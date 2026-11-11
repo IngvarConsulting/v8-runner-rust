@@ -6,7 +6,7 @@
 <title>v8-runner · Кластер 1С</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -316,7 +316,7 @@ v8-runner test
 v8-runner cluster stop</code></pre>
 <p>В отличие от автономного сервера, базу кластера создают в работающем кластере, поэтому <a href="cli-infobase-create.html#create-cluster-managed"><code>infobase create</code></a> идёт после <code>cluster start</code>. Останавливает раннер только кластер, который запустил сам; кластер службы или вашей консоли на тех же портах он не трогает и называет в ответе.</p>
 <p>Процессы кластера и <code>ras</code> слушают все интерфейсы машины, ключей ограничить их адресом нет, а администраторов у нового кластера нет: база без пользователей открывается без учётных данных. Закройте порты брандмауэром, если машина доступна из сети.</p>
-<p>Порты кластера раннер закрепляет при первом запуске: реестр кластера их хранит. Если закреплённый порт занял чужой процесс — например, кластер второй рабочей копии, — <code>cluster start</code> отказывает и называет его, а <a href="cli-cluster.html#op-cluster-new-regport"><code>--new-regport</code></a> переносит базу в новый реестр на других портах. Пока кластер этой базы работает, автономный сервер над той же БД не поднимается: одну БД держит один сервер.</p>
+<p>Порты кластера раннер закрепляет при первом запуске: реестр кластера их хранит. Если закреплённый порт занял чужой процесс — например, кластер второй рабочей копии, — <code>cluster start</code> сам переносит базу в новый реестр на других портах, как <a href="cli-cluster.html#op-cluster-new-regport"><code>--new-regport</code></a>, и называет в ответе прежний <code>regport</code> и того, кто занял порт. Адрес кластера живёт только в состоянии под <code>localPath</code>: берите его из ответа <code>cluster status</code>, <code>v8project*.yaml</code> раннер не правит. Пока кластер этой базы работает, автономный сервер над той же БД не поднимается: одну БД держит один сервер.</p>
 <p>Кластеру нужна лицензия на этой машине. Без неё сервер запускается, но Конфигуратор и клиент получают отказ «На сервере 1С:Предприятия не найдена лицензия».</p>
 <p>Пароль PostgreSQL виден в командной строке при создании и регистрации базы в кластере: у этих команд другого способа передать его нет.</p>
 <h4 id="d-cluster-managed-dbms">PostgreSQL под управлением раннера</h4>
@@ -515,6 +515,6 @@ v8-runner cluster stop       # сервер 1С и PostgreSQL</code></pre>
 <p>При заданном <code>cluster.ras</code> используется <a href="#d-ras">готовый RAS</a>. В обоих вариантах обмен с базой идёт по <code>connection</code>; недоступность RAS мешает операциям, которым нужен канал администрирования.</p>
 <p class="hint">Состав операций и выбор утилит — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
 </main>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

@@ -100,6 +100,9 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         UseCaseErrorKind::AgentLimit => (ErrorCode::AgentLimit, ErrorKind::Environment),
         UseCaseErrorKind::LiveAgentOff => (ErrorCode::LiveAgentOff, ErrorKind::Capability),
         UseCaseErrorKind::LiveAgentJob => (ErrorCode::LiveAgentJob, ErrorKind::Environment),
+        UseCaseErrorKind::SourceSetIgnoredByGit => {
+            (ErrorCode::SourceSetIgnoredByGit, ErrorKind::Validation)
+        }
         UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
         UseCaseErrorKind::Cancelled(_) => (ErrorCode::Cancelled, ErrorKind::Interruption),
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),

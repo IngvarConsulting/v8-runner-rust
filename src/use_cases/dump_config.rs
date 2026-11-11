@@ -104,6 +104,27 @@ pub fn execute(
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
 
+/// Выгрузка — и полная, и по изменившемуся — отказывает, если правило игнорирования git
+/// прячет файл набора, который она пишет: изменения набора берутся у git, и спрятанный файл
+/// следующая отправка не увидела бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+pub(super) fn refuse_hidden_sets(config: &AppConfig, args: &DumpArgs) -> Result<(), AppError> {
+    if config.format != SourceFormat::Designer {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let contexts: Vec<SourceSetContext> = inventory
+        .designer_contexts()
+        .iter()
+        .filter(|set| {
+            args.source_set
+                .as_deref()
+                .is_none_or(|name| set.name() == name)
+        })
+        .cloned()
+        .collect();
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedDumpTarget {
     source_set_name: String,
@@ -266,7 +287,9 @@ fn observe_dump(
     });
     let writes = watch.map(|watch| {
         listed.and_then(|listing| {
-            observe_dump_writes(set, work_path, watch, ended, listing, interrupted)
+            crate::use_cases::source_changes::with_dump_hasher(set, |blobs| {
+                observe_dump_writes(set, work_path, watch, ended, listing, blobs, interrupted)
+            })
         })
     });
     DumpObservation { fact, writes }
@@ -371,7 +394,7 @@ fn publish_full_dump(
     resolved: &ResolvedDumpTarget,
     publication: &StagedPublication,
 ) -> Result<DumpNotes, AppError> {
-    use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
+    use crate::change_detection::analyzer::commit_full_snapshot;
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
@@ -394,7 +417,12 @@ fn publish_full_dump(
         SourceSetInventory::new(config)
             .designer_context(&resolved.source_set_name)
             .filter(|source| source.persists_snapshot())
-            .map(|source| prepare_full_snapshot(source, publication.staging_path()))
+            .map(|source| {
+                crate::use_cases::source_changes::prepare_full_snapshot(
+                    source,
+                    publication.staging_path(),
+                )
+            })
     } else {
         None
     };
@@ -462,7 +490,12 @@ fn publish_full_dump(
         if let Some(prepared) = snapshot {
             let result = prepared.and_then(|prepared| {
                 if let Some(source) = published_source {
-                    commit_full_snapshot(source, &config.work_path, &prepared)
+                    crate::use_cases::source_changes::full_pull_memory(
+                        source,
+                        &config.work_path,
+                        prepared,
+                    )
+                    .and_then(|memory| commit_full_snapshot(source, &config.work_path, &memory))
                 } else {
                     Ok(())
                 }
@@ -528,6 +561,13 @@ fn publish_full_dump(
             ));
         };
         prepared
+            .and_then(|snapshot| {
+                crate::use_cases::source_changes::full_pull_memory(
+                    source,
+                    &config.work_path,
+                    snapshot,
+                )
+            })
             .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
             .err()
             .map(|error| format!(

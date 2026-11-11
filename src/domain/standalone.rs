@@ -38,5 +38,12 @@ pub struct StandaloneResult {
     /// PostgreSQL, погашенный вместе с сервером, потому что поднят его шагом.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_dbms_pid: Option<u32>,
+    /// Прямой порт прежнего блока, если запуск сменил занятый чужим процессом блок; SSH и
+    /// HTTP шли в том блоке следом за ним.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_port: Option<u16>,
     pub duration_ms: u64,
+    /// Предупреждения идут только в `warnings` конверта: форма `data` их не несёт.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }

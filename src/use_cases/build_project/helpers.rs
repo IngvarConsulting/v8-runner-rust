@@ -99,7 +99,8 @@ pub(super) fn change_detection_failure(
             )
         }
         analyzer::ChangeDetectionError::StorageHard { .. }
-        | analyzer::ChangeDetectionError::ConcurrentStateModified { .. } => error.to_string(),
+        | analyzer::ChangeDetectionError::ConcurrentStateModified { .. }
+        | analyzer::ChangeDetectionError::HiddenByGit { .. } => error.to_string(),
     })
 }
 
@@ -503,7 +504,7 @@ pub(super) fn commit_full_rescan(
     work_path: &Path,
     recover_storage: bool,
 ) -> Result<(), AppError> {
-    match analyzer::rescan_and_commit_full(context, work_path) {
+    match crate::use_cases::source_changes::rescan_and_commit_full(context, work_path) {
         Ok(()) => Ok(()),
         Err(_error) if recover_storage && storage_needs_recovery(context, work_path) => {
             let Some(storage_path) = context.storage_path(work_path) else {
@@ -515,7 +516,7 @@ pub(super) fn commit_full_rescan(
                     storage_path.display()
                 ))
             })?;
-            analyzer::rescan_and_commit_full(context, work_path)
+            crate::use_cases::source_changes::rescan_and_commit_full(context, work_path)
                 .map_err(|retry_error| AppError::Runtime(retry_error.to_string()))
         }
         Err(error) => Err(AppError::Runtime(error.to_string())),
@@ -673,6 +674,7 @@ pub(super) fn fail_with_remaining_steps(
     }
 
     BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: false,

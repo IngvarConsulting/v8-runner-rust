@@ -1620,6 +1620,9 @@ fn project_managed_cluster(
         return Ok(());
     }
     refuse_a_stand_of_another_project(config, &infobase_name, validation_mode)?;
+    // Память — по имени базы, а не по `Srvr=`: перенос на новый `regport` её не сбрасывает
+    // (`INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME`).
+    config.infobase.managed_memory = Some(format!("managed:{infobase_name}"));
     let name = managed.reference(&infobase_name);
     let running =
         crate::platform::service_record::running_cluster(&config.local_dir(), &infobase_name);
@@ -3158,6 +3161,31 @@ source-set:
         assert_eq!(
             config.infobase.memory_address(dir.path()).as_deref(),
             Some("managed:origin")
+        );
+    }
+
+    #[test]
+    fn a_managed_cluster_keeps_its_memory_by_name_whatever_its_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        config.infobase.standalone = None;
+        config.infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig {
+                name: Some("demo".to_owned()),
+                db_path: None,
+            }),
+            ..Default::default()
+        });
+        super::project_managed_cluster(
+            &mut config,
+            &super::ConfigValidationMode::Inspecting { preview: false },
+        )
+        .unwrap();
+        assert_eq!(config.infobase.connection, "Srvr=127.0.0.1;Ref=demo");
+        assert_eq!(
+            config.infobase.memory_address(dir.path()).as_deref(),
+            Some("managed:origin"),
+            "the memory is bound to the name, not to Srvr= and its regport"
         );
     }
 

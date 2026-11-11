@@ -6,7 +6,7 @@
 <title>cluster — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -77,11 +77,11 @@
 <h2 class="command-variant" id="op-cluster-start">cluster start</h2>
 <pre data-output-command><code>v8-runner cluster start</code></pre>
 <p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>): агент <code>ragent</code> с реестром под <code>localPath</code>, затем сервер администрирования <code>ras</code>, и отдаёт ответ после того, как <code>rac cluster list</code> назвал кластер. Порт агента, <code>regport</code> и диапазон рабочих процессов раннер выбирает свободными вне динамического диапазона и закрепляет при первом запуске: реестр кластера хранит их все. Порт <code>ras</code> выбирается заново при каждом запуске. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессах и портах раннер держит под <code>localPath</code>: удаление <code>workPath</code> кластер не трогает. На Linux и macOS команда отказывает.</p>
-<p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его; упавший <code>ras</code> поднимает заново. Остатки своего упавшего агента — <code>rmngr</code> и <code>rphost</code> — снимает по их PID и запускает кластер на прежних портах. Если закреплённый порт занят чужим процессом, команда отказывает, называет его и предлагает <a href="#op-cluster-new-regport"><code>--new-regport</code></a>; другой порт сама не берёт. Пока работает свой автономный сервер этой базы, команда отказывает и называет <code>standalone stop</code>: одну БД держит один сервер.</p>
+<p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его; упавший <code>ras</code> поднимает заново. Остатки своего упавшего агента — <code>rmngr</code> и <code>rphost</code> — снимает по их PID и запускает кластер на прежних портах. Если закреплённый порт — <code>regport</code>, порт агента или порт диапазона — занят чужим процессом, команда сама делает то же, что <a href="#op-cluster-new-regport"><code>--new-regport</code></a>: новый реестр на свободных портах и регистрация базы над прежней БД. Чужой процесс остаётся работать, ответ называет прежний <code>regport</code> и предупреждает, кто занял порт. <code>v8project*.yaml</code> раннер не правит: адрес кластера берите из ответа <code>cluster start</code> или <code>cluster status</code> и не кешируйте. Если на порту работает чужой <code>ragent</code> над реестром этой копии или перечня процессов нет, команда отказывает без нового реестра. Пока работает свой автономный сервер этой базы, команда отказывает и называет <code>standalone stop</code>: одну БД держит один сервер.</p>
 <pre data-output-command><code>v8-runner cluster start --dry-run</code></pre>
 <p>Показывает состояние, закреплённые адреса и каталог реестра, если кластер уже запускался. Ничего не запускает. Такое же превью есть у <code>cluster stop</code> и <code>cluster restart</code>. Команды <code>cluster</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
 <pre data-output-command id="op-cluster-new-regport"><code>v8-runner cluster start --new-regport</code></pre>
-<p>Когда закреплённые порты заняты чужим процессом: заводит новый реестр на свободных портах и регистрирует объявленную базу над прежней БД без её создания. UUID базы меняется, данные, поколение конфигурации и память раннера остаются. Если базы ещё не было, остаётся только новый реестр. Прежний реестр удаляется после регистрации и пробы базы, поэтому отказ на любом шаге ничего не теряет. При свободных портах ключ — отказ. Если на прежних портах работает чужой <code>ragent</code> над реестром этой копии, команда отказывает без нового реестра: такой реестр живой.</p>
+<p>То же, что делает <code>cluster start</code> без ключа, когда закреплённые порты заняты чужим процессом, но явно: заводит новый реестр на свободных портах и регистрирует объявленную базу над прежней БД без её создания. UUID базы меняется, данные, поколение конфигурации и память раннера остаются. Если базы ещё не было, остаётся только новый реестр. Прежний реестр удаляется после регистрации и пробы базы, поэтому отказ на любом шаге ничего не теряет. При свободных портах ключ — отказ. Если на прежних портах работает чужой <code>ragent</code> над реестром этой копии, команда отказывает без нового реестра: такой реестр живой.</p>
 <h2 class="command-variant" id="op-cluster-status">cluster status</h2>
 <pre data-output-command><code>v8-runner cluster status</code></pre>
 <p>Отвечает, запущен ли кластер этой копии: не запущен, запущен раннером или его порт занят не раннером. Для своего кластера называет PID агента и <code>ras</code>, версию платформы, адрес <code>Srvr=</code>, адреса агента и <code>ras</code> и ответил ли <code>rac cluster list</code>. Говорит, создана ли база в реестре. Называет и остатки упавшего агента, не трогая их. Клиент и Конфигуратор команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
@@ -98,7 +98,7 @@
 <tr data-response-class="outcome"><td>Состояние</td><td><code>cluster status</code> называет свой кластер или говорит, что он не запущен. <a href="#cluster-status-own">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Остатки упавшего агента</td><td>Агент упал, его <code>rmngr</code> и <code>rphost</code> живы: <code>cluster status</code> их называет, <code>cluster start</code> и <code>cluster stop</code> снимают. <a href="#cluster-remnants">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Кластер остановлен</td><td><code>cluster stop</code> завершил свои процессы. <a href="#cluster-stopped">Пример</a></td></tr>
-<tr data-response-class="outcome"><td>Порт занят</td><td>Закреплённый порт держит чужой процесс: <code>workspace_busy</code>, выход CLI 3, совет — <code>--new-regport</code>. <a href="#cluster-port-taken">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Порт занят</td><td>Закреплённый порт держит чужой процесс: <code>cluster start</code> завёл новый реестр, в ответе <code>previous_regport</code>, в предупреждении — кто занял порт. <a href="#cluster-port-taken">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Новый реестр</td><td><code>cluster start --new-regport</code> перенёс базу в реестр на новых портах. <a href="#cluster-new-registry">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Нет серверных компонентов</td><td>На машине нет <code>ragent</code> выбранной платформы или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#cluster-no-server">Пример</a></td></tr>
 </tbody>
@@ -137,7 +137,18 @@
 <pre data-output-example="cluster-stopped" data-output-schema="cluster-stop"><code>cluster stop: ragent pid 6312, ras pid 16980 stopped
   PostgreSQL stopped  pid 15604</code></pre>
 <h4 id="cluster-port-taken">Порт занят</h4>
-<pre data-output-example="cluster-port-taken" data-output-schema="cluster-start"><code>ERROR: workspace busy: port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`</code></pre>
+<pre data-output-example="cluster-port-taken" data-output-schema="cluster-start"><code>cluster start: started the cluster 8.5.4.2028, ragent pid 11160
+  connection  Srvr=127.0.0.1:46793;Ref=demo
+  agent  127.0.0.1:46792
+  ras  127.0.0.1:25425
+  worker range  46794:46809
+  ras pid  10884
+  rac cluster list  answers
+  infobase  created
+  previous regport  46761
+  registry  .local/infobases/origin/managed/cluster/registry-46793
+  log  .local/infobases/origin/managed/cluster/cluster.log
+warning: port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: the cluster moved to a new registry on regport 46793, the infobase is registered there again over its database (its id in the registry is new); take the address from this answer, v8project*.yaml is not changed</code></pre>
 <h4 id="cluster-new-registry">Новый реестр</h4>
 <pre data-output-example="cluster-new-registry" data-output-schema="cluster-start"><code>cluster start: started the cluster 8.5.4.2028, ragent pid 11160
   connection  Srvr=127.0.0.1:46793;Ref=demo
@@ -243,28 +254,32 @@
     "steps": []
   },
   "cluster-port-taken": {
-    "ok": false,
+    "ok": true,
     "command": "cluster start",
-    "duration_ms": 700,
+    "duration_ms": 11800,
     "data": {
-      "ok": false,
+      "ok": true,
       "infobase": "origin",
-      "state": "foreign",
-      "action": "reported",
-      "connection": "Srvr=127.0.0.1:46761;Ref=demo",
+      "state": "started_by_this_copy",
+      "action": "started",
+      "pid": 11160,
+      "ras_pid": 10884,
+      "version": "8.5.4.2028",
+      "connection": "Srvr=127.0.0.1:46793;Ref=demo",
+      "agent": "127.0.0.1:46792",
+      "ras": "127.0.0.1:25425",
+      "worker_range": "46794:46809",
+      "registry_dir": ".local/infobases/origin/managed/cluster/registry-46793",
       "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
-      "ready": false,
+      "ready": true,
       "registered": true,
-      "occupant_pid": 9008,
-      "duration_ms": 700
+      "previous_regport": 46761,
+      "duration_ms": 11800
     },
-    "warnings": [],
-    "steps": [],
-    "error": {
-      "kind": "workspace",
-      "code": "workspace_busy",
-      "message": "port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`"
-    }
+    "warnings": [
+      "port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: the cluster moved to a new registry on regport 46793, the infobase is registered there again over its database (its id in the registry is new); take the address from this answer, v8project*.yaml is not changed"
+    ],
+    "steps": []
   },
   "cluster-new-registry": {
     "ok": true,
@@ -315,6 +330,6 @@
     }
   }
 }</script>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, cluster_over, environment, forget_record, io_failure, occupant_of,
+    await_gone, being_started, cluster_over, environment, first_taken, forget_record, io_failure,
     owned_by_a_cluster, port_offsets, validation, write_record, Database, DbmsAccess,
-    ServiceCommand, ServiceHost, Stand,
+    ServiceCommand, ServiceHost, Stand, Taken,
 };
 use crate::config::model::AppConfig;
 use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
@@ -18,7 +18,7 @@ use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatu
 use crate::platform::ibsrv::{self, DbmsTarget, ServerPorts, ServerStorage};
 use crate::platform::postgres;
 use crate::platform::process::ProcessRunner;
-use crate::platform::service::ServiceSpawnError;
+use crate::platform::service::{ProcessRow, ServiceSpawnError};
 use crate::platform::service_record::{
     adopt_recorded_pid, observe_service, read_json, write_json, Observed, RecordState,
     ServicePaths, ServiceRecord, StandService,
@@ -76,6 +76,39 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
     })
 }
 
+/// Закреплённый блок, который запуск сменил.
+struct Moved {
+    previous: ServerPorts,
+    cause: MoveCause,
+}
+
+/// Почему закреплённый блок не годится.
+enum MoveCause {
+    /// Порт держит чужой процесс; он остаётся работать.
+    Taken(Taken),
+    /// В блок попал закреплённый порт PostgreSQL раннера: `ibsrv` на нём не поднимется.
+    Postgres(u16),
+}
+
+impl Moved {
+    fn warning(&self, infobase: &str, ports: ServerPorts) -> String {
+        let reason = match self.cause {
+            MoveCause::Taken(taken) => format!(
+                "port {} of the server of '{infobase}' is taken by {}, which this runner did not start; it is left running",
+                taken.port,
+                taken.who()
+            ),
+            MoveCause::Postgres(port) => format!(
+                "port {port} of the server of '{infobase}' is the port of the runner's PostgreSQL"
+            ),
+        };
+        format!(
+            "{reason}: the server moved from port {} to port {}, the gate key and its fingerprint stay; take the address from this answer, v8project*.yaml is not changed",
+            self.previous.direct, ports.direct
+        )
+    }
+}
+
 struct Server<'a> {
     config: &'a AppConfig,
     context: &'a ExecutionContext,
@@ -109,6 +142,22 @@ impl Server<'_> {
 
     /// Чужой `ibsrv` над этой же базой: ключи запуска, которые её называют.
     fn foreign_server(&self) -> Option<u32> {
+        self.foreign_server_in(&self.host.processes(&[IBSRV_IMAGE]).unwrap_or_default())
+    }
+
+    /// Отказ: базу обслуживает чужой `ibsrv`.
+    fn served_by(&self, pid: u32) -> UseCaseError {
+        UseCaseError::new(
+            UseCaseErrorKind::WorkspaceBusy,
+            format!(
+                "the infobase of '{}' is served by ibsrv pid {pid}, which this runner did not start; it is left running",
+                self.declared.infobase
+            ),
+        )
+    }
+
+    /// Чужой `ibsrv` над этой же базой в данном перечне процессов.
+    fn foreign_server_in(&self, rows: &[ProcessRow]) -> Option<u32> {
         let keys = match &self.declared.storage {
             Storage::File(path) => ibsrv::file_base_keys(path),
             Storage::Dbms(database) => {
@@ -116,12 +165,7 @@ impl Server<'_> {
                 ibsrv::database_keys(&server, &name)
             }
         };
-        // Без перечня процессов чужой сервер не назвать: отказ по нему только сообщает, а запуск
-        // упрётся в занятый порт.
-        crate::platform::service::first_with_keys(
-            &self.host.processes(&[IBSRV_IMAGE]).unwrap_or_default(),
-            &keys,
-        )
+        crate::platform::service::first_with_keys(rows, &keys)
     }
 
     /// СУБД, которую поднимает раннер, как шаг этого сервера.
@@ -156,7 +200,9 @@ impl Server<'_> {
             occupant_pid: None,
             stopped_pid: None,
             stopped_dbms_pid: None,
+            previous_port: None,
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            warnings: Vec::new(),
         }
     }
 
@@ -173,15 +219,64 @@ impl Server<'_> {
     }
 
     fn occupant(&self, ports: ServerPorts) -> Option<u32> {
-        ports.all().find_map(|port| occupant_of(self.host, port))
+        first_taken(self.host, ports.all()).map(|taken| taken.pid)
     }
 
-    /// Блок портов на первый запуск; занятый заменяется при этом запуске.
-    fn choose_ports(&self) -> Result<ServerPorts, UseCaseError> {
+    /// Закрепить блок, на котором сервер поднялся.
+    fn pin(&self, ports: ServerPorts) -> Result<(), UseCaseError> {
+        write_json(&self.paths.pins(), &ports)
+            .map_err(|error| io_failure("cannot write", &self.paths.pins(), &error))
+    }
+
+    /// Свободный блок портов на первый запуск или на смену занятого: не задевает прежний блок и
+    /// порт PostgreSQL раннера. Занятый при этом запуске блок заменяется следующим.
+    fn choose_ports(
+        &self,
+        stand: Option<&Stand<'_>>,
+        except: Option<ServerPorts>,
+    ) -> Result<ServerPorts, UseCaseError> {
+        let dbms = stand.and_then(Stand::pinned_port);
         port_offsets(self.paths.root())
             .map(ServerPorts::from_first)
-            .find(|ports| self.occupant(*ports).is_none())
+            .find(|ports| {
+                except.is_none_or(|old| !old.overlaps(*ports))
+                    && ports.all().all(|port| Some(port) != dbms)
+                    && self.occupant(*ports).is_none()
+            })
             .ok_or_else(|| environment("no free ports for ibsrv"))
+    }
+
+    /// Закреплённый блок занят чужим процессом или в него попал закреплённый порт PostgreSQL
+    /// раннера: выход — новый блок (`INV.PLATFORM.STANDALONE-PORTS-AND-KEY-ARE-PINNED`). Отказ, если
+    /// блок держит чужой `ibsrv` над этой же базой или перечня процессов нет и не сказать, кто
+    /// держит порт. Решается до запуска PostgreSQL шагом: поднятый, он сам занял бы порт блока.
+    fn taken_block(&self, dbms: Option<u16>) -> Result<Option<Moved>, UseCaseError> {
+        let Some(previous) = self.pins() else {
+            return Ok(None);
+        };
+        if let Some(port) = dbms.filter(|port| previous.all().any(|own| own == *port)) {
+            return Ok(Some(Moved {
+                previous,
+                cause: MoveCause::Postgres(port),
+            }));
+        }
+        let Some(taken) = first_taken(self.host, previous.all()) else {
+            return Ok(None);
+        };
+        let busy = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
+        let Some(rows) = self.host.processes(&[IBSRV_IMAGE]) else {
+            return Err(busy(format!(
+                "port {} of the server of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
+                taken.port, self.declared.infobase
+            )));
+        };
+        if let Some(server) = self.foreign_server_in(&rows) {
+            return Err(self.served_by(server));
+        }
+        Ok(Some(Moved {
+            previous,
+            cause: MoveCause::Taken(taken),
+        }))
     }
 
     fn write_record(&self, record: &ServiceRecord) -> Result<(), UseCaseError> {
@@ -224,13 +319,7 @@ impl Server<'_> {
             Observed::Nothing => false,
         };
         if let Some(pid) = self.foreign_server() {
-            return Err(UseCaseError::new(
-                UseCaseErrorKind::WorkspaceBusy,
-                format!(
-                    "the infobase of '{}' is served by ibsrv pid {pid}, which this runner did not start; it is left running",
-                    self.declared.infobase
-                ),
-            ));
+            return Err(self.served_by(pid));
         }
         if let Storage::Dbms(database) = &self.declared.storage {
             if let Some(owner) = cluster_over(self.config, self.host, database) {
@@ -245,13 +334,14 @@ impl Server<'_> {
                 )));
             }
         }
-        // Шаг сервера: поднятая здесь СУБД гаснет при любой неудаче дальше.
         let stand = self.stand();
+        let moved = self.taken_block(stand.as_ref().and_then(Stand::pinned_port))?;
+        // Шаг сервера: поднятая здесь СУБД гаснет при любой неудаче дальше.
         let raised = match &stand {
             Some(stand) => stand.start(false)?.action == ServiceAction::Started,
             None => false,
         };
-        match self.start_process(stale, machine, stand.as_ref()) {
+        match self.start_process(stale, machine, stand.as_ref(), moved) {
             Ok(result) => Ok(result),
             Err(error) => {
                 if raised {
@@ -269,29 +359,58 @@ impl Server<'_> {
         stale: bool,
         machine: String,
         stand: Option<&Stand<'_>>,
+        moved: Option<Moved>,
     ) -> Result<StandaloneResult, UseCaseError> {
         let storage = self.server_storage(stand)?;
         let ibsrv = (self.locate)()?;
         self.paths
             .prepare()
             .map_err(|error| io_failure("cannot prepare", self.paths.root(), &error))?;
-        let ports = match self.pins() {
-            Some(ports) => {
-                if let Some(pid) = self.occupant(ports) {
-                    return Err(UseCaseError::new(
-                        UseCaseErrorKind::WorkspaceBusy,
-                        format!(
-                            "a port of the server of '{}' is taken by process {pid}, which this runner did not start; it is left running: free the port and repeat",
-                            self.declared.infobase
-                        ),
-                    ));
-                }
-                ports
-            }
-            None => self.choose_ports()?,
+        let ports = match (&moved, self.pins()) {
+            (Some(moved), _) => self.choose_ports(stand, Some(moved.previous))?,
+            (None, Some(pinned)) => pinned,
+            (None, None) => self.choose_ports(stand, None)?,
         };
-        write_json(&self.paths.pins(), &ports)
-            .map_err(|error| io_failure("cannot write", &self.paths.pins(), &error))?;
+        match self.launch(machine, &storage, ibsrv, ports) {
+            Ok(mut result) => {
+                result.stale_record = stale;
+                if let Some(moved) = moved {
+                    result.previous_port = Some(moved.previous.direct);
+                    result
+                        .warnings
+                        .push(moved.warning(&self.declared.infobase, ports));
+                }
+                Ok(result)
+            }
+            // Неудавшийся запуск блок не закрепил: смена адреса без сервера никому не видна. Если
+            // сервер не снялся, он живёт на новом блоке, и закреплённое переходит к нему.
+            Err(error)
+                if self.pins() != Some(ports)
+                    && matches!(self.observe(), Observed::Own(_) | Observed::Starting(_)) =>
+            {
+                match self.pin(ports) {
+                    Ok(()) => {
+                        Err(error.followed_by("the server did not stop and keeps the new ports"))
+                    }
+                    Err(pin) => Err(error.followed_by(format!(
+                        "the server did not stop on port {}, and its ports were not pinned: {pin}",
+                        ports.direct
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Процесс `ibsrv` на выбранном блоке: запись, запуск, проба готовности; блок закрепляется,
+    /// когда сервер на нём поднялся.
+    fn launch(
+        &self,
+        machine: String,
+        storage: &OwnedStorage,
+        ibsrv: PathBuf,
+        ports: ServerPorts,
+    ) -> Result<StandaloneResult, UseCaseError> {
         let key = self.paths.host_key();
         if !key.is_file() {
             write_service_host_key(&key)
@@ -353,6 +472,10 @@ impl Server<'_> {
             return Err(error);
         }
         self.await_ready(&record, ports)?;
+        if let Err(error) = self.pin(ports) {
+            self.stop_process(&record);
+            return Err(error);
+        }
         record.state = RecordState::Running;
         record.starter = None;
         if let Err(error) = self.write_record(&record) {
@@ -361,7 +484,6 @@ impl Server<'_> {
         }
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
-        result.stale_record = stale;
         Ok(self.describe(result, record.pid))
     }
 
@@ -894,6 +1016,8 @@ mod tests {
         calls: RefCell<Vec<Vec<String>>>,
         pg_stops: Cell<u32>,
         last_stdin: RefCell<Option<String>>,
+        /// Перечень процессов не отвечает.
+        unlisted: Cell<bool>,
     }
 
     impl ServiceHost for Host {
@@ -986,6 +1110,9 @@ mod tests {
         }
         fn processes(&self, images: &[&str]) -> Option<Vec<crate::platform::service::ProcessRow>> {
             assert_eq!(images, ["ibsrv.exe"]);
+            if self.unlisted.get() {
+                return None;
+            }
             Some(
                 self.foreign
                     .borrow()
@@ -1163,32 +1290,275 @@ mod tests {
         assert!(!setup.paths().record().exists());
     }
 
+    fn pinned(setup: &Setup) -> ServerPorts {
+        read_json(&setup.paths().pins()).expect("pinned")
+    }
+
     #[test]
-    fn a_foreign_process_on_a_pinned_port_is_named_and_left_alone() {
+    fn a_taken_pinned_block_moves_the_server_to_a_new_block_with_the_same_key() {
+        for pick in [
+            (|ports: ServerPorts| ports.direct) as fn(ServerPorts) -> u16,
+            |ports: ServerPorts| ports.ssh,
+        ] {
+            let setup = setup();
+            let host = Host::default();
+            let project = setup._root.path().join("v8project.yaml");
+            std::fs::write(&project, "infobases: {}\n").unwrap();
+            let first = setup.run(ServiceCommand::Start, false, &host).unwrap();
+            let key = std::fs::read(setup.paths().host_key()).unwrap();
+            setup.run(ServiceCommand::Stop, false, &host).unwrap();
+            let old = pinned(&setup);
+            let port = pick(old);
+            host.listeners.borrow_mut().insert(port, 555);
+            let status = setup.run(ServiceCommand::Status, false, &host).unwrap();
+            assert_eq!(status.state, ServiceState::Foreign);
+            assert_eq!(status.occupant_pid, Some(555));
+            let stop = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+            assert_eq!(stop.action, ServiceAction::NothingToStop);
+            let moved = setup.run(ServiceCommand::Start, false, &host).unwrap();
+            assert_eq!(moved.action, ServiceAction::Started);
+            assert_eq!(moved.previous_port, Some(old.direct));
+            let new = pinned(&setup);
+            assert!(
+                !new.overlaps(old),
+                "the new block keeps clear of the old one"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&project).unwrap(),
+                "infobases: {}\n",
+                "v8project.yaml is not changed"
+            );
+            assert_eq!(moved.connection, Some(new.connection("demo")));
+            assert_eq!(moved.gate, Some(new.gate()));
+            assert_eq!(moved.http, Some(new.http_url("demo")));
+            assert_ne!(moved.connection, first.connection);
+            assert_eq!(
+                key,
+                std::fs::read(setup.paths().host_key()).unwrap(),
+                "the gate key and its fingerprint stay"
+            );
+            let warning = moved.warnings.join(" ");
+            assert!(warning.contains("process 555"), "{warning}");
+            assert!(warning.contains(&format!("port {port}")), "{warning}");
+            assert!(!host.hard_stops.borrow().contains(&555), "it is left alone");
+            assert!(!host.soft_stops.borrow().contains(&555), "it is left alone");
+            // Новый блок закреплён: следующий запуск идёт на нём и ничего не меняет.
+            setup.run(ServiceCommand::Stop, false, &host).unwrap();
+            let again = setup.run(ServiceCommand::Start, false, &host).unwrap();
+            assert_eq!(again.connection, moved.connection);
+            assert_eq!(again.previous_port, None);
+            assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+        }
+    }
+
+    #[test]
+    fn a_taken_block_without_the_process_list_is_refused_and_the_ports_stay() {
         let setup = setup();
         let host = Host::default();
-        let started = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
         setup.run(ServiceCommand::Stop, false, &host).unwrap();
-        let port: u16 = started
-            .connection
-            .unwrap()
-            .split(':')
-            .nth(1)
-            .and_then(|tail| tail.split(';').next())
-            .and_then(|port| port.parse().ok())
-            .unwrap();
-        host.listeners.borrow_mut().insert(port, 555);
+        let old = pinned(&setup);
+        host.listeners.borrow_mut().insert(old.direct, 555);
+        host.unlisted.set(true);
         let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
-        assert!(refused.to_string().contains("process 555"), "{refused}");
-        let status = setup.run(ServiceCommand::Status, false, &host).unwrap();
-        assert_eq!(status.state, ServiceState::Foreign);
-        assert_eq!(status.occupant_pid, Some(555));
-        let stop = setup.run(ServiceCommand::Stop, false, &host).unwrap();
-        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(refused.to_string().contains("process list"), "{refused}");
+        assert_eq!(pinned(&setup), old);
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn a_foreign_server_of_this_base_on_the_pinned_block_is_refused_and_the_ports_stay() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let old = pinned(&setup);
+        let db_path = setup
+            .config
+            .infobase
+            .standalone
+            .as_ref()
+            .and_then(|standalone| standalone.managed.as_ref())
+            .and_then(|managed| managed.db_path.clone())
+            .unwrap();
+        host.foreign.borrow_mut().push((
+            30117,
+            format!("ibsrv.exe \"--db-path={}\"", db_path.display()),
+        ));
+        host.listeners.borrow_mut().insert(old.direct, 30117);
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(refused.to_string().contains("30117"), "{refused}");
+        assert_eq!(pinned(&setup), old);
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn no_free_block_is_refused_and_the_ports_stay() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let old = pinned(&setup);
+        for first in super::super::port_offsets(setup.paths().root()) {
+            host.listeners.borrow_mut().insert(first, 555);
+        }
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert!(refused.to_string().contains("no free ports"), "{refused}");
+        assert_eq!(pinned(&setup), old);
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn restart_moves_a_running_server_off_a_taken_port() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let old = pinned(&setup);
+        // Порт диапазона заняли, пока сервер работал.
+        host.listeners.borrow_mut().insert(old.range_start, 556);
+        let again = setup.run(ServiceCommand::Restart, false, &host).unwrap();
+        assert_eq!(again.action, ServiceAction::Started);
+        assert_eq!(again.stopped_pid, Some(PID));
+        assert_eq!(again.previous_port, Some(old.direct));
+        assert!(!pinned(&setup).overlaps(old));
+        assert!(again.warnings.join(" ").contains("process 556"));
+    }
+
+    #[test]
+    fn a_failed_start_on_a_new_block_keeps_the_previous_block() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let old = pinned(&setup);
+        host.listeners.borrow_mut().insert(old.direct, 555);
+        host.exits_at_once.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(pinned(&setup), old, "the previous block is back");
+        assert!(!setup.paths().record().exists(), "no record is left");
+        host.exits_at_once.set(false);
+        let moved = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert_eq!(moved.previous_port, Some(old.direct));
+        assert!(!moved.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_failed_start_over_a_stale_record_keeps_the_previous_block() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        // Раннер упал: запись осталась, процесса нет.
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let old = pinned(&setup);
+        host.listeners.borrow_mut().insert(old.direct, 555);
+        // Запуск рушится до того, как перезапишет запись: каталог данных не создать.
+        let data = setup.paths().data();
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::write(&data, "").unwrap();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert!(
-            host.soft_stops.borrow().len() == 1,
-            "only our own was stopped"
+            !refused.to_string().contains("keeps the new ports"),
+            "{refused}"
+        );
+        assert_eq!(pinned(&setup), old, "no server, so the block stays");
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn a_pinned_block_over_the_port_of_the_runners_postgres_moves() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        run_dbms(&setup, &host, ServiceCommand::Stop);
+        let old = pinned(&setup);
+        // PostgreSQL закреплён на порту блока сервера: поднятый, он занял бы этот порт.
+        let dbms_port = old.range_start + 2;
+        let dbms = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);
+        write_json(
+            &dbms.pins(),
+            &crate::platform::service_record::PinnedPorts { port: dbms_port },
+        )
+        .unwrap();
+        let moved = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert_eq!(moved.action, ServiceAction::Started);
+        assert_eq!(moved.previous_port, Some(old.direct));
+        assert_eq!(dbms_record(&setup).port, dbms_port);
+        let new = pinned(&setup);
+        assert!(!new.overlaps(old), "{new:?}");
+        assert!(!new.all().any(|port| port == dbms_port), "{new:?}");
+        let warning = moved.warnings.join(" ");
+        assert!(warning.contains("PostgreSQL"), "{warning}");
+        assert!(warning.contains(&format!("port {dbms_port}")), "{warning}");
+    }
+
+    #[test]
+    fn the_refusals_of_a_taken_block_come_before_the_postgres_starts() {
+        for unlisted in [false, true] {
+            let setup = over_postgres();
+            let host = Host::default();
+            host.database_exists.set(true);
+            setup.run(ServiceCommand::Start, false, &host).unwrap();
+            setup.run(ServiceCommand::Stop, false, &host).unwrap();
+            run_dbms(&setup, &host, ServiceCommand::Stop);
+            let old = pinned(&setup);
+            if unlisted {
+                host.listeners.borrow_mut().insert(old.direct, 555);
+                host.unlisted.set(true);
+            } else {
+                // Чужой `ibsrv` этой же базы держит закреплённый блок.
+                let pg: crate::platform::service_record::PinnedPorts = read_json(
+                    &ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres)
+                        .pins(),
+                )
+                .unwrap();
+                host.listeners.borrow_mut().insert(old.direct, 30117);
+                host.foreign.borrow_mut().push((
+                    30117,
+                    format!(
+                        "ibsrv.exe --dbms=PostgreSQL \"--db-server=127.0.0.1 port={}\" --db-name=demo_data -W",
+                        pg.port
+                    ),
+                ));
+            }
+            let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+            assert!(
+                !host.processes.borrow().contains_key(&PG_PID),
+                "PostgreSQL is not started: {refused}"
+            );
+            assert_eq!(pinned(&setup), old, "the pinned ports stay");
+            assert_eq!(host.spawned.get(), 1);
+        }
+    }
+
+    #[test]
+    fn a_new_block_whose_server_did_not_stop_stays_pinned() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let old = pinned(&setup);
+        host.listeners.borrow_mut().insert(old.direct, 555);
+        host.never_ready.set(true);
+        host.immortal.set(true);
+        host.ignores_soft_stop.set(true);
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert!(
+            refused.to_string().contains("keeps the new ports"),
+            "{refused}"
+        );
+        assert!(
+            !pinned(&setup).overlaps(old),
+            "the pins stay with the live server"
         );
     }
 
@@ -1418,6 +1788,34 @@ mod tests {
         );
         let stdin = host.last_stdin.borrow().clone().expect("the password");
         assert!(!args.iter().any(|arg| arg.contains(&stdin)), "{args:?}");
+    }
+
+    #[test]
+    fn a_new_block_keeps_clear_of_the_port_of_the_runners_postgres() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let old = pinned(&setup);
+        // PostgreSQL закреплён на порту блока, который перебор взял бы первым.
+        let next = super::super::port_offsets(setup.paths().root())
+            .map(ServerPorts::from_first)
+            .find(|ports| !ports.overlaps(old))
+            .unwrap();
+        let dbms = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);
+        let dbms_port = next.direct + 4;
+        write_json(
+            &dbms.pins(),
+            &crate::platform::service_record::PinnedPorts { port: dbms_port },
+        )
+        .unwrap();
+        host.listeners.borrow_mut().insert(old.direct, 555);
+        let moved = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert_eq!(moved.previous_port, Some(old.direct));
+        assert_eq!(dbms_record(&setup).port, dbms_port);
+        let new = pinned(&setup);
+        assert!(!new.all().any(|port| port == dbms_port), "{new:?}");
     }
 
     #[test]

@@ -26,6 +26,22 @@ pub(super) fn run_dump_with_context(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "starting dump"
     );
+    // Отказ несёт форму ответа: без неё конверт `--json-message` не печатается.
+    if let Err(error) = super::refuse_hidden_sets(config, args) {
+        let message = error.to_string();
+        return Err(DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                args.source_set.clone(),
+                args.extension.clone(),
+                None,
+                None,
+                Some(message),
+            ),
+        ));
+    }
 
     if let Some(error) = validate_supported_matrix(config) {
         return Err(DumpExecutionFailure::with_payload(

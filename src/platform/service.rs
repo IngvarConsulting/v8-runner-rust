@@ -42,6 +42,15 @@ pub enum ServiceSpawnError {
     Io(#[from] std::io::Error),
 }
 
+/// Делят ли два набора портов хотя бы один порт — общее тело `overlaps` блоков `ibsrv` и кластера.
+pub fn ports_overlap(
+    left: impl IntoIterator<Item = u16>,
+    right: impl IntoIterator<Item = u16>,
+) -> bool {
+    let right: Vec<u16> = right.into_iter().collect();
+    left.into_iter().any(|port| right.contains(&port))
+}
+
 /// Слушает ли кто-нибудь порт на петле.
 pub fn port_answers(port: u16) -> bool {
     TcpStream::connect_timeout(

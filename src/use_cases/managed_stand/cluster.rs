@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, environment, forget_record, io_failure, occupant_of,
+    await_gone, being_started, environment, first_taken, forget_record, io_failure, occupant_of,
     other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record, Database,
-    ServiceHost, Stand,
+    ServiceHost, Stand, Taken,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -57,20 +57,11 @@ struct AgentStop {
 
 /// Почему закреплённые порты не годятся для запуска.
 enum Busy {
-    /// Чужой `ragent` работает над реестром этой копии: выхода нет, реестр живой.
-    ForeignAgent(UseCaseError),
+    /// Отказ: чужой `ragent` работает над реестром этой копии — реестр живой, — или порт занят,
+    /// а перечня процессов нет, и кто его держит, не сказать.
+    Refused(UseCaseError),
     /// Порт держит чужой процесс: выход — новый реестр.
-    Port(UseCaseError),
-    /// Порт занят, а перечня процессов нет: кто его держит, не сказать.
-    Unlisted(UseCaseError),
-}
-
-impl Busy {
-    fn into_error(self) -> UseCaseError {
-        match self {
-            Self::ForeignAgent(error) | Self::Port(error) | Self::Unlisted(error) => error,
-        }
-    }
+    Port(Taken),
 }
 
 /// То, что сценарий узнаёт о цели из настроек.
@@ -207,6 +198,7 @@ impl Cluster<'_> {
             stopped_dbms_pid: None,
             previous_regport: None,
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            warnings: Vec::new(),
         }
     }
 
@@ -652,21 +644,20 @@ impl Cluster<'_> {
         self.stop_ras()?;
         // Отказы, которым СУБД не нужна, — до её запуска.
         let pins = self.pins();
+        // Занятый чужим процессом закреплённый порт ведёт к новому реестру и без ключа
+        // (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`).
+        let mut taken = None;
         match (&pins, new_regport) {
-            (Some(pins), false) => {
-                if let Some(busy) = self.busy(pins) {
-                    return Err(busy.into_error());
-                }
-            }
-            (Some(pins), true) => match self.busy(pins) {
-                None => {
+            (Some(pins), _) => match self.busy(pins) {
+                None if new_regport => {
                     return Err(validation(format!(
                         "the ports of the cluster of '{}' are free: `cluster start` starts it on its registry; --new-regport is for ports taken by another process",
                         self.declared.infobase
                     )))
                 }
-                Some(Busy::Port(_)) => {}
-                Some(refusal) => return Err(refusal.into_error()),
+                None => {}
+                Some(Busy::Port(port)) => taken = Some(port),
+                Some(Busy::Refused(error)) => return Err(error),
             },
             (None, true) => {
                 return Err(validation(format!(
@@ -682,9 +673,15 @@ impl Cluster<'_> {
             Some(stand) => stand.start(false)?.action == ServiceAction::Started,
             None => false,
         };
-        let outcome = match pins {
-            Some(old) if new_regport => self.move_registry(&machine, stand.as_ref(), old),
-            pins => self.start_on_pins(&machine, stand.as_ref(), pins),
+        let outcome = match (pins, taken) {
+            // По `--new-regport` перенос просили явно: предупреждать не о чем.
+            (Some(old), Some(taken)) => self.move_registry(
+                &machine,
+                stand.as_ref(),
+                old,
+                (!new_regport).then_some(taken),
+            ),
+            (pins, _) => self.start_on_pins(&machine, stand.as_ref(), pins),
         };
         match outcome {
             Ok(mut result) => {
@@ -698,6 +695,20 @@ impl Cluster<'_> {
                 _ => Err(error),
             },
         }
+    }
+
+    /// Предупреждение о новом реестре, который запуск завёл сам: закреплённый порт занят.
+    fn moved_warning(&self, taken: Taken, regport: u16, registered: bool) -> String {
+        let (port, who) = (taken.port, taken.who());
+        let base = if registered {
+            ", the infobase is registered there again over its database (its id in the registry is new)"
+        } else {
+            ""
+        };
+        format!(
+            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: the cluster moved to a new registry on regport {regport}{base}; take the address from this answer, v8project*.yaml is not changed",
+            self.declared.infobase
+        )
     }
 
     /// Прерванный `--new-regport`: закреплённое ещё помнит прежний реестр. Поднятое по новому
@@ -739,7 +750,7 @@ impl Cluster<'_> {
         port_offsets(self.agent.root())
             .map(ClusterPorts::from_first)
             .find(|ports| {
-                except.is_none_or(|old| !old.all().any(|port| ports.all().any(|own| own == port)))
+                except.is_none_or(|old| !old.overlaps(*ports))
                     && ports
                         .all()
                         .all(|port| Some(port) != dbms && occupant_of(self.host, port).is_none())
@@ -772,45 +783,33 @@ impl Cluster<'_> {
     }
 
     /// Закреплённые порты заняты: чужой агент над нашим реестром — отказ без выхода, иначе выход —
-    /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`). Перечень процессов нужен, только
-    /// если порт занят.
+    /// новый реестр (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`). Перечень процессов нужен,
+    /// только если порт занят.
     fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
         let refusal = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
         let foreign = |agents: &[ProcessRow]| {
             first_with_keys(agents, &ragent::registry_keys(&self.registry(pins))).map(|agent| {
-                Busy::ForeignAgent(refusal(format!(
+                Busy::Refused(refusal(format!(
                     "the registry of the cluster of '{}' is served by ragent pid {agent}, which this runner did not start; it is left running",
                     self.declared.infobase
                 )))
             })
         };
-        let Some((port, pid)) = pins
-            .ports
-            .all()
-            .find_map(|port| occupant_of(self.host, port).map(|pid| (port, pid)))
-        else {
+        let Some(taken) = first_taken(self.host, pins.ports.all()) else {
             // Порты свободны, но чужой агент может работать над нашим реестром на других портах:
             // второй агент над тем же реестром его испортит. Без перечня запуск идёт как есть.
             return self.agents().and_then(|agents| foreign(&agents));
         };
         let Some(agents) = self.agents() else {
-            return Some(Busy::Unlisted(refusal(format!(
-                "port {port} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
-                self.declared.infobase
+            return Some(Busy::Refused(refusal(format!(
+                "port {} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
+                taken.port, self.declared.infobase
             ))));
         };
         if let Some(busy) = foreign(&agents) {
             return Some(busy);
         }
-        let who = if pid == 0 {
-            "another process".to_owned()
-        } else {
-            format!("process {pid}")
-        };
-        Some(Busy::Port(refusal(format!(
-            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`",
-            self.declared.infobase
-        ))))
+        Some(Busy::Port(taken))
     }
 
     /// Каталоги реестров, которых не называют закреплённые порты: остатки прерванного `--new-regport`.
@@ -878,6 +877,7 @@ impl Cluster<'_> {
         machine: &str,
         stand: Option<&Stand<'_>>,
         old: ClusterPins,
+        announce: Option<Taken>,
     ) -> Result<ClusterResult, UseCaseError> {
         let old_registry = self.registry(&old);
         let declared = self.database()?;
@@ -957,7 +957,12 @@ impl Cluster<'_> {
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
         result.previous_regport = Some(old.ports.regport);
-        Ok(self.describe(result, Some(&agent)))
+        let mut result = self.describe(result, Some(&agent));
+        if let Some(taken) = announce {
+            let warning = self.moved_warning(taken, pins.ports.regport, result.registered);
+            result.warnings.push(warning);
+        }
+        Ok(result)
     }
 
     /// База над прежней БД в новом реестре: `rac infobase create` без `--create-database`.
@@ -2522,21 +2527,83 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_regport_is_refused_before_the_postgres_starts() {
+    fn a_new_registry_keeps_clear_of_the_port_of_the_runners_postgres() {
         let setup = setup();
         let host = Host::default();
         setup.run(ServiceCommand::Start, &host).unwrap();
         setup.run(ServiceCommand::Stop, &host).unwrap();
-        host.spawned.borrow_mut().clear();
-        host.listeners
-            .borrow_mut()
-            .insert(setup.pins().ports.regport, 555);
-        setup.run(ServiceCommand::Start, &host).unwrap_err();
-        assert!(
-            host.spawned.borrow().is_empty(),
-            "{:?}",
-            host.spawned.borrow()
+        let old = setup.pins();
+        // PostgreSQL закреплён на порту блока, который перебор взял бы первым.
+        let next = super::super::port_offsets(setup.agent().root())
+            .map(ClusterPorts::from_first)
+            .find(|ports| !ports.overlaps(old.ports))
+            .unwrap();
+        let dbms_port = next.range_start + 3;
+        let dbms = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);
+        write_json(
+            &dbms.pins(),
+            &crate::platform::service_record::PinnedPorts { port: dbms_port },
+        )
+        .unwrap();
+        host.listeners.borrow_mut().insert(old.ports.regport, 555);
+        let moved = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(moved.previous_regport, Some(old.ports.regport));
+        assert_eq!(setup.dbms_record().port, dbms_port);
+        let new = setup.pins();
+        assert!(!new.ports.all().any(|port| port == dbms_port), "{new:?}");
+    }
+
+    #[test]
+    fn no_free_block_for_a_new_registry_is_refused_and_the_ports_stay() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let old = setup.pins();
+        for first in super::super::port_offsets(setup.agent().root()) {
+            host.listeners.borrow_mut().insert(first, 555);
+        }
+        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
         );
+        assert!(refused.to_string().contains("no free ports"), "{refused}");
+        assert_eq!(setup.pins(), old);
+        assert!(setup.agent().root().join(&old.registry).is_dir());
+        assert!(!host.alive(PG_PID), "the step PostgreSQL is stopped");
+    }
+
+    #[test]
+    fn the_refusals_of_a_busy_port_come_before_the_postgres_starts() {
+        for unlisted in [false, true] {
+            let setup = setup();
+            let host = Host::default();
+            setup.run(ServiceCommand::Start, &host).unwrap();
+            setup.run(ServiceCommand::Stop, &host).unwrap();
+            let pins = setup.pins();
+            host.spawned.borrow_mut().clear();
+            host.listeners.borrow_mut().insert(pins.ports.regport, 9101);
+            if unlisted {
+                host.unlisted.set(true);
+            } else {
+                host.foreign_agents.borrow_mut().push((
+                    9100,
+                    format!(
+                        "ragent.exe /agent /d \"{}\"",
+                        setup.agent().root().join(&pins.registry).display()
+                    ),
+                ));
+            }
+            let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+            assert!(
+                host.spawned.borrow().is_empty(),
+                "{:?}",
+                host.spawned.borrow()
+            );
+            assert_eq!(setup.pins(), pins, "the pinned ports stay");
+        }
     }
 
     #[test]
@@ -2553,24 +2620,120 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_regport_is_refused_with_its_process_and_no_new_port_is_taken() {
+    fn a_busy_regport_moves_the_cluster_to_a_new_registry_over_its_database() {
         let setup = setup();
         let host = Host::default();
         let first = setup.run(ServiceCommand::Start, &host).unwrap();
+        super::remember_registered(&setup.config).unwrap();
         setup.run(ServiceCommand::Stop, &host).unwrap();
-        let pins = setup.pins();
-        host.listeners.borrow_mut().insert(pins.ports.regport, 555);
-        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
-        let text = refused.to_string();
-        assert!(text.contains("process 555"), "{text}");
-        assert!(text.contains("--new-regport"), "{text}");
-        assert_eq!(setup.pins(), pins, "the pinned ports stay");
+        let old = setup.pins();
+        let old_registry = setup.agent().root().join(&old.registry);
+        let project = setup._root.path().join("v8project.yaml");
+        std::fs::write(&project, "infobases: {}\n").unwrap();
+        host.listeners.borrow_mut().insert(old.ports.regport, 555);
         let status = setup.run(ServiceCommand::Status, &host).unwrap();
         assert_eq!(status.state, ServiceState::Foreign);
         assert_eq!(status.occupant_pid, Some(555));
         assert_eq!(status.connection, first.connection);
+        let moved = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(moved.action, ServiceAction::Started);
+        assert_eq!(moved.previous_regport, Some(old.ports.regport));
+        assert_ne!(moved.connection, first.connection, "the address is new");
+        let warning = moved.warnings.join(" ");
+        assert!(warning.contains("process 555"), "{warning}");
+        assert!(
+            warning.contains(&format!("port {}", old.ports.regport)),
+            "{warning}"
+        );
+        let new = setup.pins();
+        assert!(new.registered);
+        assert!(new.previous.is_none());
+        assert!(
+            !new.ports
+                .all()
+                .any(|port| old.ports.all().any(|was| was == port)),
+            "the new block keeps clear of the old one"
+        );
+        assert_eq!(moved.connection, Some(new.ports.connection("demo")));
+        assert!(!old_registry.exists(), "the old registry is gone");
+        assert!(setup.agent().root().join(&new.registry).is_dir());
+        {
+            let calls = host.rac_calls.borrow();
+            let create = calls
+                .iter()
+                .find(|args| args[..2] == ["infobase", "create"])
+                .expect("the base is registered again over its database");
+            assert!(!create.iter().any(|arg| arg == "--create-database"));
+            assert!(create.iter().any(|arg| arg == "--db-name=demo_data"));
+        }
         assert!(!host.hard_stops.borrow().contains(&555), "it is left alone");
+        assert_eq!(host.listeners.borrow().get(&old.ports.regport), Some(&555));
+        assert_eq!(
+            std::fs::read_to_string(&project).unwrap(),
+            "infobases: {}\n",
+            "v8project.yaml is not changed"
+        );
+        // Новый блок закреплён: следующий запуск идёт на нём и ничего не переносит.
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let again = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(again.connection, moved.connection);
+        assert_eq!(again.previous_regport, None);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+
+    #[test]
+    fn restart_moves_a_running_cluster_off_a_taken_port() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let old = setup.pins();
+        // Порт диапазона заняли, пока кластер работал.
+        host.listeners
+            .borrow_mut()
+            .insert(old.ports.range_end(), 556);
+        let again = setup.run(ServiceCommand::Restart, &host).unwrap();
+        assert_eq!(again.action, ServiceAction::Started);
+        assert_eq!(again.stopped_pid, Some(AGENT_PID));
+        assert_eq!(again.previous_regport, Some(old.ports.regport));
+        assert!(!setup.pins().ports.overlaps(old.ports));
+        assert!(again.warnings.join(" ").contains("process 556"));
+    }
+
+    #[test]
+    fn a_busy_agent_or_worker_port_moves_the_cluster_to_a_new_registry() {
+        for pick in [
+            (|ports: ClusterPorts| ports.agent) as fn(ClusterPorts) -> u16,
+            |ports: ClusterPorts| ports.range_end(),
+        ] {
+            let setup = setup();
+            let host = Host::default();
+            setup.run(ServiceCommand::Start, &host).unwrap();
+            setup.run(ServiceCommand::Stop, &host).unwrap();
+            let old = setup.pins();
+            let port = pick(old.ports);
+            host.listeners.borrow_mut().insert(port, 556);
+            let moved = setup.run(ServiceCommand::Start, &host).unwrap();
+            assert_eq!(moved.action, ServiceAction::Started);
+            assert_eq!(moved.previous_regport, Some(old.ports.regport));
+            let warning = moved.warnings.join(" ");
+            assert!(warning.contains(&format!("port {port}")), "{warning}");
+            assert!(warning.contains("process 556"), "{warning}");
+            let new = setup.pins();
+            assert_ne!(new.ports, old.ports);
+            assert!(
+                !new.registered,
+                "a base that was never created stays absent"
+            );
+            assert!(
+                !host
+                    .rac_calls
+                    .borrow()
+                    .iter()
+                    .any(|args| args[..2] == ["infobase", "create"]),
+                "nothing to register"
+            );
+            assert!(!setup.agent().root().join(&old.registry).exists());
+        }
     }
 
     #[test]

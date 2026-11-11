@@ -98,6 +98,16 @@
         "null"
       ]
     },
+    "previous_port": {
+      "description": "Прямой порт прежнего блока, если запуск сменил занятый чужим процессом блок; SSH и\nHTTP шли в том блоке следом за ним.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "ready": {
       "type": "boolean"
     },
