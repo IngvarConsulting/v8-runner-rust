@@ -4,6 +4,8 @@ check:
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - src/use_cases/status.rs::the_verdict_compares_within_the_tool_of_the_record
   - tests/cli_status.rs::status_deep_where_push_does_not_load_with_this_executor_answers_null_with_a_reason
+  - tests/cli_live_agent_portable.rs::status_deep_reports_reusing_the_generation_agent
+  - tests/cli_build_agent.rs::push_status_and_pull_share_one_live_agent
 ---
 
 # `status --deep` сверяет поколение так, как сверит его `push`
@@ -18,5 +20,10 @@ check:
 сервер) `status --deep` называет `other_tool` и инструментом записи не спрашивает: `push`
 такую запись сверяет инструментом записи и без его ответа отказывает, так что `other_tool` —
 не обещание, что `push` пройдёт.
+
+Если для чтения поколения выбран управляемый агент, `status --deep` берёт его тем же
+механизмом, что `push` и `pull`. У подготовленного исполнителя поколения есть квитанция
+`provider`; `provider.endpoint.live` называет переиспользование и состояние агента после
+закрытия сессии чтения поколения. Состав расширений спрашивает своего исполнителя.
 
 Источник: [`sources.html`](../../../docs/site/sources.html), раздел о состояниях пары.
