@@ -386,7 +386,7 @@ pub(crate) fn restart_refusal(cause: AppError) -> AppError {
     let refusal = UseCaseError::new(
         cause.kind(),
         format!(
-            "the sessions were ended, but the update failed again: a standalone server the runner started over a file infobase refuses updates after it ended a session until it is restarted (measured on 8.5.4.2028); run standalone restart and repeat the command; {}",
+            "the sessions were ended, but the update failed again: a standalone server the runner started over a file infobase may refuse updates after it ended a session until it is restarted (measured on 8.5.4.2028), so standalone restart is the likely way out; then repeat the command; {}",
             cause.message()
         ),
     )

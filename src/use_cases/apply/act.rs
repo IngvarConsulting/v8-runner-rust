@@ -211,7 +211,7 @@ fn apply_with(
     // ключ не отдаётся: отказ доходит до команды как есть.
     let terminated = match holder {
         Some(sessions::Holder::Sessions(list)) => list,
-        Some(sessions::Holder::Listed(ref list)) => Some(list.clone()),
+        Some(sessions::Holder::Listed(list)) => Some(list),
         Some(sessions::Holder::Designer) => {
             return Err(refuse(gate, config, holder, refused.error));
         }
