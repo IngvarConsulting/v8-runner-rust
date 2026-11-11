@@ -288,6 +288,69 @@ pub struct CriticalPhaseResult<T> {
     pub deferred_interruption: Option<ExecutionInterruption>,
 }
 
+/// Второй сигнал оператора командной строки. Сигналы ОС приходят процессу, а не команде,
+/// а токен отмены протянут по командной строке десятками путей: второй токен рядом с ним
+/// живёт в слоте, который ставит сторож сигналов (`CliSignalGuard`) на время своей жизни.
+/// Каждый сторож ставит свежий токен и при уходе возвращает прежний: сработавший токен не
+/// переживает своего сторожа и не отравляет следующие команды того же процесса.
+#[must_use = "the second signal is in force only while the guard lives"]
+pub struct OperatorInsistence {
+    stack: &'static InsistenceStack,
+    id: u64,
+}
+
+/// Действующие вторые сигналы по номеру стража; действует последний поставленный. Страж
+/// снимает только свою запись, в каком бы порядке стражи ни уходили.
+#[derive(Default)]
+struct InsistenceStack {
+    entries: std::sync::Mutex<Vec<(u64, CancellationToken)>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+static OPERATOR_INSISTENCE: InsistenceStack = InsistenceStack {
+    entries: std::sync::Mutex::new(Vec::new()),
+    next: std::sync::atomic::AtomicU64::new(0),
+};
+
+impl InsistenceStack {
+    fn enter(&'static self, token: CancellationToken) -> OperatorInsistence {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.entries().push((id, token));
+        OperatorInsistence { stack: self, id }
+    }
+
+    fn current(&self) -> CancellationToken {
+        self.entries()
+            .last()
+            .map(|(_, token)| token.clone())
+            .unwrap_or_default()
+    }
+
+    fn entries(&self) -> std::sync::MutexGuard<'_, Vec<(u64, CancellationToken)>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl OperatorInsistence {
+    /// Ставит `token` вторым сигналом командной строки, пока жив возвращённый страж.
+    pub fn enter(token: CancellationToken) -> Self {
+        OPERATOR_INSISTENCE.enter(token)
+    }
+
+    /// Действующий второй сигнал или свежий токен, который никто не выставит.
+    fn current() -> CancellationToken {
+        OPERATOR_INSISTENCE.current()
+    }
+}
+
+impl Drop for OperatorInsistence {
+    fn drop(&mut self) {
+        self.stack.entries().retain(|(id, _)| *id != self.id);
+    }
+}
+
 /// Per-invocation metadata passed into transport-neutral use cases.
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -295,6 +358,9 @@ pub struct ExecutionContext {
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
     cancellation: CancellationToken,
+    /// Второй сигнал оператора: перестать ждать работу, которую раннер не может снять, —
+    /// команду чужого агента (`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
+    abandonment: CancellationToken,
     /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
     work: WorkGiven,
     /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
@@ -323,6 +389,7 @@ impl ExecutionContext {
             transport,
             edt_timeout: None,
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             work: WorkGiven::for_command(),
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
@@ -333,8 +400,11 @@ impl ExecutionContext {
     }
 
     /// Creates a CLI execution context for the specified command.
+    ///
+    /// Второй сигнал оператора — тот, что поставил действующий сторож сигналов
+    /// ([`OperatorInsistence`]); без сторожа — свой, который никто не выставит.
     pub fn cli(command: CommandName) -> Self {
-        Self::new(command, ExecutionTransport::Cli)
+        Self::new(command, ExecutionTransport::Cli).with_abandonment(OperatorInsistence::current())
     }
 
     /// Creates an MCP stdio execution context for the specified command.
@@ -451,6 +521,17 @@ impl ExecutionContext {
     /// Returns the shared cancellation token for this execution.
     pub fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    /// Привязывает второй сигнал: по нему раннер перестаёт ждать команду чужого агента.
+    pub fn with_abandonment(mut self, abandonment: CancellationToken) -> Self {
+        self.abandonment = abandonment;
+        self
+    }
+
+    /// Второй сигнал этого вызова: отмена уже пришла, и вызывающий не хочет больше ждать.
+    pub fn abandonment(&self) -> CancellationToken {
+        self.abandonment.clone()
     }
 
     /// Builds a process policy bounded by the step's own cap, if the step declares one.
@@ -571,6 +652,36 @@ mod tests {
         AdvisedInfobase, CommandLineTarget, CommandName, ExecutionContext, ExecutionInterruption,
         ExecutionTransport, InterruptionSafetyClass,
     };
+
+    /// Второй сигнал командной строки действует, пока жив его страж, и сработавший токен не
+    /// переживает стража, в каком бы порядке стражи ни уходили.
+    #[test]
+    fn a_second_signal_lives_only_as_long_as_its_guard() {
+        // Свой стек, а не общий: стражи соседних тестов его не трогают.
+        let stack: &'static super::InsistenceStack = Box::leak(Box::default());
+        let outer_token = CancellationToken::new();
+        let outer = stack.enter(outer_token.clone());
+        let inner_token = CancellationToken::new();
+        let inner = stack.enter(inner_token.clone());
+        inner_token.cancel();
+        assert!(stack.current().is_cancelled());
+
+        drop(outer);
+        assert!(
+            stack.current().is_cancelled(),
+            "the newest guard stays in force"
+        );
+        drop(inner);
+        assert!(
+            !stack.current().is_cancelled(),
+            "a fired token leaves with its guard"
+        );
+        assert!(
+            !ExecutionContext::new(CommandName::Dump, ExecutionTransport::McpStdio)
+                .abandonment()
+                .is_cancelled()
+        );
+    }
 
     #[test]
     fn the_first_session_endpoint_is_shared_by_context_clones() {

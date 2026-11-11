@@ -55,6 +55,9 @@ pub enum ErrorCode {
     UnsupportedValue,
     RuntimeFailure,
     PlatformFailure,
+    /// Род `platform`: второй сигнал бросил ожидание команды чужого агента, и она, возможно,
+    /// ещё идёт.
+    AgentCommandAbandoned,
     /// Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.
     NonFastForward,
     /// Пара к роду `untracked_base`: памяти о базе нет.
@@ -126,6 +129,7 @@ impl ErrorCode {
             Self::UnsupportedValue => "unsupported_value",
             Self::RuntimeFailure => "runtime_failure",
             Self::PlatformFailure => "platform_failure",
+            Self::AgentCommandAbandoned => "agent_command_abandoned",
             Self::NonFastForward => "non_fast_forward",
             Self::UntrackedBase => "untracked_base",
             Self::AgentLimit => "agent_limit",
@@ -155,6 +159,7 @@ impl ErrorCode {
         Self::UnsupportedValue,
         Self::RuntimeFailure,
         Self::PlatformFailure,
+        Self::AgentCommandAbandoned,
         Self::NonFastForward,
         Self::UntrackedBase,
         Self::AgentLimit,
@@ -487,6 +492,11 @@ mod schema_tests {
             ),
             (UseCaseErrorKind::Runtime, "runtime_failure", "runtime"),
             (UseCaseErrorKind::Platform, "platform_failure", "platform"),
+            (
+                UseCaseErrorKind::AgentCommandAbandoned,
+                "agent_command_abandoned",
+                "platform",
+            ),
         ];
         let mut produced_codes: Vec<&str> = Vec::new();
         let mut produced_kinds: Vec<&str> = Vec::new();

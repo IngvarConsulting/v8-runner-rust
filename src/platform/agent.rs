@@ -55,6 +55,13 @@ const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
 pub(crate) const AGENT_COMMAND_ABANDONED: &str =
     "agent command abandoned: the command was cancelled";
+/// Строка журнала первого сигнала у чужого агента: раннер ждёт итог и говорит, как перестать.
+const EXTERNAL_AGENT_WAITING_FOR_TERMINAL: &str =
+    "interruption requested after sending a command to an external agent; waiting for terminal reply; \
+     interrupt again to stop waiting (the agent may keep running the command)";
+/// Строка журнала второго сигнала: ожидание итога чужого агента брошено.
+const EXTERNAL_AGENT_COMMAND_ABANDONED: &str =
+    "external agent command abandoned: the runner stopped waiting for its terminal reply";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -346,6 +353,14 @@ pub enum AgentError {
         delivered: bool,
     },
 
+    /// Второй сигнал бросил ожидание итога команды чужого агента: раннер его не дождался, а
+    /// агент, возможно, ещё её выполняет. Это не отмена — конец команды не наблюдался.
+    #[error(
+        "stopped waiting for the agent after a second interrupt: command '{command}' was \
+         abandoned; the agent may still be running it and may still hold the infobase"
+    )]
+    Abandoned { command: String },
+
     /// Команда запроса, которую после отмены агенту не отдали: работы он не получил, и в
     /// базе она ничего не начинала.
     #[error("agent command '{command}' was not sent: the command was cancelled")]
@@ -507,6 +522,9 @@ pub struct AgentSessionRequest {
 pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
+    /// Второй сигнал: перестать ждать итог команды чужого агента, уже отменённой первым.
+    /// Свой агент и служебные команды его не слушают.
+    abandonment: CancellationToken,
     /// Класс безопасности меняет только сама платформа (`critical`, `cleanup`): критическую
     /// политику сценарий берёт у `critical()` там, где отсрочку потом называют
     /// (`agent_session::run_critical`, команды внутри `with_session`).
@@ -524,8 +542,18 @@ impl WaitPolicy {
         Self {
             deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
             cancellation: policy.cancellation,
+            abandonment: CancellationToken::new(),
             safety: policy.safety,
             work: policy.work,
+        }
+    }
+
+    /// Та же политика со вторым сигналом команды: по нему ожидание итога чужого агента
+    /// бросается.
+    pub fn with_abandonment(self, abandonment: CancellationToken) -> Self {
+        Self {
+            abandonment,
+            ..self
         }
     }
 
@@ -543,6 +571,7 @@ impl WaitPolicy {
         Self {
             deadline: Some(Instant::now() + grace),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: None,
         }
@@ -585,6 +614,7 @@ impl WaitPolicy {
         Self {
             deadline: None,
             cancellation,
+            abandonment: CancellationToken::new(),
             safety: if critical {
                 ProcessInterruptionSafety::CriticalNonAbortable
             } else {
@@ -630,6 +660,7 @@ impl Default for WaitPolicy {
         Self {
             deadline: None,
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: Some(WorkGiven::for_command()),
         }
@@ -760,6 +791,12 @@ impl client::Handler for ClientEvents {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentOwnership {
+    Managed,
+    External,
+}
+
 /// Открытая сессия: соединение, канал shell и накопленный, ещё не разобранный ответ.
 pub struct AgentSession {
     runtime: tokio::runtime::Runtime,
@@ -770,6 +807,7 @@ pub struct AgentSession {
     pending: Vec<u8>,
     stderr: Vec<u8>,
     endpoint: AgentEndpoint,
+    ownership: AgentOwnership,
     transcript: Option<std::fs::File>,
     known_secrets: Vec<String>,
     ended: bool,
@@ -778,6 +816,13 @@ pub struct AgentSession {
     deferred_interruption: Option<ProcessInterruptionReason>,
     /// Прерывание, которое отложила последняя команда, — и когда её ответ не дочитан.
     command_deferral: Option<ProcessInterruptionReason>,
+    /// Прерывание, пришедшее после отправки команды чужому агенту, и когда его заметили:
+    /// снять команду раннер не может, поэтому дочитывает её итог через все батчи ответа.
+    /// Сбрасывает его следующая команда.
+    awaited_interruption: Option<(ProcessInterruptionReason, Instant)>,
+    /// Бросил ли второй сигнал команду этой сессии: агент, возможно, ещё пишет в свой
+    /// каталог, и убирать за ним след нельзя.
+    abandoned: bool,
     /// Пришёл ли от агента хоть один JSON-массив. До него проза — баннер и приглашение
     /// shell, а не ответ: конец сессии после неё — закрытая сессия, а не неверный ответ.
     json_seen: bool,
@@ -787,7 +832,7 @@ impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
-        Self::open_within(request, policy, None)
+        Self::open_within(request, policy, AgentOwnership::External, None)
     }
 
     /// То же, но рукопожатие транспорта ограничено `handshake`: слушатель, который принял
@@ -796,6 +841,7 @@ impl AgentSession {
     fn open_within(
         request: &AgentSessionRequest,
         policy: &WaitPolicy,
+        ownership: AgentOwnership,
         handshake: Option<Duration>,
     ) -> Result<Self, AgentError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -914,6 +960,7 @@ impl AgentSession {
             pending: Vec::new(),
             stderr: Vec::new(),
             endpoint,
+            ownership,
             transcript,
             known_secrets: [&request.user, &request.password]
                 .into_iter()
@@ -923,6 +970,8 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
             command_deferral: None,
+            awaited_interruption: None,
+            abandoned: false,
             json_seen: false,
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
@@ -986,6 +1035,7 @@ impl AgentSession {
         on_batch: &mut dyn FnMut(&[AgentMessage]),
     ) -> Result<AgentReply, AgentError> {
         self.command_deferral = None;
+        self.awaited_interruption = None;
         // Команду запроса после отмены агенту не отдают, как раннер не запускает процесс:
         // отмена до работы — безопасная точка. Служебные команды — открытие, закрытие —
         // идут и после неё, иначе сессию было бы не закрыть.
@@ -1026,6 +1076,24 @@ impl AgentSession {
         let reply = AgentReply { messages };
         let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
         log_reply(command, &secrets, &reply, started.elapsed());
+        if let Some((reason, observed)) = self.awaited_interruption {
+            // Вопрос останавливает чтение, но не подтверждает конец команды. Отказ
+            // агента сохраняет свою причину; явная отмена агентом подтверждает конец.
+            match reply.outcome() {
+                Ok(_) | Err(AgentError::Canceled { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            return Err(match reason {
+                ProcessInterruptionReason::Cancelled => AgentError::Cancelled {
+                    command: self.display_command(command),
+                    delivered: true,
+                },
+                ProcessInterruptionReason::TimedOut => AgentError::TimedOut {
+                    command: self.display_command(command),
+                    timeout_ms: observed.saturating_duration_since(started).as_millis() as u64,
+                },
+            });
+        }
         Ok(reply)
     }
 
@@ -1388,6 +1456,12 @@ impl AgentSession {
             })
     }
 
+    /// Бросил ли второй сигнал команду этой сессии: тогда агент, возможно, ещё её
+    /// выполняет, и след прогона на его стороне остаётся ему.
+    pub fn abandoned(&self) -> bool {
+        self.abandoned
+    }
+
     /// Прерывание, защёлкнутое в критической фазе за время сессии.
     pub fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
         self.deferred_interruption
@@ -1416,47 +1490,68 @@ impl AgentSession {
             policy.safety,
             ProcessInterruptionSafety::CriticalNonAbortable
         );
+        // Чужой процесс раннер не может снять и дождаться. Только доставленная
+        // команда запроса ждёт своего итога; служебная очистка сохраняет свой предел.
+        // Ожидание ограничивает второй сигнал (`policy.abandonment`): тогда команда брошена.
+        let wait_for_external_end =
+            self.ownership == AgentOwnership::External && policy.work.is_some() && !critical;
         loop {
-            if let Some(reply) = self.take_complete_array()? {
+            let reply = self.take_complete_array()?;
+            let now = Instant::now();
+            let remaining = policy
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let reason = if policy.cancellation.is_cancelled() {
+                Some(ProcessInterruptionReason::Cancelled)
+            } else if remaining == Some(Duration::ZERO) {
+                Some(ProcessInterruptionReason::TimedOut)
+            } else {
+                None
+            };
+            let starts_waiting = wait_for_external_end && self.awaited_interruption.is_none();
+            if let Some(reason) = reason.filter(|_| starts_waiting) {
+                warn!(command = %self.display_command(command), ?reason, "{}", EXTERNAL_AGENT_WAITING_FOR_TERMINAL);
+                self.awaited_interruption = Some((reason, now));
+            }
+            if let Some(reply) = reply {
                 return Ok(reply);
             }
             if self.ended {
                 return Err(self.ended_without_reply());
             }
-            if policy.cancellation.is_cancelled() {
-                if !critical {
-                    // Служебные команды уборки тоже бросаются по отмене, но строка журнала —
-                    // о брошенной работе команды.
-                    if policy.work.is_some() {
-                        info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
-                    }
-                    // Ответ читается после отправки: команда запроса уже работа команды.
-                    return Err(AgentError::Cancelled {
-                        command: self.display_command(command),
-                        delivered: policy.work.is_some(),
-                    });
-                }
-                self.defer(command, ProcessInterruptionReason::Cancelled);
+            // Второй сигнал бросает только уже начатое ожидание: без первого его нет.
+            if self.awaited_interruption.is_some() && policy.abandonment.is_cancelled() {
+                warn!(command = %self.display_command(command), "{}", EXTERNAL_AGENT_COMMAND_ABANDONED);
+                self.abandoned = true;
+                return Err(AgentError::Abandoned {
+                    command: self.display_command(command),
+                });
             }
-            let wait = match policy.deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    match (remaining.is_zero(), critical) {
-                        (true, false) => {
-                            return Err(AgentError::TimedOut {
-                                command: self.display_command(command),
-                                timeout_ms: started.elapsed().as_millis() as u64,
-                            })
+            // Свой агент и служебные команды прерываются сразу; чужой ждёт итога выше.
+            let interrupts_now = !wait_for_external_end;
+            if let Some(reason) = reason.filter(|_| interrupts_now) {
+                match reason {
+                    reason if critical => self.defer(command, reason),
+                    ProcessInterruptionReason::Cancelled => {
+                        if policy.work.is_some() {
+                            info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
                         }
-                        (true, true) => {
-                            self.defer(command, ProcessInterruptionReason::TimedOut);
-                            WAIT_SLICE
-                        }
-                        (false, _) => remaining.min(WAIT_SLICE),
+                        return Err(AgentError::Cancelled {
+                            command: self.display_command(command),
+                            delivered: policy.work.is_some(),
+                        });
+                    }
+                    ProcessInterruptionReason::TimedOut => {
+                        return Err(AgentError::TimedOut {
+                            command: self.display_command(command),
+                            timeout_ms: started.elapsed().as_millis() as u64,
+                        });
                     }
                 }
-                None => WAIT_SLICE,
-            };
+            }
+            let wait = remaining
+                .filter(|remaining| !remaining.is_zero())
+                .map_or(WAIT_SLICE, |remaining| remaining.min(WAIT_SLICE));
             let channel = &mut self.channel;
             let event = self
                 .runtime
@@ -1846,7 +1941,12 @@ impl ManagedAgent {
         debug!(pid = process.pid(), port, "designer agent launched");
 
         let opened = loop {
-            let last = match AgentSession::open_within(&session, policy, Some(HANDSHAKE_PROBE)) {
+            let last = match AgentSession::open_within(
+                &session,
+                policy,
+                AgentOwnership::Managed,
+                Some(HANDSHAKE_PROBE),
+            ) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
                 Err(AgentError::HostKeyRejected {
@@ -2300,6 +2400,7 @@ mod tests {
         let base = WaitPolicy {
             deadline: Some(deadline),
             cancellation: cancellation.clone(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         };
@@ -2352,6 +2453,7 @@ mod tests {
         let capped = WaitPolicy {
             deadline: Some(soon),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         }
@@ -2366,6 +2468,7 @@ mod tests {
         let bounded = WaitPolicy {
             deadline: Some(far),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         }
@@ -2538,6 +2641,7 @@ mod tests {
         let wait = WaitPolicy {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: Some(WorkGiven::for_command()),
         };

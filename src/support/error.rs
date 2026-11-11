@@ -125,6 +125,11 @@ pub enum AppError {
     #[error("platform error: {0}")]
     Platform(String),
 
+    /// Второй сигнал бросил ожидание команды чужого агента: конец её не наблюдался, и
+    /// отменой это не является (`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
+    #[error("agent command abandoned: {0}")]
+    AgentAbandoned(String),
+
     #[error("platform error: {0}")]
     PlatformDesigner(#[source] DesignerError),
 
@@ -262,6 +267,8 @@ impl AppError {
             | Self::Runtime(_)
             | Self::SourceLoadNotStarted(_)
             | Self::Platform(_)
+            // Брошенная команда чужого агента — не отмена: её конец не наблюдался.
+            | Self::AgentAbandoned(_)
             | Self::PlatformLocator(_)
             | Self::PlatformLocatorContext { .. }
             | Self::Config(_)
@@ -290,6 +297,7 @@ impl AppError {
                 at,
             },
             Self::TimedOut(message) => Self::TimedOut(format!("{context}; {message}")),
+            Self::AgentAbandoned(message) => Self::AgentAbandoned(format!("{context}; {message}")),
             Self::InvalidOutput(message) => Self::InvalidOutput(format!("{context}; {message}")),
             Self::Validation(message) => Self::Validation(format!("{context}; {message}")),
             Self::ValidationIbcmd(source) => Self::ValidationIbcmdContext { context, source },
@@ -475,6 +483,7 @@ impl From<AgentError> for AppError {
                 message: error.to_string(),
                 at: CancelledAt::Boundary,
             },
+            AgentError::Abandoned { .. } => Self::AgentAbandoned(error.to_string()),
             AgentError::Command { .. }
             | AgentError::Canceled { .. }
             | AgentError::Question { .. }
