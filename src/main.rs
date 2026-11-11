@@ -20,6 +20,7 @@ fn main() {
     if let Err(error) = platform::process::restore_default_child_signal() {
         eprintln!("warning: cannot restore the default SIGCHLD disposition: {error}");
     }
+    platform::backup_removal::allow_from_this_executable();
     let exit_code = app::run();
     process::exit(exit_code);
 }

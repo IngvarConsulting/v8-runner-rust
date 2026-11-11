@@ -123,6 +123,10 @@ pub fn run() -> i32 {
         return run_agent_keeper(&cli, keeper);
     }
 
+    if let Command::RemoveBackup(args) = &cli.command {
+        return crate::platform::backup_removal::run(&args.path);
+    }
+
     let color_mode = color_mode(cli.no_color);
     let presenter = Presenter::new(output_format.to_owned(), color_mode);
 
@@ -330,6 +334,9 @@ pub fn run() -> i32 {
             ),
         },
         Command::Mcp(_) => unreachable!("mcp commands are handled before CLI presenter setup"),
+        Command::RemoveBackup(_) => {
+            unreachable!("the background removal is handled before config loading")
+        }
     };
 
     match result {
@@ -445,6 +452,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(crate::cli::args::AgentArgs {
             command: crate::cli::args::AgentCommand::Keeper(_),
         }) => "agent keeper",
+        Command::RemoveBackup(_) => crate::platform::backup_removal::COMMAND,
         _ => execute::command_name(command).as_str(),
     }
 }
