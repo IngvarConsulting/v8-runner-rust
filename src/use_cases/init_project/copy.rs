@@ -21,6 +21,7 @@ use crate::config::model::{is_infobase_name, AppConfig};
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::infobase_export::RestoreTargetMode;
 use crate::domain::init::InitSource;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
@@ -333,6 +334,8 @@ impl Copy<'_> {
             return outcome;
         }
         log_live_stage(
+            ProgressPhase::Infobase,
+            None,
             "init: infobase create",
             "[Platform] creating the infobase from the snapshot",
         );
@@ -437,6 +440,8 @@ impl Copy<'_> {
             }
         }
         log_live_stage(
+            ProgressPhase::Infobase,
+            None,
             "init: infobase snapshot",
             &format!("[Конфигуратор] taking the snapshot of '{}'", self.from),
         );

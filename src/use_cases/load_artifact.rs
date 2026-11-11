@@ -17,6 +17,7 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     UploadArtifactType,
 };
+use crate::domain::progress::ProgressPhase;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::extension_inventory::parse_extension_inventory;
 use crate::platform::locator::UtilityType;
@@ -231,6 +232,8 @@ fn run_load_selected(
 
     if args.dry_run {
         crate::use_cases::progress::log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "load: preview",
             "[Load] preview only, nothing probed or applied",
         );
@@ -279,6 +282,8 @@ fn run_load_selected(
 
     if resolved.mode != LoadMode::Update {
         log_live_stage(
+            ProgressPhase::Inspect,
+            None,
             "load: compatibility probe",
             "[Конфигуратор] comparing infobase compatibility",
         );
@@ -392,7 +397,12 @@ fn run_load_selected(
         }
     };
 
-    log_live_stage(apply_stage, "[Конфигуратор] applying artifact");
+    log_live_stage(
+        ProgressPhase::Load,
+        None,
+        apply_stage,
+        "[Конфигуратор] applying artifact",
+    );
     let apply_result = match (resolved.mode, &resolved.settings) {
         (LoadMode::Load, None) => apply_dsl
             .load_cfg(&resolved.artifact_path, resolved.extension.as_deref())
@@ -542,6 +552,8 @@ fn run_load_selected(
     };
 
     log_live_stage(
+        ProgressPhase::UpdateDb,
+        None,
         "load: update_db_cfg",
         "[Конфигуратор] updating database configuration",
     );
@@ -1656,6 +1668,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![],
             tools: ToolsConfig {
                 platform: PlatformToolConfig {

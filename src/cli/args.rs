@@ -20,6 +20,17 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Global options")]
     pub json_message: bool,
 
+    /// With --json-message, stream progress events to stdout (`-`) as NDJSON before the
+    /// envelope, which comes last on one line
+    #[arg(
+        long,
+        global = true,
+        value_name = "-",
+        value_parser = ["-"],
+        help_heading = "Global options"
+    )]
+    pub events: Option<String>,
+
     /// Log level
     #[arg(long, global = true, default_value = "info",
           value_parser = ["error", "warn", "info", "debug", "trace"],

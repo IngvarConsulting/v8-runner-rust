@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::config::model::{AppConfig, SourceSetConfig};
 use crate::domain::capability::Provider;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::connection::V8Connection;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -161,6 +162,8 @@ impl ThrowawayInfobase {
             ))
         })?;
         log_live_stage(
+            ProgressPhase::Infobase,
+            None,
             "throwaway infobase",
             "creating a throwaway infobase under workPath",
         );
@@ -194,7 +197,12 @@ impl ThrowawayInfobase {
                 if let Some(error) = interruption_before_safe_point(context, "package export") {
                     return Err(error);
                 }
-                log_live_stage("package export", "[ibcmd] exporting the package to XML");
+                log_live_stage(
+                    ProgressPhase::Package,
+                    None,
+                    "package export",
+                    "[ibcmd] exporting the package to XML",
+                );
                 self.base
                     .ibcmd(context, runner, InterruptionSafetyClass::GracefulThenKill)
                     .config_export_file(package_file, target_dir)
@@ -359,6 +367,8 @@ impl FileInfobase {
             return Err(error);
         }
         log_live_stage(
+            ProgressPhase::Package,
+            None,
             "package dump",
             "dumping the package from the build infobase",
         );
@@ -437,7 +447,12 @@ pub(crate) fn edt_sources_to_xml(
             &one_shot
         }
     };
-    log_live_stage("edt export", "[EDT] converting the sources to XML");
+    log_live_stage(
+        ProgressPhase::Convert,
+        None,
+        "edt export",
+        "[EDT] converting the sources to XML",
+    );
     use crate::use_cases::build_project::EdtExportSource;
     let export_source = match context.command() {
         crate::use_cases::context::CommandName::Artifacts

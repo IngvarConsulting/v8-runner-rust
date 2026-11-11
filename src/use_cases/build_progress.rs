@@ -1,4 +1,5 @@
 use crate::domain::build::{BuildMode, BuildStep};
+use crate::domain::progress::ProgressPhase;
 use crate::use_cases::progress::log_live_stage;
 use tracing::info;
 
@@ -43,12 +44,11 @@ pub(crate) fn log_build_step_timeline(step: &BuildStep) {
         .filter(|value| !value.is_empty())
         .unwrap_or("ok");
     let detail = build_step_completion_detail(step, status, message);
-    log_timeline_stage(
-        &step.source_set,
-        &build_mode_label(&step.mode),
-        &detail,
-        status,
-    );
+    let phase = match step.mode {
+        BuildMode::EdtExport => ProgressPhase::Convert,
+        BuildMode::Full | BuildMode::Partial { .. } | BuildMode::Skipped => ProgressPhase::Load,
+    };
+    log_timeline_stage(&step.source_set, phase, &detail, status);
 }
 
 fn build_step_completion_detail(
@@ -67,16 +67,18 @@ fn build_step_completion_detail(
     }
 }
 
+/// Этап набора `source_set_name` в живой ленте. Начатый этап (`Running`) — ещё и шаг потока
+/// событий с фазой `phase`.
 pub(crate) fn log_timeline_stage(
     source_set_name: &str,
-    _stage: &str,
+    phase: ProgressPhase,
     message: &str,
     status: TimelineStageStatus,
 ) {
     let label = format!("{source_set_name}:");
     let detail = first_message_line(message);
     if matches!(status, TimelineStageStatus::Running) {
-        log_live_stage(&label, detail);
+        log_live_stage(phase, Some(source_set_name), &label, detail);
         return;
     }
 
@@ -85,15 +87,6 @@ pub(crate) fn log_timeline_stage(
         timeline_label = label.as_str(),
         timeline_detail = detail
     );
-}
-
-pub(crate) fn build_mode_label(mode: &BuildMode) -> String {
-    match mode {
-        BuildMode::EdtExport => "edt_export".to_owned(),
-        BuildMode::Full => "full".to_owned(),
-        BuildMode::Partial { file_count } => format!("partial ({file_count} files)"),
-        BuildMode::Skipped => "skipped".to_owned(),
-    }
 }
 
 fn first_message_line(message: &str) -> &str {

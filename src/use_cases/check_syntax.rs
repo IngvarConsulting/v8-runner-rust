@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
@@ -164,7 +165,12 @@ fn run_syntax_branch(
 
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let stage_label = "check: designer-config";
-    log_live_stage(stage_label, "[Конфигуратор] running syntax check");
+    log_live_stage(
+        ProgressPhase::Check,
+        None,
+        stage_label,
+        "[Конфигуратор] running syntax check",
+    );
     let platform_result = dsl.check_config(&flags);
 
     let platform_result = match platform_result {
@@ -286,6 +292,8 @@ fn preview_designer_config(
 ) -> UseCaseResult<SyntaxCheckResult> {
     let selected = select_designer(config, started)?;
     log_live_stage(
+        ProgressPhase::Preview,
+        None,
         "check: preview",
         "[Конфигуратор] preview only, configuration not checked",
     );
@@ -512,7 +520,12 @@ fn preview_edt(
     started: Instant,
 ) -> UseCaseResult<SyntaxCheckResult> {
     let (_utilities, location) = locate_edt(config, started)?;
-    log_live_stage("check: preview", "[EDT] preview only, project not checked");
+    log_live_stage(
+        ProgressPhase::Preview,
+        None,
+        "check: preview",
+        "[EDT] preview only, project not checked",
+    );
     let mut result = planned_result(CheckName::Edt, started);
     let names: Vec<&str> = source_sets
         .iter()
@@ -704,7 +717,12 @@ fn check_edt_projects(
         ) {
             return Err(failure.into());
         }
-        log_live_stage("check: edt", "[EDT] validating project");
+        log_live_stage(
+            ProgressPhase::Check,
+            None,
+            "check: edt",
+            "[EDT] validating project",
+        );
         let run = validation.validate(context, config, &project, started)?;
 
         if let Some(stderr) = &run.stderr {
@@ -1710,6 +1728,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1742,6 +1761,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),

@@ -9,6 +9,7 @@ use crate::config::model::{
 };
 use crate::domain::build::{BuildMode, BuildStep};
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -427,10 +428,10 @@ fn tool_extension_source_context(
     )
 }
 
-fn log_tool_extension_stage(extension: &ToolExtensionConfig, stage: &str, detail: &str) {
+fn log_tool_extension_stage(extension: &ToolExtensionConfig, phase: ProgressPhase, detail: &str) {
     log_timeline_stage(
         &format!("tool:{}", extension.name),
-        stage,
+        phase,
         detail,
         TimelineStageStatus::Running,
     );
@@ -513,7 +514,7 @@ fn prepare_designer_source_extension(
             )?;
             log_tool_extension_stage(
                 extension,
-                "load",
+                ProgressPhase::Load,
                 &extension_stage_detail("Конфигуратор", "Загрузка", extension),
             );
             let load = dsl
@@ -549,7 +550,7 @@ fn prepare_designer_source_extension(
             )?;
             log_tool_extension_stage(
                 extension,
-                "ibcmd_import",
+                ProgressPhase::Load,
                 &extension_stage_detail("ibcmd", "Загрузка", extension),
             );
             let import = dsl
@@ -619,7 +620,7 @@ fn prepare_artifact_extension(
     )?;
     log_tool_extension_stage(
         extension,
-        "load_artifact",
+        ProgressPhase::Load,
         &extension_stage_detail("Конфигуратор", "Загрузка .cfe", extension),
     );
     let load = dsl
@@ -670,7 +671,7 @@ fn export_edt_source_extension(
     let project_name = resolve_edt_project_name(extension, source_path)?;
     log_tool_extension_stage(
         extension,
-        "edt_export",
+        ProgressPhase::Convert,
         &extension_stage_detail("EDT", "Экспорт", extension),
     );
     let result = dsl

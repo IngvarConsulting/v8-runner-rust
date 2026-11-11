@@ -7,6 +7,7 @@ use chrono::Utc;
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
 use crate::domain::convert::{ConvertDirection, ConvertOutput, ConvertResult, ConvertScope};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
 use crate::platform::locator::UtilityType;
@@ -1278,6 +1279,8 @@ fn infer_runtime_base_project_name(
     })?;
 
     log_live_stage(
+        ProgressPhase::Convert,
+        None,
         "convert: base project import",
         "[EDT] importing Designer files for base project name",
     );
@@ -1363,6 +1366,8 @@ fn run_platform_conversion(
                         ))
                     })?;
                     log_live_stage(
+                        ProgressPhase::Convert,
+                        None,
                         "convert: edt export",
                         "[EDT] exporting external project to Designer files",
                     );
@@ -1405,6 +1410,8 @@ fn run_platform_conversion(
                 Ok(())
             } else {
                 log_live_stage(
+                    ProgressPhase::Convert,
+                    None,
                     "convert: edt export",
                     "[EDT] exporting project to Designer files",
                 );
@@ -1418,7 +1425,12 @@ fn run_platform_conversion(
         | ConvertDirection::EdtToPackage
         | ConvertDirection::PackageToDesigner => Err(package_direction_without_edt(direction)),
         ConvertDirection::DesignerToEdt => {
-            log_live_stage("convert: designer import", "[EDT] importing Designer files");
+            log_live_stage(
+                ProgressPhase::Convert,
+                None,
+                "convert: designer import",
+                "[EDT] importing Designer files",
+            );
             let result = dsl
                 .import_configuration_files(
                     staging_dir,
@@ -1763,6 +1775,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![],
             tools: ToolsConfig::default(),
             mcp: McpConfig::default(),

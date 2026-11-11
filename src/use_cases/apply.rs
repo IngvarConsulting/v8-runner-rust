@@ -6,6 +6,7 @@
 pub(crate) mod act;
 pub mod sessions;
 
+use crate::domain::progress::ProgressPhase;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -191,7 +192,7 @@ fn walk(
         }
         crate::use_cases::build_progress::log_timeline_stage(
             &step.source_set,
-            "apply",
+            ProgressPhase::UpdateDb,
             step.message.as_deref().unwrap_or_default(),
             if step.outcome == ApplyOutcome::Failed {
                 crate::use_cases::build_progress::TimelineStageStatus::Failed
@@ -661,6 +662,7 @@ mod tests {
         fs::create_dir_all(base.join("epf")).expect("epf");
         AppConfig {
             local_path: base.join(".local"),
+            project_file: crate::config::model::default_project_file(),
             base_path: base,
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

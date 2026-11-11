@@ -6,6 +6,7 @@ use crate::domain::launch::{
     ClientWaitResult, ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia,
 };
 use crate::domain::next_step::NextStep;
+use crate::domain::progress::ProgressPhase;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
@@ -170,6 +171,8 @@ fn run_launch(
         let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
         let masked = mask_preview_args(&process_request.args, &secrets);
         log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "launch: preview",
             "[Launch] preview only, client process not dispatched",
         );
@@ -194,7 +197,12 @@ fn run_launch(
     }
 
     debug!("[Запуск] Приложение: {}", mode_label(args.target));
-    log_live_stage("launch: start", "[Launch] starting client process");
+    log_live_stage(
+        ProgressPhase::Launch,
+        None,
+        "launch: start",
+        "[Launch] starting client process",
+    );
     let runner = utilities.runner_for(utility);
 
     if let Some(plan) = client_wait {
@@ -595,6 +603,8 @@ fn execute_web(
     if args.dry_run {
         let plan_args: Vec<String> = plan_args.iter().map(|arg| mask_url_userinfo(arg)).collect();
         log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "launch: preview",
             "[Launch] preview only, browser not opened",
         );
@@ -620,7 +630,12 @@ fn execute_web(
         });
     }
 
-    log_live_stage("launch: web", "[Launch] opening the published infobase");
+    log_live_stage(
+        ProgressPhase::Launch,
+        None,
+        "launch: web",
+        "[Launch] opening the published infobase",
+    );
     let pid = crate::platform::browser::open_url(&program, &leading, url, context.work())
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     Ok(LaunchResult {
@@ -848,6 +863,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,

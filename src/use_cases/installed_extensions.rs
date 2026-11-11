@@ -6,6 +6,7 @@
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::extensions::InstalledExtension;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::extension_inventory::{
     is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
@@ -54,6 +55,8 @@ pub(crate) fn read_installed_extensions(
         first.make_ascii_uppercase();
     }
     log_live_stage(
+        ProgressPhase::Inspect,
+        None,
         &format!("{command}: extensions"),
         &format!("[{label}] reading the extensions installed in the infobase"),
     );
