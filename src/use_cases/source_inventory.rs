@@ -173,12 +173,10 @@ impl<'a> SourceSetInventory<'a> {
             };
             let key = extension_name_key(extension);
             let root = source_set.root_in(&self.config.base_path);
-            if let Some(held) =
-                source_extension_name(self.config.format, &root, None)?.filter(|held| {
-                    let held = extension_name_key(held);
-                    held != key && installed.contains(&held)
-                })
-            {
+            if let Some(held) = source_extension_name(self.config.format, &root)?.filter(|held| {
+                let held = extension_name_key(held);
+                held != key && installed.contains(&held)
+            }) {
                 return Err(AppError::Validation(format!(
                     "source-set '{}' holds extension '{held}' by the Name in its sources, but the runner takes an extension set by the set's name, '{extension}' (#218): rename the set to '{held}' in the project file; no second set is declared for '{held}'",
                     source_set.name

@@ -79,6 +79,8 @@ pub(super) fn read_working_version(
         })?
         .filter(|version| !version.is_empty())
         .ok_or_else(|| AppError::Platform("the working configuration has no version".into()))?;
-    temp.close().map_err(workspace_error)?;
+    if let Err(error) = temp.close() {
+        tracing::warn!(%error, "could not remove the configuration version read directory");
+    }
     Ok(version)
 }

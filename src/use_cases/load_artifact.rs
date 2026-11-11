@@ -28,7 +28,7 @@ use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
-use crate::use_cases::extension_identity::resolve_upload_extension_ref;
+use crate::use_cases::extension_identity::upload_extension_name;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
     cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
@@ -246,11 +246,9 @@ fn run_load_selected(
                 context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             );
             format!(
-                "would run {} using a private copy of the settings, then /UpdateDBCfg only after a confirmed version change",
-                designer.preview_update_cfg(
-                    &resolved.artifact_path,
-                    source,
-                )
+                "would run {}; Designer reads a private copy of the validated settings, made in a new directory under {}; then /UpdateDBCfg only after a confirmed version change",
+                designer.preview_update_cfg(&resolved.artifact_path, source),
+                crate::support::temp::temp_root_path(&config.work_path).display(),
             )
         } else {
             format!(
@@ -1025,7 +1023,7 @@ fn resolve_request(
                 .ok_or_else(|| AppError::Validation(CFE_REQUIRES_EXTENSION_ERROR.to_owned()))?;
             (
                 LoadTargetKind::Extension,
-                Some(resolve_upload_extension_ref(config, reference)?),
+                Some(upload_extension_name(config, reference)),
             )
         }
         UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)

@@ -1893,7 +1893,7 @@
     "url": "cli-upload.html#op-upload",
     "page": "upload",
     "section": "upload build/main.cf",
-    "text": "upload build/main.cf v8-runner upload build/main.cf целиком заменяет основную конфигурацию пакетом .cf или загружает расширение пакетом .cfe с --ref <имя> ( 11 ) Если --ref совпадает с именем набора EXTENSION , раннер читает имя расширения из Configuration.xml набора. Если подходящего набора нет, использует указанное имя расширения в базе."
+    "text": "upload build/main.cf v8-runner upload build/main.cf целиком заменяет основную конфигурацию пакетом .cf или загружает расширение пакетом .cfe с --ref <имя> ( 11 ) Имя в --ref — имя расширения в базе. Набор EXTENSION называет расширение своим именем, как у push ."
   },
   {
     "url": "cli-upload.html#response-classes",

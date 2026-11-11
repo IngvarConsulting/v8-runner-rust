@@ -133,10 +133,9 @@ v8-runner upload <VENDOR_PACKAGE> --mode update --settings <FILE>
 Rules:
 
 - supported only for `format=DESIGNER`, and `upload` is Designer-only;
-- `.cfe` requires `--ref <NAME>`. An exact match with an extension source-set uses
-  the extension name from its `Configuration.xml`. Without a matching extension source-set,
-  the runner uses the given name directly. A matched source-set must have a readable extension
-  descriptor with a valid name. `--extension` remains a hidden alias.
+- `.cfe` requires `--ref <NAME>`, the extension name in the base. An extension source-set
+  is named by its set name, as in `push`; its `Configuration.xml` is not read.
+  `--extension` remains a hidden alias.
 - `--mode combine` requires `--settings`;
 - use `--mode load` for the first installation of an extension; JSON reports
   `compatibility_state: "absent"` when the infobase does not list it yet, read from

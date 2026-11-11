@@ -3,7 +3,6 @@ use std::path::Path;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
 use crate::support::edt_project;
 use crate::support::error::AppError;
-use crate::support::source_descriptor::SourceDescriptorPurpose;
 
 /// Extension name passed to platform commands (`-Extension` / `--name`).
 ///
@@ -24,13 +23,13 @@ pub fn extension_name_key(name: &str) -> String {
 /// Имя расширения, которое называют исходники набора: `Name` в `Configuration.xml`
 /// (у EDT — в `src/Configuration/Configuration.mdo`); `None`, пока описания нет.
 ///
-/// `upload --ref` использует это имя для набора расширения. Другие операции пока
-/// сопоставляют наборы с составом базы по имени набора (#218) и используют имя
-/// из исходников при проверке расхождений.
+/// Платформе раннер называет расширение по имени набора ([`platform_extension_name`]), а
+/// сайт обещает имя набора псевдонимом (#218). Пока обещание не выполнено, это имя служит
+/// только сверке: набор, исходники которого называют другое расширение, не должен молча
+/// считаться набором ни того, ни другого.
 pub fn source_extension_name(
     format: SourceFormat,
     root: &Path,
-    required_purpose: Option<SourceDescriptorPurpose>,
 ) -> Result<Option<String>, AppError> {
     let marker = match format {
         SourceFormat::Designer => root.join("Configuration.xml"),
@@ -40,35 +39,27 @@ pub fn source_extension_name(
         return Ok(None);
     }
     Ok(
-        crate::use_cases::config_init::read_configuration_logical_name(&marker, required_purpose)?
+        crate::use_cases::config_init::read_configuration_logical_name(&marker)?
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty()),
     )
 }
 
-pub(super) fn resolve_upload_extension_ref(
-    config: &AppConfig,
-    reference: String,
-) -> Result<String, AppError> {
-    let Some(source_set) = config.source_sets.iter().find(|source_set| {
-        source_set.purpose == SourceSetPurpose::Extension && source_set.name == reference
-    }) else {
-        return Ok(reference);
-    };
-
-    let root = source_set.root_in(&config.base_path);
-    source_extension_name(
-        config.format,
-        &root,
-        Some(SourceDescriptorPurpose::Extension),
-    )?
-    .filter(|name| crate::platform::extension_inventory::is_extension_identifier(name))
-    .ok_or_else(|| {
-        AppError::Validation(format!(
-            "--ref '{reference}' requires an extension Configuration.xml with a valid name at '{}'",
-            root.join("Configuration.xml").display(),
-        ))
-    })
+/// Имя расширения в базе для `upload --ref <NAME>`.
+///
+/// Набор `EXTENSION` с именем `NAME` называет расширение так же, как у `push`, — по
+/// имени набора ([`platform_extension_name`]); `Name` из его `Configuration.xml` не читается.
+/// Без такого набора `NAME` и есть имя расширения в базе.
+pub(super) fn upload_extension_name(config: &AppConfig, reference: String) -> String {
+    config
+        .source_sets
+        .iter()
+        .find(|source_set| {
+            source_set.purpose == SourceSetPurpose::Extension && source_set.name == reference
+        })
+        .map_or(reference, |source_set| {
+            platform_extension_name(source_set).to_owned()
+        })
 }
 
 #[cfg(test)]

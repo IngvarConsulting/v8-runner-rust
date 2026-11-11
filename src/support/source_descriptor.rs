@@ -77,7 +77,8 @@ enum XmlDescriptorKind {
 struct XmlDescriptorScan {
     kind: Option<XmlDescriptorKind>,
     effective_tag: Option<String>,
-    has_extension_marker: bool,
+    has_configuration_extension_purpose: bool,
+    has_object_belonging: bool,
 }
 
 pub fn classify_source_descriptor(
@@ -86,7 +87,7 @@ pub fn classify_source_descriptor(
     let scan = scan_xml_descriptor(content)?;
     Ok(match scan.kind {
         Some(XmlDescriptorKind::Configuration) => {
-            if scan.has_extension_marker {
+            if scan.has_configuration_extension_purpose || scan.has_object_belonging {
                 Some(SourceDescriptorPurpose::Extension)
             } else {
                 Some(SourceDescriptorPurpose::Configuration)
@@ -149,14 +150,9 @@ pub fn parse_external_descriptor(
 
 pub fn extract_configuration_logical_name(
     content: &str,
-    required_purpose: Option<SourceDescriptorPurpose>,
 ) -> Result<Option<String>, SourceDescriptorParseError> {
-    let purpose = classify_source_descriptor(content)?;
-    if !matches!(
-        purpose,
-        Some(SourceDescriptorPurpose::Configuration | SourceDescriptorPurpose::Extension)
-    ) || required_purpose.is_some_and(|required| purpose != Some(required))
-    {
+    let scan = scan_xml_descriptor(content)?;
+    if scan.kind != Some(XmlDescriptorKind::Configuration) {
         return Ok(None);
     }
 
@@ -281,64 +277,56 @@ fn scan_xml_descriptor(content: &str) -> Result<XmlDescriptorScan, SourceDescrip
     let mut buf = Vec::new();
     let mut root_tag = None::<String>;
     let mut first_child_tag = None::<String>;
-    let mut ancestors = Vec::new();
+    let mut depth = 0usize;
     let mut scan = XmlDescriptorScan::default();
 
     loop {
-        let event = reader
-            .read_event_into(&mut buf)
-            .map_err(|error| SourceDescriptorParseError::Xml(error.to_string()))?;
-        match &event {
-            Event::Start(node) | Event::Empty(node) => {
-                let tag = xml_local_name(node.name().as_ref());
-                if ancestors.is_empty() {
-                    if root_tag.replace(tag.clone()).is_some() {
-                        return Err(SourceDescriptorParseError::Xml(
-                            "expected a single root element".to_owned(),
-                        ));
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) => {
+                let tag = xml_local_name(event.name().as_ref());
+                if root_tag.is_none() {
+                    root_tag = Some(tag.clone());
+                    depth = 1;
+                } else {
+                    if depth == 1 && first_child_tag.is_none() {
+                        first_child_tag = Some(tag.clone());
                     }
-                } else if ancestors.len() == 1
-                    && root_tag.as_deref() == Some("MetaDataObject")
-                    && first_child_tag.replace(tag.clone()).is_some()
-                {
-                    return Err(SourceDescriptorParseError::Xml(
-                        "expected a single metadata object".to_owned(),
-                    ));
+                    depth += 1;
                 }
-
-                if matches!(
-                    tag.as_str(),
-                    "ConfigurationExtensionPurpose" | "ObjectBelonging"
-                ) && is_configuration_marker_parent(&ancestors)
-                {
-                    scan.has_extension_marker = true;
-                }
-                if matches!(event, Event::Start(_)) {
-                    ancestors.push(tag);
+                if tag == "ConfigurationExtensionPurpose" {
+                    scan.has_configuration_extension_purpose = true;
+                } else if tag == "ObjectBelonging" {
+                    scan.has_object_belonging = true;
                 }
             }
-            Event::End(_) => {
-                ancestors.pop().ok_or_else(|| {
-                    SourceDescriptorParseError::Xml("unexpected closing element".to_owned())
-                })?;
+            Ok(Event::Empty(event)) => {
+                let tag = xml_local_name(event.name().as_ref());
+                if root_tag.is_none() {
+                    root_tag = Some(tag.clone());
+                    break;
+                }
+                if depth == 1 && first_child_tag.is_none() {
+                    first_child_tag = Some(tag.clone());
+                }
+                if tag == "ConfigurationExtensionPurpose" {
+                    scan.has_configuration_extension_purpose = true;
+                } else if tag == "ObjectBelonging" {
+                    scan.has_object_belonging = true;
+                }
             }
-            Event::Text(text) if ancestors.is_empty() && !text.is_empty() => {
-                return Err(SourceDescriptorParseError::Xml(
-                    "text outside the root element".to_owned(),
-                ));
+            Ok(Event::End(_)) => {
+                depth = depth.saturating_sub(1);
             }
-            Event::CData(_) if ancestors.is_empty() => {
-                return Err(SourceDescriptorParseError::Xml(
-                    "CDATA outside the root element".to_owned(),
-                ));
+            Ok(Event::Eof) => break,
+            Err(error) => {
+                return Err(SourceDescriptorParseError::Xml(error.to_string()));
             }
-            Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
 
-    if !ancestors.is_empty() {
+    if depth > 0 {
         return Err(SourceDescriptorParseError::UnexpectedEof);
     }
 
@@ -355,21 +343,6 @@ fn scan_xml_descriptor(content: &str) -> Result<XmlDescriptorScan, SourceDescrip
     };
 
     Ok(scan)
-}
-
-fn is_configuration_marker_parent(ancestors: &[String]) -> bool {
-    match ancestors {
-        [configuration] => configuration == "Configuration",
-        [configuration, properties] => {
-            configuration == "Configuration" && properties == "Properties"
-        }
-        [root, configuration, properties] => {
-            root == "MetaDataObject"
-                && configuration == "Configuration"
-                && properties == "Properties"
-        }
-        _ => false,
-    }
 }
 
 fn extract_logical_name(content: &str) -> Result<Option<String>, ExternalDescriptorParseError> {
@@ -600,7 +573,7 @@ mod tests {
         let xml = "<MetaDataObject><Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>";
 
         assert_eq!(
-            extract_configuration_logical_name(xml, None).expect("name"),
+            extract_configuration_logical_name(xml).expect("name"),
             Some("client_mcp".to_owned())
         );
     }
@@ -610,7 +583,7 @@ mod tests {
         let xml = r#"<mdclass:Configuration xmlns:mdclass="http://g5.1c.ru/v8/dt/metadata/mdclass"><name>test_client</name><languages><name>Русский</name></languages></mdclass:Configuration>"#;
 
         assert_eq!(
-            extract_configuration_logical_name(xml, None).expect("name"),
+            extract_configuration_logical_name(xml).expect("name"),
             Some("test_client".to_owned())
         );
     }

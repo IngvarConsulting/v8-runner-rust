@@ -78,7 +78,7 @@
 <h2 class="command-variant" id="op-upload">upload build/main.cf</h2>
 <pre data-output-command><code>v8-runner upload build/main.cf</code></pre>
 <p>целиком заменяет основную конфигурацию пакетом <code>.cf</code> или загружает расширение пакетом <code>.cfe</code> с <code>--ref &lt;имя&gt;</code> <span class="ref">(<a href="platform.html#t11">11</a>)</span></p>
-<p>Если <code>--ref</code> совпадает с именем набора <code>EXTENSION</code>, раннер читает имя расширения из <code>Configuration.xml</code> набора. Если подходящего набора нет, использует указанное имя расширения в базе.</p>
+<p>Имя в <code>--ref</code> — имя расширения в базе. Набор <code>EXTENSION</code> называет расширение своим именем, как у <code>push</code>.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">

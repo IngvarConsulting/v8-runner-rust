@@ -199,6 +199,11 @@ fn vendor_update_preview_names_masked_argv_without_running_designer() {
     for part in ["/UpdateCfg", "vendor.cfu", "-Settings", "settings.xml"] {
         assert!(message.contains(part), "{message}");
     }
+    let private_copy_root = dir.path().join("work").join("temp");
+    assert!(
+        message.contains(&private_copy_root.display().to_string()),
+        "{message}"
+    );
     assert!(!message.contains("preview-secret"), "{message}");
     assert!(!calls.exists());
     assert_eq!(
@@ -505,44 +510,35 @@ fn merge_cfe_json_success_requires_extension_and_settings() {
 }
 
 #[test]
-fn upload_resolves_an_extension_source_set_before_probing() {
-    let extension = "<MetaDataObject><Configuration><Properties><Name>ExistingExt</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>";
-    let main = "<MetaDataObject><Configuration><Properties><Name>ExistingExt</Name></Properties></Configuration></MetaDataObject>";
-    let invalid_name = extension.replace("ExistingExt", "Bad Name");
-    let nested_marker = main.replace(
-        "</Properties>",
-        "<Comment><ObjectBelonging>Adopted</ObjectBelonging></Comment></Properties>",
-    );
-    let second_root =
-        format!("{main}<ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose>");
+fn upload_ref_names_an_extension_set_by_the_set_name_like_push() {
+    // The set `sales` holds sources whose `Configuration.xml` names another extension;
+    // `--ref sales` still targets `sales`, as `push` does. A name that matches no set goes
+    // to the platform as given.
+    let descriptor = "<MetaDataObject><Configuration><Properties><Name>OtherExt</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>";
     for (flag, reference, descriptor, target) in [
-        ("--ref", "sales-alias", Some(extension), Some("ExistingExt")),
-        (
-            "--extension",
-            "sales-alias",
-            Some(extension),
-            Some("ExistingExt"),
-        ),
-        ("--ref", "main", None, Some("main")),
-        ("--ref", "sales-alias", None, None),
+        ("--ref", "sales", Some(descriptor), "sales"),
+        ("--extension", "sales", Some(descriptor), "sales"),
         (
             "--ref",
-            "sales-alias",
+            "sales",
             Some("<MetaDataObject><Configuration>"),
-            None,
+            "sales",
         ),
-        ("--ref", "sales-alias", Some(main), None),
-        ("--ref", "sales-alias", Some(nested_marker.as_str()), None),
-        ("--ref", "sales-alias", Some(invalid_name.as_str()), None),
-        ("--ref", "sales-alias", Some(second_root.as_str()), None),
+        ("--ref", "sales", None, "sales"),
+        ("--ref", "ExistingExt", Some(descriptor), "ExistingExt"),
     ] {
         let (dir, config_path, _binary_path, base_path, calls_log) = setup_project();
         let project = fs::read_to_string(&config_path).expect("read project");
         fs::write(
             &config_path,
             project.replacen(
-                "\ntools:",
-                "\n  - name: sales-alias\n    type: EXTENSION\n    path: addon\ntools:",
+                "
+tools:",
+                "
+  - name: sales
+    type: EXTENSION
+    path: addon
+tools:",
                 1,
             ),
         )
@@ -552,11 +548,10 @@ fn upload_resolves_an_extension_source_set_before_probing() {
         if let Some(xml) = descriptor {
             fs::write(addon.join("Configuration.xml"), xml).expect("extension descriptor");
         }
-        let mut installed = vec!["ExistingExt", "main"];
-        if target.is_none() {
-            installed.push("sales-alias");
-        }
-        write_extension_list_ibcmd(&dir.path().join("ibcmd"), &installed);
+        write_extension_list_ibcmd(
+            &dir.path().join("ibcmd"),
+            &["ExistingExt", "OtherExt", "sales"],
+        );
         fs::write(base_path.join("release.cfe"), "cfe").expect("package");
         fs::write(base_path.join("settings.xml"), "<Settings/>").expect("settings");
 
@@ -577,30 +572,23 @@ fn upload_resolves_an_extension_source_set_before_probing() {
             .output()
             .expect("upload");
         let answer: Value = serde_json::from_slice(&output.stdout).expect("json");
-        if let Some(target) = target {
-            assert!(output.status.success(), "{flag} {reference}: {answer}");
-            assert_eq!(answer["data"]["extension"], target, "{answer}");
-            assert_eq!(
-                answer["data"]["compatibility_state"], "supported",
-                "{answer}"
-            );
-            let calls = fs::read_to_string(&calls_log).expect("Designer calls");
-            assert!(
-                calls.lines().any(|line| line.contains("/MergeCfg")
-                    && line.ends_with(&format!("-Extension {target}"))),
-                "{calls}"
-            );
-            assert!(
-                calls.contains(&format!("/UpdateDBCfg -Extension {target}")),
-                "{calls}"
-            );
-        } else {
-            assert_eq!(output.status.code(), Some(2), "{answer}");
-            assert_eq!(answer["data"]["provider_dispatched"], false, "{answer}");
-            let message = answer["data"]["message"].as_str().expect("message");
-            assert!(message.contains("Configuration.xml"), "{message}");
-            assert!(!calls_log.exists());
-        }
+        assert!(output.status.success(), "{flag} {reference}: {answer}");
+        assert_eq!(answer["data"]["extension"], target, "{answer}");
+        assert_eq!(
+            answer["data"]["compatibility_state"], "supported",
+            "{answer}"
+        );
+        let calls = fs::read_to_string(&calls_log).expect("Designer calls");
+        assert!(
+            calls.lines().any(|line| line.contains("/MergeCfg")
+                && line.ends_with(&format!("-Extension {target}"))),
+            "{calls}"
+        );
+        assert!(
+            calls.contains(&format!("/UpdateDBCfg -Extension {target}")),
+            "{calls}"
+        );
+        assert!(!calls.contains("OtherExt"), "{calls}");
     }
 }
 
