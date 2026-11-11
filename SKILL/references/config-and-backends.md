@@ -6,7 +6,8 @@ settings before CLI overrides.
 
 ## Fields To Check First
 
-- `workPath`: generated state, temp files, and workspace location.
+- `workPath`: recomputable state — logs, temp files, caches, dump stage, workspaces; default `.build/v8-runner`.
+- `localPath`: memory of each base (`localPath/infobases/<base>/`) and managed stands; default `.local`.
 - `format`: `DESIGNER` or `EDT`.
 - `providers.<operation>`: optional per-operation executor override. Omit it to use the defaults below.
 - `infobases.origin.connection` in `v8project.local.yaml`: the default infobase, often `File=build/ib`;

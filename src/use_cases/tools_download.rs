@@ -54,7 +54,9 @@ fn tools_download(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let local_config_path = config_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let tools_dir = config.base_path.join("build").join("tools");
+    // Загрузки — пересчитываемый кеш: их место в `workPath`, а не в дереве проекта
+    // (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`). Прежний `build/tools` не трогается.
+    let tools_dir = tools_dir(config);
 
     ensure_dir(&tools_dir).map_err(|error| {
         AppError::Runtime(format!(
@@ -104,6 +106,11 @@ fn tools_download(
     })
 }
 
+/// Каталог загрузок `tools download`: `workPath/tools`.
+fn tools_dir(config: &AppConfig) -> PathBuf {
+    config.work_path.join("tools")
+}
+
 fn download_yaxunit(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -119,16 +126,22 @@ fn download_yaxunit(
     match mode {
         ToolExtensionInstallMode::Sources => {
             let path = config.base_path.join("tests");
-            let marker_path = config
-                .base_path
-                .join("build")
-                .join(format!(".tests{DOWNLOAD_MARKER_FILE}"));
+            // Метка говорит, что набор проекта `tests` — раннера: это долгоживущее состояние
+            // рабочей копии, и место ей под `localPath`. Метка прежних версий в
+            // `<basePath>/build` признаётся, но не пишется и не удаляется
+            // (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`).
+            let marker_name = format!(".tests{DOWNLOAD_MARKER_FILE}");
+            let marker = SourceMarker {
+                path: config.local_path.join("tools").join(&marker_name),
+                legacy: Some(config.base_path.join("build").join(&marker_name)),
+            };
             download_source_subdir(
                 context,
+                &config.local_dir(),
                 &release,
                 YAXUNIT_SOURCE_PREFIX,
                 &path,
-                &marker_path,
+                &marker,
                 force,
             )?;
             Ok(vec![destination(
@@ -199,13 +212,17 @@ fn download_client_mcp(
                 .join("onec-client-mcp-devkit")
                 .join("exts")
                 .join("client-mcp");
-            let marker_path = source_download_marker_path(&path);
+            let marker = SourceMarker {
+                path: source_download_marker_path(&path),
+                legacy: None,
+            };
             download_source_subdir(
                 context,
+                &config.local_dir(),
                 &release,
                 CLIENT_MCP_SOURCE_PREFIX,
                 &path,
-                &marker_path,
+                &marker,
                 force,
             )?;
             Ok(vec![destination(
@@ -428,15 +445,30 @@ fn download_single_file_from_zip(
     publish_file_bytes_with_marker(context, &file, target_path)
 }
 
+/// Метка управляемого каталога исходников: где её писать и где признать метку прежних версий.
+struct SourceMarker {
+    path: PathBuf,
+    legacy: Option<PathBuf>,
+}
+
+impl SourceMarker {
+    /// Каталог уже помечен раннером: новой меткой или прежней.
+    fn exists(&self) -> bool {
+        self.path.exists() || self.legacy.as_deref().is_some_and(Path::exists)
+    }
+}
+
 fn download_source_subdir(
     context: &ExecutionContext,
+    local: &crate::support::local_dir::LocalDir,
     release: &GitHubRelease,
     source_prefix: &str,
     target_path: &Path,
-    marker_path: &Path,
+    marker: &SourceMarker,
     force: bool,
 ) -> Result<(), AppError> {
-    if !should_download_source_dir(target_path, marker_path, force)? {
+    let marker_path = marker.path.as_path();
+    if !should_download_source_dir(target_path, marker, force)? {
         return Ok(());
     }
     let archive_url = source_archive_url(release);
@@ -466,6 +498,10 @@ fn download_source_subdir(
     })?;
 
     let marker_existed = marker_path.exists();
+    // Метка под `localPath` — первый писатель в него: каталог заводится со своим `.gitignore`.
+    local.prepare_for(marker_path).map_err(io_error(
+        "failed to prepare localPath for the download marker",
+    ))?;
     write_source_download_marker(target_path, marker_path)?;
     let publish_phase = context.run_no_process_critical_phase(|| {
         replace_dir_atomically(
@@ -648,7 +684,7 @@ fn should_download_file(path: &Path, force: bool) -> Result<bool, AppError> {
 
 fn should_download_source_dir(
     path: &Path,
-    marker_path: &Path,
+    marker: &SourceMarker,
     force: bool,
 ) -> Result<bool, AppError> {
     if !path.exists() {
@@ -660,7 +696,7 @@ fn should_download_source_dir(
             path.display()
         )));
     }
-    if !marker_path.exists() {
+    if !marker.exists() {
         return Err(AppError::Validation(format!(
             "download target already exists and is not managed by v8-runner: {}",
             path.display()
@@ -724,6 +760,10 @@ fn sidecar_download_marker_path(path: &Path) -> PathBuf {
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
+    // Оба пути сводятся к одному виду: каталог конфига и `workPath` могут прийти один как
+    // написан, другой раскрытым по ссылкам (на macOS `/var` — это `/private/var`).
+    let root = &resolved_path(root);
+    let path = &resolved_path(path);
     if let Some(relative) = path
         .strip_prefix(root)
         .ok()
@@ -753,6 +793,14 @@ fn relative_path(root: &Path, path: &Path) -> String {
     } else {
         relative.display().to_string()
     }
+}
+
+/// Путь с разрешёнными ссылками по ближайшему существующему предку и без префикса `\?\`.
+fn resolved_path(path: &Path) -> PathBuf {
+    let normal = crate::support::path::lexically_normal_absolute(path);
+    crate::support::path::normalize_windows_verbatim_path(
+        &crate::support::path::nearest_existing_canonical_path(&normal).unwrap_or(normal),
+    )
 }
 
 fn normalized_components(path: &Path) -> Vec<OsString> {

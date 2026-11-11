@@ -89,7 +89,10 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     serde_yaml::from_str::<serde_yaml::Value>(&config).expect("generated config remains YAML");
     assert!(config.contains("format: DESIGNER"));
     assert!(!config.contains("basePath:"));
-    assert!(config.contains("workPath: 'build'"));
+    assert!(
+        !config.contains("workPath"),
+        "the default workPath needs no key: {config}"
+    );
     assert!(
         !config.contains("infobase"),
         "the project file names no base:\n{config}"
@@ -618,6 +621,7 @@ fn init_with_the_address_already_in_origin_changes_nothing() {
         );
     }
     assert!(!dir.path().join("build").exists());
+    assert!(!dir.path().join(".build").exists());
 }
 
 #[test]

@@ -329,9 +329,9 @@ fn apply_target(
     target: &Target<'_>,
     index: usize,
 ) -> Result<TargetApplied, AppError> {
-    let record = target.memory.and_then(|set| {
-        crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
-    });
+    let record = target
+        .memory
+        .and_then(crate::use_cases::exchange_guard::recorded_generation);
     let (Some(set), Some(record)) = (target.memory, record) else {
         let deferrals = applied(context, config, executor, target, index)?;
         return Ok(TargetApplied {
@@ -369,13 +369,8 @@ fn apply_target(
         Some(token) if token == record.token => {
             let deferrals = applied(context, config, executor, target, index)?;
             let after = executor.read_generation(context, config, record.tool, target, index);
-            let (generation, note) = generation_record::carry_record(
-                RecordStep::Apply,
-                set,
-                &config.work_path,
-                &record,
-                after,
-            )?;
+            let (generation, note) =
+                generation_record::carry_record(RecordStep::Apply, set, &record, after)?;
             Ok(TargetApplied {
                 generation: Some(generation),
                 deferrals,
@@ -398,7 +393,6 @@ fn apply_target(
             let (generation, note) = generation_record::erase_record(
                 RecordStep::Apply,
                 set,
-                &config.work_path,
                 &format!(
                     "could not be read by {}, the tool of its record",
                     record.tool
@@ -706,7 +700,7 @@ mod tests {
             .into_iter()
             .find(|set| set.name() == "main")
             .expect("main");
-        GenerationLedger::of(&set, &config.work_path).expect("ledger")
+        GenerationLedger::of(&set).expect("ledger")
     }
 
     fn all_sets() -> ApplyRequest {

@@ -185,7 +185,7 @@ fn write_live_workspace_lock(work_path: &Path, command: &str) {
 /// начинают не с первого знакомства.
 fn remember(dir: &Path, sets: &[support::memory::Set<'_>]) {
     support::memory::remember_base(
-        &dir.join("work"),
+        dir,
         "origin",
         support::memory::Base::File(&dir.join("ib")),
         sets,
@@ -430,7 +430,7 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
 /// Память о базе `File=<tmp>/ib` (`infobase:` — база `origin`) у набора EDT `configuration`.
 fn remember_edt_configuration(work_path: &Path, tmp: &str, base_path: &Path) {
     support::memory::remember_base(
-        work_path,
+        work_path.parent().expect("project"),
         "origin",
         support::memory::Base::File(&Path::new(tmp).join("ib")),
         &[support::memory::Set::configuration(
@@ -662,6 +662,7 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
     // Состояние Конфигуратора теряется — так выглядит база после оборванного прогона.
     // Этап EDT при этом остаётся пройденным, и загрузка планируется заново.
     let designer_state = work_path
+        .with_file_name(".local")
         .join("infobases/origin/hashes")
         .join("configuration.redb");
     fs::remove_file(&designer_state).expect("drop designer state");
@@ -866,7 +867,10 @@ fn build_dry_run_plans_every_source_set_without_dispatching_designer() {
         "preview committed change-detection state"
     );
     assert!(
-        !work_path.join("infobases/origin/hashes").exists(),
+        !work_path
+            .with_file_name(".local")
+            .join("infobases/origin/hashes")
+            .exists(),
         "preview committed infobase change-detection state"
     );
 }

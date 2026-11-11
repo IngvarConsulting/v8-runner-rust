@@ -167,7 +167,7 @@ fn harness_holding(
     write_config(&harness, &infobase, "");
     // Память о базе, как после её создания: тесты шлюза начинают не с первого знакомства.
     support::memory::remember_base(
-        &root.join("work"),
+        &root,
         "origin",
         support::memory::Base::Standalone {
             host: "127.0.0.1",

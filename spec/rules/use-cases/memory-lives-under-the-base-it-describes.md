@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.MEMORY-LIVES-UNDER-THE-BASE-IT-DESCRIBES
 check:
-  - src/change_detection/source_sets.rs::analysis_state_lies_under_the_work_path_by_logical_context
+  - src/change_detection/source_sets.rs::analysis_state_lies_under_the_local_path_and_the_cache_under_the_work_path
   - src/change_detection/source_sets.rs::edt_and_external_memory_is_shared_but_designer_identity_ignores_credentials
   - tests/cli_pull_memory.rs::a_pull_from_one_base_does_not_mark_another_base_as_loaded
   - src/change_detection/source_sets.rs::an_edt_designer_copy_lies_under_the_base_memory
@@ -13,20 +13,26 @@ check:
 # Память лежит под базой, которую описывает
 
 Хеши исходников, поколение базы и файл версий `ConfigDumpInfo.xml` описывают отношение
-«один каталог ↔ одна база» и лежат под `workPath/infobases/<имя базы>/`:
-`generation.json`, `hashes/` по наборам, `dump-info/<набор>/ConfigDumpInfo.xml`. Журнал
+«один каталог ↔ одна база» и лежат под `localPath/infobases/<имя базы>/`:
+`generation.json`, `hashes/` по наборам, `dump-info/<набор>/ConfigDumpInfo.xml`, признаки
+нового владельца и копии. Без базы их не пересчитать, поэтому они не в `workPath`: удаление
+`workPath` памяти не задевает. Журнал
 поколений держит одну запись на набор — у основной конфигурации и у каждого расширения
 своя; запись несёт привязку памяти набора и последнюю операцию, после которой записан
 токен (`build` или `dump`). Какому инструменту принадлежит токен, держит правило о
 сравнении токенов.
 
-Под базой лежит только состояние обмена с ней — контекст `designer-<набор>`: его хеши, а у
-формата EDT и сам снимок Конфигуратора `designer/<набор>` вместе с его файлом версий. Хеши
-исходников расширений-инструментов (`tools.extensions`) лежат там же, в `hashes/tools/`.
+Под базой лежит только состояние обмена с ней — контекст `designer-<набор>` и его хеши.
+Снимок Конфигуратора набора формата EDT вместе с его файлом версий пересчитывается из
+исходников и лежит в `workPath/infobases/<имя базы>/designer/<набор>`; его потеря делает
+следующую выгрузку полной. Хеши исходников расширений-инструментов (`tools.extensions`)
+лежат под памятью базы, в `hashes/tools/`.
 Кеш экспорта EDT, контекст `edt-<набор>` и кеш внешних артефактов от базы не зависят и
 остаются общими.
 
-Прежняя общая память — `workPath/hash-storages/designer-*.redb`, хеши
+Прежняя память под `workPath/infobases/<имя базы>/` (до переноса под `localPath`) не
+читается и не переносится: нужен однократный `pull --force`. Прежняя общая память —
+`workPath/hash-storages/designer-*.redb`, хеши
 расширений-инструментов в `workPath/hash-storages/tool-*.redb`, снимки
 `workPath/designer/<набор>` и журнал `workPath/agent/generation/` — не читается, не
 переносится и не удаляется: первый `push` после обновления видит все файлы добавленными, а

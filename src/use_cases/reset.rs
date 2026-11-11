@@ -205,8 +205,7 @@ fn discard(
     }
     let memory = inventory.designer_context(&set.name);
     let record = memory.and_then(|memory| {
-        crate::use_cases::exchange_guard::recorded_generation(memory, &config.work_path)
-            .map(|record| (memory, record))
+        crate::use_cases::exchange_guard::recorded_generation(memory).map(|record| (memory, record))
     });
     // Поколение до отката сверяется с записью, как у `apply`: запись переписывается, только
     // когда база не ушла от неё, — иначе откат спрятал бы чужую загрузку от проверки
@@ -282,7 +281,6 @@ fn discard(
                 generation_record::carry_record(
                     RecordStep::Reset,
                     memory,
-                    &config.work_path,
                     &record,
                     after,
                 )?
@@ -299,7 +297,6 @@ fn discard(
             Before::NoAnswer => generation_record::erase_record(
                 RecordStep::Reset,
                 memory,
-                &config.work_path,
                 &format!(
                     "could not be read by {}, the tool of its record",
                     record.tool

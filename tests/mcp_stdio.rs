@@ -317,7 +317,7 @@ fn setup_designer_suite_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathB
     write_designer_suite_config(&config_path, &base_path, &work_path, &platform_dir);
     // Память о базе, как после её создания раннером: сборка идёт не с первого знакомства.
     support::memory::remember_base(
-        &work_path,
+        config_path.parent().expect("project"),
         "origin",
         support::memory::Base::File(&dir.path().join("ib")),
         &[support::memory::Set::configuration(

@@ -136,7 +136,7 @@ fn a_positional_source_set_selects_that_set() {
     // запускают, поэтому память о базе пишется так, как её оставляет создание базы.
     let home = project.root.parent().expect("workspace");
     support::memory::remember_base(
-        &home.join("work"),
+        &project.root,
         "origin",
         support::memory::Base::File(&home.join("ib")),
         &[support::memory::Set::extension(

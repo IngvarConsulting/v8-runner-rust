@@ -387,15 +387,13 @@ fn run_build_with(
                     ok,
                     |record| {
                         loader.locate().and_then(|()| {
-                            apply_unapplied(context, config, &source_context, record, &mut |op| {
-                                match op {
-                                    UnappliedOp::Read => {
-                                        loader.read_generation(context, config, source_set, index)
-                                    }
-                                    UnappliedOp::Apply(deferrals) => loader
-                                        .apply_only(context, config, source_set, index, deferrals)
-                                        .map(|()| None),
+                            apply_unapplied(context, &source_context, record, &mut |op| match op {
+                                UnappliedOp::Read => {
+                                    loader.read_generation(context, config, source_set, index)
                                 }
+                                UnappliedOp::Apply(deferrals) => loader
+                                    .apply_only(context, config, source_set, index, deferrals)
+                                    .map(|()| None),
                             })
                         })
                     },
@@ -458,7 +456,7 @@ fn run_build_with(
                 // чужую опись и раннер примет её за свою. Временные файлы прошлых замен
                 // убираются в любом случае.
                 let prepared = remove_left_candidates(source_context.path()).and_then(|()| {
-                    RunnerVersionFile::of(config, &source_context)
+                    RunnerVersionFile::of(&source_context)
                         .map(|version_file| {
                             version_file.restore().map(|before| (version_file, before))
                         })
@@ -752,7 +750,7 @@ pub(super) fn run_build_ibcmd(
                         )
                         .and_then(|binary| {
                             let runner = utilities.runner_for(UtilityType::Ibcmd);
-                            apply_unapplied(context, config, &source_context, record, &mut |op| {
+                            apply_unapplied(context, &source_context, record, &mut |op| {
                                 ibcmd_unapplied_op(context, config, &binary, runner, source_set, op)
                             })
                         })
@@ -937,14 +935,12 @@ fn version_file_after_ibcmd_load(
     }
     let file = source_context.path().join(VERSION_FILE_NAME);
     let why = match export_version_file(context, config, binary, runner, source_set, &file) {
-        Ok(None) => {
-            return RunnerVersionFile::of(config, source_context).and_then(|copy| copy.record())
-        }
+        Ok(None) => return RunnerVersionFile::of(source_context).and_then(|copy| copy.record()),
         Ok(Some(why)) => format!(": {why}"),
         Err(error) => format!(": {error}"),
     };
     // Копия раннера описывала базу до загрузки: и она не должна вернуться в каталог.
-    let copy = RunnerVersionFile::of(config, source_context)
+    let copy = RunnerVersionFile::of(source_context)
         .map_or(Ok(()), |copy| copy.forget())
         .err()
         .map(|error| format!("; the runner's copy was not removed: {error}"))
@@ -1687,7 +1683,7 @@ pub(super) fn run_build_edt(
                             &mut ibcmd_binary,
                         )
                         .and_then(|binary| {
-                            apply_unapplied(context, config, &designer_context, record, &mut |op| {
+                            apply_unapplied(context, &designer_context, record, &mut |op| {
                                 match provider {
                                     Provider::Ibcmd => ibcmd_unapplied_op(
                                         context,
@@ -2010,7 +2006,7 @@ fn unapplied_record(
     if args.apply == ApplyPolicy::Defer {
         return None;
     }
-    let record = crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
+    let record = crate::use_cases::exchange_guard::recorded_generation(set)
         .filter(|record| !record.applied)?;
     let scope = crate::use_cases::exchange_guard::token_scope(config, set);
     Some(if scope.compares(record.tool, tool) {
@@ -2050,7 +2046,6 @@ enum UnappliedStep {
 /// Отказ применения называет выход `apply`.
 fn apply_unapplied(
     context: &ExecutionContext,
-    config: &AppConfig,
     set: &SourceSetContext,
     record: &crate::use_cases::agent_session::GenerationRecord,
     run: &mut dyn FnMut(UnappliedOp<'_>) -> Result<Option<String>, AppError>,
@@ -2069,7 +2064,6 @@ fn apply_unapplied(
     let (_, note) = crate::use_cases::generation_record::carry_record(
         crate::use_cases::generation_record::RecordStep::Apply,
         set,
-        &config.work_path,
         record,
         run(UnappliedOp::Read),
     )?;

@@ -103,6 +103,9 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         UseCaseErrorKind::SourceSetIgnoredByGit => {
             (ErrorCode::SourceSetIgnoredByGit, ErrorKind::Validation)
         }
+        UseCaseErrorKind::WorkPathOnAnotherVolume => {
+            (ErrorCode::WorkPathOnAnotherVolume, ErrorKind::Validation)
+        }
         UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
         UseCaseErrorKind::Cancelled(_) => (ErrorCode::Cancelled, ErrorKind::Interruption),
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),
