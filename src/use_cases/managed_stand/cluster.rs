@@ -645,7 +645,7 @@ impl Cluster<'_> {
         // Отказы, которым СУБД не нужна, — до её запуска.
         let pins = self.pins();
         // Занятый чужим процессом закреплённый порт ведёт к новому реестру и без ключа
-        // (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`).
+        // (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`).
         let mut taken = None;
         match (&pins, new_regport) {
             (Some(pins), _) => match self.busy(pins) {
@@ -783,7 +783,7 @@ impl Cluster<'_> {
     }
 
     /// Закреплённые порты заняты: чужой агент над нашим реестром — отказ без выхода, иначе выход —
-    /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`). Перечень процессов нужен,
+    /// новый реестр (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`). Перечень процессов нужен,
     /// только если порт занят.
     fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
         let refusal = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);

@@ -11,7 +11,7 @@ check:
 
 `action` всегда `reported`. Поля те же, что у `cluster start`. Если агент упал, а его `rmngr` и `rphost` живы,
 `remnant_pids` называет их; такие процессы не делают закреплённый порт чужим. Адрес кластера живёт только в
-состоянии стенда: занятый порт `cluster start` сменяет новым реестром (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`), а
+состоянии стенда: занятый порт `cluster start` сменяет новым реестром (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`), а
 `v8project*.yaml` раннер не правит. Берите адрес из этого ответа и не кешируйте.
 
 ## Пример

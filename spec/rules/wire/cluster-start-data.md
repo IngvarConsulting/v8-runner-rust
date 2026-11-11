@@ -17,7 +17,7 @@ check:
 `agent` и `ras` — их адреса, `worker_range` — диапазон рабочих процессов, `registry_dir` — каталог реестра. `ready`
 говорит, что ответил `rac cluster list`, `registered` — что база создана в этом реестре. Если запуск завёл новый
 реестр — по `--new-regport` или сам, потому что закреплённый порт занят чужим процессом
-(`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`), — `previous_regport` называет `regport` прежнего реестра, а `connection`,
+(`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`), — `previous_regport` называет `regport` прежнего реестра, а `connection`,
 `agent` и `worker_range` — новые порты. Во втором случае `warnings` конверта называет порт и pid того, кто его занял.
 `stale_record` говорит, что запись была, а процесса из неё уже нет.
 

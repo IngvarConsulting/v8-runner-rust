@@ -1,5 +1,5 @@
 ---
-id: INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED
+id: INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY
 check:
   - src/use_cases/managed_stand/cluster.rs::a_busy_regport_moves_the_cluster_to_a_new_registry_over_its_database
   - src/use_cases/managed_stand/cluster.rs::a_busy_agent_or_worker_port_moves_the_cluster_to_a_new_registry
