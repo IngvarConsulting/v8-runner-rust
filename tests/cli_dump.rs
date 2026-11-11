@@ -466,7 +466,15 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
 
     let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
     let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-    assert!(designer_calls.contains(base.join("designer").display().to_string().as_str()));
+    // Конфигуратор выгружает в промежуточный каталог `workPath/stage` на томе набора; путь
+    // сверяется по хвосту: на macOS временный каталог раскрывается в `/private`.
+    let stage = std::path::Path::new(work_path.file_name().expect("work dir"))
+        .join("stage")
+        .join(".dump-stage-");
+    assert!(
+        designer_calls.contains(stage.display().to_string().as_str()),
+        "{designer_calls}"
+    );
     assert!(edt_calls.contains(snapshot.display().to_string().as_str()));
 }
 
