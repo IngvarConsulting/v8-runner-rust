@@ -512,6 +512,7 @@ mod tests {
         fs::write(base.join("main").join("Configuration.xml"), "<x/>").expect("marker");
         AppConfig {
             local_path: base.join(".local"),
+            project_file: crate::config::model::default_project_file(),
             base_path: base,
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

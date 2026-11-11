@@ -2828,6 +2828,7 @@ exit 0"#,
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),

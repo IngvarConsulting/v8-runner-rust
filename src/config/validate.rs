@@ -65,6 +65,11 @@ pub enum ConfigValidationError {
     StandaloneConnectionIsNotADirectGate,
 
     #[error(
+        "infobase.connection contains the control character U+{code:04X}: a connection string is one line of printable characters"
+    )]
+    ConnectionHasControlCharacter { code: u32 },
+
+    #[error(
         "infobase.connection is neither a file address `File=…` nor a server address `Srvr=<host[:port]>;Ref=<name>` (or `/S server\\ref`): the target kind is declared, not guessed"
     )]
     ConnectionShapeUnsupported,
@@ -1206,6 +1211,12 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
 fn validate_infobase_form(
     infobase: &crate::config::model::InfobaseConfig,
 ) -> Result<(), ConfigValidationError> {
+    // Значение в отказ не идёт: в строке бывают реквизиты, а управляющий символ назван кодом.
+    if let Some(character) = crate::platform::connection::control_character(&infobase.connection) {
+        return Err(ConfigValidationError::ConnectionHasControlCharacter {
+            code: u32::from(character),
+        });
+    }
     validate_managed_declarations(infobase)?;
     // Строки у такой цели нет: её адрес знает раннер. Рядом с обычной базой она никому не мешает.
     if ManagedServer::of(infobase).is_some() {
@@ -2050,6 +2061,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: name.to_owned(),
                 purpose,
@@ -2156,6 +2168,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2197,6 +2210,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2239,6 +2253,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2304,6 +2319,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "../outside".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2342,6 +2358,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "bad/name".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2380,6 +2397,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main-config_01".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2414,6 +2432,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2453,6 +2472,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2814,6 +2834,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -3085,6 +3106,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3118,6 +3140,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3152,6 +3175,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3185,6 +3209,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3222,6 +3247,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![],
             tools: ToolsConfig::default(),
             mcp: Default::default(),
@@ -3256,6 +3282,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3301,6 +3328,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "hash-storages".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3359,6 +3387,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3400,6 +3429,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3462,6 +3492,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3542,6 +3573,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3828,6 +3860,34 @@ mod tests {
         }
     }
 
+    /// Управляющий символ в строке соединения — отказ до запуска платформы, и у файловой, и у
+    /// серверной формы, и на краю строки, который разбор отрезал бы; отказ называет ключ и
+    /// код символа, но не значение (#638).
+    #[test]
+    fn a_connection_with_a_control_character_is_refused_without_its_value() {
+        for (connection, code) in [
+            ("File=/srv/secret-ib\nUsr=admin", 0x0A),
+            ("File=/srv/secret-ib\0", 0x00),
+            ("File=/srv/secret-ib\r", 0x0D),
+            ("Srvr=srv;Ref=secret-ib\u{1b}", 0x1B),
+        ] {
+            let section = crate::config::model::InfobaseConfig::file(connection.to_owned());
+            let error = super::validate_infobase_form(&section).expect_err(connection);
+            assert!(
+                matches!(
+                    error,
+                    ConfigValidationError::ConnectionHasControlCharacter { code: found } if found == code
+                ),
+                "{connection:?}: {error}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("infobase.connection"), "{message}");
+            assert!(message.contains(&format!("U+{code:04X}")), "{message}");
+            assert!(!message.contains("secret-ib"), "{message}");
+        }
+        assert!(crate::platform::connection::control_character("File=/srv/ib").is_none());
+    }
+
     /// Третий ответ — кластер — получает только строка серверной формы; канонические
     /// формы платформы (завершающая `;`, кавычки) проходят.
     #[test]
@@ -4000,6 +4060,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4038,6 +4099,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "Logs".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4074,6 +4136,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4109,6 +4172,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4148,6 +4212,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4199,6 +4264,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4256,6 +4322,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4576,6 +4643,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4627,6 +4695,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4674,6 +4743,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4728,6 +4798,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,

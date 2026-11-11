@@ -253,6 +253,44 @@ fn a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner() {
     );
 }
 
+/// Копии, загруженные `--config other.yaml` со старым ключом `infobase:` в этом файле, держат
+/// базу так же, как копии с `v8project.yaml`: проверка владельца читает объявления из файла
+/// под именем конфига команды, и живого владельца запись другой копии не сменяет (#638).
+#[test]
+fn an_owner_loaded_by_config_with_another_file_name_is_found_like_with_v8project_yaml() {
+    for name in ["v8project.yaml", "other.yaml"] {
+        let stand = Stand::new();
+        let in_file = |copy: &str| {
+            let at = Copy::at(stand.dir.path().join(copy));
+            let config = at.root.join(name);
+            let mut text = fs::read_to_string(&at.config).expect("project file");
+            fs::remove_file(&at.config).expect("move the project file");
+            text.push_str(&format!(
+                "infobase:\n  connection: 'File={}'\n",
+                stand.base.display()
+            ));
+            fs::write(&config, text).expect("named project file");
+            let copy = Copy {
+                root: at.root,
+                config,
+            };
+            copy.remember(&stand.base);
+            copy
+        };
+        let first = in_file("first");
+        let second = in_file("second");
+
+        succeeded(&first.run(&["push"]));
+        assert_eq!(stand.owners(), [first.canonical_root()], "{name}");
+        let marker = stand.marker_text();
+
+        let pushed = second.run(&["push"]);
+
+        assert_warned(&pushed, "push", &first, &stand);
+        assert_eq!(stand.marker_text(), marker, "{name}: the owner stays");
+    }
+}
+
 /// `pull --all` пишет в проект и в каталоги наборов, а базу берёт как любая выгрузка: на
 /// базе другой копии он идёт, его ответ — удача или отказ самой выгрузки — несёт
 /// предупреждение, а метка не меняется.
