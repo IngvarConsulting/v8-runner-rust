@@ -4,8 +4,9 @@
 //! Тесту, которому нужна обычная отправка, память пишется так, как её оставляет создание базы
 //! раннером: запись журнала поколений на каждый набор. Привязка записи повторяет ту, что
 //! строит раннер (`SourceSetsService::designer_context`): разойдётся — тест упадёт отказом
-//! `no_memory`, а не пройдёт молча. Токен — сорок нулей от Конфигуратора: поддельные
-//! исполнители его не подтверждают и не опровергают.
+//! `untracked_base`, а не пройдёт молча. Токен — сорок нулей от `ibcmd-rs`: инструмента, который
+//! поколением не отвечает, поэтому ни один исполнитель его не сверяет — ни своим токеном, ни
+//! токеном инструмента записи (#559): запись не подтверждается и не опровергается.
 
 use std::path::{Path, PathBuf};
 
@@ -86,7 +87,7 @@ pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
                 set.name.to_owned(),
                 serde_json::json!({
                     "token": "0".repeat(40),
-                    "tool": "designer",
+                    "tool": "ibcmd-rs",
                     "after": "build",
                     "recorded_at": "2026-10-06T00:00:00Z",
                     "identity": identity,
@@ -137,7 +138,7 @@ fn path_hash(path: &Path) -> String {
 
 /// Память о базе образца контрактных тестов, как после её создания раннером: база `infobase:`
 /// (`origin`) — файловая `<dir>/ib`, набор `main` — `<dir>/project/configuration`,
-/// `workPath` — `<dir>/work`. Без неё `push` и его превью отказывают `no_memory`.
+/// `workPath` — `<dir>/work`. Без неё `push` и его превью отказывают `untracked_base`.
 pub fn remember_sample(dir: &Path) {
     remember_base(
         &dir.join("work"),

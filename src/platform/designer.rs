@@ -10,6 +10,7 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
+use crate::platform::session_list::SessionTerminate;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
@@ -164,16 +165,23 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/UpdateDBCfg`
+    /// `/UpdateDBCfg [-Extension <name>] -Dynamic-`: динамическое обновление запрещено
+    /// всегда — без ключа платформа его разрешает (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
     pub fn update_db_cfg(
         &self,
         extension: Option<&str>,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/UpdateDBCfg".to_owned());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
+        }
+        args.push("-Dynamic-".to_owned());
+        if let SessionTerminate::Force { .. } = sessions {
+            args.push("-SessionTerminate".to_owned());
+            args.push("force".to_owned());
         }
         self.run(&args)
     }
@@ -291,11 +299,7 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.compare_args("MainConfiguration", None, configuration_type, name);
         if let DiffAgainst::File(file) = against {
             args.push("-SecondFile".to_owned());
-            args.push(
-                crate::support::path::normalize_windows_verbatim_path(file)
-                    .display()
-                    .to_string(),
-            );
+            args.push(file.display().to_string());
         }
         args.extend(
             [
@@ -307,8 +311,7 @@ impl<'a> DesignerDsl<'a> {
             ]
             .map(str::to_owned),
         );
-        let report_file = crate::support::path::normalize_windows_verbatim_path(report_file);
-        self.run_compare(args, &report_file)
+        self.run_compare(args, report_file)
     }
 
     fn compare_args(
@@ -363,8 +366,8 @@ impl<'a> DesignerDsl<'a> {
     /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
     /// кластере и база данных в СУБД одной командой (замер #181, 8.5.4.1878). Без
     /// `/DisableStartupDialogs` при заполненном списке администраторов кластера и без `SUsr`
-    /// клиент спросил бы пароль окном. `/Out` не ставится: строка успеха в нём повторяет всю
-    /// строку соединения вместе с `DBPwd` и `SPwd`.
+    /// клиент спросил бы пароль окном. Путь `/Out`, если задан, должен быть закрытым временным
+    /// файлом: платформа может повторить строку соединения с `DBPwd` и `SPwd`.
     pub fn create_cluster_infobase(
         &self,
         creation: &ClusterInfobaseCreation<'_>,
@@ -375,17 +378,37 @@ impl<'a> DesignerDsl<'a> {
             .ok_or(DesignerError::ConnectionForm(
                 "a cluster connection Srvr=…;Ref=…",
             ))?;
-        // The caller masks creation diagnostics with the DBMS and cluster credentials.
-        self.run_raw(&[
+        let mut args = vec![
             "CREATEINFOBASE".to_owned(),
             connection,
             "/DisableStartupDialogs".to_owned(),
-        ])
+        ];
+        if let Some(log_file) = &self.log_file {
+            args.push("/Out".to_owned());
+            args.push(log_file.display().to_string());
+        }
+        let mut result = self.run_raw(&args)?;
+        let passwords = creation.passwords();
+        let connection = args[1].as_str();
+        let masked_connection = mask_text(connection, &passwords);
+        // Mask an echoed connection as a separate value: its last field can be a
+        // password, and its range must not swallow the following diagnostic.
+        let mask_output = |output: &str| {
+            output
+                .split(connection)
+                .map(|part| mask_text(part, &passwords))
+                .collect::<Vec<_>>()
+                .join(&masked_connection)
+        };
+        result.process.stdout = mask_output(&result.process.stdout);
+        result.process.stderr = mask_output(&result.process.stderr);
+        result.platform_log = result.platform_log.as_deref().map(mask_output);
+        Ok(result)
     }
 
-    /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: прогноз
-    /// выгрузки по изменившемуся. Каталог не трогается, список пишется в `list_file`
-    /// (замер #173).
+    /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: что
+    /// выгрузка по изменившемуся выгрузила бы, для `diff`. Каталог не трогается, список
+    /// пишется в `list_file` (замер #173).
     pub fn dump_changes_list(
         &self,
         target_dir: &Path,
@@ -394,18 +417,10 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpConfigToFiles".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_dir)
-                .display()
-                .to_string(),
-        );
+        args.push(target_dir.display().to_string());
         args.push("-update".to_owned());
         args.push("-getChanges".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(list_file)
-                .display()
-                .to_string(),
-        );
+        args.push(list_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -499,11 +514,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpCfg".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -519,11 +530,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpDBCfg".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -547,11 +554,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpIB".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         // The caller formats the failure with the credentials of the transfer or copy.
         self.run_raw(&args)
     }
@@ -721,6 +724,7 @@ mod tests {
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -735,7 +739,22 @@ mod tests {
             _policy: &ProcessExecutionPolicy,
         ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
         {
-            self.0.borrow_mut().push(request.clone());
+            // Записано то, что получит процесс: аргументы после единственного владельца
+            // приставки `\\?\`
+            // (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+            let mut seen = request.clone();
+            seen.args = crate::support::path::child_line(&request.args, None)
+                .map_err(
+                    |source| crate::platform::process::ProcessError::UnexpressiblePath {
+                        cmd: String::new(),
+                        source,
+                    },
+                )?
+                .args
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect();
+            self.0.borrow_mut().push(seen);
             Ok(crate::platform::process::ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -751,6 +770,42 @@ mod tests {
         ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
         {
             panic!("Designer exports must run synchronously")
+        }
+    }
+
+    /// Каждое `/UpdateDBCfg` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn update_db_cfg_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.update_db_cfg(None, SessionTerminate::Keep)
+            .expect("update the configuration");
+        dsl.update_db_cfg(Some("ext"), SessionTerminate::Keep)
+            .expect("update the extension");
+        dsl.update_db_cfg(None, SessionTerminate::Force { message: "m" })
+            .expect("update with the sessions ended");
+
+        let requests = runner.0.borrow();
+        assert_eq!(requests.len(), 3);
+        for (request, expected) in requests.iter().zip([
+            &["/UpdateDBCfg", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Extension", "ext", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Dynamic-", "-SessionTerminate", "force"][..],
+        ]) {
+            let start = request
+                .args
+                .iter()
+                .position(|arg| arg == "/UpdateDBCfg")
+                .expect("/UpdateDBCfg");
+            assert_eq!(&request.args[start..], expected, "{:?}", request.args);
         }
     }
 
@@ -837,6 +892,18 @@ mod tests {
         )
         .expect("upload probe");
         let requests = runner.0.borrow();
+        // Вне Windows `\\?\` — допустимая часть имени файла, и путь доходит до процесса как есть.
+        let (package, report) = if cfg!(windows) {
+            (
+                r"C:\Каталог с пробелами\пакет.cf",
+                r"\\server\share\Каталог с пробелами\отчёт.txt",
+            )
+        } else {
+            (
+                r"\\?\C:\Каталог с пробелами\пакет.cf",
+                r"\\?\UNC\server\share\Каталог с пробелами\отчёт.txt",
+            )
+        };
         assert_eq!(
             &requests[0].args[5..],
             [
@@ -846,7 +913,7 @@ mod tests {
                 "-SecondConfigurationType",
                 "File",
                 "-SecondFile",
-                r"C:\Каталог с пробелами\пакет.cf",
+                package,
                 "-ReportType",
                 "Full",
                 "-IncludeChangedObjects",
@@ -855,7 +922,7 @@ mod tests {
                 "-ReportFormat",
                 "txt",
                 "-ReportFile",
-                r"\\server\share\Каталог с пробелами\отчёт.txt",
+                report,
             ]
         );
         assert_eq!(
@@ -1301,24 +1368,16 @@ mod tests {
         assert!(args.contains("File='/tmp/my ib'"));
     }
 
-    /// `CREATEINFOBASE` кластера: строка создания одним аргументом и
-    /// `/DisableStartupDialogs`, без `/Out`, даже когда журнал задан.
-    #[cfg(unix)]
     #[test]
-    fn create_cluster_infobase_passes_the_string_and_disables_dialogs_without_out() {
+    fn create_cluster_infobase_passes_the_string_and_requests_the_configured_log() {
         let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("1cv8");
-        let args_log = dir.path().join("args.log");
-        write_script(
-            &script,
-            &format!("printf '%s\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
-        );
-        let runner = ProcessExecutor;
+        let log = dir.path().join("out.log");
+        let runner = CapturingRunner::default();
         let dsl = DesignerDsl::new(
-            script,
+            "1cv8.exe".into(),
             V8Connection::from_connection_string("Srvr=srv;Ref=demo"),
-            &runner as &dyn ProcessRunner,
-            Some(dir.path().join("out.log")),
+            &runner,
+            Some(log.clone()),
             ProcessExecutionPolicy::default(),
         );
 
@@ -1334,10 +1393,15 @@ mod tests {
         })
         .expect("create infobase");
 
-        let args = fs::read_to_string(args_log).expect("args log");
         assert_eq!(
-            args,
-            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y\n/DisableStartupDialogs\n"
+            runner.0.borrow()[0].args,
+            [
+                "CREATEINFOBASE",
+                "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y",
+                "/DisableStartupDialogs",
+                "/Out",
+                &log.to_string_lossy(),
+            ]
         );
     }
 

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::config::model::SourceSetConfig;
-use crate::domain::capability::Operation;
+use crate::domain::capability::{Operation, OperationSize};
 use crate::domain::config_init::ConfigInitSourceSet;
 use crate::domain::dump::{NotDeclaredExtension, PullAllResult};
 use crate::platform::extension_inventory::is_windows_device_name;
@@ -71,15 +71,26 @@ fn run_all(
         return Err(set_walk::fail(error, result, started));
     }
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected =
-        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Dump)
-        {
-            Ok(selected) => selected,
-            Err((error, receipt)) => {
-                result.provider = Some(receipt);
-                return Err(set_walk::fail(error, result, started));
-            }
-        };
+    // Обход читает состав базы исполнителем выгрузки. Объём обхода известен заранее только у
+    // `--force`: каждый набор тогда выгружается целиком. Без него каждый набор выбирает
+    // исполнителя по своему объёму сам (#559), а состав читает исполнитель частичной.
+    let size = if request.discard_uncommitted {
+        OperationSize::Whole
+    } else {
+        OperationSize::ByChanges
+    };
+    let selected = match crate::use_cases::provider_selection::select_sized(
+        config,
+        &mut utilities,
+        Operation::Dump,
+        size,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            result.provider = Some(receipt);
+            return Err(set_walk::fail(error, result, started));
+        }
+    };
     result.provider = Some(selected.receipt.clone());
 
     if request.dry_run {
@@ -418,6 +429,7 @@ mod tests {
 
     fn config_in(base_path: &std::path::Path, source_sets: Vec<SourceSetConfig>) -> AppConfig {
         AppConfig {
+            local_path: base_path.join("base").join(".local"),
             base_path: base_path.join("base"),
             work_path: base_path.join("work"),
             format: SourceFormat::Designer,

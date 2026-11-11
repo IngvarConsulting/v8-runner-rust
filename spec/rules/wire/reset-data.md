@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.RESET-DATA
-version: 1
+version: 3
 artifact: docs/schemas/command-data/reset.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -33,6 +33,10 @@ check:
 
 Отказ до выбора цели — неизвестный, внешний набор или проект без набора основной
 конфигурации — формы команды не несёт: исполнителя ещё нет.
+
+**Что изменила версия 3.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+
+**Что изменила версия 2.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 

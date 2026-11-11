@@ -72,6 +72,12 @@ pub enum Command {
     /// Creating the infobase; parsed as `infobase create` and normalised here.
     #[command(skip)]
     Init(InfobaseCreateArgs),
+    /// Start and stop the PostgreSQL of an infobase declared with dbms.managed
+    Dbms(DbmsArgs),
+    /// Start and stop the ibsrv of an infobase declared with standalone.managed
+    Standalone(StandaloneArgs),
+    /// Start and stop the cluster (ragent and ras) of an infobase declared with cluster.managed
+    Cluster(ClusterArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -120,6 +126,105 @@ pub enum Command {
     Status(StatusArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+    /// Hold, release, stop or list the live Designer agent that outlives commands
+    Agent(AgentArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+/// Who holds the live agent: a running process, or a term in seconds.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentHolderArgs {
+    /// Process that holds the agent while it runs
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339); a pid given to another process is
+    /// refused
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Hold the agent for this many seconds; a repeated hold extends the term
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub ttl: Option<u64>,
+}
+
+/// Whose mark `agent release` removes: a process, or the holder of `agent hold --ttl`.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentReleaseArgs {
+    /// Process whose mark to remove
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339): only its mark is removed
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Remove the mark of agent hold --ttl
+    #[arg(long)]
+    pub ttl: bool,
+}
+
+fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .map_err(|error| format!("not an RFC 3339 time: {error}"))
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStopArgs {
+    /// Stop every live agent of this OS account, not only the one of this project; needs no
+    /// project
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStatusArgs {
+    /// List every live agent of this OS account; needs no project
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// Hold the live agent of this project, starting it if there is none
+    Hold(AgentHolderArgs),
+    /// Remove the holder's mark from the live agent of this project
+    Release(AgentReleaseArgs),
+    /// Stop the live agent of this project, or every one with --all
+    Stop(AgentStopArgs),
+    /// Show the live agent of this project, or every one of the OS account with --all
+    Status(AgentStatusArgs),
+    /// The keeper of one live agent: the runner starts it itself, with the start request on
+    /// stdin
+    #[command(hide = true)]
+    Keeper(AgentKeeperArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentKeeperArgs {
+    /// Key of the live agent: hexadecimal digits
+    #[arg(long, value_name = "HEX")]
+    pub key: String,
 }
 
 #[derive(Args, Debug)]
@@ -177,6 +282,64 @@ pub struct BootstrapArgs {
     /// Overwrite generated config/local config/source targets
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DbmsArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum ServiceCommandArgs {
+    /// Start the service of this infobase and wait until it accepts connections
+    Start,
+    /// Say whether it runs, who started it and where it listens
+    Status,
+    /// Stop the service this working copy started; the data stays
+    Stop,
+    /// Stop and start it again
+    Restart,
+}
+
+#[derive(Args, Debug)]
+pub struct StandaloneArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommandArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ClusterArgs {
+    #[command(subcommand)]
+    pub command: ClusterCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum ClusterCommandArgs {
+    /// Start the cluster of this infobase and wait until rac answers
+    Start {
+        /// The pinned ports are taken: start a new registry on other ports and register the
+        /// infobase in it over its database
+        #[arg(long)]
+        new_regport: bool,
+    },
+    /// Say whether it runs, who started it and where it listens
+    Status,
+    /// Stop the cluster this working copy started, with its remnants; the data stays
+    Stop,
+    /// Stop and start it again
+    Restart,
+}
+
+impl ClusterCommandArgs {
+    pub fn service(self) -> crate::cli::args::ServiceCommandArgs {
+        match self {
+            Self::Start { .. } => ServiceCommandArgs::Start,
+            Self::Status => ServiceCommandArgs::Status,
+            Self::Stop => ServiceCommandArgs::Stop,
+            Self::Restart => ServiceCommandArgs::Restart,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -316,11 +479,36 @@ pub struct BuildArgs {
 
     /// Load into the main configuration only and leave the database configuration as it is,
     /// so open sessions keep working; apply it later with `apply`
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["sessions", "sessions_message"])]
     pub no_apply: bool,
 
     #[command(flatten)]
     pub source_set: SourceSetArg,
+
+    #[command(flatten)]
+    pub sessions: SessionsArgs,
+}
+
+/// `--sessions` и `--sessions-message` у `push` и `apply`
+/// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+#[derive(Args, Debug, Default)]
+pub struct SessionsArgs {
+    /// Other sessions of the infobase when the database configuration needs exclusive access:
+    /// disable (default) refuses and names them; force ends them by the executor's own key —
+    /// on a standalone server or in a cluster; a file infobase is refused either way
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub sessions: Option<SessionsMode>,
+
+    /// Message to the sessions --sessions force ends
+    #[arg(long, value_name = "TEXT")]
+    pub sessions_message: Option<String>,
+}
+
+/// Значение `--sessions`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionsMode {
+    Disable,
+    Force,
 }
 
 #[derive(Args, Debug)]
@@ -331,6 +519,9 @@ pub struct ApplyArgs {
     /// client MCP tool extension
     #[arg(value_name = "SET")]
     pub set: Option<String>,
+
+    #[command(flatten)]
+    pub sessions: SessionsArgs,
 }
 
 #[derive(Args, Debug)]
@@ -657,12 +848,15 @@ pub enum InfobaseCommand {
 #[derive(Args, Debug, Clone, Default)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without --from: a new infobase with the configuration of this project's sources. With --from <INFOBASE>: a copy of another infobase declared in v8project.local.yaml, with its data and configuration — the source is snapshotted to a DT image under workPath (it must be free: the runner ends no sessions), and the new infobase is made from that image; the first push after it loads every set in full. A source or a target on a standalone server is refused with a recipe."
+    after_help = "Without --from: a new infobase with the configuration of this project's sources. With --from <INFOBASE>: a copy of another infobase declared in v8project.local.yaml, with its data and configuration — the source is snapshotted to a DT image under workPath (it must be free: the runner ends no sessions), and the new infobase is made from that image; the first push after it loads every set in full. A source or a target on a standalone server is refused with a recipe. An existing infobase is refused; --recreate replaces it: a file infobase loses only its top-level 1Cv8* entries, a runner-managed stand over its own PostgreSQL loses its database and its registration; a busy infobase is refused before anything is removed, and a failed creation puts the old infobase back."
 )]
 pub struct InfobaseCreateArgs {
     /// Declared infobase to copy, with its data and configuration
     #[arg(long, value_name = "INFOBASE")]
     pub from: Option<String>,
+    /// Replace the existing infobase of this working copy: remove it, then create it anew
+    #[arg(long)]
+    pub recreate: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1071,7 +1265,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Infobase(InfobaseArgs {
-                command: InfobaseCommand::Create(InfobaseCreateArgs { from: None }),
+                command: InfobaseCommand::Create(InfobaseCreateArgs {
+                    from: None,
+                    recreate: false
+                }),
             })
         ));
 
@@ -1080,7 +1277,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Infobase(InfobaseArgs {
-                command: InfobaseCommand::Create(InfobaseCreateArgs { from: Some(ref name) }),
+                command: InfobaseCommand::Create(InfobaseCreateArgs {
+                    from: Some(ref name),
+                    ..
+                }),
             }) if name == "upstream"
         ));
     }
@@ -1815,6 +2015,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577).
+    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&["agent"], "keeper")];
+
     /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
     type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);
 
@@ -1859,6 +2062,14 @@ mod tests {
         }
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
+            // Служебные подкоманды раннер зовёт сам: это не прежние имена, и перечня
+            // синонимов они не касаются.
+            if INTERNAL_COMMANDS
+                .iter()
+                .any(|(at, internal)| *at == path && *internal == name)
+            {
+                continue;
+            }
             if subcommand.is_hide_set() {
                 hidden.push((path.to_vec(), Previous::Command(name), None));
                 continue;

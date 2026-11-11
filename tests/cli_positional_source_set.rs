@@ -132,7 +132,7 @@ fn a_positional_source_set_selects_that_set() {
     let project = project();
     let cfe = project.out.join("sales.cfe").display().to_string();
 
-    // Превью отправки без памяти о базе отказало бы `no_memory`; платформу здесь не
+    // Превью отправки без памяти о базе отказало бы `untracked_base`; платформу здесь не
     // запускают, поэтому память о базе пишется так, как её оставляет создание базы.
     let home = project.root.parent().expect("workspace");
     support::memory::remember_base(

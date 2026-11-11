@@ -130,7 +130,7 @@ fn run_configure(
     };
 
     let outcome = disable_safety_for(context, &mut setter, targets, started);
-    setter.close();
+    setter.close(context);
     outcome.map(|steps| ExtensionsResult {
         provider: Some(receipt),
         provider_dispatched: false,
@@ -189,9 +189,9 @@ impl SafetySetter<'_> {
         }
     }
 
-    fn close(self) {
+    fn close(self, context: &ExecutionContext) {
         if let Self::Agent(agent) = self {
-            agent.close();
+            agent.close(context);
         }
     }
 }
@@ -427,6 +427,7 @@ mod tests {
 
     fn sample_config(base: &Path, work: &Path, ibcmd_path: &Path) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format: SourceFormat::Edt,

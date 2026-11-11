@@ -333,12 +333,21 @@ impl<'a> SourceSetInventory<'a> {
         !self.edt_contexts.is_empty()
     }
 
+    /// Разбор изменений наборов: у набора формата Конфигуратора в рабочей копии git изменения
+    /// называет git (#575); `preview` — превью, индекс git не обновляется.
     pub(crate) fn analyze_contexts(
         &self,
+        execution: &crate::use_cases::context::ExecutionContext,
         contexts: &[SourceSetContext],
-        interrupted: &mut dyn FnMut() -> bool,
-    ) -> Vec<ContextAnalysis> {
-        SourceSetsService::new(self.config).analyze_contexts(contexts, interrupted)
+        preview: bool,
+    ) -> Result<Vec<ContextAnalysis>, crate::support::error::AppError> {
+        crate::use_cases::source_changes::analyze(
+            execution,
+            contexts,
+            &self.config.work_path,
+            preview,
+            self.config.format == crate::config::model::SourceFormat::Designer,
+        )
     }
 }
 
@@ -414,6 +423,7 @@ mod tests {
             .expect("current dir")
             .join("target/source-inventory-tests");
         AppConfig {
+            local_path: root.join("base").join(".local"),
             base_path: root.join("base"),
             work_path: root.join("work"),
             format,

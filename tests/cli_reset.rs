@@ -604,7 +604,7 @@ fn reset_rewrites_the_record_with_the_tool_that_made_it() {
 }
 
 /// Инструмент записи не ответил поколением до отката: запись стёрта и названа, а следующая
-/// отправка не отказывает `no_memory` — память набора есть, пустая.
+/// отправка не отказывает `untracked_base` — память набора есть, пустая.
 #[test]
 fn reset_without_an_answer_erases_the_record() {
     let project = Project::new();
@@ -631,7 +631,7 @@ fn reset_without_an_answer_erases_the_record() {
 }
 
 /// Без памяти о базе `reset` откатывает, но памяти не создаёт: ни хеш-памяти, ни записи, и
-/// следующая отправка по-прежнему отказывает `no_memory`.
+/// следующая отправка по-прежнему отказывает `untracked_base`.
 #[test]
 fn reset_creates_no_memory_of_the_base() {
     let project = Project::new();
@@ -646,7 +646,7 @@ fn reset_creates_no_memory_of_the_base() {
     assert!(project.ledger().is_null(), "{}", project.ledger());
 
     let pushed = refused(&project.run(&["push"]));
-    assert_eq!(pushed["error"]["kind"], "no_memory", "{pushed}");
+    assert_eq!(pushed["error"]["kind"], "untracked_base", "{pushed}");
 }
 
 /// Память другой пары «база ↔ каталог» — набор переехал в другой каталог — не своя: `reset`

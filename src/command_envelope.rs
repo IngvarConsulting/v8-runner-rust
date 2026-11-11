@@ -2,6 +2,8 @@ use serde::Serialize;
 
 use crate::domain::execution::StepResult;
 use crate::domain::next_step::NextStep;
+use crate::domain::platforms::PlatformReleaseRefusal;
+use crate::domain::sessions::InfobaseSessions;
 use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
@@ -21,7 +23,7 @@ pub enum ErrorKind {
     /// Отправка в базу, ушедшую вперёд записанного поколения.
     NonFastForward,
     /// Отправка в базу, о которой у рабочей копии нет памяти.
-    NoMemory,
+    UntrackedBase,
 }
 
 /// Код отказа — та же причина подробнее. Набор закрыт вместе с родом.
@@ -36,9 +38,16 @@ pub enum ErrorCode {
     /// Пока не умеет.
     Soon,
     EnvironmentUnavailable,
+    /// Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет
+    /// формат исходников, среди установок нет.
+    PlatformReleaseMissing,
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
+    /// Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.
+    InfobaseSessions,
+    /// Файловую базу держит чужой Конфигуратор; его раннер не закрывает.
+    InfobaseDesignerBusy,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -48,8 +57,16 @@ pub enum ErrorCode {
     PlatformFailure,
     /// Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.
     NonFastForward,
-    /// Пара к роду `no_memory`: памяти о базе нет.
-    NoMemory,
+    /// Пара к роду `untracked_base`: памяти о базе нет.
+    UntrackedBase,
+    /// `agent hold`: живых агентов уже `live-max`, и снять некого.
+    AgentLimit,
+    /// `agent hold` при `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// `agent hold` в Job, из которого сторож не может выйти.
+    LiveAgentJob,
+    /// Правило игнорирования git прячет файл набора; род `validation`.
+    SourceSetIgnoredByGit,
 }
 
 impl ErrorKind {
@@ -66,7 +83,7 @@ impl ErrorKind {
             Self::Runtime => "runtime",
             Self::Platform => "platform",
             Self::NonFastForward => "non_fast_forward",
-            Self::NoMemory => "no_memory",
+            Self::UntrackedBase => "untracked_base",
         }
     }
 
@@ -82,7 +99,7 @@ impl ErrorKind {
         Self::Runtime,
         Self::Platform,
         Self::NonFastForward,
-        Self::NoMemory,
+        Self::UntrackedBase,
     ];
 }
 
@@ -97,8 +114,11 @@ impl ErrorCode {
             Self::Target => "target",
             Self::Soon => "soon",
             Self::EnvironmentUnavailable => "environment_unavailable",
+            Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
+            Self::InfobaseSessions => "infobase_sessions",
+            Self::InfobaseDesignerBusy => "infobase_designer_busy",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -107,7 +127,11 @@ impl ErrorCode {
             Self::RuntimeFailure => "runtime_failure",
             Self::PlatformFailure => "platform_failure",
             Self::NonFastForward => "non_fast_forward",
-            Self::NoMemory => "no_memory",
+            Self::UntrackedBase => "untracked_base",
+            Self::AgentLimit => "agent_limit",
+            Self::LiveAgentOff => "live_agent_off",
+            Self::LiveAgentJob => "live_agent_job",
+            Self::SourceSetIgnoredByGit => "source_set_ignored_by_git",
         }
     }
 
@@ -119,8 +143,11 @@ impl ErrorCode {
         Self::Target,
         Self::Soon,
         Self::EnvironmentUnavailable,
+        Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
+        Self::InfobaseSessions,
+        Self::InfobaseDesignerBusy,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -129,7 +156,11 @@ impl ErrorCode {
         Self::RuntimeFailure,
         Self::PlatformFailure,
         Self::NonFastForward,
-        Self::NoMemory,
+        Self::UntrackedBase,
+        Self::AgentLimit,
+        Self::LiveAgentOff,
+        Self::LiveAgentJob,
+        Self::SourceSetIgnoredByGit,
     ];
 }
 
@@ -148,6 +179,12 @@ pub struct EnvelopeError {
     /// Поколение, записанное после прошлого обмена; заполняется тем же отказом.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_generation: Option<String>,
+    /// Формат исходников и опись установок; заполняется отказом `platform_release_missing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_release: Option<Box<PlatformReleaseRefusal>>,
+    /// Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Box<InfobaseSessions>>,
 }
 
 impl EnvelopeError {
@@ -159,6 +196,8 @@ impl EnvelopeError {
             next: None,
             base_generation: None,
             local_generation: None,
+            platform_release: None,
+            sessions: None,
         }
     }
 
@@ -351,7 +390,7 @@ mod schema_tests {
         // Соответствие рода отказа паре «код, род» на проводе проверяется целиком и по
         // литералам: иначе можно поменять местами два кода, и набор останется тем же.
         use crate::support::error::{CancelledAt, CapabilityReason};
-        use crate::use_cases::result::UseCaseErrorKind;
+        use crate::use_cases::result::{EnvironmentReason, UseCaseErrorKind};
         let cli: Vec<(UseCaseErrorKind, &str, &str)> = vec![
             (
                 UseCaseErrorKind::Capability(CapabilityReason::Unavailable),
@@ -374,8 +413,13 @@ mod schema_tests {
                 "capability",
             ),
             (
-                UseCaseErrorKind::Environment,
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
                 "environment_unavailable",
+                "environment",
+            ),
+            (
+                UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
+                "platform_release_missing",
                 "environment",
             ),
             (
@@ -385,11 +429,41 @@ mod schema_tests {
             ),
             (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
             (
+                UseCaseErrorKind::InfobaseSessions,
+                "infobase_sessions",
+                "workspace",
+            ),
+            (
+                UseCaseErrorKind::InfobaseDesignerBusy,
+                "infobase_designer_busy",
+                "workspace",
+            ),
+            (
                 UseCaseErrorKind::NonFastForward,
                 "non_fast_forward",
                 "non_fast_forward",
             ),
-            (UseCaseErrorKind::NoMemory, "no_memory", "no_memory"),
+            (
+                UseCaseErrorKind::UntrackedBase,
+                "untracked_base",
+                "untracked_base",
+            ),
+            (UseCaseErrorKind::AgentLimit, "agent_limit", "environment"),
+            (
+                UseCaseErrorKind::LiveAgentOff,
+                "live_agent_off",
+                "capability",
+            ),
+            (
+                UseCaseErrorKind::LiveAgentJob,
+                "live_agent_job",
+                "environment",
+            ),
+            (
+                UseCaseErrorKind::SourceSetIgnoredByGit,
+                "source_set_ignored_by_git",
+                "validation",
+            ),
             (
                 UseCaseErrorKind::InvalidOutput,
                 "invalid_output",

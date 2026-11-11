@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -9,6 +9,7 @@ check:
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
   - tests/cli_extensions.rs::cluster_designer_names_are_used_by_status_and_extension_upload
+  - tests/cli_status.rs::status_and_push_name_how_the_changes_were_found
 ---
 
 # `data` команды `status`
@@ -18,7 +19,8 @@ check:
 владельца и по набору конфигурации и расширений — назначение (`purpose`, как ключ `type`
 проекта: `CONFIGURATION` или `EXTENSION`), память о базе (`memory`), запись журнала
 поколений (`recorded`) и число файлов каталога, изменившихся с последнего чтения
-(`changed_files`; `null` — сравнить не с чем).
+(`changed_files`; `null` — сравнить не с чем) и каким путём эти изменения найдены
+(`detection`; `null` — изменений не искали).
 
 У `--deep` к набору добавляется `base`: поколение, которое ответил исполнитель `push`, и его
 сверка с записью — `unchanged`, `moved_ahead`, `other_tool`, `no_record` или `no_answer`. К базе
@@ -26,6 +28,9 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 6.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)). Код и род отказа `no_memory` в этой версии называются `untracked_base`. У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). У набора новое обязательное поле `detection`: `path` — `git` (изменения назвал git), `git+fsmonitor` (git, которому о файлах сообщает демон `core.fsmonitor` репозитория) или `scan` (раннер прочёл файлы сам), и у `scan` — `reason`: `no_repository`, `submodule`, `nested_repository`, `sha256_repository`, `bytes_memory`,
+`git_failed` или `edt_format` ([правило](../use-cases/changes-are-detected-on-demand.md)). Отказ `source_set_ignored_by_git` ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)) формы не меняет: он едет в конверте.
 
 **Что изменила версия 5.** У расширения из пакетного списка Конфигуратора `active: null`.
 Имя из списка участвует в сопоставлении с наборами проекта.
@@ -68,6 +73,7 @@ check:
             "recorded_at": "2026-10-06T10:00:00+00:00"
           },
           "changed_files": 3,
+          "detection": {"path": "git+fsmonitor"},
           "base": {
             "tool": "designer",
             "token": "2222222222222222222222222222222222222222",

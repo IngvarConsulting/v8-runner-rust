@@ -30,7 +30,6 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::platform::locator::{platform_version_of, PlatformVersion, UtilityType};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
 use crate::platform::sftp::{self, SftpClient, SftpError};
 use crate::support::authority::Host;
@@ -40,40 +39,22 @@ pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-forma
 /// Вторая команда сессии: без подключения к базе любая команда `config` отвечает
 /// `DesignerNotConnectedToInfoBase` (замер 15.09.2026).
 pub const CONNECT_COMMAND: &str = "common connect-ib";
-/// Команда, которой управляемый агент завершает работу.
 /// Закрытие соединения с базой без завершения точки входа.
 pub const DISCONNECT_COMMAND: &str = "common disconnect-ib";
-pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
 pub const MANAGED_LISTEN_HOST: std::net::IpAddr =
     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 /// Файл карты пользовательских каталогов в `AgentBaseDir`.
 pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-/// Сколько управляемый агент ждут выйти после `common shutdown`.
-const MANAGED_EXIT_GRACE: Duration = Duration::from_secs(15);
-/// Границы версий, где `common shutdown` агента не завершает: на 8.3.24–8.3.26 команда остаётся
-/// без ответа, соединение не закрывается и процесс не выходит (замер 06.11.2026, Windows). Ниже
-/// 8.3.24 поведение не замерено.
-const FIRST_VERSION_IGNORING_SHUTDOWN: PlatformVersion = PlatformVersion {
-    major: 8,
-    minor: 3,
-    patch: 24,
-    build: 0,
-};
-const FIRST_VERSION_HONOURING_SHUTDOWN: PlatformVersion = PlatformVersion {
-    major: 8,
-    minor: 3,
-    patch: 27,
-    build: 0,
-};
-/// Срок каждого шага закрытия агента, который `common shutdown` заведомо не завершит: ждать
-/// там нечего.
-const IGNORED_SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
+const CLEANUP_GRACE: Duration = Duration::from_secs(30);
+/// Сколько управляемый агент ждут ответить на `common disconnect-ib`: команда отвечает за
+/// 40–190 мс (замер 07.11.2026); дольше агент её уже не выполнит, и процесс снимается.
+const RELEASE_GRACE: Duration = Duration::from_secs(5);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
-const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
+pub(crate) const AGENT_COMMAND_ABANDONED: &str =
+    "agent command abandoned: the command was cancelled";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -388,6 +369,16 @@ pub enum AgentError {
     #[error("agent asked a question the runner does not answer: {message}")]
     Question { message: String },
 
+    /// Ни один путь для одноразового ключа хоста агент не прочтёт
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[error(
+        "the Designer agent reads its host key only from an ASCII path, and none was available \
+         (tried: {}); move the project to an ASCII path or declare tools.designer_agent.host-key \
+         at one",
+        .tried.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    HostKeyPathNotReadable { tried: Vec<PathBuf> },
+
     #[error("failed to prepare the agent workspace '{path}': {source}")]
     Workspace {
         path: PathBuf,
@@ -444,6 +435,23 @@ pub enum AgentError {
     /// приводит строку `/Out` агента как есть.
     #[error("managed agent exited ({status}) before accepting a session; /Out: {out}")]
     ExitedBeforeSession { status: String, out: String },
+
+    /// Живого агента сторож снял или снимает: команда поднимает нового
+    /// (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`).
+    #[error("{detail}; a new live agent is needed")]
+    LiveAgentGone { detail: String },
+
+    /// Отказ сторожа живого агента.
+    #[error("the live agent keeper failed: {detail}")]
+    Keeper { detail: String },
+
+    /// Канала сторожа нет или он не принимает подключение: сторож ещё не поднялся или уже ушёл.
+    #[error("the live agent keeper is not reachable at {channel}: {source}")]
+    KeeperUnreachable {
+        channel: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("agent base dir '{base_dir}' has no directory for user '{user}': {detail}")]
     UserDirUnknown {
@@ -526,7 +534,18 @@ impl WaitPolicy {
     /// завершение обязано закончиться — иначе прерванная сессия висела бы вечно.
     /// Берётся меньшее из запаса на завершение и уже стоящего срока, если тот есть.
     pub fn cleanup(&self) -> Self {
-        self.cleanup_within(SHUTDOWN_GRACE)
+        self.cleanup_within(CLEANUP_GRACE)
+    }
+
+    /// Срок отпускания своего агента, который отмена команды не обрывает: агент, снятый
+    /// посреди `disconnect-ib`, мог бы держать базу дольше, чем стоят эти секунды.
+    fn release_window(grace: Duration) -> Self {
+        Self {
+            deadline: Some(Instant::now() + grace),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
+            work: None,
+        }
     }
 
     fn cleanup_within(&self, grace: Duration) -> Self {
@@ -556,6 +575,40 @@ impl WaitPolicy {
         Self {
             work: None,
             ..self.clone()
+        }
+    }
+
+    /// Ожидание команды, которую сторож живого агента выполняет по запросу клиента: без срока,
+    /// отменяет его сам сторож, когда клиент ушёл посреди некритической команды. Работы команды
+    /// оно не отмечает: её отмечает клиент в своём процессе.
+    pub(in crate::platform) fn for_keeper(cancellation: CancellationToken, critical: bool) -> Self {
+        Self {
+            deadline: None,
+            cancellation,
+            safety: if critical {
+                ProcessInterruptionSafety::CriticalNonAbortable
+            } else {
+                ProcessInterruptionSafety::Interruptible
+            },
+            work: None,
+        }
+    }
+
+    /// Ожидание `common disconnect-ib`, которым сторож отключает живого агента от базы после
+    /// сессии команды: тот же короткий срок, что у отпускания своего агента.
+    pub(in crate::platform) fn for_keeper_release() -> Self {
+        Self::release_window(RELEASE_GRACE)
+    }
+
+    /// Объявлена ли фаза критической: её команду доводят до исхода.
+    pub fn is_critical(&self) -> bool {
+        matches!(self.safety, ProcessInterruptionSafety::CriticalNonAbortable)
+    }
+
+    /// Отмечает работу команды, если отметка есть: команда ушла агенту через сторожа.
+    pub fn mark_work_given(&self) {
+        if let Some(work) = &self.work {
+            work.mark_work_given();
         }
     }
 
@@ -876,8 +929,44 @@ impl AgentSession {
         // команды они не отмечают.
         let service = policy.without_work();
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
-        session.run(CONNECT_COMMAND, &service)?.outcome()?;
+        session.connect_infobase(&service)?;
         Ok(session)
+    }
+
+    /// Подключает агента к базе (`common connect-ib`). Ответ «уже подключён»
+    /// (`DesignerAlreadyConnectedToInfoBase`) — тоже подключение: так отвечает агент, которого
+    /// подключили раньше (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`). Служебная
+    /// команда работы команды не отмечает.
+    pub fn connect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        self.connect_infobase_reporting(policy, &mut |_| {})
+    }
+
+    /// То же, что `connect_infobase`, но ответ агента на подключение, уже с маской секретов,
+    /// отдаётся `on_batch`: сторож живого агента передаёт его в журнал команды.
+    pub fn connect_infobase_reporting(
+        &mut self,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<(), AgentError> {
+        match self
+            .run_streaming(CONNECT_COMMAND, &policy.without_work(), on_batch)?
+            .outcome()
+        {
+            Ok(_)
+            | Err(AgentError::Command {
+                error_type: AgentErrorType::DesignerAlreadyConnectedToInfoBase,
+                ..
+            }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Отключает агента от базы (`common disconnect-ib`), не закрывая сессии: так живой агент
+    /// между командами базу не держит. Служебная команда работы команды не отмечает.
+    pub fn disconnect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        self.run(DISCONNECT_COMMAND, &policy.without_work())?
+            .outcome()
+            .map(|_| ())
     }
 
     /// Одна команда — последовательность JSON-массивов до первого с итоговым
@@ -885,6 +974,17 @@ impl AgentSession {
     /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
     /// Команду запроса после отмены не отправляет: отказ `NotSent`.
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
+        self.run_streaming(command, policy, &mut |_| {})
+    }
+
+    /// То же, что `run`, но каждый массив ответа, уже с маской секретов, сначала отдаётся
+    /// `on_batch`: сторож живого агента передаёт их команде по мере прихода.
+    pub fn run_streaming(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<AgentReply, AgentError> {
         self.command_deferral = None;
         // Команду запроса после отмены агенту не отдают, как раннер не запускает процесс:
         // отмена до работы — безопасная точка. Служебные команды — открытие, закрытие —
@@ -894,6 +994,7 @@ impl AgentSession {
                 command: self.display_command(command),
             });
         }
+        let started = Instant::now();
         self.send(command)?;
         // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
         // команды сессии приходят без отметки.
@@ -915,6 +1016,7 @@ impl AgentSession {
                     *text = crate::platform::secrets::mask_text(text, &secrets);
                 }
             }
+            on_batch(&batch);
             let done = batch.iter().any(AgentMessage::is_terminal);
             messages.extend(batch);
             if done {
@@ -922,7 +1024,8 @@ impl AgentSession {
             }
         }
         let reply = AgentReply { messages };
-        debug!(command = %self.display_command(command), messages = reply.messages.len(), "agent replied");
+        let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
+        log_reply(command, &secrets, &reply, started.elapsed());
         Ok(reply)
     }
 
@@ -942,9 +1045,15 @@ impl AgentSession {
     /// закрывает соединение с базой служебной командой — иначе точка входа держит
     /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
     /// команды это не отмечает.
-    pub fn release(mut self, policy: &WaitPolicy) {
+    pub fn release(self, policy: &WaitPolicy) {
+        self.release_under(&policy.cleanup());
+    }
+
+    fn release_under(mut self, cleanup: &WaitPolicy) {
         self.discard_stale();
-        let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
+        if let Err(error) = self.run(DISCONNECT_COMMAND, &cleanup.without_work()) {
+            debug!(%error, "agent did not confirm common disconnect-ib");
+        }
         self.disconnect();
     }
 
@@ -1227,21 +1336,8 @@ impl AgentSession {
         }
     }
 
-    /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
-    /// Завершение — служебная команда: работы команды оно не отмечает.
-    pub fn shutdown(mut self, policy: &WaitPolicy, grace: Duration) -> Option<AgentReply> {
-        // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
-        // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let capped = policy.cleanup_within(grace).without_work();
-        self.discard_stale();
-        // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
-        let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
-        self.disconnect();
-        reply
-    }
-
     /// Недочитанное от прежней команды — например, неверный ответ, на котором она
-    /// кончилась, — ответом на служебную команду (`disconnect-ib`, `shutdown`) не является:
+    /// кончилась, — ответом на служебную команду (`disconnect-ib`) не является:
     /// без сброса разбор упал бы на нём сразу (`InvalidReply`), не дождавшись ответа агента.
     /// Журнал сохраняет только размер сброшенного: неразобранные байты могут содержать секреты.
     fn discard_stale(&mut self) {
@@ -1502,7 +1598,27 @@ fn excerpt(text: &str, limit: usize) -> String {
     result
 }
 
+/// Отладочная строка `agent replied` об одной команде агента: команда с маской секретов, число
+/// сообщений ответа и время от отправки до последнего кадра. Её пишут и разовая сессия, и
+/// живой агент, чтобы трасса показывала, сколько шла загрузка и сколько применение.
+pub(crate) fn log_reply(command: &str, secrets: &[&str], reply: &AgentReply, elapsed: Duration) {
+    debug!(
+        command = %crate::platform::secrets::mask_text(command, secrets),
+        messages = reply.messages.len(),
+        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "agent replied"
+    );
+}
+
 /// Protocol values stay intact; only this display copy masks decoded strings and keys.
+/// Строка журнала разговора для одного массива ответа: с маской секретов, как её пишет сессия.
+/// Её же пишет команда, которая говорит с живым агентом через сторожа.
+pub fn transcript_line(batch: &[AgentMessage], secrets: &[&str]) -> String {
+    let mut display = serde_json::to_value(batch).expect("agent messages serialize");
+    mask_agent_display(&mut display, secrets);
+    display.to_string()
+}
+
 fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
     match value {
         serde_json::Value::String(text) => {
@@ -1596,9 +1712,8 @@ pub struct ManagedAgent {
     process: Option<crate::platform::process::ManagedSpawnResult>,
     session: Option<AgentSession>,
     base_dir: PathBuf,
-    ignores_shutdown: bool,
     /// Ключ хоста этого запуска: одноразовый файл живёт, пока жив агент.
-    _host_key: LaunchHostKey,
+    host_key: LaunchHostKey,
 }
 
 impl ManagedAgent {
@@ -1611,6 +1726,44 @@ impl ManagedAgent {
         session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
+    ) -> Result<Self, AgentError> {
+        Self::launch_in(
+            runner,
+            launch,
+            session,
+            startup_timeout,
+            policy,
+            ManagedSpawnMode::Wait,
+        )
+    }
+
+    /// То же для сторожа живого агента: процесс агента умирает вместе со сторожем
+    /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`), поэтому звать это можно только из
+    /// потока, который живёт столько же, сколько сторож ([`ManagedSpawnMode::Tied`]).
+    pub fn launch_for_keeper(
+        runner: &dyn ProcessRunner,
+        launch: AgentLaunch,
+        session: AgentSessionRequest,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+    ) -> Result<Self, AgentError> {
+        Self::launch_in(
+            runner,
+            launch,
+            session,
+            startup_timeout,
+            policy,
+            ManagedSpawnMode::Tied,
+        )
+    }
+
+    fn launch_in(
+        runner: &dyn ProcessRunner,
+        launch: AgentLaunch,
+        session: AgentSessionRequest,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+        mode: ManagedSpawnMode,
     ) -> Result<Self, AgentError> {
         for dir in [&launch.base_dir, &launch.workdir] {
             std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
@@ -1625,11 +1778,10 @@ impl ManagedAgent {
                 source,
             }
         })?;
-        let ignores_shutdown = ignores_shutdown(&launch.v8);
         let request = launch.request();
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
-            .spawn_managed(&request, ManagedSpawnMode::Wait, None)
+            .spawn_managed(&request, mode, None)
             .map_err(|error| match port_taken(launch.port) {
                 Some(detail) => AgentError::PortTaken {
                     port: launch.port,
@@ -1701,13 +1853,16 @@ impl ManagedAgent {
             process: Some(process),
             session: Some(opened),
             base_dir: launch.base_dir,
-            ignores_shutdown,
-            _host_key: launch.host_key,
+            host_key: launch.host_key,
         })
     }
 
     pub fn session(&mut self) -> &mut AgentSession {
         self.session.as_mut().expect("session lives with the agent")
+    }
+
+    pub fn session_ref(&self) -> &AgentSession {
+        self.session.as_ref().expect("session lives with the agent")
     }
 
     /// Точка входа сессии с поднятым агентом.
@@ -1722,34 +1877,27 @@ impl ManagedAgent {
         &self.base_dir
     }
 
-    /// Просит агента завершиться и ждёт процесс; не вышедший вовремя — снимается. Версию, где
-    /// команда агента не завершает, не ждут, но команду ей всё равно отдают.
-    pub fn shutdown(mut self, policy: &WaitPolicy) {
-        let (reply_grace, exit_grace) = if self.ignores_shutdown {
-            (IGNORED_SHUTDOWN_WAIT, IGNORED_SHUTDOWN_WAIT)
-        } else {
-            (SHUTDOWN_GRACE, MANAGED_EXIT_GRACE)
-        };
+    /// Номер процесса агента.
+    pub fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(|process| process.pid())
+    }
+
+    /// Ожидание ключа хоста, на котором закреплена сессия: отпечаток идёт в запись живого агента.
+    pub fn host_key_expectation(&self) -> HostKeyExpectation {
+        self.host_key.expectation()
+    }
+
+    /// Закрывает соединение агента с базой (`common disconnect-ib`) и сессию и снимает процесс,
+    /// не дожидаясь, что он выйдет сам: `common shutdown` агенту не отдаётся
+    /// (`INV.PLATFORM.A-MANAGED-AGENT-IS-RELEASED-AND-REMOVED`). Отказ или молчание
+    /// `disconnect-ib` снятия не отменяют, исхода команды они не меняют; отмена команды
+    /// срока отпускания не обрывает.
+    pub fn release_and_remove(mut self) {
         if let Some(session) = self.session.take() {
-            session.shutdown(policy, reply_grace);
+            session.release_under(&WaitPolicy::release_window(RELEASE_GRACE));
         }
         if let Some(process) = self.process.take() {
-            // Ожидание выхода агента — служебное: работы команды оно не отмечает.
-            let grace = ProcessExecutionPolicy::platform_step(
-                Some(exit_grace),
-                CancellationToken::new(),
-                ProcessInterruptionSafety::Interruptible,
-            );
-            match process.wait_for_exit(&grace) {
-                Ok(outcome) if outcome.timed_out && self.ignores_shutdown => {
-                    debug!("designer agent of this platform ignores shutdown and was terminated")
-                }
-                Ok(outcome) if outcome.timed_out => {
-                    warn!("designer agent ignored shutdown and was terminated")
-                }
-                Ok(_) => {}
-                Err(error) => warn!(error = %error, "designer agent shutdown wait failed"),
-            }
+            process.terminate();
         }
     }
 }
@@ -1760,15 +1908,6 @@ impl Drop for ManagedAgent {
         self.session.take();
         self.process.take();
     }
-}
-
-/// Известно ли, что агент этой установки не выполняет `common shutdown`. Версия вне замера и
-/// версия, которую путь не называет, считаются выполняющими: им достаётся полный срок, а не
-/// снятие раньше времени.
-fn ignores_shutdown(v8: &Path) -> bool {
-    platform_version_of(UtilityType::V8, v8).is_some_and(|version| {
-        (FIRST_VERSION_IGNORING_SHUTDOWN..FIRST_VERSION_HONOURING_SHUTDOWN).contains(&version)
-    })
 }
 
 /// Сколько знаков `/Out` агента приводит отказ.
@@ -1815,6 +1954,9 @@ pub fn free_managed_port() -> Result<u16, AgentError> {
 pub struct EphemeralHostKey {
     path: PathBuf,
     fingerprint: Fingerprint,
+    /// Свой каталог этого ключа вне `workPath`: создан только для владельца и уходит вместе с
+    /// ключом (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    private_dir: Option<PathBuf>,
 }
 
 /// Ключ хоста, который получает управляемый агент.
@@ -1843,6 +1985,40 @@ impl LaunchHostKey {
     }
 }
 
+/// Ключ ED25519 из зерна и его текст в формате OpenSSH.
+fn ed25519_key(
+    seed: &[u8; 32],
+    comment: &str,
+) -> Result<(russh::keys::PrivateKey, String), String> {
+    let key = russh::keys::PrivateKey::new(
+        russh::keys::ssh_key::private::KeypairData::Ed25519(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(seed),
+        ),
+        comment,
+    )
+    .map_err(|error| error.to_string())?;
+    let text = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .map_err(|error| error.to_string())?;
+    Ok((key, text.to_string()))
+}
+
+/// Ключ хоста для SSH-шлюза службы. Живёт вместе с её записью: от запуска к запуску он тот же, и
+/// закреплённый отпечаток остаётся верным.
+pub fn write_service_host_key(path: &Path) -> std::io::Result<()> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(std::io::Error::other)?;
+    let (_, text) =
+        ed25519_key(&seed, "v8-runner managed server").map_err(std::io::Error::other)?;
+    crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+}
+
+/// Отпечаток ключа хоста в виде, который принимает `standalone.host-fingerprint`.
+pub fn host_key_fingerprint(path: &Path) -> Option<String> {
+    let key = russh::keys::load_secret_key(path, None).ok()?;
+    Some(key.public_key().fingerprint(HashAlg::Sha256).to_string())
+}
+
 /// Префикс имени одноразового ключа; за ним — номер процесса раннера, который ключ создал.
 const ONE_TIME_KEY_PREFIX: &str = "host-key-";
 
@@ -1864,9 +2040,35 @@ fn remove_orphaned_keys(dir: &Path) {
             continue;
         };
         if !crate::support::machine::is_process_alive(owner) {
-            let _ = std::fs::remove_file(entry.path());
+            // Свой каталог ключа вне `workPath` уходит целиком; чужой не даст удалить его ACL.
+            let path = entry.path();
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
         }
     }
+}
+
+/// Читает ли агент Конфигуратора ключ хоста по этому пути (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+/// На Windows — только по пути в ASCII: с кириллицей он отвечает «Фатальная ошибка SSH-сервера:
+/// Ошибка установки ключа хоста» и выходит (замер #582). Другие ОС не замерены, и путь не
+/// ограничивается.
+pub(crate) fn agent_reads_host_key_at(path: &Path) -> bool {
+    !cfg!(windows) || path.to_str().is_some_and(str::is_ascii)
+}
+
+/// Корни, где ложится одноразовый ключ, когда агент не прочтёт его в `workPath`: временный
+/// каталог ОС, на Windows ещё `%ProgramData%\v8-runner`.
+pub(crate) fn host_key_fallback_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    if cfg!(windows) {
+        if let Some(data) = std::env::var_os("ProgramData") {
+            roots.push(PathBuf::from(data).join("v8-runner"));
+        }
+    }
+    roots
 }
 
 impl EphemeralHostKey {
@@ -1888,16 +2090,7 @@ impl EphemeralHostKey {
                 "the system random generator gave no seed for the one-time host key: {error}"
             )),
         })?;
-        let key = russh::keys::PrivateKey::new(
-            russh::keys::ssh_key::private::KeypairData::Ed25519(
-                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
-            ),
-            "v8-runner managed agent",
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        let text = key
-            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
-            .map_err(|error| invalid(error.to_string()))?;
+        let (key, text) = ed25519_key(&seed, "v8-runner managed agent").map_err(invalid)?;
         remove_orphaned_keys(dir);
         let path = dir.join(format!(
             "{ONE_TIME_KEY_PREFIX}{}-{}",
@@ -1921,7 +2114,52 @@ impl EphemeralHostKey {
         Ok(Self {
             path,
             fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
+            private_dir: None,
         })
+    }
+
+    /// Одноразовый ключ для агента рабочей копии `work_path`
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`). Агент читает путь `workPath` — ключ там. Иначе
+    /// ключ ложится в новый каталог со случайным именем под первым корнем из `roots`, путь к
+    /// которому агент прочтёт. Каталог создаётся только для владельца и только этим вызовом, так
+    /// что заранее подложенный чужой каталог не годится. Ни одного такого корня — отказ до
+    /// запуска со всеми испробованными путями.
+    pub fn create_for(work_path: &Path, roots: &[PathBuf]) -> Result<Self, AgentError> {
+        let own = work_path.join("agent").join("host-keys");
+        if agent_reads_host_key_at(&own) {
+            return Self::create(&own);
+        }
+        let mut tried = vec![own];
+        for root in roots {
+            let dir = root.join(format!(
+                "{ONE_TIME_KEY_PREFIX}{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            if !agent_reads_host_key_at(&dir) {
+                tried.push(dir);
+                continue;
+            }
+            remove_orphaned_keys(root);
+            let made = std::fs::create_dir_all(root)
+                .and_then(|()| crate::support::temp::create_private_dir(&dir));
+            if let Err(error) = made {
+                debug!(dir = %dir.display(), %error, "host key directory refused");
+                tried.push(dir);
+                continue;
+            }
+            return match Self::create(&dir) {
+                Ok(mut key) => {
+                    key.private_dir = Some(dir);
+                    Ok(key)
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    Err(error)
+                }
+            };
+        }
+        Err(AgentError::HostKeyPathNotReadable { tried })
     }
 
     pub fn path(&self) -> &Path {
@@ -1937,6 +2175,9 @@ impl EphemeralHostKey {
 impl Drop for EphemeralHostKey {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        if let Some(dir) = &self.private_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
 }
 
@@ -2044,28 +2285,6 @@ mod tests {
             "nothing bounds how long an agent operation may take: the command has no deadline \
              and the measurement gives agent silence no upper bound to pick a threshold from"
         );
-    }
-
-    #[test]
-    fn only_a_platform_known_to_ignore_shutdown_is_not_awaited() {
-        let v8 = |version: &str| {
-            Path::new("1cv8")
-                .join(version)
-                .join("bin")
-                .join(UtilityType::V8.executable_name())
-        };
-        for version in ["8.3.24.1819", "8.3.25.1633", "8.3.26.1656"] {
-            assert!(ignores_shutdown(&v8(version)), "{version}");
-        }
-        for version in [
-            "8.3.23.1",
-            "8.3.27.0",
-            "8.3.27.2342",
-            "8.5.1.1529",
-            "custom",
-        ] {
-            assert!(!ignores_shutdown(&v8(version)), "{version}");
-        }
     }
 
     /// Очистка входит в срок команды и не заводит собственного: она берёт меньшее из
@@ -2588,6 +2807,51 @@ mod tests {
         let path = key.path().to_path_buf();
         drop(key);
         assert!(!path.exists(), "the one-time key outlived its owner");
+    }
+
+    /// Агент не читает ключ хоста по пути с кириллицей: при таком `workPath` одноразовый ключ
+    /// ложится в новый каталог под корнем с путём в ASCII, только для владельца, и уходит вместе
+    /// с каталогом; без такого корня — отказ со всеми испробованными путями
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[cfg(windows)]
+    #[test]
+    fn a_one_time_host_key_leaves_a_cyrillic_work_path_for_a_private_ascii_directory() {
+        let temp = tempfile::tempdir().expect("dir");
+        let ascii_work = temp.path().join("work");
+        let key = EphemeralHostKey::create_for(&ascii_work, &[]).expect("key in workPath");
+        assert!(key
+            .path()
+            .starts_with(ascii_work.join("agent").join("host-keys")));
+        drop(key);
+
+        let cyrillic_work = temp.path().join("Рабочая папка").join("ws3");
+        let root = temp.path().join("keys");
+        // Каталог, подложенный заранее под похожим именем, ключ не получает.
+        let planted = root.join(format!(
+            "{ONE_TIME_KEY_PREFIX}{}-planted",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&planted).expect("planted");
+        let key = EphemeralHostKey::create_for(&cyrillic_work, &[root.clone()]).expect("key");
+        assert!(
+            agent_reads_host_key_at(key.path()),
+            "{}",
+            key.path().display()
+        );
+        assert!(key.path().starts_with(&root));
+        assert!(!key.path().starts_with(&planted));
+        let dir = key.path().parent().expect("dir").to_path_buf();
+        assert_ne!(dir, root);
+        drop(key);
+        assert!(!dir.exists(), "the key directory outlived the key");
+
+        let refused = EphemeralHostKey::create_for(&cyrillic_work, &[temp.path().join("ключи")])
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&refused, AgentError::HostKeyPathNotReadable { tried } if tried.len() == 2),
+            "{refused}"
+        );
     }
 
     #[test]

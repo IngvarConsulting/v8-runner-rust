@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "ServiceAction": {
+      "description": "Что сделала команда.",
+      "enum": [
+        "started",
+        "already_running",
+        "stopped",
+        "nothing_to_stop",
+        "reported",
+        "planned"
+      ],
+      "type": "string"
+    },
+    "ServiceState": {
+      "description": "В каком состоянии служба сейчас.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_running",
+            "starting",
+            "started_by_this_copy"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Порт записи слушает процесс, которого раннер этой копии не запускал.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/standalone-start.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ServiceAction"
+    },
+    "connection": {
+      "description": "Строка соединения прямого шлюза.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "gate": {
+      "description": "Адрес SSH-шлюза.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "http": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "infobase": {
+      "type": "string"
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occupant_pid": {
+      "description": "Чужой процесс на порту записи.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "previous_port": {
+      "description": "Прямой порт прежнего блока, если запуск сменил занятый чужим процессом блок; SSH и\nHTTP шли в том блоке следом за ним.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "stale_record": {
+      "description": "Запись была, но процесса из неё уже нет.",
+      "type": "boolean"
+    },
+    "state": {
+      "$ref": "#/$defs/ServiceState"
+    },
+    "stopped_dbms_pid": {
+      "description": "PostgreSQL, погашенный вместе с сервером, потому что поднят его шагом.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stopped_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ok",
+    "infobase",
+    "state",
+    "action",
+    "ready",
+    "duration_ms"
+  ],
+  "title": "StandaloneResult",
+  "type": "object"
+}

@@ -389,6 +389,12 @@ pub(crate) fn deferred_interruption_warning_for_command(
     )
 }
 
+/// Пришла ли отмена — для работы, которая только прекращается и сама отмену не сообщает:
+/// обход того, что записала выгрузка, пока платформа отвечает про поколение (#571).
+pub(crate) fn interruption_pending(context: &ExecutionContext) -> bool {
+    context.interruption().is_some()
+}
+
 /// Ошибка отмены на безопасной точке, названной местом `place`, если отмена пришла.
 #[must_use]
 pub(crate) fn pending_interruption_error(

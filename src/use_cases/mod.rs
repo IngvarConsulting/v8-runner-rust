@@ -65,8 +65,12 @@ pub(crate) mod interruption;
 pub mod launch_app;
 /// Shared launch key policy for Enterprise-backed use cases.
 mod launch_keys;
+/// `agent hold`, `release`, `stop` и `status`: живой агент Конфигуратора по запросу.
+pub mod live_agent;
 /// Load packaged artifacts into infobase.
 pub mod load_artifact;
+/// Managed stand: services the runner starts and stops.
+pub mod managed_stand;
 /// `platforms`: установленные платформы и выбор раннера для проекта.
 pub mod platforms;
 /// Text-mode live progress events shared by CLI-facing use cases.
@@ -82,6 +86,8 @@ pub mod result;
 /// Test orchestration use case.
 pub mod run_tests;
 pub(crate) mod set_walk;
+/// Где искать изменения набора: у git или чтением файлов.
+pub(crate) mod source_changes;
 /// Read-only source-set runtime indexes shared by orchestrating use cases.
 pub(crate) mod source_inventory;
 /// Shared staged publication mechanics for full-replacement use-case outputs.

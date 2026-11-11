@@ -5,6 +5,8 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde_json::Value;
 use support::fake_agent::{start_fake_agent, FakeAgent, AGENT_PASSWORD};
@@ -21,6 +23,8 @@ struct Project {
     calls: PathBuf,
     binary: PathBuf,
     extension: bool,
+    /// Поколение конфигурации у поддельного агента: тест сдвигает его, как правка в базе.
+    agent_generation: Option<Arc<AtomicU64>>,
 }
 
 /// Поддельная платформа, которая выгружает в каталог из командной строки два файла.
@@ -63,6 +67,7 @@ fn project(provider: &str, extension: bool) -> Project {
     };
     let binary = root.join(if provider == "ibcmd" { "ibcmd" } else { "1cv8" });
     write_shell_script(&binary, &dumping_platform(&calls));
+    let mut agent_generation = None;
     let agent_yaml = if provider == "agent" {
         let base = root.join("agent-base");
         fs::create_dir_all(base.join("0")).expect("agent user dir");
@@ -71,13 +76,15 @@ fn project(provider: &str, extension: bool) -> Project {
             r#"{"usersInfo":[{"name":"","dir":"0"}]}"#,
         )
         .expect("agent map");
-        let port = start_fake_agent(FakeAgent::new(
+        let agent = FakeAgent::new(
             true,
             calls.clone(),
             Some(base.clone()),
             root.join("base-dir.txt"),
             root.join("designer.pid"),
-        ));
+        );
+        agent_generation = Some(agent.generation.clone());
+        let port = start_fake_agent(agent);
         format!(
             "  designer_agent:\n    attach: 127.0.0.1:{port}\n    base-dir: '{}'\n",
             base.display()
@@ -106,6 +113,7 @@ fn project(provider: &str, extension: bool) -> Project {
         calls,
         binary,
         extension,
+        agent_generation,
     }
 }
 
@@ -313,11 +321,11 @@ fn a_pull_from_one_base_does_not_mark_another_base_as_loaded() {
     let project = project("designer", false);
     pull(&project);
     // Память первой базы другой не достаётся: о второй памяти нет, и превью её отправки
-    // называет отказ `no_memory`, а не пропуск неизменившегося.
+    // называет отказ `untracked_base`, а не пропуск неизменившегося.
     let output = run(&project, &["--infobase", "second", "push", "--dry-run"]);
     let response: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     assert_eq!(
-        response["error"]["code"], "no_memory",
+        response["error"]["code"], "untracked_base",
         "another base inherited the first baseline: {response}"
     );
     assert_push_skips(&project);
@@ -349,8 +357,8 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     // Чужая память — отсутствие памяти (решение владельца от 06.10.2026): отказ
-    // `no_memory` называет её и оба выхода — выгрузку набора и перезапись.
-    assert_eq!(json["error"]["code"], "no_memory", "{json}");
+    // `untracked_base` называет её и оба выхода — выгрузку набора и перезапись.
+    assert_eq!(json["error"]["code"], "untracked_base", "{json}");
     let message = json.to_string();
     assert!(
         message.contains("written for another infobase or source directory"),
@@ -402,7 +410,7 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json["error"]["message"].as_str().expect("message");
-    assert_eq!(json["error"]["code"], "no_memory", "{json}");
+    assert_eq!(json["error"]["code"], "untracked_base", "{json}");
     assert!(message.contains("another infobase"), "{message}");
     // Раннер называет конфиг каноническим путём: на macOS временный `/var/…` — ссылка на
     // `/private/var/…`.
@@ -615,7 +623,7 @@ fn version_writing_platform(root: &Path) -> String {
     let fail = root.join("fail");
     format!(
         r#"printf '%s\n' "$*" >> '{calls}'
-case " $* " in *" -getChanges "*|*" export status "*) exit 0;; esac
+case " $* " in *" -getChanges "*) exit 1;; *" export status "*) exit 0;; esac
 target=''
 load=''
 update=''
@@ -1018,7 +1026,19 @@ fn a_preview_names_the_mode_the_pull_would_run() {
     assert_eq!(restored["data"]["mode"], "INCREMENTAL", "{restored}");
     assert_eq!(read(&version_file), "<ConfigDumpInfo/>\n");
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
-    assert_eq!(response["data"]["mode"], "INCREMENTAL", "{response}");
+    // Выгрузка шла с `-update`; поддельная платформа переписала каждый файл каталога, и
+    // режим по факту — полный (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    assert!(
+        read(&project.calls)
+            .lines()
+            .any(|line| line.contains("/DumpConfigToFiles") && line.contains("-update")),
+        "{response}"
+    );
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+    assert_eq!(
+        response["data"]["mode_reason"], "platform_rewrote_all",
+        "{response}"
+    );
 
     fs::remove_file(&version_file).expect("a lost version file");
     let lost = preview(&project);
@@ -1057,4 +1077,186 @@ fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
             .exists(),
         "a dump over the directory records no hashes"
     );
+}
+
+/// Поддельная платформа выгрузки по изменившемуся: поколение — из файла `token`, модуль —
+/// из файла `module` (так правка в базе доходит до выгрузки). С файлом `gone` выгрузка убирает
+/// `Gone.bsl`, с файлом `fail` она, успев записать, кончается сбоем.
+fn remembering_platform(root: &Path) -> String {
+    format!(
+        r#"printf '%s\n' "$*" >> '{calls}'
+out=''
+target=''
+exports=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/Out' ]; then out="$arg"; fi
+  if [ "$previous" = '/DumpConfigToFiles' ]; then target="$arg"; fi
+  if [ "$previous" = 'config' ] && [ "$arg" = 'export' ]; then exports=1; fi
+  previous="$arg"
+done
+case " $* " in
+  *'/GetConfigGenerationID'*) cat '{root}/token' > "$out"; exit 0 ;;
+  *' generation-id '*) cat '{root}/token'; exit 0 ;;
+  *' -getChanges '*) exit 1 ;;
+  *' export status '*) exit 0 ;;
+esac
+if [ -n "$exports" ]; then target="$previous"; fi
+if [ -n "$target" ]; then
+  mkdir -p "$target"
+  printf '<Configuration/>\n' > "$target/Configuration.xml"
+  cp '{root}/module' "$target/Module.bsl"
+  if [ -f '{root}/gone' ]; then rm -f "$target/Gone.bsl"; else printf 'gone\n' > "$target/Gone.bsl"; fi
+  printf '<ConfigDumpInfo version="2.17" dump="%s"/>\n' "$(cat '{root}/token')" > "$target/ConfigDumpInfo.xml"
+  if [ -f '{root}/fail' ]; then exit 1; fi
+fi
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0"#,
+        calls = root.join("calls.log").display(),
+        root = root.display(),
+    )
+}
+
+fn root_of(project: &Project) -> &Path {
+    project.config.parent().expect("project root")
+}
+
+fn remembering_project(provider: &str) -> Project {
+    let project = project(provider, false);
+    let root = root_of(&project);
+    fs::write(root.join("token"), format!("{:040}", 1)).expect("token");
+    fs::write(root.join("module"), "Procedure Base()\nEndProcedure\n").expect("module");
+    if provider != "agent" {
+        write_shell_script_atomically(&project.binary, &remembering_platform(root));
+    }
+    project
+}
+
+/// Правка в базе: новое поколение и, где платформа поддельная, новый текст модуля.
+fn edit_base(project: &Project, round: u64) {
+    match &project.agent_generation {
+        Some(generation) => {
+            generation.fetch_add(1, Ordering::SeqCst);
+        }
+        None => {
+            let root = root_of(project);
+            fs::write(root.join("token"), format!("{:040}", round + 1)).expect("token");
+            fs::write(
+                root.join("module"),
+                format!("Procedure Edited{round}()\nEndProcedure\n"),
+            )
+            .expect("module");
+        }
+    }
+}
+
+/// Грузит ли `push` что-нибудь в базу; ответ сверяется с вызовами платформы.
+fn push_loads(project: &Project) -> bool {
+    let before = fs::read_to_string(&project.calls).unwrap_or_default().len();
+    let response = succeeded(run(project, &["push"]));
+    let steps = response["data"]["steps"].as_array().expect("push steps");
+    let skipped = !steps.is_empty() && steps.iter().all(|step| step["mode"] == "skipped");
+    let calls = fs::read_to_string(&project.calls).unwrap_or_default();
+    let new_calls = &calls[before..];
+    let loaded = [
+        "/LoadConfigFromFiles",
+        "config import",
+        "load-config-from-files",
+    ]
+    .iter()
+    .any(|load| new_calls.contains(load));
+    assert_eq!(skipped, !loaded, "{response}\n{new_calls}");
+    loaded
+}
+
+/// Выгрузка поверх каталога: сторож пускает её только в закоммиченное дерево.
+fn pull_by_changes(project: &Project) -> Output {
+    commit_project(project);
+    run(project, &["pull", "--source-set", "main"])
+}
+
+/// После выгрузки по изменившемуся память знает, что легло в каталог: `push` без правок
+/// человека ничего не грузит — у всех исполнителей выгрузки (#557).
+#[test]
+fn a_push_after_a_pull_by_changes_loads_nothing() {
+    for provider in ["designer", "ibcmd", "agent"] {
+        let project = remembering_project(provider);
+        pull(&project);
+        assert!(!push_loads(&project), "{provider}: after the full pull");
+        for round in 1..=2 {
+            edit_base(&project, round);
+            let response = succeeded(pull_by_changes(&project));
+            // Поддельные Конфигуратор и агент переписывают каждый файл каталога: режим по
+            // факту полный. `ibcmd` называет режим по прогнозу.
+            let (mode, reason) = if provider == "ibcmd" {
+                ("INCREMENTAL", Value::Null)
+            } else {
+                ("FULL", Value::from("platform_rewrote_all"))
+            };
+            assert_eq!(response["data"]["mode"], mode, "{provider}: {response}");
+            assert_eq!(
+                response["data"]["mode_reason"], reason,
+                "{provider}: {response}"
+            );
+            if project.agent_generation.is_none() {
+                assert_eq!(
+                    read(&project.sources.join("Module.bsl")),
+                    format!("Procedure Edited{round}()\nEndProcedure\n"),
+                    "{provider}"
+                );
+            }
+            assert!(!push_loads(&project), "{provider}: round {round}");
+        }
+    }
+}
+
+/// Правка человека в другом файле после выгрузки по изменившемуся остаётся изменением.
+#[test]
+fn a_user_edit_after_a_pull_by_changes_is_still_loaded() {
+    for provider in ["designer", "ibcmd", "agent"] {
+        let project = remembering_project(provider);
+        pull(&project);
+        edit_base(&project, 1);
+        succeeded(pull_by_changes(&project));
+        fs::write(
+            project.sources.join("Mine.bsl"),
+            "Procedure Mine()\nEndProcedure\n",
+        )
+        .expect("user edit");
+        assert!(push_loads(&project), "{provider}");
+    }
+}
+
+/// Файл, который выгрузка убрала, не грузится заново и не числится удалённым.
+#[test]
+fn a_file_removed_by_a_pull_by_changes_is_forgotten() {
+    for provider in ["designer", "ibcmd"] {
+        let project = remembering_project(provider);
+        pull(&project);
+        assert!(project.sources.join("Gone.bsl").is_file(), "{provider}");
+        edit_base(&project, 1);
+        fs::write(root_of(&project).join("gone"), "").expect("gone flag");
+        succeeded(pull_by_changes(&project));
+        assert!(!project.sources.join("Gone.bsl").exists(), "{provider}");
+        assert!(!push_loads(&project), "{provider}");
+    }
+}
+
+/// Отказ выгрузки память не меняет.
+#[test]
+fn a_failed_pull_by_changes_leaves_the_memory() {
+    for provider in ["designer", "ibcmd"] {
+        let project = remembering_project(provider);
+        pull(&project);
+        let memory = fs::read(snapshot(&project)).expect("memory after the full pull");
+        edit_base(&project, 1);
+        fs::write(root_of(&project).join("fail"), "").expect("fail flag");
+        let output = pull_by_changes(&project);
+        assert!(!output.status.success(), "{provider}");
+        assert_eq!(
+            fs::read(snapshot(&project)).expect("memory"),
+            memory,
+            "{provider}"
+        );
+    }
 }

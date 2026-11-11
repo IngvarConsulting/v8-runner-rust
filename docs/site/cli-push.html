@@ -6,7 +6,7 @@
 <title>push — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -156,7 +157,7 @@ my-ext: удалён</code></pre>
   ваше:            2b91…
   сперва выполните: v8-runner pull</code></pre>
 <h4 id="push-no-memory" data-response-class="planned">Нет памяти обмена с непустой базой</h4>
-<p>Для <a href="#op-push">обычного push</a>, <a href="#push-variant-2">--no-apply</a> и <a href="#push-variant-3">--full</a> без <code>--force</code>. <span class="plan-badge">План</span> <code>no_memory</code>: база не изменена. <code>pull</code> позволяет прочитать базу; <a href="#push-variant-4">--force</a> разрешает перезапись. Пустая база не требует прошлой памяти.</p>
+<p>Для <a href="#op-push">обычного push</a>, <a href="#push-variant-2">--no-apply</a> и <a href="#push-variant-3">--full</a> без <code>--force</code>. <span class="plan-badge">План</span> <code>untracked_base</code>: база не изменена. <code>pull</code> позволяет прочитать базу; <a href="#push-variant-4">--force</a> разрешает перезапись. Пустая база не требует прошлой памяти.</p>
 <pre data-output-example="push-no-memory-refusal" data-output-schema="planned"><code>$ v8-runner push
 ✖ Отправка отклонена: база не пуста, а памяти о ней ещё нет
   поколение базы:  7f3a…
@@ -355,8 +356,8 @@ ERROR: timed out: configuration load timed out</code></pre>
     "warnings": [],
     "steps": [],
     "error": {
-      "code": "no_memory",
-      "kind": "no_memory",
+      "code": "untracked_base",
+      "kind": "untracked_base",
       "message": "✖ Отправка отклонена: база не пуста, а памяти о ней ещё нет\n  поколение базы:  7f3a…\n  ваше:            —\n  посмотреть, что в базе:  v8-runner pull\n  перезаписать базу:       v8-runner push --force",
       "base_generation": "7f3a",
       "next": {
@@ -561,6 +562,6 @@ ERROR: timed out: configuration load timed out</code></pre>
     }
   }
 }</script>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

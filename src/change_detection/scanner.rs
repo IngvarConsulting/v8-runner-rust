@@ -1,6 +1,10 @@
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::Duration;
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -36,14 +40,21 @@ pub enum ScanError {
     RelativePath { root: PathBuf, path: PathBuf },
 }
 
-/// Directory/file names that are always excluded from scanning.
+/// Directory/file names that are always excluded from scanning. `.local` is the default
+/// `localPath`: a second guard behind [`runner_dirs_inside`](super::runner_dirs::runner_dirs_inside).
 const IGNORED_DIRS: &[&str] = &[
-    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit",
+    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit", ".local",
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
+/// Name prefix of the file an incremental dump writes into the tree to read its clock.
+pub(crate) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
 
 /// An ignored file, or the temporary file of its atomic replacement left by a killed process.
 fn is_ignored_file(name: &str) -> bool {
+    // The clock probe of an incremental dump, left behind only by a killed process.
+    if name.starts_with(DUMP_START_PROBE) {
+        return true;
+    }
     IGNORED_FILES.iter().any(|ignored| {
         name.strip_prefix(ignored).is_some_and(|rest| {
             rest.is_empty() || rest.starts_with(crate::support::fs::ATOMIC_WRITE_CANDIDATE_SUFFIX)
@@ -119,32 +130,56 @@ pub(super) enum ScanScope {
 /// successful post-publication bookkeeping supplies an always-false predicate.
 #[cfg(test)]
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
-    scan_in_scope(root, None, interrupted, ScanScope::Push)
+    scan_in_scope(root, &[], interrupted, ScanScope::Push)
 }
 
-/// `workPath` under a source-set root, named as the walk of that root names it. A set in the
-/// workspace root holds it, and it can have any name.
-pub fn work_path_inside(root: &Path, work_path: &Path) -> Option<PathBuf> {
-    let root_real = root.canonicalize().ok()?;
-    let work_real = work_path.canonicalize().ok()?;
-    let relative = work_real.strip_prefix(&root_real).ok()?;
-    (!relative.as_os_str().is_empty()).then(|| root.join(relative))
-}
-
-/// Hash the files selected by the scan scope, excluding the supplied directory.
+/// Hash the files selected by the scan scope, excluding the supplied directories.
 pub(super) fn scan_in_scope(
     root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
     scope: ScanScope,
 ) -> Result<ScanSnapshot, ScanError> {
+    scan_with_workers(root, excluded, interrupted, scope, hash_workers())
+}
+
+fn scan_with_workers(
+    root: &Path,
+    excluded: &[PathBuf],
+    interrupted: &mut dyn FnMut() -> bool,
+    scope: ScanScope,
+    workers: usize,
+) -> Result<ScanSnapshot, ScanError> {
+    let listed = list_in_scope(root, excluded, interrupted, scope)?;
+    let files = hash_listed_with(listed.files, workers, interrupted)?;
+    Ok(ScanSnapshot {
+        scan_started_at: listed.scan_started_at,
+        files,
+        has_untracked_links: listed.has_untracked_links,
+    })
+}
+
+/// The selected files of a tree with their metadata, before any content is read.
+pub(super) struct Listing {
+    pub(super) scan_started_at: u64,
+    pub(super) files: Vec<Candidate>,
+    pub(super) has_untracked_links: bool,
+}
+
+/// Walk the tree and select its source files without reading them.
+pub(super) fn list_in_scope(
+    root: &Path,
+    excluded: &[PathBuf],
+    interrupted: &mut dyn FnMut() -> bool,
+    scope: ScanScope,
+) -> Result<Listing, ScanError> {
     check_interruption(interrupted)?;
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
             path: root.to_path_buf(),
             source,
         })?;
-    let mut files = Vec::new();
+    let mut candidates = Vec::new();
     let mut has_untracked_links = false;
 
     for entry in source_entries(root, excluded, scope) {
@@ -163,9 +198,14 @@ pub(super) fn scan_in_scope(
             continue;
         }
         let path = entry.path();
-        let meta = std::fs::metadata(path).map_err(|e| ScanError::Meta {
+        // A selected entry is a regular file, never a link, so the walk's own metadata is the
+        // file's. On Windows it comes with the directory listing and opens no file; a
+        // separate `fs::metadata` opened every file of the tree once more (#571).
+        let meta = entry.metadata().map_err(|e| ScanError::Meta {
             path: path.to_path_buf(),
-            source: e,
+            source: e.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("the walk reported no metadata for a selected file")
+            }),
         })?;
 
         let mtime_ns = mtime_nanos(
@@ -176,46 +216,242 @@ pub(super) fn scan_in_scope(
             path: path.to_path_buf(),
             source,
         })?;
-        let rel_path = rel_path(root, path)?;
-        let hash = hash_file(path, interrupted)?;
-        files.push(HashedFile {
+        candidates.push(Candidate {
+            rel_path: rel_path(root, path)?,
             path: path.to_path_buf(),
-            rel_path,
             mtime_ns,
-            hash,
         });
     }
 
-    check_interruption(interrupted)?;
-    Ok(ScanSnapshot {
+    Ok(Listing {
         scan_started_at,
-        files,
+        files: candidates,
         has_untracked_links,
     })
 }
 
-/// Compute SHA-256 hex digest of a file's contents.
-pub fn hash_file(path: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<String, ScanError> {
+fn hash_listed_with(
+    files: Vec<Candidate>,
+    workers: usize,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<HashedFile>, ScanError> {
+    let hashes = hash_candidates(&files, workers, interrupted, &hash_file)?;
     check_interruption(interrupted)?;
-    let file = std::fs::File::open(path).map_err(|e| ScanError::Read {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    hash_reader(file, path, interrupted)
+    Ok(files
+        .into_iter()
+        .zip(hashes)
+        .map(|(candidate, hash)| HashedFile {
+            path: candidate.path,
+            rel_path: candidate.rel_path,
+            mtime_ns: candidate.mtime_ns,
+            hash,
+        })
+        .collect())
 }
 
+/// Hash listed files by content and keep only those whose modification time stayed put while
+/// they were read: an edit saved during the read may already be in the digest, and such a file
+/// is left out, so it stays a change (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). The
+/// second look at the time happens in the reading worker, right after the read.
+pub(super) fn hash_listed_unmoved(
+    files: Vec<Candidate>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<HashedFile>, ScanError> {
+    let read = |path: &Path, stop: &mut dyn FnMut() -> bool| {
+        let hash = hash_file(path, stop)?;
+        let after = std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| mtime_nanos(modified, path).ok());
+        Ok((hash, after))
+    };
+    let hashes = hash_candidates(&files, hash_workers(), interrupted, &read)?;
+    check_interruption(interrupted)?;
+    Ok(files
+        .into_iter()
+        .zip(hashes)
+        .filter(|(candidate, (_, after))| *after == Some(candidate.mtime_ns))
+        .map(|(candidate, (hash, _))| HashedFile {
+            path: candidate.path,
+            rel_path: candidate.rel_path,
+            mtime_ns: candidate.mtime_ns,
+            hash,
+        })
+        .collect())
+}
+
+/// A selected file whose content is still to be read.
+pub(super) struct Candidate {
+    pub(super) path: PathBuf,
+    pub(super) rel_path: String,
+    pub(super) mtime_ns: u64,
+}
+
+/// Below this many files the threads cost more than they save; the set is read in order.
+const PARALLEL_HASH_FROM: usize = 64;
+/// Reading past this many threads gave nothing on the measured disks (#556).
+const MAX_HASH_WORKERS: usize = 8;
+/// How often the caller's interruption predicate is asked while the workers read.
+const INTERRUPTION_POLL: Duration = Duration::from_millis(5);
+/// No candidate has failed yet.
+const NO_FAILURE: usize = usize::MAX;
+
+fn hash_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(MAX_HASH_WORKERS)
+}
+
+/// Stops every worker when one of them panics, so the others do not read the rest of the set
+/// before the panic reaches the caller.
+struct StopOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Hash every candidate, the digests in candidate order whatever the number of workers.
+///
+/// The interruption predicate stays on the calling thread: it is polled while the workers
+/// read and raises a shared cancel flag that every worker checks between files and around
+/// each block. A read failure stops the workers on later candidates only, so the earliest
+/// failing candidate is reported, as a sequential read reports it. No digest is returned
+/// after a cancellation or a failure.
+fn hash_candidates<H, T>(
+    candidates: &[Candidate],
+    workers: usize,
+    interrupted: &mut dyn FnMut() -> bool,
+    hash: &H,
+) -> Result<Vec<T>, ScanError>
+where
+    H: Fn(&Path, &mut dyn FnMut() -> bool) -> Result<T, ScanError> + Sync,
+    T: Send + Sync,
+{
+    let workers = workers.min(candidates.len());
+    if workers <= 1 || candidates.len() < PARALLEL_HASH_FROM {
+        return candidates
+            .iter()
+            .map(|candidate| hash(&candidate.path, interrupted))
+            .collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let cancel = AtomicBool::new(false);
+    let first_failure = AtomicUsize::new(NO_FAILURE);
+    let digests: Vec<OnceLock<T>> = candidates.iter().map(|_| OnceLock::new()).collect();
+    let failure: Mutex<Option<(usize, ScanError)>> = Mutex::new(None);
+    let mut cancelled = false;
+
+    std::thread::scope(|scope| {
+        let (done, finished) = mpsc::channel::<()>();
+        for _ in 0..workers {
+            let done = done.clone();
+            let (next, cancel, first_failure, digests, failure) =
+                (&next, &cancel, &first_failure, &digests, &failure);
+            scope.spawn(move || {
+                let _guard = StopOnPanic(cancel);
+                let stopped = |index: usize| {
+                    cancel.load(Ordering::Relaxed) || first_failure.load(Ordering::Relaxed) < index
+                };
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(candidate) = candidates.get(index) else {
+                        break;
+                    };
+                    if stopped(index) {
+                        break;
+                    }
+                    match hash(&candidate.path, &mut || stopped(index)) {
+                        Ok(digest) => {
+                            let stored = digests[index].set(digest);
+                            debug_assert!(stored.is_ok(), "candidate {index} hashed twice");
+                        }
+                        // Raised by a flag: the reason is a cancellation or an earlier failure.
+                        Err(ScanError::Interrupted) => break,
+                        Err(error) => {
+                            first_failure.fetch_min(index, Ordering::Relaxed);
+                            let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.as_ref().is_none_or(|(earliest, _)| index < *earliest) {
+                                *slot = Some((index, error));
+                            }
+                            break;
+                        }
+                    }
+                }
+                drop(done);
+            });
+        }
+        drop(done);
+        // Every sender is dropped when its worker ends; the loop ends with the last of them.
+        while let Err(mpsc::RecvTimeoutError::Timeout) = finished.recv_timeout(INTERRUPTION_POLL) {
+            if !cancelled && interrupted() {
+                cancelled = true;
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+
+    if cancelled {
+        return Err(ScanError::Interrupted);
+    }
+    if let Some((_, error)) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        return Err(error);
+    }
+    Ok(digests
+        .into_iter()
+        .map(|digest| {
+            digest
+                .into_inner()
+                .expect("without a cancellation or a failure every candidate is hashed")
+        })
+        .collect())
+}
+
+/// How many times a file whose length moved while it was read is read again.
+const LENGTH_RETRIES: usize = 2;
+
+/// The git blob id of a file's contents, as `git hash-object --no-filters` computes it: the
+/// SHA-1 of `blob <length>\0` and the bytes (#575). Without git the memory holds the ids git
+/// would give the file without filters, so one memory serves a set with and without git.
+pub fn hash_file(path: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<String, ScanError> {
+    let read_error = |source| ScanError::Read {
+        path: path.to_path_buf(),
+        source,
+    };
+    for _ in 0..=LENGTH_RETRIES {
+        check_interruption(interrupted)?;
+        let file = std::fs::File::open(path).map_err(read_error)?;
+        let length = file.metadata().map_err(read_error)?.len();
+        if let Some(id) = hash_reader(file, length, path, interrupted)? {
+            return Ok(id);
+        }
+    }
+    Err(read_error(std::io::Error::other(
+        "the file length kept changing while it was read",
+    )))
+}
+
+/// The blob id of `length` bytes read from `reader`; `None` when the reader gave another number
+/// of bytes — the file changed while it was read.
 fn hash_reader(
     mut reader: impl Read,
+    length: u64,
     path: &Path,
     interrupted: &mut dyn FnMut() -> bool,
-) -> Result<String, ScanError> {
+) -> Result<Option<String>, ScanError> {
     // Working storage, not a maximum file size. Files of any size are streamed.
     let mut buffer = [0u8; 64 * 1024];
-    let mut digest = Sha256::new();
+    let mut digest = Sha1::new();
+    digest.update(format!("blob {length}\0").as_bytes());
+    let mut read: u64 = 0;
     loop {
         check_interruption(interrupted)?;
-        let length = match reader.read(&mut buffer) {
-            Ok(length) => length,
+        let got = match reader.read(&mut buffer) {
+            Ok(got) => got,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(source) => {
                 return Err(ScanError::Read {
@@ -225,12 +461,13 @@ fn hash_reader(
             }
         };
         check_interruption(interrupted)?;
-        if length == 0 {
+        if got == 0 {
             break;
         }
-        digest.update(&buffer[..length]);
+        read += got as u64;
+        digest.update(&buffer[..got]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok((read == length).then(|| format!("{:x}", digest.finalize())))
 }
 
 fn check_interruption(interrupted: &mut dyn FnMut() -> bool) -> Result<(), ScanError> {
@@ -270,14 +507,16 @@ pub(crate) fn top_level_source_entries(
 /// The entries of a source tree, without the generated directories and `excluded`.
 pub(super) fn source_entries<'a>(
     root: &Path,
-    excluded: Option<&'a Path>,
+    excluded: &'a [PathBuf],
     scope: ScanScope,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> + 'a {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(move |entry| {
-            entry.depth() == 0 || !(is_ignored_dir(entry, scope) || excluded == Some(entry.path()))
+            entry.depth() == 0
+                || !(is_ignored_dir(entry, scope)
+                    || excluded.iter().any(|path| path == entry.path()))
         })
 }
 
@@ -293,27 +532,72 @@ pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: Scan
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    let Some(name) = entry.file_name().to_str() else {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| is_ignored_dir_name(name, scope))
+}
+
+/// Whether a file below a set root, named by its path from the root with `/`, is one the push
+/// walk selects: the same name predicates as [`source_entries`] and [`is_source_file`], so a
+/// listing that comes from git selects exactly what the walk selects (#575). Every component
+/// but the last names a directory below the root. Links and `workPath` are the caller's.
+pub(super) fn is_push_source_rel_path(rel: &str) -> bool {
+    let mut parts = rel.split('/');
+    let Some(name) = parts.next_back() else {
         return false;
     };
+    !name.is_empty()
+        && !is_ignored_file(name)
+        && !parts.any(|dir| is_ignored_dir_name(dir, ScanScope::Push))
+}
+
+fn is_ignored_dir_name(name: &str, scope: ScanScope) -> bool {
     match scope {
         ScanScope::Push => IGNORED_DIRS.contains(&name),
         // A metadata object can itself be named build, target, temp, or tmp.
-        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit"),
+        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit" | ".local"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, scan_in_scope, work_path_inside, ScanScope, ScanSnapshot};
+    use super::{scan, scan_in_scope, ScanScope, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
+    use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
+
+    /// Файл, время которого не то, что было в перечне, — его правили, пока его читали, — из
+    /// ответа уходит; нетронутый остаётся с хешем (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`).
+    #[test]
+    fn a_file_whose_time_moved_while_it_was_read_is_left_out() {
+        let dir = tempdir().expect("dir");
+        let candidate = |name: &str, shift: u64| {
+            let path = dir.path().join(name);
+            fs::write(&path, name).expect("file");
+            let mtime_ns = mtime_nanos(
+                fs::metadata(&path)
+                    .expect("meta")
+                    .modified()
+                    .expect("mtime"),
+                &path,
+            )
+            .expect("ns");
+            super::Candidate {
+                path,
+                rel_path: name.to_owned(),
+                mtime_ns: mtime_ns - shift,
+            }
+        };
+        let files = vec![candidate("Kept.bsl", 0), candidate("Moved.bsl", 1)];
+        let hashed = super::hash_listed_unmoved(files, &mut || false).expect("hashed");
+        let names: Vec<_> = hashed.iter().map(|file| file.rel_path.as_str()).collect();
+        assert_eq!(names, ["Kept.bsl"]);
+    }
 
     fn scanned_names(snapshot: &ScanSnapshot) -> Vec<&str> {
         snapshot
@@ -337,24 +621,42 @@ mod tests {
         assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
     }
 
-    /// `workPath` внутри набора не исходник, как бы он ни назывался.
+    /// `workPath` и `localPath` внутри набора не исходники, как бы они ни назывались.
     #[test]
     fn a_work_path_inside_the_root_is_not_a_source_whatever_its_name() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("root");
         let work = root.join("service-area");
+        let local = root.join("personal");
         fs::create_dir_all(&work).expect("work");
+        fs::create_dir_all(local.join("db")).expect("local");
         fs::write(work.join("log.txt"), "log").expect("service file");
+        fs::write(local.join("db").join("1Cv8.1CD"), "base").expect("personal file");
         fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
 
-        let excluded = work_path_inside(&root, &work);
-        assert_eq!(excluded.as_deref(), Some(work.as_path()));
-        let snapshot = scan_in_scope(&root, excluded.as_deref(), &mut || false, ScanScope::Push)
-            .expect("scan");
+        let excluded = runner_dirs_inside(&root, RunnerDirs::new(&work, Some(&local)));
+        assert_eq!(excluded, [work.clone(), local.clone()]);
+        for scope in [ScanScope::Push, ScanScope::Build] {
+            let snapshot = scan_in_scope(&root, &excluded, &mut || false, scope).expect("scan");
+            assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        }
+        assert!(runner_dirs_inside(&root, RunnerDirs::new(dir.path(), None)).is_empty());
+        assert!(runner_dirs_inside(&root, RunnerDirs::new(&root, None)).is_empty());
+    }
 
-        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
-        assert_eq!(work_path_inside(&root, dir.path()), None);
-        assert_eq!(work_path_inside(&root, &root), None);
+    /// `.local` под корнем набора пропускается по имени и без настроек: вторая защита
+    /// `localPath` по умолчанию.
+    #[test]
+    fn the_default_local_directory_is_skipped_by_its_name() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join(".local").join("db")).expect("local");
+        fs::write(root.join(".local").join("db").join("1Cv8.1CD"), "base").expect("base");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+        for scope in [ScanScope::Push, ScanScope::Build] {
+            let snapshot = scan_in_scope(root, &[], &mut || false, scope).expect("scan");
+            assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        }
     }
 
     fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
@@ -510,10 +812,15 @@ mod tests {
             left: length,
             largest: 0,
         };
-        let hash =
-            super::hash_reader(&mut reader, Path::new("large"), &mut || false).expect("hash");
-        use sha2::{Digest, Sha256};
-        assert_eq!(hash, format!("{:x}", Sha256::digest(vec![17; length])));
+        let hash = super::hash_reader(&mut reader, length as u64, Path::new("large"), &mut || {
+            false
+        })
+        .expect("hash")
+        .expect("all bytes");
+        use sha1::{Digest, Sha1};
+        let mut expected = format!("blob {length}\0").into_bytes();
+        expected.extend(vec![17; length]);
+        assert_eq!(hash, format!("{:x}", Sha1::digest(expected)));
         assert_eq!(reader.left, 0);
         assert!(reader.largest <= 64 * 1024);
     }
@@ -551,8 +858,9 @@ mod tests {
                 cancelled: cancelled.clone(),
                 cancel,
             };
-            let error = super::hash_reader(reader, Path::new("partial"), &mut || cancelled.get())
-                .expect_err("no partial hash");
+            let error =
+                super::hash_reader(reader, 3, Path::new("partial"), &mut || cancelled.get())
+                    .expect_err("no partial hash");
             if cancel {
                 assert!(matches!(error, super::ScanError::Interrupted));
                 assert_eq!(reads.get(), 1, "no read after cancellation");
@@ -579,11 +887,34 @@ mod tests {
                 }
             }
         }
-        let digest = super::hash_reader(OnceInterrupted(true), Path::new("empty"), &mut || false)
-            .expect("retry then EOF");
+        let digest =
+            super::hash_reader(OnceInterrupted(true), 0, Path::new("empty"), &mut || false)
+                .expect("retry then EOF");
+        // The id git gives an empty file.
         assert_eq!(
-            digest,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            digest.as_deref(),
+            Some("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+        );
+    }
+
+    /// Without git a file is hashed as `git hash-object --no-filters` hashes it, so one memory
+    /// serves a set with and without git (#575); a file whose length moved while it was read
+    /// gives no id.
+    #[test]
+    fn a_file_is_hashed_as_git_hashes_it_without_filters() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("Module.bsl");
+        fs::write(&file, "line\r\n").expect("file");
+        let id = super::hash_file(&file, &mut || false).expect("id");
+        let git = std::process::Command::new("git")
+            .args(["hash-object", "--no-filters"])
+            .arg(&file)
+            .output()
+            .expect("git");
+        assert_eq!(id, String::from_utf8_lossy(&git.stdout).trim());
+        assert_eq!(
+            super::hash_reader(&b"abc"[..], 4, Path::new("short"), &mut || false).expect("read"),
+            None
         );
     }
 
@@ -592,7 +923,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("A.bsl"), "first").expect("first");
         fs::write(dir.path().join("B.bsl"), "second").expect("second");
-        // Root, first file and its read finish before the second directory entry.
+        // The walk ends, the first file is read, and the ninth check comes at its end.
         let mut checkpoints = 0;
         let error = scan(dir.path(), &mut || {
             checkpoints += 1;
@@ -601,5 +932,180 @@ mod tests {
         .expect_err("cancelled");
         assert!(matches!(error, super::ScanError::Interrupted));
         assert_eq!(checkpoints, 9);
+    }
+
+    fn many_files(root: &Path, count: usize) {
+        for index in 0..count {
+            let dir = root.join(format!("Dir{}", index % 7)).join("Ext");
+            fs::create_dir_all(&dir).expect("dir");
+            // Some files span several working buffers.
+            let size = if index % 50 == 0 {
+                200 * 1024
+            } else {
+                index * 13
+            };
+            let body: Vec<u8> = (0..size).map(|byte| (byte * 31 + index) as u8).collect();
+            fs::write(dir.join(format!("Module{index}.bsl")), body).expect("file");
+        }
+    }
+
+    #[test]
+    fn a_parallel_read_gives_the_snapshot_of_a_sequential_one() {
+        let dir = tempdir().expect("tempdir");
+        many_files(dir.path(), 300);
+        let read = |workers| {
+            super::scan_with_workers(dir.path(), &[], &mut || false, ScanScope::Push, workers)
+                .expect("scan")
+        };
+        let sequential = read(1);
+        assert_eq!(sequential.files.len(), 300);
+        for workers in [2, 8] {
+            let parallel = read(workers);
+            let entries = |snapshot: &ScanSnapshot| {
+                snapshot
+                    .files
+                    .iter()
+                    .map(|file| {
+                        (
+                            file.path.clone(),
+                            file.rel_path.clone(),
+                            file.mtime_ns,
+                            file.hash.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                entries(&parallel),
+                entries(&sequential),
+                "{workers} workers"
+            );
+            assert_eq!(parallel.has_untracked_links, sequential.has_untracked_links);
+        }
+    }
+
+    fn fake_candidates(count: usize) -> Vec<super::Candidate> {
+        (0..count)
+            .map(|index| super::Candidate {
+                path: format!("file-{index}").into(),
+                rel_path: format!("file-{index}"),
+                mtime_ns: 0,
+            })
+            .collect()
+    }
+
+    /// Reads until the shared stop flag is raised, or gives up so a broken flag fails the test.
+    fn read_until_stopped(
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> Result<String, super::ScanError> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(20) {
+            if interrupted() {
+                return Err(super::ScanError::Interrupted);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok("never stopped".to_owned())
+    }
+
+    #[test]
+    fn a_failed_read_stops_the_other_workers_without_a_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let candidates = fake_candidates(200);
+        let started = AtomicUsize::new(0);
+        let hash = |path: &Path, interrupted: &mut dyn FnMut() -> bool| {
+            started.fetch_add(1, Ordering::Relaxed);
+            match path.to_str().expect("name") {
+                // Files before the failing one are read to the end, as a sequential read would.
+                "file-0" | "file-1" | "file-2" | "file-3" | "file-4" => Ok("read".to_owned()),
+                "file-5" => Err(super::ScanError::Read {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other("unreadable"),
+                }),
+                _ => read_until_stopped(interrupted),
+            }
+        };
+        let clock = std::time::Instant::now();
+        let error = super::hash_candidates(&candidates, 8, &mut || false, &hash)
+            .expect_err("a failed read gives no snapshot");
+        assert!(
+            matches!(&error, super::ScanError::Read { path, .. } if path == Path::new("file-5")),
+            "{error:?}"
+        );
+        assert!(
+            clock.elapsed() < Duration::from_secs(10),
+            "workers were not stopped"
+        );
+        assert!(
+            started.load(Ordering::Relaxed) < 20,
+            "files kept being read after the failure"
+        );
+    }
+
+    #[test]
+    fn the_earliest_failing_file_is_reported_whichever_fails_first() {
+        let candidates = fake_candidates(200);
+        let unreadable = |path: &Path| super::ScanError::Read {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("unreadable"),
+        };
+        let hash = |path: &Path, interrupted: &mut dyn FnMut() -> bool| {
+            let index: usize = path.to_str().expect("name")[5..].parse().expect("index");
+            match index {
+                0..10 => Ok("read".to_owned()),
+                // The earlier file fails late, after the later one has already failed.
+                10 => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    if interrupted() {
+                        return Err(super::ScanError::Interrupted);
+                    }
+                    Err(unreadable(path))
+                }
+                11 => Err(unreadable(path)),
+                _ => read_until_stopped(interrupted),
+            }
+        };
+        let error = super::hash_candidates(&candidates, 8, &mut || false, &hash)
+            .expect_err("a failed read gives no snapshot");
+        assert!(
+            matches!(&error, super::ScanError::Read { path, .. } if path == Path::new("file-10")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancellation_stops_the_workers_without_a_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let candidates = fake_candidates(200);
+        let started = AtomicUsize::new(0);
+        let hash = |_: &Path, interrupted: &mut dyn FnMut() -> bool| {
+            started.fetch_add(1, Ordering::Relaxed);
+            read_until_stopped(interrupted)
+        };
+        let mut polls = 0;
+        let clock = std::time::Instant::now();
+        let error = super::hash_candidates(
+            &candidates,
+            8,
+            &mut || {
+                polls += 1;
+                polls >= 3
+            },
+            &hash,
+        )
+        .expect_err("a cancelled read gives no snapshot");
+        assert!(matches!(error, super::ScanError::Interrupted), "{error:?}");
+        assert_eq!(
+            polls, 3,
+            "the predicate is asked on the calling thread only until it says stop"
+        );
+        assert!(
+            clock.elapsed() < Duration::from_secs(10),
+            "workers were not stopped"
+        );
+        assert!(
+            started.load(Ordering::Relaxed) <= 8,
+            "no file starts after the cancellation"
+        );
     }
 }

@@ -679,13 +679,20 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
         "оба",
     ),
     (
+        "use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md",
+        "пяти",
+    ),
+    (
         "use-cases/an-untracked-directory-is-refused-not-replaced.md",
         "двадцать",
     ),
     ("use-cases/edt-keeps-two-change-contexts.md", "две"),
     ("wire/check-data.md", "двумя,три"),
     ("wire/clone-data.md", "два,обоими"),
-    ("wire/command-envelope.md", "два,четыре,обоими,два,два"),
+    (
+        "wire/command-envelope.md",
+        "два,четыре,обоими,два,тремя,три,два",
+    ),
     ("wire/infobase-restore-data.md", "двумя"),
     ("wire/launch-data.md", "двух,два,оба"),
     ("wire/pull-data.md", "двадцати"),

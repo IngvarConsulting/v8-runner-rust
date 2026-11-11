@@ -99,7 +99,8 @@ pub(super) fn change_detection_failure(
             )
         }
         analyzer::ChangeDetectionError::StorageHard { .. }
-        | analyzer::ChangeDetectionError::ConcurrentStateModified { .. } => error.to_string(),
+        | analyzer::ChangeDetectionError::ConcurrentStateModified { .. }
+        | analyzer::ChangeDetectionError::HiddenByGit { .. } => error.to_string(),
     })
 }
 
@@ -367,13 +368,7 @@ fn plan_partial_or_full_load(
 ) -> StepPlan {
     let edt_extension =
         source.forces_full_for_extension() && source_set.purpose == SourceSetPurpose::Extension;
-    // When the prior snapshot has no entries, every current file is new.
-    // A warm snapshot with one added file can still be loaded partially.
-    let nothing_to_compare = changes.len() == prepared.snapshot.len()
-        && changes
-            .iter()
-            .all(|change| change.kind == analyzer::ChangeKind::Added);
-    let decision = if edt_extension || nothing_to_compare {
+    let decision = if edt_extension || nothing_to_compare(&changes, &prepared) {
         LoadDecision::Full
     } else {
         partial_load::decide(&changes, context_path)
@@ -414,6 +409,27 @@ fn plan_partial_or_full_load(
                 commit: StepCommit::Prepared(prepared),
             }
         }
+    }
+}
+
+/// When the prior snapshot has no entries, every current file is new.
+/// A warm snapshot with one added file can still be loaded partially.
+fn nothing_to_compare(changes: &[analyzer::FileChange], prepared: &PreparedStateUpdate) -> bool {
+    changes.len() == prepared.scanned_files
+        && changes
+            .iter()
+            .all(|change| change.kind == analyzer::ChangeKind::Added)
+}
+
+/// Загрузит ли набор целиком по разбору его изменений, ещё до правил частичной загрузки:
+/// разбор без памяти о каталоге (`Fallback`) или снимок, с которым нечего сравнить. По этому
+/// признаку отправка выбирает исполнителя (#559); план шага строит
+/// [`plan_configurator_load_step`] по тому же разбору.
+pub(super) fn loads_whole(outcome: &AnalysisOutcome) -> bool {
+    match outcome {
+        AnalysisOutcome::Fallback => true,
+        AnalysisOutcome::Changes { changes, prepared } => nothing_to_compare(changes, prepared),
+        AnalysisOutcome::NoChanges => false,
     }
 }
 
@@ -488,7 +504,7 @@ pub(super) fn commit_full_rescan(
     work_path: &Path,
     recover_storage: bool,
 ) -> Result<(), AppError> {
-    match analyzer::rescan_and_commit_full(context, work_path) {
+    match crate::use_cases::source_changes::rescan_and_commit_full(context, work_path) {
         Ok(()) => Ok(()),
         Err(_error) if recover_storage && storage_needs_recovery(context, work_path) => {
             let Some(storage_path) = context.storage_path(work_path) else {
@@ -500,7 +516,7 @@ pub(super) fn commit_full_rescan(
                     storage_path.display()
                 ))
             })?;
-            analyzer::rescan_and_commit_full(context, work_path)
+            crate::use_cases::source_changes::rescan_and_commit_full(context, work_path)
                 .map_err(|retry_error| AppError::Runtime(retry_error.to_string()))
         }
         Err(error) => Err(AppError::Runtime(error.to_string())),
@@ -658,11 +674,13 @@ pub(super) fn fail_with_remaining_steps(
     }
 
     BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: false,
         steps: completed_steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     }
 }
 

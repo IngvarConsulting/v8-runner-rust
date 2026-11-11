@@ -111,8 +111,14 @@ pub struct FakeAgent {
     pub any_credentials: bool,
     /// Выгрузка в файлы отвечает ошибкой агента, пока флаг поднят.
     pub fail_dump: Arc<AtomicBool>,
+    /// Опись `ConfigDumpInfo.xml`, которую пишет выгрузка в файлы; `None` — опись без
+    /// элементов.
+    pub dump_info: Arc<Mutex<Option<String>>>,
     /// Диагностика служебной команды подключения перед командой запроса.
     pub connect_log: Option<&'static str>,
+    /// Подключён ли агент к базе: повторный `common connect-ib` отвечает
+    /// `DesignerAlreadyConnectedToInfoBase`, как платформа.
+    pub connected: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -174,7 +180,9 @@ impl FakeAgent {
             sftp_hold: None,
             any_credentials: false,
             fail_dump: Arc::new(AtomicBool::new(false)),
+            dump_info: Arc::new(Mutex::new(None)),
             connect_log: None,
+            connected: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -321,6 +329,16 @@ impl FakeAgent {
             || line == "common connect-ib"
             || line == "common disconnect-ib"
         {
+            if line == "common disconnect-ib" {
+                self.connected.store(false, Ordering::SeqCst);
+            }
+            if line == "common connect-ib" && self.connected.swap(true, Ordering::SeqCst) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"DesignerAlreadyConnectedToInfoBase\",\"message\":\"Конфигуратор уже подключен к информационной базе\"}]
+".to_owned(),
+                    false,
+                );
+            }
             if let Some(message) = self.connect_log.filter(|_| line == "common connect-ib") {
                 return (
                     format!(
@@ -342,14 +360,6 @@ impl FakeAgent {
                 false,
             );
         }
-        // Прогноз, как у настоящего агента: список пишется, каталог не трогается.
-        if line.starts_with("config dump-config-to-files") && option("get-changes").is_some() {
-            let list = self
-                .user_dir()
-                .join(option("get-changes").unwrap_or_default());
-            fs::write(&list, "\u{feff}").expect("forecast list");
-            return (success(), false);
-        }
         if line.starts_with("config dump-config-to-files") {
             if self.fail_dump.load(Ordering::SeqCst) {
                 return (
@@ -363,9 +373,12 @@ impl FakeAgent {
             fs::write(target.join("Configuration.xml"), "<Configuration/>\n").expect("dump file");
             // Как платформа: выгрузка целиком и по изменившемуся пишет файл версий.
             if option("list-file").is_none() {
+                let dump_info = self.dump_info.lock().expect("dump info").clone();
                 fs::write(
                     target.join("ConfigDumpInfo.xml"),
-                    "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"/>\n",
+                    dump_info.unwrap_or_else(|| {
+                        "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"/>\n".to_owned()
+                    }),
                 )
                 .expect("dump info");
             }

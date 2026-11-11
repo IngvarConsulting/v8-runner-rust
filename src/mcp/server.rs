@@ -1835,6 +1835,7 @@ mod tests {
         edt_timeout_ms: u64,
     ) -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/project").join(".local"),
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
             format: SourceFormat::Designer,
@@ -1898,6 +1899,7 @@ mod tests {
                 kind: McpBusinessErrorKind::Runtime,
                 message: path.to_owned(),
                 next: None,
+                platform_release: None,
             },
             json!({"warnings": [format!("held by {path}")]}),
         );

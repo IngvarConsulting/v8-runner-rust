@@ -409,10 +409,10 @@ fn a_project_copied_whole_leaves_no_live_owner() {
     assert_eq!(owners_of(&copied_marker), [original.canonical_root()]);
 
     // Память в скопированном `work/` описывает прежнюю базу, то есть памяти о новой нет:
-    // `--full` отказал бы `no_memory`, а выход каталога — перезапись `--force`.
+    // `--full` отказал бы `untracked_base`, а выход каталога — перезапись `--force`.
     // Владельца сменяет граница команды, раньше проверки памяти: смену называет уже отказ.
     let refused = envelope(&copied.run(&["push", "main", "--full"]));
-    assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
+    assert_eq!(refused["error"]["code"], "untracked_base", "{refused}");
     assert!(
         warnings(&refused)
             .iter()
@@ -823,7 +823,7 @@ fn ownership_is_warned_before_foreign_memory() {
 
     let refused = envelope(&copied.run(&["push"]));
 
-    assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
+    assert_eq!(refused["error"]["code"], "untracked_base", "{refused}");
     another_copy_warning(&refused, "push", &holder, &stand);
     assert_eq!(stand.owners(), [holder.canonical_root()]);
 }

@@ -6,7 +6,7 @@
 <title>v8project.yaml — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -112,8 +113,8 @@ source-set:
 <pre data-config-example="local"><code># v8project.local.yaml
 infobases:                        # базы этой машины
   origin:                         # база по умолчанию
-    connection: "File=.build/ib"  # каталог файловой базы</code></pre>
-<p>Адрес записывает <a href="cli-init.html#op-init"><code>init</code></a>: например, <code>File=.build/ib</code> или значение <code>--infobase</code>. <a href="cli-infobase-create.html"><code>infobase create</code></a> создаёт базу по этому адресу. Команды обмена используют тот же адрес.</p>
+    connection: "File=.local/db"  # каталог файловой базы</code></pre>
+<p>Адрес записывает <a href="cli-init.html#op-init"><code>init</code></a>: по умолчанию <code>File=.local/db</code>, иначе значение <code>--infobase</code>. <a href="cli-infobase-create.html"><code>infobase create</code></a> создаёт базу по этому адресу. Команды обмена используют тот же адрес.</p>
 <h3>Несколько баз и параметры подключения</h3>
 <p>Добавьте базы под другими именами. Для файловой базы задаётся <code>File</code>, для серверной — <code>Srvr</code> и <code>Ref</code>. <code>standalone</code> задаёт подключение к автономному серверу.</p>
 <p>Для кластерной базы учётные данные разделены на три уровня: <code>user/password</code> — пользователь информационной базы; <code>cluster.user/password</code> — администратор кластера; <code>cluster.agent.user/password</code> — администратор центрального сервера. У центрального сервера и кластера отдельные списки администраторов (<a href="platform.html#t59">документация платформы</a>).</p>
@@ -121,7 +122,7 @@ infobases:                        # базы этой машины
 workPath: .build
 infobases:                             # базы проекта, как remote у репозитория
   origin:                              # умолчание, как у гита
-    connection: "File=.build/ib"
+    connection: "File=.local/db"
   test:
     connection: "Srvr=srv;Ref=erp_test"
   prod:
@@ -171,7 +172,7 @@ infobases:
 <p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. На платформе 8.5.4 и новее <code>apache22</code> нет, см. <a href="#platform-versions">версии платформы</a>. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
 <pre><code>v8-runner web publish</code></pre>
 <h2 id="tools">Инструменты</h2>
-<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
+<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С. <code>tools.postgres.path</code> называет каталог сборки PostgreSQL для 1С, которую поднимает <a href="cli-dbms.html"><code>dbms</code></a>.</p>
 <h3 id="platform-selection">Выбор платформы <span class="plan-badge">План</span></h3>
 <p>Выберите один способ: <code>version</code> — поиск подходящей установленной платформы, <code>path</code> — использование платформы по указанному пути.</p>
 <pre data-config-example="main"><code># Фрагмент v8project.yaml
@@ -188,7 +189,7 @@ tools:
 <p>Если оба поля отсутствуют, раннер ищет установленную платформу автоматически. Если после объединения основного и локального файлов заданы и <code>path</code>, и <code>version</code>, это ошибка конфигурации. Локальный <code>path</code> не отменяет <code>version</code> из основного файла.</p>
 <h3 id="platform-versions">Поддерживаемые версии платформы <span class="plan-badge">План</span></h3>
 <p>Минимальная версия платформы — <strong>8.3.24</strong>. Платформу ниже раннер не запускает: команда, и её превью тоже, отказывает с кодом <code>environment_unavailable</code> и называет путь, найденную версию и минимум. Проверка идёт до запуска, потому что старая платформа может не отвергнуть незнакомую команду, а открыть окно и не завершиться, а срока у команды нет. Команды, которые платформу не запускают, например <a href="cli-init.html"><code>init</code></a> и <a href="cli-status.html"><code>status</code></a> без <code>--deep</code>, от версии не зависят.</p>
-<p>Два ответа устроены иначе. <a href="cli-status.html"><code>status --deep</code></a> — диагностика: он отвечает успехом, платформу не запускает, а причину называет в ответе о базе. <a href="cli-push.html"><code>push</code></a> без памяти о базе отказывает кодом <code>no_memory</code>, а причина стоит в <code>skipped</code>; <code>push --force</code> отказывает с <code>environment_unavailable</code>.</p>
+<p>Два ответа устроены иначе. <a href="cli-status.html"><code>status --deep</code></a> — диагностика: он отвечает успехом, платформу не запускает, а причину называет в ответе о базе. <a href="cli-push.html"><code>push</code></a> без памяти о базе отказывает кодом <code>untracked_base</code>, а причина стоит в <code>skipped</code>; <code>push --force</code> отказывает с <code>environment_unavailable</code>.</p>
 <p>Версию раннер видит в пути установки, например <code>/opt/1cv8/x86_64/8.3.27.2074/bin/1cv8</code>, и запускать платформу ради ответа о версии не станет. Если версии в пути нет, отказа не будет, и платформа ниже минимума может зависнуть, поэтому указывайте каталог версии. Подключённый агент (<code>attached</code>) и SSH-шлюз автономного сервера не используют утилиты на машине раннера: их версию раннер не видит, и минимум к ним не применяется.</p>
 <p>Выше минимума команды и исполнители те же. Различия по версиям:</p>
 <div class="tablewrap"><table><thead><tr><th>Версия</th><th>Что меняется</th><th>Что делает раннер</th></tr></thead><tbody>
@@ -210,6 +211,7 @@ providers:        # явно выбранные исполнители опер�
   push: designer  # отправка через Конфигуратор
   pull: designer  # выгрузка через Конфигуратор</code></pre>
 <p>Если ключ не задан, раннер выбирает исполнителя сам. Если задан — использует только указанного исполнителя, без переключения на другого. Для <code>check</code> ветка определяется форматом проекта.</p>
+<p>У файловой базы без ключа <code>push</code> и <code>pull</code> выбирают исполнителя ещё и по объёму операции. Когда каждый набор команды идёт целиком — <code>push --force</code> или <code>--full</code>, <code>pull --force</code>, загрузка без снимка, выгрузка без годного файла версий, — первым идёт <code>ibcmd</code>: целиком он выгружает и загружает быстрее. Остальные операции, в том числе команда, где хоть один набор идёт по изменившемуся, начинает агент. Подключённый агент (<code>tools.designer_agent.attach</code>), кластер и автономный сервер выбирают как прежде. Ответ называет выбор полем <code>reason</code> квитанции исполнителя. После полной загрузки через <code>ibcmd</code> раннер записывает файл версий, и следующий <code>pull</code> идёт по изменившемуся.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>ключ</th><th>чем управляет</th></tr></thead>
 <tbody>
@@ -238,10 +240,13 @@ tests:                            # настройки тестовых инст
 <h2 id="overlay">Локальные переопределения</h2>
 <p>Общие настройки хранятся в <code>v8project.yaml</code>, настройки этой машины — в <code>v8project.local.yaml</code> рядом с ним. Раннер сначала читает основной файл, затем локальный.</p>
 <p>Вложенные карты объединяются по ключам: локальное значение заменяет одноимённое основное, остальные значения сохраняются. Значения других типов, включая списки, заменяются целиком.</p>
-<p>Локальный файл может переопределять <code>workPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
+<p>Локальный файл может переопределять <code>workPath</code>, <code>localPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
+<h3 id="local-path">Личное состояние копии</h3>
+<p><code>workPath</code> пересобирается: его можно удалить. Всё, что пересобрать нельзя, лежит в <code>localPath</code> — по умолчанию <code>.local</code> рядом с <code>v8project.yaml</code>: данные стендов, которые поднимает раннер (<code>dbms</code>, <code>cluster</code>, <code>standalone</code>), и файловая база по умолчанию <code>.local/db</code>. Раннер кладёт в каталог <code>.gitignore</code> со строкой <code>*</code>; в <code>.gitignore</code> проекта можно добавить <code>/.local/</code>. <code>localPath</code> не может содержать каталог проекта или набор исходников и не пересекается с <code>workPath</code>.</p>
+<p>После удаления <code>workPath</code> стенды и база целы, но память о базе пропала: следующий <a href="cli-push.html"><code>push</code></a> отказывает с <code>untracked_base</code>, и связь восстанавливает <a href="cli-pull.html"><code>pull --force</code></a>.</p>
 <h3 id="local-push">Исполнитель отправки</h3>
 <p>Режим полной загрузки задаёт аргумент <a href="cli-push.html"><code>push --full</code></a>. В локальном файле можно выбрать исполнителя через <code>providers.push</code>.</p>
 </main>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

@@ -130,6 +130,8 @@ pub(crate) fn read_by_record_tool(
     } else {
         match utilities.locate(utility) {
             Ok(location) => location.path,
+            // Нет выпуска формата исходников — отказ команды, а не молчание инструмента.
+            Err(error) if error.platform_release().is_some() => return Err(error.into()),
             Err(error) => {
                 tracing::debug!(%error, %tool, "the tool of the generation record is not found");
                 return Ok(None);
@@ -155,6 +157,145 @@ pub(crate) fn read_by_record_tool(
         },
         extension,
     )
+}
+
+/// Ответ инструмента записи о поколении набора.
+pub(crate) enum RecordToolAnswer {
+    Token(String),
+    /// Ответа нет; строка — почему: утилиты нет, агент не подключился, инструмент не ответил.
+    NoAnswer(String),
+}
+
+/// Поколение инструментом записи `tool`, когда набор грузит другой исполнитель и токены у
+/// набора несравнимы (расширение, кластер, автономный сервер; #559). Конфигуратор и `ibcmd`
+/// ищутся в `utilities` и отвечают процессом; агенту открывается своя сессия на одно чтение и
+/// сразу отпускается. Зовут его до первого чтения и до сессии самого загрузчика: занятая им
+/// файловая база другому инструменту не отвечает. Отмена — ошибка, всё остальное без
+/// токена — [`RecordToolAnswer::NoAnswer`] с причиной.
+pub(crate) fn read_with_record_tool(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    tool: Provider,
+    name: &str,
+    extension: Option<&str>,
+) -> Result<RecordToolAnswer, AppError> {
+    // Отмена — отмена, а не молчание инструмента: иначе она стала бы отказом сверки.
+    let cancelled = || {
+        crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "the configuration generation",
+        )
+    };
+    if let Some(error) = cancelled() {
+        return Err(error);
+    }
+    let answer = |token: Option<String>| match token {
+        Some(token) => Ok(RecordToolAnswer::Token(token)),
+        None => match cancelled() {
+            Some(error) => Err(error),
+            None => Ok(RecordToolAnswer::NoAnswer(format!(
+                "{tool} gave no configuration generation"
+            ))),
+        },
+    };
+    let process = match tool {
+        Provider::Designer => UtilityType::V8,
+        Provider::Ibcmd => UtilityType::Ibcmd,
+        Provider::Agent => {
+            let needs_v8 = config.infobase.standalone.is_none()
+                && !matches!(
+                    config.tools.designer_agent.mode(),
+                    Ok(crate::config::model::DesignerAgentMode::Attached { .. })
+                );
+            let v8 = if needs_v8 {
+                match utilities.locate(UtilityType::V8) {
+                    Ok(location) => Some(location.path),
+                    Err(error) if error.platform_release().is_some() => return Err(error.into()),
+                    Err(error) => {
+                        return Ok(RecordToolAnswer::NoAnswer(format!(
+                            "the agent cannot start: {error}"
+                        )))
+                    }
+                }
+            } else {
+                None
+            };
+            let wait = crate::use_cases::agent_session::wait_policy(context);
+            let connected =
+                crate::use_cases::agent_session::transcript_log(config, name).and_then(|log| {
+                    crate::use_cases::agent_session::connect(
+                        context,
+                        config,
+                        utilities,
+                        v8.as_deref(),
+                        log,
+                        &wait,
+                    )
+                });
+            let mut handle = match connected {
+                Ok(handle) => handle,
+                Err(error) if error.cancellation().is_some() => return Err(error),
+                Err(error) => {
+                    return Ok(RecordToolAnswer::NoAnswer(format!(
+                        "the agent could not be reached: {error}"
+                    )))
+                }
+            };
+            let token =
+                crate::use_cases::agent_session::generation_id(&mut handle, extension, &wait);
+            handle.finish(context, &wait);
+            return match token {
+                Ok(token) => Ok(RecordToolAnswer::Token(token)),
+                Err(error) if error.cancellation().is_some() => Err(error),
+                Err(error) => Ok(RecordToolAnswer::NoAnswer(format!(
+                    "the agent gave no configuration generation: {error}"
+                ))),
+            };
+        }
+        Provider::IbcmdRs | Provider::Webinst => {
+            return Ok(RecordToolAnswer::NoAnswer(format!(
+                "{tool} gives no configuration generation"
+            )))
+        }
+    };
+    let binary = match utilities.locate(process) {
+        Ok(location) => location.path,
+        // Нет выпуска формата исходников — отказ команды: «инструмент не ответил» стало бы
+        // отказом сверки `non_fast_forward` и спрятало бы настоящую причину.
+        Err(error) if error.platform_release().is_some() => return Err(error.into()),
+        Err(error) => {
+            return Ok(RecordToolAnswer::NoAnswer(format!(
+                "{tool} is not found: {error}"
+            )))
+        }
+    };
+    let runner = utilities.runner_for(process);
+    let read = read_generation(
+        context,
+        config,
+        || {
+            Ok(match tool {
+                Provider::Ibcmd => GenerationProcess::Ibcmd {
+                    binary: &binary,
+                    runner,
+                },
+                _ => GenerationProcess::Designer {
+                    binary: &binary,
+                    runner,
+                    log_file: designer_log_file(config, name)?,
+                },
+            })
+        },
+        extension,
+    );
+    match read {
+        Ok(token) => answer(token),
+        Err(error) if error.cancellation().is_some() => Err(error),
+        Err(error) => Ok(RecordToolAnswer::NoAnswer(format!(
+            "{tool} gave no configuration generation: {error}"
+        ))),
+    }
 }
 
 /// Есть ли непринятое: основная конфигурация (или расширение `extension`) отличается от

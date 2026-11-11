@@ -140,6 +140,66 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "dbms start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "diff",
         preview: Preview::Absent("it reads the selected infobase to obtain the answer"),
         base: Base::Resolves,
@@ -263,6 +323,33 @@ const LEAVES: &[Leaf] = &[
         path: "mcp serve http",
         preview: Preview::Absent("the server starts nothing by itself"),
         base: Base::Resolves,
+    },
+    // Живой агент цели проекта: его ключ складывается из базы, поэтому базу выбирают.
+    Leaf {
+        path: "agent hold",
+        preview: Preview::Absent("it holds or starts the live agent: nothing to preview"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent release",
+        preview: Preview::Absent("it removes a holder mark and starts nothing"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent stop",
+        preview: Preview::Absent("it stops live agents and starts nothing"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    // Сторожа запускает сам раннер: он держит агента, которого ему назвали, и базы не выбирает.
+    Leaf {
+        path: "agent keeper",
+        preview: Preview::Absent("the keeper of a live agent is started by the runner itself"),
+        base: Base::Ignores,
     },
 ];
 

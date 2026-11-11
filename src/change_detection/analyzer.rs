@@ -3,10 +3,18 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::change_detection::hash_storage::{
-    HashStorage, StorageError, StorageSnapshot, StoredFileState,
+use crate::change_detection::file_state::mtime_nanos;
+use crate::change_detection::git_ignore::{dump_samples, HiddenBy, IgnoreRules};
+use crate::change_detection::git_tree::{
+    in_runner_dir, BlobHashError, BlobHasher, GitSource, ObserveError, ObservedFile, Spelling,
 };
+use crate::change_detection::hash_storage::{
+    HashKind, HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary,
+    StoredFileState,
+};
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use crate::change_detection::scanner::{self, ScanError, ScanScope};
+use crate::domain::git_worktree::{ChangeDetection, GitWorktree, ScanReason};
 use crate::domain::source_set::SourceSetContext;
 
 /// A single detected file change.
@@ -17,27 +25,30 @@ pub struct FileChange {
 }
 
 /// How a file changed relative to the stored state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Added,
     Modified,
     Deleted,
 }
 
-/// File state prepared for the next successful storage commit.
-#[derive(Debug, Clone)]
-pub struct PreparedFileState {
-    pub rel_path: String,
-    pub mtime_ns: u64,
-    pub hash: String,
-}
-
-/// Complete storage update payload produced by one analysis pass.
+/// Storage update produced by one analysis pass: the rows that differ from the memory of
+/// `observed_generation`, so a commit after a change of one file writes one file (#576).
 #[derive(Debug, Clone)]
 pub struct PreparedStateUpdate {
-    pub snapshot: Vec<PreparedFileState>,
+    pub delta: StorageDelta,
+    /// Files the scan found.
+    pub scanned_files: usize,
     pub scan_started_at: u64,
     pub observed_generation: u64,
+}
+
+/// Where the changes of a set come from (#575).
+pub enum ChangeSource<'v, 'h> {
+    /// Every file is read; the reason is named when the caller knows why git is not asked.
+    Scan(Option<ScanReason>),
+    /// Git names the files and their blob ids.
+    Git(GitSource<'v, 'h>),
 }
 
 /// Result of analyzing one source-set against its persisted snapshot.
@@ -56,6 +67,8 @@ pub enum AnalysisOutcome {
 pub struct ContextAnalysis {
     pub context: SourceSetContext,
     pub outcome: Result<AnalysisOutcome, ChangeDetectionError>,
+    /// How the changes were found; `None` when the analysis stopped before it looked.
+    pub detection: Option<ChangeDetection>,
 }
 
 /// Hard failures that prevent normal change-detection flow.
@@ -93,75 +106,414 @@ pub enum ChangeDetectionError {
         expected: u64,
         actual: u64,
     },
+
+    /// A git ignore rule can hide a file the platform writes into the set: git would not report
+    /// it, and its change would never be loaded
+    /// (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+    #[error("{}", hidden_message(source_set, hidden))]
+    HiddenByGit {
+        source_set: String,
+        hidden: Box<HiddenBy>,
+    },
 }
 
-/// Analyze one source-set context and produce either concrete changes or a safe fallback.
+fn hidden_message(source_set: &str, hidden: &HiddenBy) -> String {
+    let paths = if hidden.paths == ["."] {
+        "the set root itself".to_owned()
+    } else {
+        hidden
+            .paths
+            .iter()
+            .map(|path| format!("'{path}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "the git ignore rule '{}' at {}:{} hides files of source-set '{source_set}' ({paths}): git does not report a change of an ignored file, so it would never be loaded. Anchor the rule to the place it is meant for, for example '/build/' instead of 'build/', or remove it",
+        hidden.rule,
+        hidden.file.display(),
+        hidden.line,
+    )
+}
+
+/// Analyze one source-set context by reading every file and produce either concrete changes
+/// or a safe fallback.
 pub fn analyze_context(
     context: &SourceSetContext,
     work_path: &Path,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> ContextAnalysis {
+    analyze_context_from(context, work_path, ChangeSource::Scan(None), interrupted)
+}
+
+/// What one analysis found, before the final interruption check.
+struct Found {
+    outcome: Result<AnalysisOutcome, ChangeDetectionError>,
+    detection: Option<ChangeDetection>,
+}
+
+impl Found {
+    fn early(outcome: Result<AnalysisOutcome, ChangeDetectionError>) -> Self {
+        Self {
+            outcome,
+            detection: None,
+        }
+    }
+}
+
+/// Analyze one source-set context with its changes taken from `source` (#575): git names the
+/// files and their blob ids, or every file is read and hashed the way git hashes a file without
+/// filters. Memory written before #575 compares with nothing and gives a full load.
+pub fn analyze_context_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> ContextAnalysis {
     // All outcomes, including storage and IO fallback, cross the same final
     // interruption check. No early return can turn cancellation into a full load.
-    let outcome = if interrupted() {
-        Err(ChangeDetectionError::Interrupted)
+    let found = if interrupted() {
+        Found::early(Err(ChangeDetectionError::Interrupted))
     } else {
-        (|| {
-            let snapshot = match context.storage_path(work_path) {
-                None => Default::default(),
-                Some(path) => match load_bound_snapshot(context, &HashStorage::new(path)) {
-                    Ok(Some(snapshot)) => snapshot,
-                    Ok(None) => return Ok(AnalysisOutcome::Fallback),
-                    Err(error) => return Err(error),
-                },
-            };
-            let excluded = scanner::work_path_inside(context.path(), work_path);
-            let scan = match scan_sources(context, context.path(), excluded.as_deref(), interrupted)
-            {
-                Ok(scan) => scan,
-                Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
-                Err(error) => {
-                    tracing::warn!(source_set = %context.name(), error = %error, "scan failed, switching to fallback mode");
-                    return Ok(AnalysisOutcome::Fallback);
-                }
-            };
-            if scan.has_untracked_links {
-                return Ok(AnalysisOutcome::Fallback);
+        let snapshot = match context.storage_path(work_path) {
+            None => Ok(Some(StorageSnapshot::default())),
+            Some(path) => load_bound_snapshot(context, &HashStorage::new(path)),
+        };
+        match snapshot {
+            Ok(Some(snapshot)) => {
+                analyze_snapshot(context, work_path, &snapshot, source, interrupted)
             }
-            let mut changes = detect_changes(&scan.files, &snapshot.entries);
-            let seen_rel: HashSet<&str> = scan
-                .files
-                .iter()
-                .map(|file| file.rel_path.as_str())
-                .collect();
-            changes.extend(
-                snapshot
-                    .entries
-                    .iter()
-                    .filter(|(relative, _)| !seen_rel.contains(relative.as_str()))
-                    .map(|(relative, _)| FileChange {
-                        path: context.path().join(relative),
-                        kind: ChangeKind::Deleted,
-                    }),
-            );
-            Ok(if changes.is_empty() {
-                AnalysisOutcome::NoChanges
-            } else {
-                AnalysisOutcome::Changes {
-                    changes,
-                    prepared: build_prepared_state(&scan, snapshot.generation),
-                }
-            })
-        })()
+            Ok(None) => Found::early(Ok(AnalysisOutcome::Fallback)),
+            Err(error) => Found::early(Err(error)),
+        }
     };
+    let interrupted_now = interrupted();
     ContextAnalysis {
         context: context.clone(),
-        outcome: if interrupted() {
+        outcome: if interrupted_now {
             Err(ChangeDetectionError::Interrupted)
         } else {
-            outcome
+            found.outcome
         },
+        detection: found.detection,
     }
+}
+
+fn analyze_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+    snapshot: &StorageSnapshot,
+    source: ChangeSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Found {
+    // A memory of another hasher compares with nothing: the set loads whole (#575).
+    let other_kind = |kind: HashKind| !snapshot.entries.is_empty() && snapshot.hash_kind != kind;
+    let reason = match source {
+        ChangeSource::Scan(reason) => reason,
+        ChangeSource::Git(mut git) => {
+            let runner_dirs = runner_dirs_below(context, work_path);
+            if let Some(hidden) = hidden_by_git(git.view, &git.root, snapshot, &runner_dirs) {
+                return Found::early(Err(ChangeDetectionError::HiddenByGit {
+                    source_set: context.name().to_owned(),
+                    hidden: Box::new(hidden),
+                }));
+            }
+            let detection = ChangeDetection::git(git.view.fsmonitor);
+            let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
+            match observe_by_git(
+                context,
+                snapshot,
+                &spelling,
+                &runner_dirs,
+                &mut git,
+                interrupted,
+            ) {
+                // Память хешей байтов — например, записанная до того, как каталог стал
+                // рабочей копией git, — сравнивается тем же хешером, чтением файлов: полная
+                // загрузка из-за смены хешера была бы ложной. Хешами git её заменит полная
+                // выгрузка или отправка.
+                Ok(_) if other_kind(HashKind::GitBlob) => Some(ScanReason::BytesMemory),
+                Ok(observed) => {
+                    let changes = git_changes(context, &observed, snapshot, &spelling);
+                    return Found {
+                        outcome: Ok(if changes.is_empty() {
+                            AnalysisOutcome::NoChanges
+                        } else {
+                            AnalysisOutcome::Changes {
+                                changes,
+                                prepared: git_prepared_state(&observed, snapshot, Some(&spelling)),
+                            }
+                        }),
+                        detection: Some(detection),
+                    };
+                }
+                Err(ObserveError::Interrupted) => {
+                    return Found::early(Err(ChangeDetectionError::Interrupted))
+                }
+                Err(ObserveError::Unusable { reason, detail }) => {
+                    tracing::warn!(
+                        source_set = %context.name(),
+                        reason = ?reason,
+                        detail,
+                        "git cannot describe the set; its files are read"
+                    );
+                    Some(reason)
+                }
+            }
+        }
+    };
+    let detection = reason.map(ChangeDetection::scan);
+    if other_kind(HashKind::RawBlob) {
+        return Found {
+            outcome: Ok(AnalysisOutcome::Fallback),
+            detection,
+        };
+    }
+    let mut found = scan_snapshot(context, work_path, snapshot, interrupted);
+    found.detection = detection;
+    found
+}
+
+/// The rule of an ignore file that can hide a file of the set: one of the remembered files —
+/// those a dump wrote — or, with nothing remembered, one of the files a dump writes. Files in
+/// the runner directories `runner_dirs` are no sources: the rule `*` that `localPath` hides
+/// itself with hides nothing of the set.
+fn hidden_by_git(
+    view: &GitWorktree,
+    root: &str,
+    snapshot: &StorageSnapshot,
+    runner_dirs: &[String],
+) -> Option<HiddenBy> {
+    let rules = IgnoreRules::read(&view.ignore_sources, view.ignore_case);
+    let source = |path: &&str| !in_runner_dir(path, runner_dirs, view.ignore_case);
+    if snapshot.entries.is_empty() {
+        let samples = dump_samples();
+        rules.hiding(root, samples.iter().map(String::as_str).filter(source))
+    } else {
+        let mut remembered: Vec<&str> = snapshot
+            .entries
+            .keys()
+            .map(String::as_str)
+            .filter(source)
+            .collect();
+        remembered.sort_unstable();
+        rules.hiding(root, remembered)
+    }
+}
+
+/// Whether a git ignore rule can hide a file of the set at `root` of the working tree `view`:
+/// one of the remembered files, or with no memory of the base — memory of another pair, of an
+/// old runner, unreadable — one of the files a dump writes
+/// (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`). For commands that compare
+/// nothing: a full pull, `push --full`, `make`.
+pub fn hidden_by_git_rules(
+    context: &SourceSetContext,
+    work_path: &Path,
+    view: &GitWorktree,
+    root: &str,
+) -> Result<(), ChangeDetectionError> {
+    let snapshot = context
+        .storage_path(work_path)
+        .and_then(|path| {
+            load_bound_snapshot(context, &HashStorage::new(path))
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default();
+    match hidden_by_git(
+        view,
+        root,
+        &snapshot,
+        &runner_dirs_below(context, work_path),
+    ) {
+        Some(hidden) => Err(ChangeDetectionError::HiddenByGit {
+            source_set: context.name().to_owned(),
+            hidden: Box::new(hidden),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The set's files as git lists them, checked against the memory: a remembered file git does
+/// not list but the disk still holds means git's answer misses it, and the set is read. A
+/// remembered file in a runner directory is no source: it is gone, as for the walk.
+fn observe_by_git(
+    context: &SourceSetContext,
+    snapshot: &StorageSnapshot,
+    spelling: &Spelling<'_>,
+    runner_dirs: &[String],
+    git: &mut GitSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<ObservedFile>, ObserveError> {
+    let observed = git.observe(context.path(), interrupted)?;
+    let seen: HashSet<&str> = observed
+        .iter()
+        .map(|file| {
+            spelling
+                .of(&file.rel_path)
+                .unwrap_or(file.rel_path.as_str())
+        })
+        .collect();
+    for relative in snapshot.entries.keys() {
+        if seen.contains(relative.as_str())
+            || in_runner_dir(relative, runner_dirs, git.view.ignore_case)
+        {
+            continue;
+        }
+        let path = context.path().join(relative);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file()) {
+            return Err(ObserveError::Unusable {
+                reason: ScanReason::GitFailed,
+                detail: format!(
+                    "'{}' is on disk, but git lists no such file",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(observed)
+}
+
+/// Changes between git's listing and the memory of blob ids.
+fn git_changes(
+    context: &SourceSetContext,
+    observed: &[ObservedFile],
+    snapshot: &StorageSnapshot,
+    spelling: &Spelling<'_>,
+) -> Vec<FileChange> {
+    let mut seen = HashSet::new();
+    let mut changes: Vec<FileChange> = observed
+        .iter()
+        .filter_map(|file| {
+            let key = spelling.of(&file.rel_path);
+            if let Some(key) = key {
+                seen.insert(key);
+            }
+            let kind = match key.and_then(|key| snapshot.entries.get(key)) {
+                None => ChangeKind::Added,
+                Some(stored) if file.hash.as_deref() != Some(stored.hash.as_str()) => {
+                    ChangeKind::Modified
+                }
+                Some(_) => return None,
+            };
+            Some(FileChange {
+                path: file.path.clone(),
+                kind,
+            })
+        })
+        .collect();
+    changes.extend(
+        snapshot
+            .entries
+            .keys()
+            .filter(|relative| !seen.contains(relative.as_str()))
+            .map(|relative| FileChange {
+                path: context.path().join(relative),
+                kind: ChangeKind::Deleted,
+            }),
+    );
+    changes
+}
+
+/// Git's listing as rows of blob ids that differ from `stored`. A file whose id is unknown is
+/// neither remembered anew nor forgotten. With `spelling`, a file is remembered under the key
+/// the memory already spells it with; without it, the rows are a whole new memory.
+fn git_prepared_state(
+    observed: &[ObservedFile],
+    stored: &StorageSnapshot,
+    spelling: Option<&Spelling<'_>>,
+) -> PreparedStateUpdate {
+    let mut seen = HashSet::new();
+    let mut upserts = HashMap::new();
+    for file in observed {
+        let key = spelling
+            .and_then(|spelling| spelling.of(&file.rel_path))
+            .unwrap_or(file.rel_path.as_str());
+        seen.insert(key.to_owned());
+        let Some(hash) = &file.hash else {
+            continue;
+        };
+        let differs = spelling.is_none()
+            || stored
+                .entries
+                .get(key)
+                .is_none_or(|entry| entry.mtime_ns != 0 || &entry.hash != hash);
+        if differs {
+            upserts.insert(
+                key.to_owned(),
+                StoredFileState {
+                    // Git answers for the time; the memory of blob ids keeps none.
+                    mtime_ns: 0,
+                    hash: hash.clone(),
+                },
+            );
+        }
+    }
+    let removals = stored
+        .entries
+        .keys()
+        .filter(|key| !seen.contains(key.as_str()))
+        .cloned()
+        .collect();
+    PreparedStateUpdate {
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::GitBlob,
+        },
+        scanned_files: observed.len(),
+        scan_started_at: now_ns(),
+        observed_generation: stored.generation,
+    }
+}
+
+fn now_ns() -> u64 {
+    mtime_nanos(std::time::SystemTime::now(), Path::new(".")).unwrap_or(0)
+}
+
+/// The analysis by reading every file: SHA-256 against the memory.
+fn scan_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+    snapshot: &StorageSnapshot,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Found {
+    let excluded = runner_dirs(context, work_path);
+    let scan = match scan_sources(context, context.path(), &excluded, interrupted) {
+        Ok(scan) => scan,
+        Err(ScanError::Interrupted) => return Found::early(Err(ChangeDetectionError::Interrupted)),
+        Err(error) => {
+            tracing::warn!(source_set = %context.name(), error = %error, "scan failed, switching to fallback mode");
+            return Found::early(Ok(AnalysisOutcome::Fallback));
+        }
+    };
+    if scan.has_untracked_links {
+        return Found::early(Ok(AnalysisOutcome::Fallback));
+    }
+    let mut changes = detect_changes(&scan.files, &snapshot.entries);
+    let seen_rel: HashSet<&str> = scan
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    changes.extend(
+        snapshot
+            .entries
+            .iter()
+            .filter(|(relative, _)| !seen_rel.contains(relative.as_str()))
+            .map(|(relative, _)| FileChange {
+                path: context.path().join(relative),
+                kind: ChangeKind::Deleted,
+            }),
+    );
+    Found::early(Ok(if changes.is_empty() {
+        AnalysisOutcome::NoChanges
+    } else {
+        AnalysisOutcome::Changes {
+            changes,
+            prepared: build_prepared_state(&scan, snapshot),
+        }
+    }))
 }
 
 /// Load the snapshot and check that it describes this context's base and sources.
@@ -170,31 +522,75 @@ fn load_bound_snapshot(
     context: &SourceSetContext,
     storage: &HashStorage,
 ) -> Result<Option<StorageSnapshot>, ChangeDetectionError> {
-    let snapshot = match storage.load_snapshot() {
-        Ok(snapshot) => snapshot,
+    let Some(snapshot) = readable(context, storage, storage.load_snapshot())? else {
+        return Ok(None);
+    };
+    check_bound(
+        context,
+        storage,
+        snapshot.is_blank(),
+        snapshot.identity.as_deref(),
+    )?;
+    // Memory written before #575 compares with nothing (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+    Ok(Some(snapshot).filter(|snapshot| !snapshot.is_legacy()))
+}
+
+/// [`load_bound_snapshot`] without the file rows, for a commit that names only the rows it
+/// changes (#576).
+fn load_bound_summary(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+) -> Result<Option<StorageSummary>, ChangeDetectionError> {
+    let Some(summary) = readable(context, storage, storage.load_summary())? else {
+        return Ok(None);
+    };
+    check_bound(
+        context,
+        storage,
+        summary.is_blank(),
+        summary.identity.as_deref(),
+    )?;
+    Ok(Some(summary).filter(|summary| !summary.is_legacy()))
+}
+
+/// `Ok(None)` for a recoverable storage problem, a refusal for a hard one.
+fn readable<T>(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+    read: Result<T, StorageError>,
+) -> Result<Option<T>, ChangeDetectionError> {
+    match read {
+        Ok(read) => Ok(Some(read)),
         Err(e) if e.is_recoverable() => {
             tracing::warn!(
                 source_set = %context.name(),
                 error = %e,
                 "recoverable storage problem, switching to fallback mode"
             );
-            return Ok(None);
+            Ok(None)
         }
-        Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
-    };
-    if let Some(selected) = context.storage_identity() {
-        if !snapshot.is_blank() && snapshot.identity.as_deref() != Some(selected) {
-            return Err(ChangeDetectionError::ForeignMemory {
+        Err(e) => Err(map_storage_hard(context, storage.path(), e)),
+    }
+}
+
+/// Memory of another base or source directory is refused, blank memory is nobody's.
+fn check_bound(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+    blank: bool,
+    recorded: Option<&str>,
+) -> Result<(), ChangeDetectionError> {
+    match context.storage_identity() {
+        Some(selected) if !blank && recorded != Some(selected) => {
+            Err(ChangeDetectionError::ForeignMemory {
                 source_set: context.name().to_owned(),
                 storage_path: storage.path().to_path_buf(),
-                recorded: snapshot
-                    .identity
-                    .unwrap_or_else(|| "an unidentified infobase".to_owned()),
+                recorded: recorded.unwrap_or("an unidentified infobase").to_owned(),
                 selected: selected.to_owned(),
-            });
+            })
         }
+        _ => Ok(()),
     }
-    Ok(Some(snapshot))
 }
 
 /// Что хеш-память набора помнит о выбранной базе.
@@ -206,7 +602,8 @@ pub enum SnapshotMemory {
     Own,
     /// Память записана для другой базы или другого каталога.
     Foreign,
-    /// Хранилище не открывается: ответ даст анализ изменений своим отказом.
+    /// Хранилище не открывается — ответ даст анализ изменений своим отказом, — или память
+    /// записана раннером до #575, и её хеши ни с чем не сравнить.
     Unreadable,
 }
 
@@ -218,10 +615,16 @@ pub fn snapshot_memory(context: &SourceSetContext, work_path: &Path) -> Snapshot
     if context.storage_identity().is_none() {
         return SnapshotMemory::Nothing;
     }
-    match load_bound_snapshot(context, &HashStorage::new(path)) {
-        Ok(Some(snapshot)) if !snapshot.is_blank() => SnapshotMemory::Own,
-        Ok(_) => SnapshotMemory::Nothing,
-        Err(ChangeDetectionError::ForeignMemory { .. }) => SnapshotMemory::Foreign,
+    // The rows are not needed for this answer; the analysis that uses them reads them itself.
+    match HashStorage::new(path).load_summary() {
+        Ok(summary) if summary.is_blank() => SnapshotMemory::Nothing,
+        // Written before #575: its hashes compare with nothing, and it is no memory of the base.
+        Ok(summary) if summary.is_legacy() => SnapshotMemory::Unreadable,
+        Ok(summary) if summary.identity.as_deref() == context.storage_identity() => {
+            SnapshotMemory::Own
+        }
+        Ok(_) => SnapshotMemory::Foreign,
+        Err(error) if error.is_recoverable() => SnapshotMemory::Nothing,
         Err(_) => SnapshotMemory::Unreadable,
     }
 }
@@ -237,21 +640,10 @@ pub fn commit_empty_snapshot(
         work_path,
         &FullSnapshot {
             snapshot: HashMap::new(),
+            hash_kind: HashKind::RawBlob,
             scan_started_at: 0,
         },
     )
-}
-
-/// Analyze multiple source-set contexts using the same work directory.
-pub fn analyze_contexts(
-    contexts: &[SourceSetContext],
-    work_path: &Path,
-    interrupted: &mut dyn FnMut() -> bool,
-) -> Vec<ContextAnalysis> {
-    contexts
-        .iter()
-        .map(|ctx| analyze_context(ctx, work_path, interrupted))
-        .collect()
 }
 
 /// Persist a prepared snapshot after the corresponding build/load step succeeded.
@@ -264,10 +656,9 @@ pub fn commit_success(
         return Ok(());
     };
     let storage = HashStorage::new(path);
-    let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
-        .commit_snapshot_with_identity(
-            &snapshot,
+        .commit_delta_with_identity(
+            &prepared.delta,
             prepared.scan_started_at,
             prepared.observed_generation,
             context.storage_identity(),
@@ -287,13 +678,155 @@ pub fn rescan_and_commit_full(
     commit_full_snapshot(context, work_path, &prepared)
 }
 
+/// [`rescan_and_commit_full`] with the files and their ids taken from `source`: under git the
+/// memory is written as blob ids, so the next analysis asks git (#575). When git cannot
+/// describe the set, every file is read.
+pub fn rescan_and_commit_full_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+) -> Result<(), ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(());
+    }
+    if let ChangeSource::Git(git) = source {
+        if commit_full_from_git(context, work_path, git)? {
+            return Ok(());
+        }
+    }
+    let prepared = prepare_source_snapshot(context, work_path)?;
+    commit_full_snapshot(context, work_path, &prepared)
+}
+
+/// Replaces the memory of the set with the blob ids git gives its tree now; a file whose id is
+/// unknown — it moved while it was hashed — is not remembered and stays a change. `Ok(false)`:
+/// git cannot describe the set, and nothing is written.
+pub fn commit_full_from_git(
+    context: &SourceSetContext,
+    work_path: &Path,
+    mut git: GitSource<'_, '_>,
+) -> Result<bool, ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(true);
+    }
+    let observed = match git.observe(context.path(), &mut || false) {
+        Ok(observed) => observed,
+        Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+        Err(ObserveError::Unusable { reason, detail }) => {
+            tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the set; its files are read");
+            return Ok(false);
+        }
+    };
+    let prepared = FullSnapshot {
+        snapshot: observed
+            .into_iter()
+            .filter_map(|file| {
+                Some((
+                    file.rel_path,
+                    StoredFileState {
+                        mtime_ns: 0,
+                        hash: file.hash?,
+                    },
+                ))
+            })
+            .collect(),
+        hash_kind: HashKind::GitBlob,
+        scan_started_at: now_ns(),
+    };
+    commit_full_snapshot(context, work_path, &prepared).map(|()| true)
+}
+
+/// The tree a full pull staged and then published into the set, as git would store it (#575).
+/// Git names the ids of the published files; a row of `prepared` keeps only when the published
+/// file still carries the time it had in staging — publication moves files, it does not
+/// rewrite them, — so an edit made after publication stays a change. `None`: git cannot
+/// describe the set, and the caller remembers `prepared` as read.
+pub fn full_snapshot_by_git(
+    context: &SourceSetContext,
+    prepared: &FullSnapshot,
+    mut git: GitSource<'_, '_>,
+) -> Result<Option<FullSnapshot>, ChangeDetectionError> {
+    let observed = match git.observe(context.path(), &mut || false) {
+        Ok(observed) => observed,
+        Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+        Err(ObserveError::Unusable { reason, detail }) => {
+            tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the published set; it is remembered as read");
+            return Ok(None);
+        }
+    };
+    let ids: HashMap<String, String> = observed
+        .into_iter()
+        .filter_map(|file| Some((file.rel_path, file.hash?)))
+        .collect();
+    let snapshot = prepared
+        .snapshot
+        .iter()
+        .filter_map(|(rel_path, staged)| {
+            let path = context.path().join(rel_path);
+            let published = std::fs::metadata(&path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| mtime_nanos(modified, &path).ok());
+            (published == Some(staged.mtime_ns)).then_some(())?;
+            Some((
+                rel_path.clone(),
+                StoredFileState {
+                    mtime_ns: staged.mtime_ns,
+                    hash: ids.get(rel_path)?.clone(),
+                },
+            ))
+        })
+        .collect();
+    Ok(Some(FullSnapshot {
+        snapshot,
+        hash_kind: HashKind::GitBlob,
+        scan_started_at: prepared.scan_started_at,
+    }))
+}
+
+/// The tree of the set as `source` names it: under git the ids `git add` would store, else the
+/// ids of the bytes. A file whose id is unknown is not remembered (#575).
+pub fn prepare_source_snapshot_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    if let ChangeSource::Git(mut git) = source {
+        match git.observe(context.path(), &mut || false) {
+            Ok(observed) => {
+                return Ok(FullSnapshot {
+                    snapshot: observed
+                        .into_iter()
+                        .filter_map(|file| {
+                            Some((
+                                file.rel_path,
+                                StoredFileState {
+                                    mtime_ns: 0,
+                                    hash: file.hash?,
+                                },
+                            ))
+                        })
+                        .collect(),
+                    hash_kind: HashKind::GitBlob,
+                    scan_started_at: now_ns(),
+                })
+            }
+            Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+            Err(ObserveError::Unusable { reason, detail }) => {
+                tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the set; its files are read");
+            }
+        }
+    }
+    prepare_source_snapshot(context, work_path)
+}
+
 /// Hash the source-set directory itself, which can hold `workPath`.
 pub fn prepare_source_snapshot(
     context: &SourceSetContext,
     work_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    prepare_snapshot(context, context.path(), excluded)
+    let excluded = runner_dirs(context, work_path);
+    prepare_snapshot(context, context.path(), &excluded)
 }
 
 /// Hash an exported tree before publishing it; does not open or mutate storage.
@@ -301,17 +834,17 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    prepare_snapshot(context, source_path, None)
+    prepare_snapshot(context, source_path, &[])
 }
 
 fn prepare_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
-    excluded: Option<std::path::PathBuf>,
+    excluded: &[std::path::PathBuf],
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scan_sources(context, source_path, excluded.as_deref(), &mut || false)
+    let scan = scan_sources(context, source_path, excluded, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -327,6 +860,7 @@ fn prepare_snapshot(
                 )
             })
             .collect(),
+        hash_kind: HashKind::RawBlob,
         scan_started_at: scan.scan_started_at,
     })
 }
@@ -347,6 +881,7 @@ pub fn commit_full_snapshot(
             return storage
                 .recover_and_commit_snapshot_with_identity(
                     &prepared.snapshot,
+                    prepared.hash_kind,
                     prepared.scan_started_at,
                     context.storage_identity(),
                 )
@@ -357,6 +892,7 @@ pub fn commit_full_snapshot(
     storage
         .commit_snapshot_with_identity(
             &prepared.snapshot,
+            prepared.hash_kind,
             prepared.scan_started_at,
             generation,
             context.storage_identity(),
@@ -364,18 +900,388 @@ pub fn commit_full_snapshot(
         .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
+/// Каталоги раннера под корнем набора: `workPath` запуска и `localPath` проекта набора.
+fn runner_dirs(context: &SourceSetContext, work_path: &Path) -> Vec<std::path::PathBuf> {
+    runner_dirs_inside(
+        context.path(),
+        RunnerDirs::new(work_path, context.local_path()),
+    )
+}
+
+/// [`runner_dirs`] from the set root, `/`-separated: how git's answer names them (#575).
+pub(crate) fn runner_dirs_below(context: &SourceSetContext, work_path: &Path) -> Vec<String> {
+    runner_dirs(context, work_path)
+        .iter()
+        .filter_map(|dir| dir.strip_prefix(context.path()).ok())
+        .map(|below| {
+            below
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
+}
+
 fn scan_sources(
     context: &SourceSetContext,
     path: &Path,
-    excluded: Option<&Path>,
+    excluded: &[std::path::PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<scanner::ScanSnapshot, ScanError> {
-    let scope = if context.is_build_memory() {
+    scanner::scan_in_scope(path, excluded, interrupted, scan_scope(context))
+}
+
+fn scan_scope(context: &SourceSetContext) -> ScanScope {
+    if context.is_build_memory() {
         ScanScope::Build
     } else {
         ScanScope::Push
+    }
+}
+
+/// When a dump into a directory began, read by the clock of that directory's file system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DumpStart {
+    started_ns: u64,
+}
+
+/// Marks the start of a dump into `dir`: the one owner of the clock probe (#557, #571).
+///
+/// The dump's files are stamped by the clock of the directory's file system, which can be
+/// coarser than this process's clock or, on a share, apart from it: the start is read from a
+/// file written there, and the file is gone before this returns, so the dump never sees it.
+pub fn mark_dump_start(dir: &Path) -> std::io::Result<DumpStart> {
+    let probe = tempfile::Builder::new()
+        .prefix(scanner::DUMP_START_PROBE)
+        .tempfile_in(dir)?;
+    let modified = probe.as_file().metadata()?.modified()?;
+    let started_ns = mtime_nanos(modified, dir).map_err(std::io::Error::other)?;
+    probe.close()?;
+    Ok(DumpStart { started_ns })
+}
+
+/// The source tree as an incremental dump found it: which files it held and when the dump
+/// began. Taken before the platform starts writing into the tree.
+pub struct DumpWatch {
+    started_ns: u64,
+    /// Every listed file with its modification time.
+    before: HashMap<String, u64>,
+}
+
+/// Lists the tree before an incremental dump that began at `start`, without reading files.
+/// `None` when the set keeps no memory of this base or the tree cannot be listed: the dump then
+/// records nothing and the next push loads what the dump wrote, as before (#557).
+pub fn watch_before_dump(
+    context: &SourceSetContext,
+    work_path: &Path,
+    start: DumpStart,
+) -> Option<DumpWatch> {
+    if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
+        return None;
+    }
+    let excluded = runner_dirs(context, work_path);
+    let listed = scanner::list_in_scope(
+        context.path(),
+        &excluded,
+        &mut || false,
+        scan_scope(context),
+    );
+    if let Err(error) = &listed {
+        tracing::debug!(
+            source_set = %context.name(),
+            %error,
+            "the tree was not listed before the dump; what the dump writes is not remembered"
+        );
+    }
+    Some(DumpWatch {
+        started_ns: start.started_ns,
+        before: listed
+            .ok()?
+            .files
+            .into_iter()
+            .map(|file| (file.rel_path, file.mtime_ns))
+            .collect(),
+    })
+}
+
+/// The tree after a dump, listed in the set's walk scope without reading a file.
+///
+/// One listing answers both what the dump wrote ([`observe_dump_writes`]) and what it did to
+/// the tree ([`Self::fact`]).
+pub struct DumpListing {
+    files: Vec<scanner::Candidate>,
+}
+
+/// What a dump by the version file did to the set's tree
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpFact {
+    /// The tree holds files, and none is older than the dump's start: the dump was full.
+    RewroteAll,
+    /// A file older than the start stayed, or the tree is empty: the dump took the changes.
+    Partly,
+    /// The start was not marked or the tree was not listed: the mode is not known.
+    Unlisted,
+}
+
+/// Lists the set's tree after a dump: the set's walk scope, `workPath` and service directories
+/// excluded, links never followed. `ConfigDumpInfo.xml` is out of the scope.
+pub fn list_after_dump(
+    context: &SourceSetContext,
+    work_path: &Path,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<DumpListing, ChangeDetectionError> {
+    let excluded = runner_dirs(context, work_path);
+    scanner::list_in_scope(
+        context.path(),
+        &excluded,
+        &mut || interrupted(),
+        scan_scope(context),
+    )
+    .map(|listed| DumpListing {
+        files: listed.files,
+    })
+    .map_err(|error| map_scan_error(context, error))
+}
+
+impl DumpListing {
+    /// A dump that began at `start` rewrote everything when the tree is not empty and every
+    /// file in it is stamped no earlier than the start.
+    pub fn fact(&self, start: DumpStart) -> DumpFact {
+        if !self.files.is_empty()
+            && self
+                .files
+                .iter()
+                .all(|file| file.mtime_ns >= start.started_ns)
+        {
+            DumpFact::RewroteAll
+        } else {
+            DumpFact::Partly
+        }
+    }
+}
+
+/// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
+/// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
+/// dump and no name of the description `after` it matches, letter case aside. A file the dump
+/// wrote (stamped no earlier than `start`) is never named: on a case-insensitive file system an
+/// element renamed only in letter case keeps its files under the old spelling. Files without a
+/// recognized owner and files of elements that stayed are not named either. Listed in the set's
+/// walk scope, links never followed; this listing precedes the one the dump's mode comes from,
+/// because what it names is gone before that one.
+pub fn files_of_dropped_elements(
+    context: &SourceSetContext,
+    work_path: &Path,
+    start: DumpStart,
+    before: &HashSet<String>,
+    after: &HashSet<String>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<PathBuf>, ChangeDetectionError> {
+    let caseless = |names: &HashSet<String>| -> HashSet<String> {
+        names.iter().map(|name| name.to_lowercase()).collect()
     };
-    scanner::scan_in_scope(path, excluded, interrupted, scope)
+    let (before, after) = (caseless(before), caseless(after));
+    let listing = list_after_dump(context, work_path, interrupted)?;
+    Ok(listing
+        .files
+        .into_iter()
+        .filter(|file| file.mtime_ns < start.started_ns)
+        .filter(|file| {
+            crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
+                .map(|owner| owner.to_lowercase())
+                .is_some_and(|owner| before.contains(&owner) && !after.contains(&owner))
+        })
+        .map(|file| file.path)
+        .collect())
+}
+
+/// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
+///
+/// Finding it reads only files and the memory, so it can run while the platform answers
+/// whether the base changed during the dump; [`Self::commit`] is the step that waits for
+/// that answer (#571). Dropping it forgets what the dump wrote.
+#[must_use = "what the dump wrote is remembered only by `DumpWrites::commit`"]
+pub struct DumpWrites {
+    /// The memory as it was read, without its rows, and the rows the dump changed. `None`:
+    /// nothing to remember — no memory for this set, memory unreadable (not repaired here),
+    /// or the dump wrote and removed nothing.
+    rows: Option<(StorageSummary, StorageDelta)>,
+    started_ns: u64,
+}
+
+/// After a successful incremental dump, finds what it wrote: a file is written by the dump
+/// when its modification time is not before the dump began and it is new or its time moved
+/// since the listing — so an edit saved in the very clock tick the dump began stays a change.
+/// Written files are hashed by content and replace their entries, files that were there before
+/// the dump and are gone are forgotten. Every other entry stays, so a user edit made before
+/// the dump remains a change. `ended` marks the end of the dump by the same clock: a file
+/// stamped after it was edited after the platform finished and stays a change, and a file
+/// whose time moved while it was hashed stays a change too. An edit made while the dump ran
+/// cannot be told from the platform's writes and is remembered (#170). `listed` is the tree
+/// after the dump ([`list_after_dump`]).
+///
+/// Under git `blobs` hashes the written files, named from the set root `root` of the working
+/// tree, as `git add` stores them; without git they are hashed in-process the same way
+/// without filters (#575).
+pub fn observe_dump_writes(
+    context: &SourceSetContext,
+    work_path: &Path,
+    watch: &DumpWatch,
+    ended: Option<DumpStart>,
+    listed: DumpListing,
+    blobs: Option<(&str, &mut BlobHasher<'_>)>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<DumpWrites, ChangeDetectionError> {
+    let writes = |rows| DumpWrites {
+        rows,
+        started_ns: watch.started_ns,
+    };
+    let Some(path) = context.storage_path(work_path) else {
+        return Ok(writes(None));
+    };
+    let storage = HashStorage::new(path);
+    // Only the rows the dump changed are written, so the other rows are not read (#576).
+    // The summary sees tables of different length: such memory is not repaired here, and the
+    // next push falls back to a full load. Damage that keeps the lengths equal — an orphan row
+    // next to a missing row of another key in the other table — passes the summary, and the
+    // delta commit keeps it; the next analysis reads every row, reports it as recoverable and
+    // falls back to a full load, whose commit repairs both tables (#571).
+    let Some(summary) = load_bound_summary(context, &storage)? else {
+        return Ok(writes(None));
+    };
+    let after: HashSet<&str> = listed
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    let removed: Vec<String> = watch
+        .before
+        .keys()
+        .filter(|rel_path| !after.contains(rel_path.as_str()))
+        .cloned()
+        .collect();
+    let written: Vec<scanner::Candidate> = listed
+        .files
+        .into_iter()
+        .filter(|file| {
+            file.mtime_ns >= watch.started_ns
+                // Не позже отметки конца: на Windows время файла идёт тиками системных часов
+                // (~15 мс), и последняя запись платформы ложится в тот же тик, что и отметка.
+                // Правка в этот же тик запоминается как запись — это окно и остаётся за #170.
+                && ended.is_none_or(|end| file.mtime_ns <= end.started_ns)
+                && watch.before.get(&file.rel_path) != Some(&file.mtime_ns)
+        })
+        .collect();
+    if written.is_empty() && removed.is_empty() {
+        return Ok(writes(None));
+    }
+    // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
+    // Записанное хешируется тем же хешером, что записал память: id двух хешеров в одной
+    // памяти не встречаются (#575). Память хешами git без git ничего не запоминает.
+    let upserts = match (summary.hash_kind, blobs) {
+        (HashKind::GitBlob, None) => return Ok(writes(None)),
+        (HashKind::GitBlob, Some((root, hash_blobs))) => {
+            blob_ids_unmoved(context, root, written, hash_blobs, interrupted)?
+        }
+        _ => scanner::hash_listed_unmoved(written, &mut || interrupted())
+            .map_err(|error| map_scan_error(context, error))?
+            .into_iter()
+            .map(|file| {
+                (
+                    file.rel_path,
+                    StoredFileState {
+                        mtime_ns: file.mtime_ns,
+                        hash: file.hash,
+                    },
+                )
+            })
+            .collect(),
+    };
+    let hash_kind = summary.hash_kind;
+    Ok(writes(Some((
+        summary,
+        StorageDelta {
+            upserts,
+            removals: removed,
+            hash_kind,
+        },
+    ))))
+}
+
+/// Blob ids of `written` files whose time stayed put while they were hashed.
+fn blob_ids_unmoved(
+    context: &SourceSetContext,
+    root: &str,
+    written: Vec<scanner::Candidate>,
+    hash_blobs: &mut BlobHasher<'_>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<HashMap<String, StoredFileState>, ChangeDetectionError> {
+    let names: Vec<String> = written
+        .iter()
+        .map(|file| {
+            if root.is_empty() {
+                file.rel_path.clone()
+            } else {
+                format!("{root}/{}", file.rel_path)
+            }
+        })
+        .collect();
+    let ids = hash_blobs(&names, &mut || interrupted()).map_err(|error| match error {
+        BlobHashError::Interrupted => ChangeDetectionError::Interrupted,
+        BlobHashError::Failed(reason) => ChangeDetectionError::StorageHard {
+            source_set: context.name().to_owned(),
+            storage_path: context.path().to_path_buf(),
+            reason: format!("git hash-object failed: {reason}"),
+        },
+    })?;
+    Ok(written
+        .into_iter()
+        .zip(ids)
+        .filter(|(file, _)| {
+            std::fs::metadata(&file.path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| mtime_nanos(modified, &file.path).ok())
+                == Some(file.mtime_ns)
+        })
+        .map(|(file, hash)| (file.rel_path, StoredFileState { mtime_ns: 0, hash }))
+        .collect())
+}
+
+impl DumpWrites {
+    /// Remembers what the dump wrote. The commit fails if the memory moved since it was read.
+    pub fn commit(
+        self,
+        context: &SourceSetContext,
+        work_path: &Path,
+    ) -> Result<(), ChangeDetectionError> {
+        let (Some((summary, delta)), Some(path)) = (self.rows, context.storage_path(work_path))
+        else {
+            return Ok(());
+        };
+        let storage = HashStorage::new(path);
+        storage
+            .commit_delta_with_identity(
+                &delta,
+                summary.watermark.unwrap_or(0).max(self.started_ns),
+                summary.generation,
+                context.storage_identity(),
+            )
+            .map_err(|error| map_commit_error(context, storage.path(), error))
+    }
+}
+
+/// [`observe_dump_writes`] and [`DumpWrites::commit`] in one step.
+#[cfg(test)]
+pub fn record_dump_changes(
+    context: &SourceSetContext,
+    work_path: &Path,
+    watch: &DumpWatch,
+) -> Result<(), ChangeDetectionError> {
+    let listed = list_after_dump(context, work_path, &|| false)?;
+    observe_dump_writes(context, work_path, watch, None, listed, None, &|| false)?
+        .commit(context, work_path)
 }
 
 fn detect_changes(
@@ -398,43 +1304,60 @@ fn detect_changes(
         .collect()
 }
 
+/// The scan as rows that differ from `stored`: a file new or with another time or hash is
+/// written, a remembered file the scan did not find is forgotten. This filter only keeps the
+/// delta small; the commit's `write_row` compares each named row again inside its write
+/// transaction, against what is committed then.
 fn build_prepared_state(
     scan: &scanner::ScanSnapshot,
-    observed_generation: u64,
+    stored: &StorageSnapshot,
 ) -> PreparedStateUpdate {
+    let upserts = scan
+        .files
+        .iter()
+        .filter(|file| {
+            stored
+                .entries
+                .get(&file.rel_path)
+                .is_none_or(|entry| entry.mtime_ns != file.mtime_ns || entry.hash != file.hash)
+        })
+        .map(|file| {
+            (
+                file.rel_path.clone(),
+                StoredFileState {
+                    mtime_ns: file.mtime_ns,
+                    hash: file.hash.clone(),
+                },
+            )
+        })
+        .collect();
+    let scanned: HashSet<&str> = scan
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    let removals = stored
+        .entries
+        .keys()
+        .filter(|rel_path| !scanned.contains(rel_path.as_str()))
+        .cloned()
+        .collect();
     PreparedStateUpdate {
-        snapshot: scan
-            .files
-            .iter()
-            .map(|file| PreparedFileState {
-                rel_path: file.rel_path.clone(),
-                mtime_ns: file.mtime_ns,
-                hash: file.hash.clone(),
-            })
-            .collect(),
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::RawBlob,
+        },
+        scanned_files: scan.files.len(),
         scan_started_at: scan.scan_started_at,
-        observed_generation,
+        observed_generation: stored.generation,
     }
 }
 
 pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
+    hash_kind: HashKind,
     scan_started_at: u64,
-}
-
-fn to_storage_snapshot(snapshot: &[PreparedFileState]) -> HashMap<String, StoredFileState> {
-    snapshot
-        .iter()
-        .map(|entry| {
-            (
-                entry.rel_path.clone(),
-                StoredFileState {
-                    mtime_ns: entry.mtime_ns,
-                    hash: entry.hash.clone(),
-                },
-            )
-        })
-        .collect()
 }
 
 fn map_storage_hard(
@@ -481,14 +1404,62 @@ fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetection
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeDetectionError, ChangeKind,
-        FileChange,
+        analyze_context, files_of_dropped_elements, mark_dump_start, record_dump_changes,
+        rescan_and_commit_full, watch_before_dump, AnalysisOutcome, ChangeDetectionError,
+        ChangeKind, FileChange,
     };
     use crate::change_detection::partial_load::decide;
     use crate::domain::source_set::SourceSetContext;
+    use std::collections::HashSet;
     use std::fs::File;
     use std::time::SystemTime;
     use tempfile::tempdir;
+
+    /// Память, которую записал раннер до #575 (хеши SHA-256, вида хеша в ней нет), — не память
+    /// о базе: `push` откажет `untracked_base`, анализ грузит набор целиком, а запись новой
+    /// памяти поверх неё — уже память хешами git.
+    #[test]
+    fn memory_written_before_git_ids_is_no_memory_of_the_base() {
+        use super::{snapshot_memory, SnapshotMemory};
+        use crate::change_detection::hash_storage::{HashStorage, META, META_KEY_HASH_KIND};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("Module.bsl"), "module").expect("module");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("ib", "file:/ib; source=src".to_owned());
+        rescan_and_commit_full(&context, &work).expect("memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+
+        let path = context.storage_path(&work).expect("storage");
+        {
+            let db = redb::Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            tx.open_table(META)
+                .expect("meta")
+                .remove(META_KEY_HASH_KIND)
+                .expect("forget the kind");
+            tx.commit().expect("old memory");
+        }
+        assert!(HashStorage::new(path.clone())
+            .load_summary()
+            .expect("summary")
+            .is_legacy());
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Unreadable);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+
+        rescan_and_commit_full(&context, &work).expect("new memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
 
     #[test]
     fn partial_load_contract_stays_compatible_with_file_change() {
@@ -523,6 +1494,30 @@ mod tests {
         rescan_and_commit_full(&context, &work_path).expect("snapshot");
 
         std::fs::write(work_path.join("state.txt"), "after").expect("state");
+
+        assert!(matches!(
+            analyze_context(&context, &work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Файлы `localPath` внутри набора — стенды и база — тоже не исходники, как бы каталог ни
+    /// назывался.
+    #[test]
+    fn a_personal_file_in_a_local_path_inside_the_set_is_not_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work_path = dir.path().join("work");
+        let local_path = root.join("personal");
+        std::fs::create_dir_all(local_path.join("db")).expect("local");
+        std::fs::write(root.join("Configuration.xml"), "<xml />").expect("config");
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "before").expect("base");
+        let context =
+            SourceSetContext::new("main", root, "designer-main").with_local_path(&local_path);
+        rescan_and_commit_full(&context, &work_path).expect("snapshot");
+
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "after").expect("base");
+        std::fs::write(local_path.join("record.json"), "{}").expect("record");
 
         assert!(matches!(
             analyze_context(&context, &work_path, &mut || false).outcome,
@@ -727,6 +1722,348 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
     }
+    /// An edit saved after the dump ended stays a change, not a write of the platform (#170).
+    #[test]
+    fn an_edit_after_the_dump_ended_stays_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["Written.bsl", "Late.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+
+        // The platform writes one file, the dump ends, then someone edits another file before
+        // the memory is written (#170).
+        std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        let ended = mark_dump_start(&root).expect("dump end");
+        std::fs::write(root.join("Late.bsl"), "edited after the dump").expect("late edit");
+        File::options()
+            .write(true)
+            .open(root.join("Late.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .expect("later mtime");
+
+        let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
+        super::observe_dump_writes(&context, &work, &watch, Some(ended), listed, None, &|| {
+            false
+        })
+        .expect("observe")
+        .commit(&context, &work)
+        .expect("commit");
+
+        let analysis = analyze_context(&context, &work, &mut || false);
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!("{:?}", analysis.outcome);
+        };
+        let names: Vec<_> = changes
+            .iter()
+            .map(|change| change.path.file_name().expect("name").to_owned())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("Late.bsl")]);
+    }
+
+    /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
+    #[test]
+    fn a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in [
+            "Written.bsl",
+            "Removed.bsl",
+            "Mine.bsl",
+            "Ahead.bsl",
+            "Kept.bsl",
+        ] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+
+        // The user's edit lands before the dump starts.
+        std::fs::write(root.join("Mine.bsl"), "mine").expect("user edit");
+        File::options()
+            .write(true)
+            .open(root.join("Mine.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .expect("old mtime");
+        // An edit stamped no earlier than the dump's start, as in the tick the dump begins.
+        std::fs::write(root.join("Ahead.bsl"), "mine too").expect("user edit");
+        File::options()
+            .write(true)
+            .open(root.join("Ahead.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(3600))
+            .expect("late mtime");
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+
+        // The dump rewrites one file, adds one and removes one.
+        std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        std::fs::write(root.join("Added.bsl"), "new in the base").expect("added");
+        std::fs::remove_file(root.join("Removed.bsl")).expect("removed");
+        record_dump_changes(&context, &work, &watch).expect("record");
+
+        let analysis = analyze_context(&context, &work, &mut || false);
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!("{:?}", analysis.outcome);
+        };
+        let mut names: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change.path.file_name().expect("name").to_owned(),
+                    change.kind,
+                )
+            })
+            .collect();
+        // Порядок изменений идёт от обхода каталога и не обещан: сверяется набор.
+        names.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            names,
+            vec![
+                ("Ahead.bsl".into(), ChangeKind::Modified),
+                ("Mine.bsl".into(), ChangeKind::Modified)
+            ]
+        );
+    }
+
+    /// Удалению по SFTP достаются только файлы элементов, пропавших из описи: удалённый
+    /// объект и удалённая форма уходят, посторонний файл в каталоге оставшегося объекта,
+    /// неизвестный вид и файлы вне области обхода остаются
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    #[test]
+    fn only_the_files_of_dropped_elements_are_named() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = root.join("work");
+        for file in [
+            "Configuration.xml",
+            "Catalogs/Items.xml",
+            "Catalogs/Items/Stray.txt",
+            "Catalogs/Items/Forms/Kept.xml",
+            "Catalogs/Items/Forms/Old.xml",
+            "Catalogs/Items/Forms/Old/Ext/Form/Module.bsl",
+            "Catalogs/Gone.xml",
+            "Catalogs/Gone/Ext/ObjectModule.bsl",
+            "Catalogs/Gone/.git/keep",
+            "Unknowns/Gone.xml",
+            "work/Catalogs/Gone.xml",
+            "Documents/Заказ.xml",
+            "Documents/Заказ/Ext/ObjectModule.bsl",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, file).expect("file");
+            File::options()
+                .write(true)
+                .open(&path)
+                .expect("open")
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(3600))
+                .expect("old mtime");
+        }
+        let start = mark_dump_start(&root).expect("dump start");
+        // The dump rewrote a file of an element its description no longer names, as a
+        // case-only rename does on a case-insensitive file system: written files stay.
+        std::fs::write(root.join("Catalogs/Gone/Ext/ObjectModule.bsl"), "written").expect("w");
+        let context = SourceSetContext::new("main", root.clone(), "designer-main");
+        let names = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let before = names(&[
+            "Catalog.Items",
+            "Catalog.Items.Form.Kept",
+            "Catalog.Items.Form.Old",
+            "Catalog.Gone",
+            "Unknown.Gone",
+            "Document.Заказ",
+        ]);
+        // A case-only rename: the new description spells the element otherwise.
+        let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept", "Document.ЗАКАЗ"]);
+
+        let mut dropped: Vec<String> =
+            files_of_dropped_elements(&context, &work, start, &before, &after, &|| false)
+                .expect("listing")
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&root)
+                        .expect("inside the set")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+        dropped.sort();
+
+        assert_eq!(
+            dropped,
+            [
+                "Catalogs/Gone.xml",
+                "Catalogs/Items/Forms/Old.xml",
+                "Catalogs/Items/Forms/Old/Ext/Form/Module.bsl",
+            ]
+        );
+        assert!(
+            files_of_dropped_elements(&context, &work, start, &HashSet::new(), &after, &|| false)
+                .expect("listing")
+                .is_empty(),
+            "nothing was in the description before"
+        );
+    }
+
+    /// After a push and after a pull by changes of one file of a large set, the memory is
+    /// written by that file's rows alone: no other row is read or written (#576).
+    #[test]
+    fn a_commit_after_one_changed_file_touches_only_its_rows() {
+        use crate::change_detection::hash_storage::row_audit;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for n in 0..100 {
+            std::fs::write(root.join(format!("M{n}.bsl")), "before").expect("module");
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let one_file = row_audit::Rows {
+            read: 2,
+            written: 2,
+        };
+
+        std::fs::write(root.join("M7.bsl"), "pushed").expect("edit");
+        let Ok(AnalysisOutcome::Changes { prepared, .. }) =
+            analyze_context(&context, &work, &mut || false).outcome
+        else {
+            panic!("the edit is a change");
+        };
+        row_audit::take();
+        super::commit_success(&context, &work, &prepared).expect("push commit");
+        assert_eq!(row_audit::take(), one_file, "after push");
+
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+        std::fs::write(root.join("M9.bsl"), "from the base").expect("written");
+        let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
+        row_audit::take();
+        super::observe_dump_writes(&context, &work, &watch, None, listed, None, &|| false)
+            .expect("observe")
+            .commit(&context, &work)
+            .expect("pull commit");
+        assert_eq!(row_audit::take(), one_file, "after pull");
+
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Damage that keeps both tables of equal length — an orphan row in one table next to a
+    /// missing row of another key in it — passes the summary a pull by changes reads, and its
+    /// delta commit keeps it. The next analysis reads every row and falls back to a full load,
+    /// and the full commit after it leaves both tables with the same keys (#571, #576).
+    #[test]
+    fn equal_length_damage_after_a_delta_commit_is_repaired_by_a_full_load() {
+        use crate::change_detection::hash_storage::{HashStorage, FILES_HASH, FILES_MTIME};
+        use redb::{Database, ReadableTable};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["A.bsl", "B.bsl", "C.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let path = context.storage_path(&work).expect("memory path");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            {
+                let mut mtime = tx.open_table(FILES_MTIME).expect("mtime");
+                mtime.remove("B.bsl").expect("missing row");
+                mtime.insert("Orphan.bsl", 1).expect("orphan row");
+            }
+            tx.commit().expect("damage");
+        }
+        let storage = HashStorage::new(path.clone());
+        assert!(
+            storage.load_summary().is_ok(),
+            "equal lengths pass the summary"
+        );
+
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+        std::fs::write(root.join("C.bsl"), "from the base").expect("written");
+        record_dump_changes(&context, &work, &watch).expect("delta commit");
+        assert!(
+            storage
+                .load_snapshot()
+                .is_err_and(|error| error.is_recoverable()),
+            "the delta commit names only its rows and keeps the damage"
+        );
+
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+        rescan_and_commit_full(&context, &work).expect("full load commit");
+
+        let keys = |table: &dyn Fn(&redb::ReadTransaction) -> Vec<String>| {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_read().expect("read");
+            let mut keys = table(&tx);
+            keys.sort();
+            keys
+        };
+        let mtime_keys = keys(&|tx| {
+            tx.open_table(FILES_MTIME)
+                .expect("mtime")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        let hash_keys = keys(&|tx| {
+            tx.open_table(FILES_HASH)
+                .expect("hash")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        assert_eq!(mtime_keys, ["A.bsl", "B.bsl", "C.bsl"]);
+        assert_eq!(hash_keys, mtime_keys);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    #[test]
+    fn a_set_without_memory_of_the_base_is_not_watched() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(root.join("A.bsl"), "a").expect("A");
+        let start = mark_dump_start(&root).expect("dump start");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        assert!(watch_before_dump(&context, &dir.path().join("work"), start).is_none());
+    }
+
     /// Cancellation is distinct from a full-load fallback and leaves committed memory alone.
     #[test]
     fn interrupted_analysis_keeps_memory_and_never_falls_back() {

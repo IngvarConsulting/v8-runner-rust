@@ -548,7 +548,10 @@ fn run_load_selected(
         "[Конфигуратор] updating database configuration",
     );
     let update_result = update_dsl
-        .update_db_cfg(resolved.extension.as_deref())
+        .update_db_cfg(
+            resolved.extension.as_deref(),
+            crate::platform::session_list::SessionTerminate::Keep,
+        )
         .map_err(AppError::from);
 
     let update_result = match update_result {
@@ -1645,6 +1648,7 @@ mod tests {
 
     fn sample_config(root: &Path, binary: &Path) -> AppConfig {
         AppConfig {
+            local_path: root.join(".local"),
             base_path: root.to_path_buf(),
             work_path: root.join("work"),
             format: SourceFormat::Designer,
@@ -1904,7 +1908,7 @@ mod tests {
 
         assert_eq!(
             failure.error.kind(),
-            UseCaseErrorKind::Environment,
+            UseCaseErrorKind::Environment(crate::use_cases::result::EnvironmentReason::Unavailable),
             "{}",
             failure.error
         );
@@ -2580,6 +2584,8 @@ mod tests {
         );
         // Поддельный Конфигуратор агентом не станет: короткое ожидание вместо двух минут.
         config.tools.designer_agent.startup_timeout_ms = 200;
+        // Разовый агент: тест о том, что к кластеру не идёт ibcmd, а не о стороже.
+        config.tools.designer_agent.live = Some(false);
         let request = LoadRequest {
             vendor_name: None,
             dry_run: false,
@@ -2600,7 +2606,7 @@ mod tests {
         assert!(!calls.contains("/LoadCfg"), "nothing is loaded: {calls}");
         assert_eq!(
             failure.error.kind(),
-            UseCaseErrorKind::Environment,
+            UseCaseErrorKind::Environment(crate::use_cases::result::EnvironmentReason::Unavailable),
             "{}",
             failure.error
         );

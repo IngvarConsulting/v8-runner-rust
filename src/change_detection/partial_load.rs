@@ -1,3 +1,4 @@
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
@@ -76,22 +77,23 @@ pub enum LoadDecision {
 
 /// Decide whether a partial or full load is appropriate for `changes`.
 pub fn decide(changes: &[FileChange], source_root: &Path) -> LoadDecision {
-    decide_in_scope(changes, source_root, None, ScanScope::Push)
+    decide_in_scope(changes, source_root, &[], ScanScope::Push)
 }
 
+/// Список частичной загрузки сборки: каталоги раннера под корнем в него не входят.
 pub(crate) fn decide_build(
     changes: &[FileChange],
     source_root: &Path,
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
 ) -> LoadDecision {
-    let excluded = scanner::work_path_inside(source_root, work_path);
-    decide_in_scope(changes, source_root, excluded.as_deref(), ScanScope::Build)
+    let excluded = runner_dirs_inside(source_root, dirs);
+    decide_in_scope(changes, source_root, &excluded, ScanScope::Build)
 }
 
 fn decide_in_scope(
     changes: &[FileChange],
     source_root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> LoadDecision {
     match expand_files(changes, source_root, excluded, scope) {
@@ -196,7 +198,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
             &payload,
             source_root,
             &root_real,
-            None,
+            &[],
             ScanScope::Push,
         )
         .ok_or_else(|| invalid(&payload))?;
@@ -207,7 +209,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
         &root_payload,
         source_root,
         &root_real,
-        None,
+        &[],
         ScanScope::Push,
     )
     .ok_or_else(|| invalid(&root_payload))?;
@@ -217,7 +219,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
 fn expand_files(
     changes: &[FileChange],
     source_root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<Vec<PathBuf>> {
     let root_real = canonicalize_existing(source_root)?;
@@ -267,7 +269,8 @@ fn expand_files(
                     scope,
                 )?;
             }
-            push_with_descriptors(&mut paths, path, source_root, &root_real)?;
+            let descriptors = ModuleDescriptors::of(change.kind, relative);
+            push_with_descriptors(&mut paths, path, descriptors, source_root, &root_real)?;
         }
     }
 
@@ -292,7 +295,7 @@ fn expand_optional_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<()> {
     match std::fs::symlink_metadata(directory) {
@@ -307,10 +310,13 @@ fn expand_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<()> {
-    if excluded.is_some_and(|excluded| directory.starts_with(excluded)) {
+    if excluded
+        .iter()
+        .any(|excluded| directory.starts_with(excluded))
+    {
         return Some(());
     }
     // The scanner does not select symlink directories within a source set.
@@ -378,6 +384,110 @@ fn validate_removals(
     Some(())
 }
 
+/// Elements a Designer dump lays out under an object's directory: the folder, the kind the
+/// element's full name carries (`Catalog.X.Form.F`) and, when only one kind owns them, that
+/// owner's kind. A nested subsystem lies in the top-level folder of its kind
+/// ([`METADATA_TYPES`]) under a subsystem.
+const NESTED_ELEMENTS: &[(&str, &str, Option<&str>)] = &[
+    ("Forms", "Form", None),
+    ("Templates", "Template", None),
+    ("Commands", "Command", None),
+    (
+        "Recalculations",
+        "Recalculation",
+        Some("CalculationRegister"),
+    ),
+];
+
+/// The folders of a Designer dump: those of the top-level metadata kinds ([`METADATA_TYPES`])
+/// and those nested under an element ([`NESTED_ELEMENTS`]). One vocabulary for the dump
+/// layout, read also by the git ignore check (#575).
+pub(crate) fn dump_layout_folders() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        METADATA_TYPES.iter().map(|(folder, _)| *folder).collect(),
+        NESTED_ELEMENTS
+            .iter()
+            .map(|(folder, _, _)| *folder)
+            .collect(),
+    )
+}
+
+/// The kind of a folder nested under an element of `owner_kind`, if a dump lays one out there.
+fn nested_kind(owner_kind: &str, folder: &str) -> Option<&'static str> {
+    let nested = NESTED_ELEMENTS.iter().find_map(|(directory, kind, owner)| {
+        (directory.eq_ignore_ascii_case(folder) && owner.is_none_or(|owner| owner == owner_kind))
+            .then_some(*kind)
+    });
+    nested.or_else(|| {
+        METADATA_TYPES
+            .iter()
+            .find(|(directory, kind)| {
+                *kind == "Subsystem"
+                    && owner_kind == "Subsystem"
+                    && directory.eq_ignore_ascii_case(folder)
+            })
+            .map(|(_, kind)| *kind)
+    })
+}
+
+/// The deepest element of a Designer dump that owns a file, as [`dump_element`] finds it.
+struct DumpElement {
+    /// Kind of the deepest element as `ConfigDumpInfo.xml` spells it: `CommonModule`, `Form`.
+    kind: &'static str,
+    /// Full name of the element: `Catalog.X.Form.F`.
+    name: String,
+    /// How many leading path components name the element; the rest lies inside its folder.
+    folders: usize,
+}
+
+/// The deepest element of a Designer dump that owns the file at `path`, relative to the dump
+/// root, named as the version file `ConfigDumpInfo.xml` names it: `Catalog.X` for
+/// `Catalogs/X.xml` and everything under `Catalogs/X/`, `Catalog.X.Form.F` under `Forms/F.xml`
+/// and `Forms/F/`, likewise `Template` (`Templates/`), `Command` (only `Commands/C/`),
+/// `Recalculation` of a calculation register (`Recalculations/`) and a nested `Subsystem`
+/// (`Subsystems/`, at any depth). `None` when the top-level folder is not a kind of
+/// [`METADATA_TYPES`] (`Configuration.xml`, `Ext/`, a stray file).
+pub(crate) fn dump_element_of(path: &Path) -> Option<String> {
+    dump_element(path).map(|element| element.name)
+}
+
+/// The one walk over a dump path behind [`dump_element_of`] and [`module_loads_alone`].
+fn dump_element(path: &Path) -> Option<DumpElement> {
+    let (kind, name) = top_level_object(path)?;
+    let mut element = DumpElement {
+        kind,
+        name: format!("{kind}.{name}"),
+        folders: 2,
+    };
+    let mut rest = path.iter().skip(2).peekable();
+    while let Some(folder) = rest.next().and_then(|part| part.to_str()) {
+        let Some(nested) = nested_kind(element.kind, folder) else {
+            break;
+        };
+        let Some(entry) = rest.next() else {
+            break;
+        };
+        let child = if rest.peek().is_some() {
+            entry.to_str()
+        } else {
+            // A file right in the folder is the element's descriptor `<Name>.xml`; a command
+            // has none.
+            let file = Path::new(entry);
+            file.extension()
+                .and_then(|extension| extension.to_str())
+                .filter(|extension| extension.eq_ignore_ascii_case("xml") && nested != "Command")
+                .and_then(|_| file.file_stem()?.to_str())
+        };
+        let Some(child) = child else {
+            break;
+        };
+        element.name = format!("{}.{nested}.{child}", element.name);
+        element.kind = nested;
+        element.folders += 2;
+    }
+    Some(element)
+}
+
 fn top_level_descriptor(path: &Path) -> Option<(&'static str, &str)> {
     (path.components().count() == 2).then_some(())?;
     top_level_object(path)
@@ -402,9 +512,107 @@ fn top_level_object(path: &Path) -> Option<(&'static str, &str)> {
     Some((kind, name))
 }
 
+/// Whether a changed `.bsl` goes to the list with the descriptors of its owners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleDescriptors {
+    /// The sibling `<module>.xml` and every existing descriptor up the tree go with it.
+    Owners,
+    /// The module goes alone (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+    Omitted,
+}
+
+impl ModuleDescriptors {
+    fn of(change: ChangeKind, relative: &Path) -> Self {
+        if change == ChangeKind::Modified && module_loads_alone(relative) {
+            Self::Omitted
+        } else {
+            Self::Owners
+        }
+    }
+}
+
+/// A changed module the platform loads as a separate file, without its owner's descriptors
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`): the module of a common
+/// module (`CommonModules/<M>/Ext/Module.bsl`), a form module
+/// (`.../Forms/<F>/Ext/Form/Module.bsl`, `CommonForms/<F>/Ext/Form/Module.bsl`) and the object
+/// module of a top-level object (`Catalogs/<C>/Ext/ObjectModule.bsl`). The platform applies
+/// each of them alone (measured on КА). Manager, record set, value manager and command
+/// modules keep their descriptors until a measurement shows the platform applies them alone.
+fn module_loads_alone(relative: &Path) -> bool {
+    let Some(element) = dump_element(relative) else {
+        return false;
+    };
+    let Some(inside) = relative
+        .iter()
+        .skip(element.folders)
+        .map(|part| part.to_str())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let is = |part: &str, name: &str| part.eq_ignore_ascii_case(name);
+    // The tail is counted inside the deepest element, not along the whole path: a common
+    // module is `CommonModules/<M>` plus `Ext/Module.bsl` (four parts in all), a form is its
+    // own folders plus `Ext/Form/Module.bsl` — five parts for a common form, seven for a form
+    // of an object. Counting from the element keeps `Catalogs/Form/Ext/Form/Module.bsl` (a
+    // catalog named `Form`) and an object command's `Ext/...` out of the form branch. An object
+    // module belongs to a top-level object only: `<Group>/<Name>` plus `Ext/ObjectModule.bsl`.
+    match (element.kind, inside.as_slice()) {
+        ("CommonModule", [ext, module]) => is(ext, "Ext") && is(module, "Module.bsl"),
+        (_, [ext, module]) if element.folders == 2 => {
+            is(ext, "Ext") && is(module, "ObjectModule.bsl")
+        }
+        ("CommonForm" | "Form", [ext, folder, module]) => {
+            is(ext, "Ext") && is(folder, "Form") && is(module, "Module.bsl")
+        }
+        _ => false,
+    }
+}
+
+/// `paths` of a decided partial load with the owners' descriptors of every `.bsl` added back:
+/// the list for a channel where a module alone is not measured yet. The SFTP exchange of the
+/// agent loads modules with their descriptors, as before #599, until a live run shows the
+/// platform applies a lone module there too
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+pub(crate) fn with_module_descriptors(
+    paths: &[PathBuf],
+    source_root: &Path,
+) -> Result<Vec<PathBuf>, DescriptorWidening> {
+    let root_real = canonicalize_existing(source_root)
+        .ok_or_else(|| DescriptorWidening::Missing(source_root.to_path_buf()))?;
+    let mut widened = Vec::with_capacity(paths.len());
+    for path in paths {
+        // The planned files have passed the path guard; one that is gone now was removed
+        // between planning and staging.
+        if !path.is_file() {
+            return Err(DescriptorWidening::Missing(path.clone()));
+        }
+        if is_bsl(path) {
+            for descriptor in owner_descriptors(path, source_root) {
+                push_file_if_safe_if_exists(&mut widened, &descriptor, source_root, &root_real)
+                    .ok_or(DescriptorWidening::Rejected(descriptor))?;
+            }
+        }
+        widened.push(path.clone());
+    }
+    widened.sort_unstable();
+    widened.dedup();
+    Ok(widened)
+}
+
+/// Why [`with_module_descriptors`] could not widen a planned partial load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DescriptorWidening {
+    /// The planned file (or the source root) is gone: removed between planning and staging.
+    Missing(PathBuf),
+    /// An owner's descriptor failed the path guard: outside the source root or not a file.
+    Rejected(PathBuf),
+}
+
 fn push_with_descriptors(
     paths: &mut Vec<PathBuf>,
     path: PathBuf,
+    descriptors: ModuleDescriptors,
     source_root: &Path,
     root_real: &Path,
 ) -> Option<()> {
@@ -412,16 +620,20 @@ fn push_with_descriptors(
     if !path.is_file() {
         return None;
     }
-    if is_bsl(&path) {
-        if let Some(xml) = sibling_xml(&path) {
-            push_file_if_safe_if_exists(paths, &xml, source_root, root_real)?;
-        }
-        for descriptor in ancestor_xml_descriptors(path.parent(), source_root) {
+    if is_bsl(&path) && descriptors == ModuleDescriptors::Owners {
+        for descriptor in owner_descriptors(&path, source_root) {
             push_file_if_safe_if_exists(paths, &descriptor, source_root, root_real)?;
         }
     }
     paths.push(path);
     Some(())
+}
+
+/// The sibling `<module>.xml` of a `.bsl` and every descriptor up the tree, existing or not.
+fn owner_descriptors(module: &Path, source_root: &Path) -> impl Iterator<Item = PathBuf> {
+    sibling_xml(module)
+        .into_iter()
+        .chain(ancestor_xml_descriptors(module.parent(), source_root))
 }
 
 fn push_file_if_safe(
@@ -524,8 +736,63 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{decide, relative_paths, root_dependencies, write_list_file, LoadDecision};
+    use super::{
+        decide, decide_build, dump_element_of, relative_paths, root_dependencies, write_list_file,
+        LoadDecision, RunnerDirs,
+    };
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
+
+    /// Владелец файла выгрузки — самый глубокий элемент, который раннер узнаёт по пути
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    #[test]
+    fn a_dump_file_belongs_to_the_deepest_element_its_path_names() {
+        let owner = |path: &str| dump_element_of(std::path::Path::new(path));
+        for (path, expected) in [
+            ("Catalogs/Items.xml", Some("Catalog.Items")),
+            ("catalogs/Items/Ext/ObjectModule.bsl", Some("Catalog.Items")),
+            ("Catalogs/Items/Stray.txt", Some("Catalog.Items")),
+            (
+                "Catalogs/Items/Forms/Item.xml",
+                Some("Catalog.Items.Form.Item"),
+            ),
+            (
+                "Catalogs/Items/Forms/Item/Ext/Form/Module.bsl",
+                Some("Catalog.Items.Form.Item"),
+            ),
+            (
+                "Documents/Order/Templates/Print/Ext/Template.xml",
+                Some("Document.Order.Template.Print"),
+            ),
+            (
+                "Catalogs/Items/Commands/Open/Ext/CommandModule.bsl",
+                Some("Catalog.Items.Command.Open"),
+            ),
+            ("Catalogs/Items/Commands/Open.xml", Some("Catalog.Items")),
+            (
+                "Subsystems/Sales/Subsystems/Orders/Subsystems/Lines.xml",
+                Some("Subsystem.Sales.Subsystem.Orders.Subsystem.Lines"),
+            ),
+            ("Catalogs/Items/Subsystems/Other.xml", Some("Catalog.Items")),
+            (
+                "CalculationRegisters/Pay/Recalculations/Again.xml",
+                Some("CalculationRegister.Pay.Recalculation.Again"),
+            ),
+            (
+                "CalculationRegisters/Pay/Recalculations/Again/Ext/RecordSetModule.bsl",
+                Some("CalculationRegister.Pay.Recalculation.Again"),
+            ),
+            (
+                "Catalogs/Items/Recalculations/Again.xml",
+                Some("Catalog.Items"),
+            ),
+            ("CommonForms/Form/Ext/Form.xml", Some("CommonForm.Form")),
+            ("Configuration.xml", None),
+            ("Ext/ParentConfigurations.bin", None),
+            ("Unknowns/Thing.xml", None),
+        ] {
+            assert_eq!(owner(path).as_deref(), expected, "{path}");
+        }
+    }
 
     #[test]
     fn write_list_file_skips_empty_relative_paths() {
@@ -659,42 +926,342 @@ mod tests {
         assert_eq!(decision, LoadDecision::Partial(vec![module, xml]));
     }
 
-    #[test]
-    fn decide_expands_nested_bsl_to_ancestor_xml_files_without_directories() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        let module = root.join("Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl");
-        let form_xml = root.join("Catalogs/Items/Forms/ItemForm.xml");
-        let form_ext_xml = root.join("Catalogs/Items/Forms/ItemForm/Ext/Form.xml");
-        let object_xml = root.join("Catalogs/Items.xml");
-
-        std::fs::create_dir_all(module.parent().expect("module parent")).expect("module dir");
-        std::fs::write(&module, "module").expect("write module");
-        std::fs::write(&form_xml, "<form />").expect("write form xml");
-        std::fs::write(&form_ext_xml, "<form ext />").expect("write form ext xml");
-        std::fs::write(&object_xml, "<object />").expect("write object xml");
-
-        let decision = decide(
-            &[FileChange {
-                path: module.clone(),
-                kind: ChangeKind::Modified,
-            }],
-            root,
-        );
-
-        let LoadDecision::Partial(paths) = decision else {
-            panic!("expected partial decision");
-        };
-
-        assert_eq!(paths, vec![module, form_ext_xml, form_xml, object_xml]);
-        assert!(paths.iter().all(|path| path.is_file()));
-    }
-
     fn write_source(root: &std::path::Path, name: &str, content: &str) -> PathBuf {
         let path = root.join(name);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&path, content).expect("write source");
         path
+    }
+
+    fn change(path: &std::path::Path, kind: ChangeKind) -> FileChange {
+        FileChange {
+            path: path.to_path_buf(),
+            kind,
+        }
+    }
+
+    fn sorted(mut paths: Vec<PathBuf>) -> LoadDecision {
+        paths.sort();
+        LoadDecision::Partial(paths)
+    }
+
+    /// Правка одного общего модуля грузит один `.bsl`: описание модуля не менялось
+    /// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+    #[test]
+    fn a_changed_common_module_loads_without_its_description() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        write_source(root, "Configuration.xml", "<xml/>");
+        write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        let decision = decide(&[change(&module, ChangeKind::Modified)], root);
+
+        assert_eq!(decision, LoadDecision::Partial(vec![module]));
+    }
+
+    /// Правка модуля формы грузит только `.bsl` формы — без `Form.xml`, описания формы и
+    /// описания владельца; у общей формы так же.
+    #[test]
+    fn a_changed_form_module_loads_without_the_form_description() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        for (module, descriptors) in [
+            (
+                "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+                &[
+                    "Catalogs/Items/Forms/ItemForm/Ext/Form.xml",
+                    "Catalogs/Items/Forms/ItemForm.xml",
+                    "Catalogs/Items.xml",
+                ][..],
+            ),
+            (
+                "CommonForms/Main/Ext/Form/Module.bsl",
+                &["CommonForms/Main/Ext/Form.xml", "CommonForms/Main.xml"][..],
+            ),
+        ] {
+            for descriptor in descriptors {
+                write_source(root, descriptor, "<xml/>");
+            }
+            let module = write_source(root, module, "module");
+
+            let decision = decide(&[change(&module, ChangeKind::Modified)], root);
+
+            assert_eq!(decision, LoadDecision::Partial(vec![module]));
+        }
+    }
+
+    /// Изменённое описание входит в список рядом с модулем: оно изменилось само.
+    #[test]
+    fn a_changed_module_and_its_changed_description_load_together() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let descriptor = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+        let form = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        let form_layout =
+            write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        write_source(root, "Catalogs/Items.xml", "<xml/>");
+
+        let decision = decide(
+            &[
+                change(&descriptor, ChangeKind::Modified),
+                change(&module, ChangeKind::Modified),
+                change(&form, ChangeKind::Modified),
+                change(&form_layout, ChangeKind::Modified),
+            ],
+            root,
+        );
+
+        assert_eq!(
+            decision,
+            sorted(vec![descriptor, module, form, form_layout])
+        );
+    }
+
+    /// Новый общий модуль грузится с описанием и корнем, как любой новый объект.
+    #[test]
+    fn an_added_common_module_loads_with_its_description_and_the_root() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let configuration = write_source(root, "Configuration.xml", "<xml/>");
+        let descriptor = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        let decision = decide(
+            &[
+                change(&configuration, ChangeKind::Modified),
+                change(&descriptor, ChangeKind::Added),
+                change(&module, ChangeKind::Added),
+            ],
+            root,
+        );
+
+        assert_eq!(decision, sorted(vec![configuration, descriptor, module]));
+    }
+
+    /// Модуль, которого у существующего объекта не было, грузится с описаниями объекта и
+    /// формы: без описаний платформа его не приняла бы — это не замерено.
+    #[test]
+    fn a_module_added_to_an_existing_object_loads_with_its_descriptions() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let object = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        let layout = write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        let object_module = write_source(root, "Catalogs/Items/Ext/ObjectModule.bsl", "module");
+        let form_module = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        let common = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let common_module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        assert_eq!(
+            decide(&[change(&object_module, ChangeKind::Added)], root),
+            sorted(vec![object.clone(), object_module])
+        );
+        assert_eq!(
+            decide(&[change(&form_module, ChangeKind::Added)], root),
+            sorted(vec![object, form, layout, form_module])
+        );
+        assert_eq!(
+            decide(&[change(&common_module, ChangeKind::Added)], root),
+            sorted(vec![common, common_module])
+        );
+    }
+
+    /// Правка модуля объекта справочника или документа грузит один `.bsl`: на КА загрузка
+    /// `ObjectModule.bsl` без описания справочника применилась.
+    #[test]
+    fn a_changed_object_module_loads_without_its_description() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        for (module, descriptor) in [
+            ("Catalogs/Items/Ext/ObjectModule.bsl", "Catalogs/Items.xml"),
+            (
+                "Documents/Order/Ext/ObjectModule.bsl",
+                "Documents/Order.xml",
+            ),
+        ] {
+            write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                LoadDecision::Partial(vec![module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// Модуль менеджера, набора записей и команды объекта пока грузится с описаниями
+    /// владельцев: что платформа применяет их одних, не замерено.
+    #[test]
+    fn a_changed_manager_record_set_or_command_module_still_loads_with_its_descriptions() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        for (module, descriptor) in [
+            (
+                "Documents/Order/Ext/ManagerModule.bsl",
+                "Documents/Order.xml",
+            ),
+            (
+                "Documents/Order/Commands/Print/Ext/CommandModule.bsl",
+                "Documents/Order.xml",
+            ),
+            (
+                "InformationRegisters/Prices/Ext/RecordSetModule.bsl",
+                "InformationRegisters/Prices.xml",
+            ),
+        ] {
+            let descriptor = write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![descriptor, module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// Пути, похожие на модуль общего модуля или формы, но принадлежащие другому элементу,
+    /// грузятся с описаниями: модуль общей команды и команды объекта, справочник с именем
+    /// `Form`, форма внутри общего модуля, `ObjectModule.bsl` в каталоге формы.
+    #[test]
+    fn paths_that_only_look_like_a_lone_module_keep_their_descriptions() {
+        for (module, descriptor) in [
+            (
+                "CommonCommands/Print/Ext/CommandModule.bsl",
+                "CommonCommands/Print.xml",
+            ),
+            (
+                "Catalogs/Items/Commands/Form/Ext/CommandModule.bsl",
+                "Catalogs/Items.xml",
+            ),
+            ("Catalogs/Form/Ext/Form/Module.bsl", "Catalogs/Form.xml"),
+            (
+                "Catalogs/Items/Forms/ItemForm/Ext/ObjectModule.bsl",
+                "Catalogs/Items.xml",
+            ),
+            ("Catalogs/Form/Ext/Module.bsl", "Catalogs/Form.xml"),
+            (
+                "CommonModules/Tools/Ext/Form/Module.bsl",
+                "CommonModules/Tools.xml",
+            ),
+            (
+                "Catalogs/CommonModules/Ext/Module.bsl",
+                "Catalogs/CommonModules.xml",
+            ),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let descriptor = write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![descriptor, module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// Регистр букв в пути на решение не влияет, как и во всём планировщике: общий модуль,
+    /// форма и модуль объекта в другом регистре грузятся одни, модуль менеджера — с описанием.
+    #[test]
+    fn letter_case_does_not_change_which_module_loads_alone() {
+        for module in [
+            "commonmodules/Tools/EXT/module.BSL",
+            "COMMONFORMS/Main/ext/FORM/Module.bsl",
+            "catalogs/Items/forms/ItemForm/Ext/form/MODULE.bsl",
+            "DOCUMENTS/Order/ext/objectmodule.BSL",
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                LoadDecision::Partial(vec![module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+        for (module, descriptor) in [
+            ("catalogs/Items/EXT/managermodule.BSL", "catalogs/Items.xml"),
+            ("CATALOGS/Form/ext/form/module.bsl", "CATALOGS/Form.xml"),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let descriptor = write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![descriptor, module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// По SFTP модуль без описаний не замерен: список возвращает описания владельцев каждого
+    /// `.bsl`, как до правила, и не трогает остальные файлы: у изменённой справки
+    /// `Catalogs/Other/Ext/Help.xml` описание `Catalogs/Other.xml` в список не попадает.
+    #[test]
+    fn the_sftp_list_takes_the_module_descriptions_back() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let common = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+        let object = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        let layout = write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        let form_module = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        write_source(root, "Catalogs/Other.xml", "<xml/>");
+        let help = write_source(root, "Catalogs/Other/Ext/Help.xml", "<xml/>");
+        let lone = decide(
+            &[
+                change(&module, ChangeKind::Modified),
+                change(&form_module, ChangeKind::Modified),
+                change(&help, ChangeKind::Modified),
+            ],
+            root,
+        );
+        assert_eq!(
+            lone,
+            sorted(vec![module.clone(), form_module.clone(), help.clone()])
+        );
+        let LoadDecision::Partial(lone) = lone else {
+            unreachable!("asserted above")
+        };
+
+        assert_eq!(
+            super::with_module_descriptors(&lone, root).map(LoadDecision::Partial),
+            Ok(sorted(vec![
+                common,
+                module,
+                object,
+                form,
+                layout,
+                form_module,
+                help
+            ]))
+        );
     }
 
     #[test]
@@ -718,6 +1285,29 @@ mod tests {
         let mut expected = vec![configuration, descriptor, form];
         expected.sort();
         assert_eq!(decision, LoadDecision::Partial(expected));
+    }
+
+    /// Список частичной загрузки сборки не несёт файлов `localPath` и `workPath`, даже если
+    /// они лежат в развёрнутом каталоге.
+    #[test]
+    fn a_build_list_leaves_the_runner_directories_out() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let configuration = write_source(root, "Configuration.xml", "<xml/>");
+        let descriptor = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/Form/Ext/Form.xml", "<xml/>");
+        write_source(root, "Catalogs/Items/personal/db/1Cv8.1CD", "base");
+        write_source(root, "Catalogs/Items/service/state.xml", "<xml/>");
+        let local = root.join("Catalogs/Items/personal");
+        let work = root.join("Catalogs/Items/service");
+
+        let decision = decide_build(
+            &[change(&root.join("Catalogs/Items"), ChangeKind::Modified)],
+            root,
+            RunnerDirs::new(&work, Some(&local)),
+        );
+
+        assert_eq!(decision, sorted(vec![configuration, descriptor, form]));
     }
 
     #[test]

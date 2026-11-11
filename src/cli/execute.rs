@@ -5,6 +5,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::cli::args::SessionsMode;
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
@@ -47,6 +48,7 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     UploadArtifactType,
 };
+use crate::domain::next_step::NextStep;
 use crate::domain::runner::{
     launch_key_alias_matches, ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest,
     LaunchOptions, RunnerKind, RunnerOutputFormat, RunnerProfile,
@@ -63,6 +65,7 @@ use crate::support::error::AppError;
 use crate::support::fs::clean_dir;
 use crate::support::path::is_safe_path_segment;
 use crate::support::temp::platform_logs_dir;
+use crate::use_cases::apply::sessions::{self, SessionsGate, SessionsPolicy};
 use crate::use_cases::artifacts;
 use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
@@ -248,6 +251,33 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Platforms => execute_platforms(config, presenter),
+        Command::Standalone(args) => execute_standalone(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Cluster(args) => execute_cluster(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Dbms(args) => execute_dbms(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Status(args) => execute_status(
             config,
             args,
@@ -256,6 +286,14 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
+        Command::Agent(args) => execute_agent(
+            config,
+            &args.command,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
     }
 }
 
@@ -759,8 +797,27 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
+        Command::Standalone(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
+        },
+        Command::Cluster(args) => match args.command.service() {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::ClusterStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::ClusterStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::ClusterRestart,
+        },
+        Command::Dbms(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::DbmsStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
+        },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
+        Command::Agent(args) => agent_command_name(&args.command),
     }
 }
 
@@ -1201,6 +1258,7 @@ fn execute_init(
     let request = InitRequest {
         dry_run,
         from: args.from.clone(),
+        recreate: args.recreate,
     };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
@@ -1293,9 +1351,12 @@ fn execute_build(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let request = map_build_request(args, dry_run);
+    let sessions = sessions_gate(&args.sessions, "push", request.source_set.as_deref())
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Build, error))?;
     // Отказ при чужой памяти советует `pull`/`push` с глобальными ключами этого вызова.
     let context = cli_context(config, CommandName::Build, cancellation)
-        .with_command_line(command_line.clone());
+        .with_command_line(command_line.clone())
+        .with_sessions(sessions);
     with_cli_workspace_lock(
         config,
         presenter,
@@ -1354,8 +1415,11 @@ fn execute_apply(
         source_set: args.set.clone(),
         dry_run,
     };
+    let sessions = sessions_gate(&args.sessions, "apply", request.source_set.as_deref())
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Apply, error))?;
     let context = cli_context(config, CommandName::Apply, cancellation)
-        .with_command_line(command_line.clone());
+        .with_command_line(command_line.clone())
+        .with_sessions(sessions);
     with_cli_workspace_lock(
         config,
         presenter,
@@ -1457,6 +1521,743 @@ fn execute_reset(
             }
         },
     )
+}
+
+/// `dbms`: запись под замком `workPath`, `status` без него, чтобы отвечать и пока идёт другая
+/// команда (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
+fn execute_dbms(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, ServiceCommand};
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::DbmsStart, ServiceCommand::Start),
+        Action::Status => (CommandName::DbmsStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::DbmsStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::DbmsRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::dbms::DbmsResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_dbms_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(dbms_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+/// `standalone`: запись под замком `workPath`, `status` без него.
+fn execute_standalone(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{
+        execute_standalone as run, standalone_status, ServiceCommand,
+    };
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
+        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::standalone::StandaloneResult,
+    >| match outcome {
+        Ok(mut result) => {
+            if presenter.is_json() {
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
+            } else {
+                render_standalone_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(standalone_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_standalone_text(
+    name: CommandName,
+    result: &crate::domain::standalone::StandaloneResult,
+    presenter: &Presenter,
+) {
+    for line in standalone_text(name, result) {
+        presenter.print_bare(&line);
+    }
+}
+
+fn standalone_text(
+    name: CommandName,
+    result: &crate::domain::standalone::StandaloneResult,
+) -> Vec<String> {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started ibsrv{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
+            "ibsrv pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the server is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the server is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: standalone server, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!(
+                    "{}: another process holds a port or the infobase of this server",
+                    result.infobase
+                )
+            }
+        },
+    };
+    let mut lines = vec![format!("{}: {line}", name.as_str())];
+    let details = [
+        ("direct gate", result.connection.clone()),
+        ("ssh gate", result.gate.clone()),
+        ("http", result.http.clone()),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+        (
+            "PostgreSQL stopped",
+            result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
+        (
+            "previous port",
+            result.previous_port.map(|port| port.to_string()),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            lines.push(format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        lines.push("  the recorded process is gone".to_owned());
+    }
+    lines.extend(
+        result
+            .warnings
+            .iter()
+            .map(|warning| format!("warning: {warning}")),
+    );
+    lines
+}
+
+/// Имя команды `agent …`: одно место, где подкоманда становится [`CommandName`].
+fn agent_command_name(command: &crate::cli::args::AgentCommand) -> CommandName {
+    use crate::cli::args::AgentCommand;
+    match command {
+        AgentCommand::Hold(_) => CommandName::AgentHold,
+        AgentCommand::Release(_) => CommandName::AgentRelease,
+        AgentCommand::Stop(_) => CommandName::AgentStop,
+        AgentCommand::Status(_) => CommandName::AgentStatus,
+        AgentCommand::Keeper(_) => unreachable!("the keeper is handled before config loading"),
+    }
+}
+
+/// `agent hold|release|stop|status` (#577) с проектом. `hold` и `release` берут замок рабочего
+/// каталога, базу не трогая; `stop` и `status` по цели проекта берут из проекта только ключ
+/// агента и замка не берут: их область — учётная запись ОС. С `--all` они идут без проекта
+/// ([`execute_agent_account`]).
+fn execute_agent(
+    config: &AppConfig,
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::{AgentCommand, AgentHolderArgs, AgentReleaseArgs};
+    use crate::use_cases::live_agent::{self, AgentScope, HolderRequest, ReleaseRequest};
+
+    fn holder(args: &AgentHolderArgs) -> HolderRequest {
+        match (args.holder_pid, args.ttl) {
+            (Some(pid), _) => HolderRequest::Process {
+                pid,
+                started_at: args.holder_started_at,
+            },
+            (None, Some(seconds)) => HolderRequest::Ttl { seconds },
+            (None, None) => unreachable!("clap requires --holder-pid or --ttl"),
+        }
+    }
+    fn release_of(args: &AgentReleaseArgs) -> ReleaseRequest {
+        match args.holder_pid {
+            Some(pid) => ReleaseRequest::Process {
+                pid,
+                started_at: args.holder_started_at,
+            },
+            None => ReleaseRequest::Ttl,
+        }
+    }
+
+    let name = agent_command_name(command);
+    let context = cli_context(config, name, cancellation);
+    let scope = if agent_needs_no_project(command) {
+        AgentScope::Account
+    } else {
+        AgentScope::Project(config)
+    };
+    if matches!(command, AgentCommand::Stop(_) | AgentCommand::Status(_)) {
+        return execute_agent_scoped(command, presenter, &context, scope);
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || match command {
+            AgentCommand::Hold(args) => present_agent(
+                presenter,
+                name,
+                live_agent::hold(&context, config, &holder(args)),
+                |result| result.duration_ms,
+                |result| {
+                    vec![format!(
+                        "{} the live agent {} (keeper pid {}), holders: {}",
+                        if result.reused {
+                            "holding"
+                        } else {
+                            "started and holding"
+                        },
+                        result.key,
+                        result.keeper_pid,
+                        crate::domain::capability::LiveAgentHolder::list_text(&result.holders)
+                    )]
+                },
+            ),
+            AgentCommand::Release(args) => present_agent(
+                presenter,
+                name,
+                live_agent::release(&context, config, &release_of(args)),
+                |result| result.duration_ms,
+                |result| {
+                    vec![if result.released {
+                        format!(
+                            "released; holders left: {}",
+                            crate::domain::capability::LiveAgentHolder::list_text(&result.holders)
+                        )
+                    } else {
+                        "nothing to release".to_owned()
+                    }]
+                },
+            ),
+            AgentCommand::Stop(_) | AgentCommand::Status(_) | AgentCommand::Keeper(_) => {
+                unreachable!("handled above")
+            }
+        },
+    )
+}
+
+/// Команда `agent`, которой проект не нужен: `stop --all` и `status --all` — область учётной
+/// записи ОС.
+pub(crate) fn agent_needs_no_project(command: &crate::cli::args::AgentCommand) -> bool {
+    use crate::cli::args::{AgentCommand, AgentStatusArgs, AgentStopArgs};
+    matches!(
+        command,
+        AgentCommand::Stop(AgentStopArgs { all: true })
+            | AgentCommand::Status(AgentStatusArgs { all: true })
+    )
+}
+
+/// `agent stop --all` и `agent status --all`: без проекта и без замка рабочего каталога.
+pub(crate) fn execute_agent_account(
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    use crate::use_cases::live_agent::AgentScope;
+
+    let cancellation = CancellationToken::new();
+    let _signal_guard = CliSignalGuard::install(cancellation.clone());
+    let name = agent_command_name(command);
+    let context = ExecutionContext::cli(name).with_cancellation(cancellation);
+    execute_agent_scoped(command, presenter, &context, AgentScope::Account)
+}
+
+/// `agent stop` и `agent status` в своей области: замка рабочего каталога не берут.
+fn execute_agent_scoped(
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+    context: &ExecutionContext,
+    scope: crate::use_cases::live_agent::AgentScope<'_>,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::AgentCommand;
+    use crate::use_cases::live_agent;
+
+    let name = agent_command_name(command);
+    match command {
+        AgentCommand::Stop(_) => present_agent(
+            presenter,
+            name,
+            live_agent::stop(context, scope),
+            |result| result.duration_ms,
+            render_agent_stop_text,
+        ),
+        AgentCommand::Status(_) => present_agent(
+            presenter,
+            name,
+            live_agent::status(context, scope),
+            |result| result.duration_ms,
+            render_agent_status_text,
+        ),
+        AgentCommand::Hold(_) | AgentCommand::Release(_) | AgentCommand::Keeper(_) => {
+            unreachable!("only stop and status go without the workspace lock")
+        }
+    }
+}
+
+/// Ответ команды `agent`: конверт или строки текста; отказ — с именем команды.
+fn present_agent<T: Serialize>(
+    presenter: &Presenter,
+    name: CommandName,
+    outcome: Result<T, AppError>,
+    duration_ms: impl FnOnce(&T) -> u64,
+    text: impl FnOnce(&T) -> Vec<String>,
+) -> Result<(), UseCaseError> {
+    match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    name.as_str(),
+                    duration_ms(&result),
+                    result,
+                ));
+            } else {
+                for line in text(&result) {
+                    presenter.print_bare(&line);
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let error = UseCaseError::from(error);
+            crate::cli::output::print_command_use_case_error(presenter, name, &error);
+            Err(error)
+        }
+    }
+}
+
+fn render_agent_stop_text(result: &crate::domain::live_agent::AgentStopResult) -> Vec<String> {
+    if result.stopped.is_empty() && result.refused.is_empty() {
+        return vec!["nothing to stop".to_owned()];
+    }
+    let stopped = result.stopped.iter().map(|agent| {
+        if agent.closing {
+            format!("the live agent {} stops after its command", agent.key)
+        } else {
+            format!("stopped the live agent {}", agent.key)
+        }
+    });
+    let refused = result.refused.iter().map(|refusal| {
+        format!(
+            "the live agent {} was not stopped: {}",
+            refusal.key, refusal.message
+        )
+    });
+    stopped.chain(refused).collect()
+}
+
+fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResult) -> Vec<String> {
+    if result.agents.is_empty() {
+        return vec!["no live agents".to_owned()];
+    }
+    result
+        .agents
+        .iter()
+        .map(|agent| {
+            let state = match (&agent.busy, agent.connected) {
+                (Some(command), _) => format!("busy with '{command}'"),
+                (None, true) => "in a command session".to_owned(),
+                (None, false) => format!("idle {} s", agent.idle_ms / 1000),
+            };
+            format!(
+                "{}{} on {}: {state}, holders: {}{}",
+                agent.key,
+                if agent.this_project {
+                    " (this project)"
+                } else {
+                    ""
+                },
+                agent.infobase.as_deref().unwrap_or("an unknown infobase"),
+                crate::domain::capability::LiveAgentHolder::list_text(&agent.holders),
+                if agent.closing { ", closing" } else { "" }
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_cluster(
+    config: &AppConfig,
+    action: crate::cli::args::ClusterCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ClusterCommandArgs as Action;
+    use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ClusterCommand};
+
+    let (name, command) = match action {
+        Action::Start { new_regport } => (
+            CommandName::ClusterStart,
+            ClusterCommand::Start { new_regport },
+        ),
+        Action::Status => (CommandName::ClusterStatus, ClusterCommand::Status),
+        Action::Stop => (CommandName::ClusterStop, ClusterCommand::Stop),
+        Action::Restart => (CommandName::ClusterRestart, ClusterCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::cluster::ClusterResult,
+    >| match outcome {
+        Ok(mut result) => {
+            if presenter.is_json() {
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
+            } else {
+                render_cluster_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ClusterCommand::Status {
+        return present(cluster_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_cluster_text(
+    name: CommandName,
+    result: &crate::domain::cluster::ClusterResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", ragent pid {pid}"))
+        .unwrap_or_default();
+    let version = result
+        .version
+        .as_deref()
+        .map(|version| format!(" {version}"))
+        .unwrap_or_default();
+    let pids = |pids: &[u32]| {
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let line = match result.action {
+        ServiceAction::Started => format!("started the cluster{version}{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => {
+            let mut stopped = Vec::new();
+            if let Some(pid) = result.stopped_pid {
+                stopped.push(format!("ragent pid {pid}"));
+            }
+            if let Some(pid) = result.stopped_ras_pid {
+                stopped.push(format!("ras pid {pid}"));
+            }
+            if !result.stopped_remnant_pids.is_empty() {
+                stopped.push(format!("remnants {}", pids(&result.stopped_remnant_pids)));
+            }
+            format!("{} stopped", stopped.join(", "))
+        }
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the cluster is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the cluster is starting", result.infobase),
+            ServiceState::StartedByThisCopy => format!(
+                "{}: cluster{version}, started by this working copy{pid}",
+                result.infobase
+            ),
+            ServiceState::Foreign => format!(
+                "{}: another process holds a port of this cluster",
+                result.infobase
+            ),
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("connection", result.connection.clone()),
+        ("agent", result.agent.clone()),
+        ("ras", result.ras.clone()),
+        ("worker range", result.worker_range.clone()),
+        ("ras pid", result.ras_pid.map(|pid| pid.to_string())),
+        (
+            "rac cluster list",
+            matches!(result.state, ServiceState::StartedByThisCopy).then(|| {
+                if result.ready {
+                    "answers"
+                } else {
+                    "does not answer"
+                }
+                .to_owned()
+            }),
+        ),
+        (
+            "infobase",
+            result.connection.as_ref().map(|_| {
+                if result.registered {
+                    "created".to_owned()
+                } else {
+                    "not created yet: run infobase create".to_owned()
+                }
+            }),
+        ),
+        (
+            "previous regport",
+            result.previous_regport.map(|port| port.to_string()),
+        ),
+        (
+            "registry",
+            result
+                .registry_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "remnants",
+            (!result.remnant_pids.is_empty()).then(|| pids(&result.remnant_pids)),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+        (
+            "PostgreSQL stopped",
+            result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+    for warning in &result.warnings {
+        presenter.print_bare(&format!("warning: {warning}"));
+    }
+}
+
+fn render_dbms_text(
+    name: CommandName,
+    result: &crate::domain::dbms::DbmsResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started PostgreSQL{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
+            "PostgreSQL pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: PostgreSQL is not running", result.infobase),
+            ServiceState::Starting => format!("{}: PostgreSQL is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: PostgreSQL, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!("{}: the port is taken by another process", result.infobase)
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("address", result.address.clone()),
+        ("user", result.user.clone()),
+        (
+            "password",
+            result
+                .password_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
 }
 
 fn execute_diff(
@@ -3368,6 +4169,34 @@ fn render_pre_dispatch_error(
     let error = error.into();
     print_command_use_case_error(presenter, command, &error);
     error
+}
+
+/// Политика чужих сеансов вызова: `--sessions` и сообщение, а `next` отказа — этот же вызов.
+/// Сообщение без `force` некому отдать — это ошибка вызова, а не молча забытый ключ.
+fn sessions_gate(
+    args: &crate::cli::args::SessionsArgs,
+    command: &str,
+    source_set: Option<&str>,
+) -> Result<SessionsGate, UseCaseError> {
+    let policy = match (args.sessions, &args.sessions_message) {
+        (Some(SessionsMode::Force), message) => SessionsPolicy::Force {
+            message: message
+                .clone()
+                .unwrap_or_else(|| sessions::DEFAULT_MESSAGE.to_owned()),
+        },
+        (_, Some(_)) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--sessions-message is the message to the sessions --sessions force ends; it needs --sessions force",
+            ))
+        }
+        (Some(SessionsMode::Disable) | None, None) => SessionsPolicy::Disable,
+    };
+    let call = match source_set {
+        Some(set) => NextStep::command(command).for_source_set(set),
+        None => NextStep::command(command),
+    };
+    Ok(SessionsGate::new(policy, call))
 }
 
 fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
@@ -5736,6 +6565,7 @@ mod tests {
                     source_set: SourceSetArg::default(),
                     force: false,
                     no_apply: false,
+                    sessions: Default::default(),
                 },
                 false,
             )
@@ -6188,6 +7018,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             })),
             CommandName::Build
         );
@@ -6215,6 +7046,7 @@ mod tests {
 
     fn sample_config(work_path: &Path) -> AppConfig {
         AppConfig {
+            local_path: work_path.join("base").join(".local"),
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,
@@ -6265,6 +7097,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -6468,6 +7301,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -6585,5 +7419,47 @@ mod tests {
             interruption.message.as_deref(),
             Some(recorded.message.as_str())
         );
+    }
+
+    #[test]
+    fn standalone_stop_names_the_postgres_it_stopped_with_the_server() {
+        use crate::domain::dbms::{ServiceAction, ServiceState};
+        use crate::domain::standalone::StandaloneResult;
+        use crate::use_cases::context::CommandName;
+
+        let result = StandaloneResult {
+            ok: true,
+            infobase: "origin".to_owned(),
+            state: ServiceState::NotRunning,
+            action: ServiceAction::Stopped,
+            pid: None,
+            connection: None,
+            gate: None,
+            http: None,
+            data_dir: None,
+            log_path: None,
+            ready: false,
+            stale_record: false,
+            occupant_pid: None,
+            stopped_pid: Some(8576),
+            stopped_dbms_pid: Some(6320),
+            previous_port: None,
+            duration_ms: 0,
+            warnings: Vec::new(),
+        };
+        let lines = super::standalone_text(CommandName::StandaloneStop, &result);
+        assert_eq!(
+            lines,
+            [
+                "standalone stop: ibsrv pid 8576 stopped",
+                "  PostgreSQL stopped  pid 6320"
+            ]
+        );
+        let explicit = StandaloneResult {
+            stopped_dbms_pid: None,
+            ..result
+        };
+        let lines = super::standalone_text(CommandName::StandaloneStop, &explicit);
+        assert_eq!(lines, ["standalone stop: ibsrv pid 8576 stopped"]);
     }
 }

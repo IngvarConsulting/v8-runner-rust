@@ -90,6 +90,110 @@ fn raw_process_spawn_apis_stay_inside_platform_layer() {
     }
 }
 
+/// Служба стенда запускается одним путём: второй способ поднять долгоживущий процесс не появится
+/// незаметно (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`, #536).
+#[test]
+fn a_service_starts_only_through_the_process_executor_mode() {
+    const CREATE_PROCESS_OWNER: &str = "src/platform/service.rs";
+    const SPAWN_SERVICE_OWNERS: &[&str] = &[
+        "src/platform/process.rs",
+        "src/use_cases/managed_stand/mod.rs",
+        // Сторож живого агента — тоже служба, переживающая команду (#577).
+        "src/platform/agent_keeper/client.rs",
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(&file)
+            .expect("source")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if relative != CREATE_PROCESS_OWNER {
+            for forbidden in [
+                "CreateProcessW",
+                "CreateProcessAsUser",
+                "ShellExecute",
+                "DETACHED_PROCESS",
+                "CREATE_BREAKAWAY_FROM_JOB",
+                "setsid(",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{relative} starts a process past the service mode: {forbidden}"
+                );
+            }
+        }
+        if relative != CREATE_PROCESS_OWNER && !SPAWN_SERVICE_OWNERS.contains(&relative.as_str()) {
+            assert!(
+                !text.contains("spawn_service") && !text.contains("spawn_hidden"),
+                "{relative} starts a service past the managed stand"
+            );
+        }
+    }
+}
+
+/// Приставку `\\?\` у пути для процесса снимает один запуск, а не адаптер
+/// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+#[test]
+fn a_process_argument_loses_the_verbatim_prefix_only_at_the_launch() {
+    // Reintroduction guard (#580): приставку `\\?\` у пути для процесса платформы снимал каждый
+    // адаптер сам, и путь, который адаптер забыл, доходил до Конфигуратора с приставкой («Файл не
+    // обнаружен»). Владелец один — `support::path::child_line`, его зовут все три запуска; в
+    // рабочем коде `src/platform/` нет ни снятия приставки, ни её самой — под каким угодно именем.
+    const LAUNCHES: &[&str] = &[
+        "src/platform/process.rs",
+        "src/platform/interactive.rs",
+        "src/platform/service.rs",
+    ];
+    // Поиск утилит хранит найденный путь исполняемого файла без приставки — это место и путь
+    // программы, а не аргумент.
+    const LOCATIONS: &[&str] = &["src/platform/locator.rs", "src/platform/utilities.rs"];
+    let verbatim = ["\\\\?\\", "\\\\\\\\?\\\\"];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in collect_rust_files(&repo_path("src/platform")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&file).expect("source");
+        // Только рабочий код: тесты адаптеров передают пути с приставкой нарочно.
+        let production = without_test_modules(&source);
+        let text = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if LOCATIONS.contains(&relative.as_str()) {
+            continue;
+        }
+        for forbidden in [
+            "normalize_windows_verbatim_path",
+            "strip_windows_verbatim_prefix",
+        ]
+        .into_iter()
+        .chain(verbatim)
+        {
+            assert!(
+                !text.contains(forbidden),
+                "{relative} handles the verbatim prefix past the launch: {forbidden}"
+            );
+        }
+        if LAUNCHES.contains(&relative.as_str()) {
+            assert!(
+                text.contains("child_line("),
+                "{relative} launches a process without the verbatim owner"
+            );
+        }
+    }
+}
+
 /// Приставку `\\?\` снимает один проход на выходе: новый писатель в stdout обошёл бы его.
 /// Журнал действий ответом не считается.
 #[test]
@@ -224,7 +328,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 34,
+        report.accepted, 39,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -316,6 +420,26 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 /// больше никто не пользуется, валит проверку.
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
+        "crate::use_cases::managed_stand::dbms_status",
+        "читает запись без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::standalone_status",
+        "читает запись без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::cluster_status",
+        "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::live_agent::status",
+        "область — учётная запись ОС: спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::live_agent::stop",
+        "область — учётная запись ОС: снимает живых агентов через их сторожей, `workPath` не трогает",
+    ),
+    (
         "crate::use_cases::transport::preview_boundary",
         "превью замков не берёт: метку владельца оно читает без замка и ничего в неё не пишет",
     ),
@@ -401,6 +525,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "готовность кандидата `ibcmd` в его же переборе",
         ),
         (
+            "crate::use_cases::managed_stand::standalone::create_base",
+            "создание базы автономного сервера в СУБД: другого исполнителя у него нет, каталог данных его службы",
+        ),
+        (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
             "единственный построитель `ibcmd` к базе проекта: его зовёт шаг, выбравший `ibcmd`",
         ),
@@ -431,6 +559,7 @@ fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
         ),
         [
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "crate::use_cases::managed_stand::standalone::create_base",
             "crate::use_cases::throwaway_infobase::FileInfobase::ibcmd",
         ]
         .map(str::to_owned)
@@ -3525,9 +3654,17 @@ fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<Str
 fn change_detection_has_no_background_watcher() {
     // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
     // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
-    // потоков не заводит, а раннер такого крейта не тянет.
+    // потоков вне команды не заводит, а раннер такого крейта не тянет. Чтение файлов набора в
+    // потоках `std::thread::scope` (#556) фоном не является: все они заканчиваются раньше, чем
+    // анализ отвечает, — поэтому разрешены только эти потоки и вопросы о числе ядер и панике.
     const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
     const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+    const SCOPED_WORK: &[&str] = &[
+        "std::thread::scope(",
+        "scope.spawn(",
+        "std::thread::available_parallelism(",
+        "std::thread::panicking(",
+    ];
 
     let manifest = read("Cargo.toml");
     let watchers: Vec<&str> = manifest
@@ -3546,7 +3683,10 @@ fn change_detection_has_no_background_watcher() {
     let mut offenders = Vec::new();
     for file in collect_rust_files(&repo_path("src/change_detection")) {
         let relative = file.strip_prefix(repo_root).expect("relative path");
-        let production = without_doc_attributes(&production_tokens(&file));
+        let production = SCOPED_WORK.iter().fold(
+            without_doc_attributes(&production_tokens(&file)),
+            |tokens, scoped| tokens.replace(scoped, ""),
+        );
         for marker in BACKGROUND_WORK {
             if production.contains(marker) {
                 offenders.push(format!("{} names `{marker}`", relative.display()));
@@ -5973,7 +6113,7 @@ fn the_apply_act_has_one_owner() {
             let tokens = production_tokens(file);
             tokens.contains(".update_db_cfg(")
                 || tokens.contains(".config_apply(")
-                || tokens.contains("config update-db-cfg")
+                || tokens.contains("configupdate-db-cfg")
         })
         .map(|file| file.display().to_string())
         .collect::<Vec<_>>();
@@ -5981,6 +6121,133 @@ fn the_apply_act_has_one_owner() {
         offenders.is_empty(),
         "these modules apply the configuration on their own instead of through apply::act:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// Где в токенах [`production_tokens`] называется режим динамического обновления, который
+/// его не запрещает. Пробелы выброшены и внутри строк, поэтому `"--dynamic auto"` видно как
+/// `--dynamicauto`. Допустимы только запреты: `-Dynamic-`, `--dynamic-disable`,
+/// `--dynamic=disable`; всё прочее после `--dynamic` или `-Dynamic` — нарушение, в том числе
+/// значение, подставленное в `format!`.
+fn dynamic_update_allowances(tokens: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (key, forbidding) in [
+        ("--dynamic", &["=disable", "-disable"][..]),
+        ("-Dynamic", &["-"][..]),
+    ] {
+        for (at, _) in tokens.match_indices(key) {
+            let rest = &tokens[at + key.len()..];
+            if !forbidding.iter().any(|tail| rest.starts_with(tail)) {
+                found.push(format!(
+                    "{key}{}",
+                    rest.chars().take(12).collect::<String>()
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Страж `INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`. Команду обновления конфигурации базы
+/// данных строят три владельца — `platform/designer.rs` (`/UpdateDBCfg`), `platform/ibcmd.rs`
+/// (`config apply`) и `use_cases/apply/act.rs` (`config update-db-cfg` агента); каждый из них
+/// ставит запрет динамического обновления, и ни один производственный модуль не называет
+/// режим, который его разрешает. Корень: без ключа платформа динамическое обновление
+/// разрешает, поэтому новая командная строка обновления в обход владельцев тихо его вернёт.
+#[test]
+fn no_db_update_allows_dynamic_update() {
+    let owners = [
+        (
+            repo_path("src/platform/designer.rs"),
+            "\"/UpdateDBCfg\"",
+            "-Dynamic-",
+        ),
+        (
+            repo_path("src/platform/ibcmd.rs"),
+            "\"config\",\"apply\"",
+            "--dynamic=disable",
+        ),
+        (
+            repo_path("src/use_cases/apply/act.rs"),
+            "\"configupdate-db-cfg",
+            "--dynamic-disable",
+        ),
+    ];
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        let tokens = production_tokens(&file);
+        let allowances = dynamic_update_allowances(&tokens);
+        if !allowances.is_empty() {
+            offenders.push(format!(
+                "{}: allows dynamic update {allowances:?}",
+                file.display()
+            ));
+        }
+        for (owner, command, forbidding) in &owners {
+            if !tokens.contains(command) {
+                continue;
+            }
+            if &file != owner {
+                offenders.push(format!(
+                    "{}: builds {command} outside its owner {}",
+                    file.display(),
+                    owner.display()
+                ));
+            } else if !tokens.contains(forbidding) {
+                offenders.push(format!(
+                    "{}: {command} without {forbidding}",
+                    file.display()
+                ));
+            }
+        }
+    }
+    for (owner, command, _) in &owners {
+        assert!(
+            production_tokens(owner).contains(command),
+            "the owner {} no longer builds {command}: update the guard",
+            owner.display()
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "database configuration update must forbid dynamic update:
+{}",
+        offenders.join(
+            "
+"
+        )
+    );
+}
+
+/// Страж динамического обновления видит разрешение под любой записью: подставленное
+/// значение, значение через пробел, ключ отдельным аргументом и `-Dynamic+`; запреты
+/// пропускает.
+#[test]
+fn the_dynamic_update_guard_sees_an_allowance_in_any_spelling() {
+    for sample in [
+        "fn f(m: &str) -> String { format!(\"--dynamic={}\", m) }
+",
+        "fn f() -> &'static str { \"--dynamic auto\" }
+",
+        "fn f(a: &mut Vec<String>) { a.push(\"--dynamic\".into()); a.push(\"auto\".into()); }
+",
+        "fn f() -> &'static str { \"-Dynamic+\" }
+",
+        "fn f() -> &'static str { \"--dynamic-enable\" }
+",
+    ] {
+        assert!(
+            !dynamic_update_allowances(&production_tokens_of(sample)).is_empty(),
+            "{sample}"
+        );
+    }
+    let forbidding = production_tokens_of(
+        "fn f(a: &mut Vec<String>) { a.push(\"-Dynamic-\".into()); a.push(\"--dynamic=disable\".into()); a.push(\" --dynamic-disable\".into()); }
+",
+    );
+    assert!(
+        dynamic_update_allowances(&forbidding).is_empty(),
+        "{forbidding}"
     );
 }
 
@@ -6466,4 +6733,33 @@ fn the_session_stamp_guard_rejects_each_real_entry_without_its_stamp() {
         14,
         "the stamped entry surface changed: {checked:?}"
     );
+}
+
+/// Исходник без тел модулей `mod tests { … }` на любой глубине: тесты нарочно передают пути
+/// с приставкой. Скобки внутри тела считаются попарно, этого хватает для тестового кода.
+fn without_test_modules(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("mod tests {") {
+        kept.push_str(&rest[..at]);
+        let body = &rest[at + "mod tests ".len()..];
+        let mut depth = 0usize;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &body[end..];
+    }
+    kept.push_str(rest);
+    kept
 }

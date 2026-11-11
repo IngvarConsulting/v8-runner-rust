@@ -53,6 +53,50 @@
       ],
       "type": "object"
     },
+    "ChangeDetection": {
+      "additionalProperties": false,
+      "description": "Путь поиска изменений набора и, у чтения файлов, его причина.",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/DetectionPath"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Причина пути `scan`; у git её нет."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "DetectionPath": {
+      "description": "Каким путём найдены изменения набора (`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`).",
+      "oneOf": [
+        {
+          "const": "git",
+          "description": "Изменения назвал git.",
+          "type": "string"
+        },
+        {
+          "const": "git+fsmonitor",
+          "description": "Изменения назвал git, которому о файлах сообщает демон `core.fsmonitor`.",
+          "type": "string"
+        },
+        {
+          "const": "scan",
+          "description": "Раннер прочёл каждый файл набора сам.",
+          "type": "string"
+        }
+      ]
+    },
     "ExtensionsStatus": {
       "additionalProperties": false,
       "description": "Состав расширений базы рядом с наборами проекта.",
@@ -129,7 +173,7 @@
         },
         {
           "const": "other_tool",
-          "description": "Запись сделана другим инструментом: сравнивать не с чем.",
+          "description": "Запись сделана инструментом, чей токен с этим несравним: сравнивать не с чем.",
           "type": "string"
         },
         {
@@ -308,17 +352,134 @@
       ],
       "type": "object"
     },
+    "LiveAgentHolder": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.",
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Держатель со сроком: до какого мгновения (UTC, RFC 3339).",
+          "properties": {
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "until"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Держатель живого агента в квитанции."
+    },
+    "LiveAgentReason": {
+      "description": "Почему управляемый агент не остался жить после команды.",
+      "oneOf": [
+        {
+          "const": "live_agent_off",
+          "description": "`tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.",
+          "type": "string"
+        },
+        {
+          "const": "job",
+          "description": "Раннер в Job, из которого сторож не может выйти.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Команду прервали, пока агент выполнял её запрос.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "Живой агент этой рабочей копии ещё служит сессии другой команды: команда работала с\nразовым.",
+          "type": "string"
+        },
+        {
+          "const": "keeper_failed",
+          "description": "Сторож живого агента не поднялся или не ответил (путь канала, отказ запуска, срок):\nкоманда работала с разовым агентом.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Сторож снял агента после команды: его сессия оборвалась, его остановили или ушёл\nпоследний держатель.",
+          "type": "string"
+        }
+      ]
+    },
+    "LiveAgentReceipt": {
+      "additionalProperties": false,
+      "description": "Живой ли был управляемый агент команды и остался ли он жить.",
+      "properties": {
+        "holders": {
+          "description": "Держатели агента на момент ответа; без держателей — пустой список.",
+          "items": {
+            "$ref": "#/$defs/LiveAgentHolder"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "description": "Остался ли агент жить после команды.",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему агент не остался жить; у оставшегося поля нет."
+        },
+        "reused": {
+          "description": "Команда взяла уже живого агента (`true`) или подняла его сама (`false`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reused",
+        "holders",
+        "kept"
+      ],
+      "type": "object"
+    },
     "MemoryState": {
       "description": "Память о базе у набора (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).",
       "oneOf": [
         {
           "const": "remembered",
-          "description": "Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `no_memory`.",
+          "description": "Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `untracked_base`.",
           "type": "string"
         },
         {
           "const": "none",
-          "description": "Памяти нет: `push` откажет `no_memory`.",
+          "description": "Памяти нет: `push` откажет `untracked_base`.",
           "type": "string"
         },
         {
@@ -334,6 +495,21 @@
         {
           "const": "unbound",
           "description": "Адрес базы не распознан: помнить её нельзя.",
+          "type": "string"
+        }
+      ]
+    },
+    "OperationSize": {
+      "description": "Объём операции, по которому раннер упорядочивает цепочку умолчаний (#559).\n\nИмя идёт в квитанцию полем `reason`: им раннер объясняет, почему первым в цепочке стоит\nтот, кто стоит.",
+      "oneOf": [
+        {
+          "const": "whole",
+          "description": "Каждый набор, который команда загружает или выгружает, идёт целиком.",
+          "type": "string"
+        },
+        {
+          "const": "by_changes",
+          "description": "Хотя бы один набор идёт по изменившемуся или выборкой.",
           "type": "string"
         }
       ]
@@ -423,6 +599,17 @@
         "origin": {
           "$ref": "#/$defs/ProviderOrigin"
         },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationSize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему цепочка умолчаний стоит в этом порядке: объём операции. Есть только у\nумолчания, которое раннер упорядочил по объёму (`push` и `pull` файловой базы);\nу ключа `providers.*` и у остальных цепочек поля нет."
+        },
         "selected": {
           "anyOf": [
             {
@@ -465,7 +652,7 @@
         },
         "tool": {
           "$ref": "#/$defs/Provider",
-          "description": "Инструмент, которым токен получен: токены разных инструментов несравнимы."
+          "description": "Инструмент, которым токен получен: токены разных инструментов сравнимы только у\nосновной конфигурации файловой базы (агент, Конфигуратор и `ibcmd`, замер #559)."
         }
       },
       "required": [
@@ -477,12 +664,63 @@
       ],
       "type": "object"
     },
+    "ScanReason": {
+      "description": "Почему изменения набора найдены чтением файлов, а не у git.",
+      "oneOf": [
+        {
+          "const": "no_repository",
+          "description": "Набор не лежит в рабочей копии git, или git не найден.",
+          "type": "string"
+        },
+        {
+          "const": "submodule",
+          "description": "Набор лежит в подмодуле.",
+          "type": "string"
+        },
+        {
+          "const": "nested_repository",
+          "description": "Внутри набора вложенный репозиторий или подмодуль: его файлы git не перечисляет.",
+          "type": "string"
+        },
+        {
+          "const": "git_failed",
+          "description": "Git отказал или его ответ неполон.",
+          "type": "string"
+        },
+        {
+          "const": "sha256_repository",
+          "description": "Репозиторий хранит объекты хешами SHA-256, а раннер считает хеши git только SHA-1.",
+          "type": "string"
+        },
+        {
+          "const": "bytes_memory",
+          "description": "Память записана хешами байтов (например, до того, как каталог стал рабочей копией\ngit): её сравнивает тот же хешер, чтением файлов, пока полная выгрузка или отправка не\nзапишет хеши git.",
+          "type": "string"
+        },
+        {
+          "const": "edt_format",
+          "description": "Исходники формата EDT: набор, который грузится в базу, — копия под `workPath`.",
+          "type": "string"
+        }
+      ]
+    },
     "SessionEndpoint": {
       "additionalProperties": false,
       "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
       "properties": {
         "address": {
           "type": "string"
+        },
+        "live": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).\nЕсть только у управляемого агента."
         },
         "mode": {
           "$ref": "#/$defs/SessionMode"
@@ -564,6 +802,17 @@
             "integer",
             "null"
           ]
+        },
+        "detection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeDetection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Каким путём найдены изменения: у git (`git`, `git+fsmonitor`) или чтением файлов\n(`scan`) с причиной; `null` — изменений не искали."
         },
         "memory": {
           "$ref": "#/$defs/MemoryState",

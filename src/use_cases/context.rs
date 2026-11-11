@@ -29,10 +29,78 @@ pub enum CommandName {
     Launch,
     Publish,
     Platforms,
+    DbmsStart,
+    DbmsStatus,
+    DbmsStop,
+    DbmsRestart,
+    StandaloneStart,
+    StandaloneStatus,
+    StandaloneStop,
+    StandaloneRestart,
+    ClusterStart,
+    ClusterStatus,
+    ClusterStop,
+    ClusterRestart,
+    AgentHold,
+    AgentRelease,
+    AgentStop,
+    AgentStatus,
     Status,
 }
 
+/// Меняет ли команда стенд под `localPath` и берёт ли поэтому его замок.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandChange {
+    Always,
+    /// Только у базы управляемого стенда: `infobase create`.
+    WhenManaged,
+    Never,
+}
+
 impl CommandName {
+    /// Меняет ли команда стенд. Перечень полный: новая команда решает это явно.
+    pub const fn stand_change(self) -> StandChange {
+        match self {
+            Self::DbmsStart
+            | Self::DbmsStop
+            | Self::DbmsRestart
+            | Self::StandaloneStart
+            | Self::StandaloneStop
+            | Self::StandaloneRestart
+            | Self::ClusterStart
+            | Self::ClusterStop
+            | Self::ClusterRestart => StandChange::Always,
+            Self::Init => StandChange::WhenManaged,
+            Self::Bootstrap
+            | Self::ToolsDownload
+            | Self::Extensions
+            | Self::Build
+            | Self::Apply
+            | Self::Reset
+            | Self::Diff
+            | Self::Load
+            | Self::Test
+            | Self::Dump
+            | Self::InfobaseConfigurationExport
+            | Self::InfobaseDump
+            | Self::InfobaseRestore
+            | Self::Convert
+            | Self::Artifacts
+            | Self::Syntax
+            | Self::Launch
+            | Self::Publish
+            | Self::Platforms
+            | Self::DbmsStatus
+            | Self::StandaloneStatus
+            | Self::ClusterStatus
+            | Self::AgentHold
+            | Self::AgentRelease
+            | Self::AgentStop
+            | Self::AgentStatus
+            | Self::Status => StandChange::Never,
+        }
+    }
+
     /// Returns the stable command label used in logs and CLI envelopes.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +124,22 @@ impl CommandName {
             Self::Launch => "launch",
             Self::Publish => "publish",
             Self::Platforms => "platforms",
+            Self::DbmsStart => "dbms start",
+            Self::DbmsStatus => "dbms status",
+            Self::DbmsStop => "dbms stop",
+            Self::DbmsRestart => "dbms restart",
+            Self::StandaloneStart => "standalone start",
+            Self::StandaloneStatus => "standalone status",
+            Self::StandaloneStop => "standalone stop",
+            Self::StandaloneRestart => "standalone restart",
+            Self::ClusterStart => "cluster start",
+            Self::ClusterStatus => "cluster status",
+            Self::ClusterStop => "cluster stop",
+            Self::ClusterRestart => "cluster restart",
+            Self::AgentHold => "agent hold",
+            Self::AgentRelease => "agent release",
+            Self::AgentStop => "agent stop",
+            Self::AgentStatus => "agent status",
             Self::Status => "status",
         }
     }
@@ -216,10 +300,19 @@ pub struct ExecutionContext {
     /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
     /// читает квитанция исполнителя. Клоны контекста делят этот слот, как и `work`:
     /// клон для другой команды унаследовал бы отметку.
-    session: std::sync::Arc<std::sync::OnceLock<SessionEndpoint>>,
+    session: std::sync::Arc<std::sync::Mutex<Option<SessionEndpoint>>>,
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
     full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
+    /// Каким путём найдены изменения каждого набора; отмечает анализ, читает ответ `push`.
+    /// Клоны контекста делят слот, как и `session`.
+    detections: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection>,
+        >,
+    >,
+    /// Политика чужих сеансов у применения (`--sessions`) и её исход; без ключа — `disable`.
+    sessions: super::apply::sessions::SessionsGate,
 }
 
 impl ExecutionContext {
@@ -234,6 +327,8 @@ impl ExecutionContext {
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
             full_pull: None,
+            detections: std::sync::Arc::default(),
+            sessions: super::apply::sessions::SessionsGate::default(),
         }
     }
 
@@ -288,6 +383,17 @@ impl ExecutionContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Политика чужих сеансов этого вызова (`push`/`apply --sessions`).
+    pub fn with_sessions(mut self, sessions: super::apply::sessions::SessionsGate) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    /// Политика чужих сеансов и её исход.
+    pub(crate) const fn sessions(&self) -> &super::apply::sessions::SessionsGate {
+        &self.sessions
     }
 
     /// Attaches the global keys a command line needs to reach the same target.
@@ -365,6 +471,17 @@ impl ExecutionContext {
         )
     }
 
+    /// Политика шага, который снимает поднятое этой командой. Отмена его не касается: отменённая
+    /// политика не запустила бы процесс вовсе, и поднятое осталось бы работать.
+    pub(crate) fn cleanup_policy(&self) -> ProcessExecutionPolicy {
+        ProcessExecutionPolicy::new(
+            None,
+            CancellationToken::new(),
+            InterruptionSafetyClass::GracefulThenKill.process_safety(),
+            self.work.clone(),
+        )
+    }
+
     /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
     pub fn work(&self) -> &WorkGiven {
         &self.work
@@ -373,12 +490,48 @@ impl ExecutionContext {
     /// Отмечает точку входа открытой сессии агента. Сессий у команды бывает несколько,
     /// но конфиг у неё один, и точка входа у них общая: первая отметка остаётся.
     pub(crate) fn note_session(&self, endpoint: SessionEndpoint) {
-        let _ = self.session.set(endpoint);
+        self.session_slot().get_or_insert(endpoint);
+    }
+
+    /// Дописывает в отмеченную точку входа, был ли управляемый агент живым: это узнаётся только
+    /// в конце сессии, а слот у команды один.
+    pub(crate) fn note_live(&self, live: crate::domain::capability::LiveAgentReceipt) {
+        if let Some(endpoint) = self.session_slot().as_mut() {
+            endpoint.live = Some(Box::new(live));
+        }
+    }
+
+    /// Отмечает, каким путём найдены изменения набора `source_set`.
+    pub(crate) fn note_detection(
+        &self,
+        source_set: &str,
+        detection: crate::domain::git_worktree::ChangeDetection,
+    ) {
+        self.detections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(source_set.to_owned(), detection);
+    }
+
+    /// Каким путём найдены изменения наборов этой команды.
+    pub(crate) fn detections(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection> {
+        self.detections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Точка входа сессии агента, если команда её открывала.
     pub(crate) fn opened_session(&self) -> Option<SessionEndpoint> {
-        self.session.get().cloned()
+        self.session_slot().clone()
+    }
+
+    fn session_slot(&self) -> std::sync::MutexGuard<'_, Option<SessionEndpoint>> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Returns the pending command-boundary interruption, if any.
@@ -430,11 +583,13 @@ mod tests {
         let first = SessionEndpoint {
             mode: SessionMode::Attached,
             address: "127.0.0.1:1545".into(),
+            live: None,
         };
         clone.note_session(first.clone());
         context.note_session(SessionEndpoint {
             mode: SessionMode::Managed,
             address: "127.0.0.1:1546".into(),
+            live: None,
         });
         assert_eq!(context.opened_session(), Some(first.clone()));
         assert_eq!(clone.opened_session(), Some(first.clone()));
@@ -443,6 +598,36 @@ mod tests {
             ExecutionContext::cli(CommandName::Build).opened_session(),
             None
         );
+    }
+
+    /// Живой ли был агент, узнаётся в конце сессии и дописывается в тот же слот, который делят
+    /// клоны контекста (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    #[test]
+    fn the_live_agent_receipt_lands_in_the_same_session_slot() {
+        use crate::domain::capability::{
+            LiveAgentReason, LiveAgentReceipt, SessionEndpoint, SessionMode,
+        };
+
+        let context = ExecutionContext::cli(CommandName::Build);
+        let live = LiveAgentReceipt {
+            reused: true,
+            holders: Vec::new(),
+            kept: false,
+            reason: Some(LiveAgentReason::Limit),
+        };
+        context.note_live(live.clone());
+        assert_eq!(
+            context.opened_session(),
+            None,
+            "no session, nothing to note"
+        );
+        context.note_session(SessionEndpoint {
+            mode: SessionMode::Managed,
+            address: "127.0.0.1:1546".into(),
+            live: None,
+        });
+        context.clone().note_live(live.clone());
+        assert_eq!(context.opened_session().unwrap().live, Some(Box::new(live)));
     }
 
     /// Команда называет только те глобальные ключи, что меняют цель, и каждое значение

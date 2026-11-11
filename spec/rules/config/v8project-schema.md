@@ -20,6 +20,8 @@ check:
 
 **Что изменила версия 15.** Схемы проектного файла и местного слоя больше не содержат
 ключи `providers.syntax` и `providers.publish`. Загрузчик отклоняет их как неизвестные поля.
+Схемы проектного файла и местного слоя получили ключ верхнего уровня `localPath` — каталог личного состояния рабочей копии,
+по умолчанию `.local` (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
 
 **Что изменила версия 14.** Ключ `providers.reset` назначает исполнителя команды `reset`:
 Конфигуратор или `ibcmd` ([правило](../cli/reset-discards-the-unapplied.md)).
@@ -46,6 +48,7 @@ check:
 
 ```yaml
 workPath: build
+localPath: .local
 format: DESIGNER
 providers:
   push: ibcmd

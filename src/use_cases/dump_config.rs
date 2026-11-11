@@ -1,3 +1,9 @@
+use crate::change_detection::analyzer::{
+    list_after_dump, mark_dump_start, observe_dump_writes, watch_before_dump, ChangeDetectionError,
+    DumpFact, DumpStart, DumpWatch, DumpWrites,
+};
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
+use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -98,6 +104,27 @@ pub fn execute(
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
 
+/// Выгрузка — и полная, и по изменившемуся — отказывает, если правило игнорирования git
+/// прячет файл набора, который она пишет: изменения набора берутся у git, и спрятанный файл
+/// следующая отправка не увидела бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+pub(super) fn refuse_hidden_sets(config: &AppConfig, args: &DumpArgs) -> Result<(), AppError> {
+    if config.format != SourceFormat::Designer {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let contexts: Vec<SourceSetContext> = inventory
+        .designer_contexts()
+        .iter()
+        .filter(|set| {
+            args.source_set
+                .as_deref()
+                .is_none_or(|name| set.name() == name)
+        })
+        .cloned()
+        .collect();
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedDumpTarget {
     source_set_name: String,
@@ -134,6 +161,165 @@ impl ResolvedDumpTarget {
     }
 }
 
+/// Отметка начала выгрузки по изменившемуся: начало по часам файловой системы каталога
+/// выгрузки или ошибка зонда — тогда режим по факту не узнать
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+type StartMark = std::io::Result<DumpStart>;
+
+/// Отмечает начало выгрузки по изменившемуся от годного файла версий в каталоге, куда она
+/// ляжет (у EDT — в зеркале Конфигуратора). Зонд убран до запуска платформы. `None` —
+/// отмечать нечего: выгрузка не по файлу версий, выборка или внешний полный pull.
+fn mark_start(
+    context: &ExecutionContext,
+    resolved: &ResolvedDumpTarget,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+) -> Option<StartMark> {
+    let by_version_file = matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
+        && objects.is_none()
+        && context.external_full_pull().is_none();
+    if !by_version_file {
+        return None;
+    }
+    let mark = mark_dump_start(&resolved.platform_target_path);
+    if let Err(error) = &mark {
+        debug!(
+            target = %resolved.platform_target_path.display(),
+            %error,
+            "the dump start was not marked: the dump mode is unknown and nothing is remembered"
+        );
+    }
+    Some(mark)
+}
+
+/// Начало, если отмечено.
+fn marked_start(mark: Option<&StartMark>) -> Option<DumpStart> {
+    mark.and_then(|mark| mark.as_ref().ok()).copied()
+}
+
+/// Выгрузка по изменившемуся пишет прямо в каталог набора: что в нём было, отмечается перед
+/// запуском платформы, чтобы после выгрузки память узнала записанное (#557).
+fn dump_watch(
+    config: &AppConfig,
+    set: Option<&SourceSetContext>,
+    start: Option<DumpStart>,
+) -> Option<DumpWatch> {
+    if config.format != SourceFormat::Designer {
+        return None;
+    }
+    watch_before_dump(set?, &config.work_path, start?)
+}
+
+/// Что выгрузка оставила в каталоге: режим по факту и записанное для памяти.
+struct DumpObservation {
+    /// `None` — режим по факту не спрашивался или перечень прервала отмена: режим плана.
+    fact: Option<DumpFact>,
+    /// `None` — записанное не запоминается.
+    writes: Option<Result<DumpWrites, ChangeDetectionError>>,
+}
+
+/// Режим по факту — у выгрузки с отметкой `fact_mark` — и то, что выгрузка по изменившемуся
+/// записала в каталог, найденное и прохешированное, пока платформа отвечала про поколение
+/// после выгрузки (#571). Каталог перечисляется один раз, обход читает только файлы и память,
+/// платформу не трогает.
+fn observe_dump_writes_while<T>(
+    set: Option<&SourceSetContext>,
+    work_path: &Path,
+    fact_mark: Option<&StartMark>,
+    watch: Option<&DumpWatch>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+    platform_step: impl FnOnce() -> T,
+) -> (T, DumpObservation) {
+    let Some(set) = set.filter(|_| fact_mark.is_some() || watch.is_some()) else {
+        return (
+            platform_step(),
+            DumpObservation {
+                fact: None,
+                writes: None,
+            },
+        );
+    };
+    let observe = move || observe_dump(set, work_path, fact_mark, watch, interrupted);
+    std::thread::scope(|scope| {
+        let span = tracing::Span::current();
+        // Without a thread the walk runs after the platform step: slower, never wrong.
+        let observing = std::thread::Builder::new()
+            .name("dump-observer".to_owned())
+            .spawn_scoped(scope, move || span.in_scope(observe));
+        let answer = platform_step();
+        let observed = match observing {
+            Ok(observing) => observing
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => observe(),
+        };
+        (answer, observed)
+    })
+}
+
+/// Перечень каталога после выгрузки отвечает и о режиме, и о записанном: второго обхода нет.
+fn observe_dump(
+    set: &SourceSetContext,
+    work_path: &Path,
+    fact_mark: Option<&StartMark>,
+    watch: Option<&DumpWatch>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> DumpObservation {
+    // Конец выгрузки по часам файловой системы набора, тем же, что отметили её начало: файл,
+    // изменённый позже, правили уже после платформы (#170). Не отмечен — граница не ставится.
+    let ended = watch.and_then(|_| {
+        mark_dump_start(set.path())
+            .map_err(|error| {
+                tracing::debug!(
+                    source_set = %set.name(),
+                    %error,
+                    "the dump end was not marked; edits after it are not told from its writes"
+                );
+            })
+            .ok()
+    });
+    let listed = list_after_dump(set, work_path, interrupted);
+    let fact = fact_mark.and_then(|mark| match (mark, &listed) {
+        (Ok(start), Ok(listing)) => Some(listing.fact(*start)),
+        // Отмена во время перечня оставляет режим плана.
+        (Ok(_), Err(_)) if interrupted() => None,
+        (Err(_), _) | (Ok(_), Err(_)) => Some(DumpFact::Unlisted),
+    });
+    let writes = watch.map(|watch| {
+        listed.and_then(|listing| {
+            crate::use_cases::source_changes::with_dump_hasher(set, |blobs| {
+                observe_dump_writes(set, work_path, watch, ended, listing, blobs, interrupted)
+            })
+        })
+    });
+    DumpObservation { fact, writes }
+}
+
+/// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
+/// хеши того, что легло в каталог (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). Базу правили
+/// или поколение неизвестно — память не трогается, и следующая отправка грузит изменённое.
+fn remember_dump_writes(
+    set: &SourceSetContext,
+    work_path: &Path,
+    observed: Option<Result<DumpWrites, ChangeDetectionError>>,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    let observed = observed?;
+    if before.is_none() || before != after {
+        return None;
+    }
+    observed
+        .and_then(|writes| writes.commit(set, work_path))
+        .err()
+        .map(|error| {
+            format!(
+                "the dump of source-set '{}' is in place, but hash memory was not updated: {error}; the next push loads what the dump wrote",
+                set.name()
+            )
+        })
+}
+
 /// Что выгрузка сообщает сверх ответа платформы.
 #[derive(Debug, Default)]
 struct DumpNotes {
@@ -141,8 +327,18 @@ struct DumpNotes {
     message: Option<String>,
     /// Что публикация уничтожила по согласию.
     discarded: Losses,
-    /// Прогноз платформы перед выгрузкой по изменившемуся; `None` — прогноза не было.
-    forecast: Option<DumpForecast>,
+    /// Что сказало о случившемся режиме; `None` — ничего: режим плана.
+    evidence: Option<ModeEvidence>,
+}
+
+/// Что говорит о случившемся режиме выгрузки по изменившемуся
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModeEvidence {
+    /// Прогноз `ibcmd` перед выгрузкой.
+    Forecast(DumpForecast),
+    /// Что выгрузка Конфигуратора или агента с `-update` сделала с каталогом.
+    Fact(DumpFact),
 }
 
 impl DumpNotes {
@@ -198,7 +394,7 @@ fn publish_full_dump(
     resolved: &ResolvedDumpTarget,
     publication: &StagedPublication,
 ) -> Result<DumpNotes, AppError> {
-    use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
+    use crate::change_detection::analyzer::commit_full_snapshot;
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
@@ -221,7 +417,12 @@ fn publish_full_dump(
         SourceSetInventory::new(config)
             .designer_context(&resolved.source_set_name)
             .filter(|source| source.persists_snapshot())
-            .map(|source| prepare_full_snapshot(source, publication.staging_path()))
+            .map(|source| {
+                crate::use_cases::source_changes::prepare_full_snapshot(
+                    source,
+                    publication.staging_path(),
+                )
+            })
     } else {
         None
     };
@@ -289,7 +490,12 @@ fn publish_full_dump(
         if let Some(prepared) = snapshot {
             let result = prepared.and_then(|prepared| {
                 if let Some(source) = published_source {
-                    commit_full_snapshot(source, &config.work_path, &prepared)
+                    crate::use_cases::source_changes::full_pull_memory(
+                        source,
+                        &config.work_path,
+                        prepared,
+                    )
+                    .and_then(|memory| commit_full_snapshot(source, &config.work_path, &memory))
                 } else {
                     Ok(())
                 }
@@ -299,7 +505,7 @@ fn publish_full_dump(
             }
         }
         if let Some(source) = published_source {
-            if let Some(warning) = external.record_generation(source, &config.work_path) {
+            if let Some(warning) = external.record_generation(config, source) {
                 warnings.push(warning);
             }
         }
@@ -355,6 +561,13 @@ fn publish_full_dump(
             ));
         };
         prepared
+            .and_then(|snapshot| {
+                crate::use_cases::source_changes::full_pull_memory(
+                    source,
+                    &config.work_path,
+                    snapshot,
+                )
+            })
             .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
             .err()
             .map(|error| format!(
@@ -368,7 +581,7 @@ fn publish_full_dump(
             dump_publication_warning(context.command(), published.deferred_interruption),
         ),
         discarded: published.discarded,
-        forecast: None,
+        evidence: None,
     })
 }
 
@@ -376,14 +589,24 @@ fn validate_full_dump_work_path(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
 ) -> Result<(), AppError> {
-    let work = nearest_existing_canonical_path(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("failed to canonicalize workPath: {error}")))?;
-    if work.starts_with(&resolved.canonical_target_path)
-        || work.starts_with(&resolved.canonical_platform_target_path)
-    {
-        return Err(AppError::Validation(
-            "full pull target must not contain workPath".to_owned(),
-        ));
+    // Полная выгрузка заменяет каталог целиком: каталоги раннера в нём — замок и память
+    // команды, стенды и база — пропали бы вместе с ним
+    // (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    let dirs = RunnerDirs::of(config);
+    let is_a_runner_dir = |target: &Path| {
+        [&config.work_path, &config.local_path]
+            .into_iter()
+            .any(|dir| nearest_existing_canonical_path(dir).is_ok_and(|dir| dir == target))
+    };
+    for target in [
+        resolved.canonical_target_path.as_path(),
+        resolved.canonical_platform_target_path.as_path(),
+    ] {
+        if is_a_runner_dir(target) || !runner_dirs_inside(target, dirs).is_empty() {
+            return Err(AppError::Validation(
+                "full pull target must not contain workPath or localPath".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -459,13 +682,16 @@ impl DumpPlan {
     }
 
     /// Случившийся режим для ответа и почему он не тот, что просили. Прогноз есть только у
-    /// выгрузки по изменившемуся (и у выборки `ibcmd`, которая идёт ею): «полная» — полная по
-    /// прогнозу, нераспознанный — «неизвестен», изменившееся — по изменившемуся.
+    /// выгрузки `ibcmd` по изменившемуся (и у её выборки, которая идёт ею): «полная» — полная
+    /// по прогнозу, нераспознанный — «неизвестен», изменившееся — по изменившемуся. Факт есть
+    /// у выгрузки Конфигуратора и агента с `-update`: переписан каждый файл — полная, не
+    /// перечислен каталог — «неизвестен», иначе — по изменившемуся. Ни того ни другого —
+    /// режим плана.
     pub(super) fn reported(
         &self,
-        forecast: Option<DumpForecast>,
+        evidence: Option<ModeEvidence>,
     ) -> (ReportedDumpMode, Option<DumpModeReason>) {
-        match (self, forecast) {
+        match (self, evidence) {
             (Self::OverDirectory(OverDirectory::Whole(reason)), _) => (
                 ReportedDumpMode::Full,
                 Some(match reason {
@@ -473,14 +699,28 @@ impl DumpPlan {
                     WholeReason::Foreign { .. } => DumpModeReason::ForeignFormat,
                 }),
             ),
-            (_, Some(DumpForecast::Full)) => (
+            (_, Some(ModeEvidence::Forecast(DumpForecast::Full))) => (
                 ReportedDumpMode::Full,
                 Some(DumpModeReason::PlatformForecast),
             ),
-            (_, Some(DumpForecast::Unknown)) => {
-                (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
-            }
-            (_, Some(DumpForecast::Changes)) => (ReportedDumpMode::Incremental, None),
+            (_, Some(ModeEvidence::Fact(DumpFact::RewroteAll))) => (
+                ReportedDumpMode::Full,
+                Some(DumpModeReason::PlatformRewroteAll),
+            ),
+            (
+                _,
+                Some(
+                    ModeEvidence::Forecast(DumpForecast::Unknown)
+                    | ModeEvidence::Fact(DumpFact::Unlisted),
+                ),
+            ) => (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown)),
+            (
+                _,
+                Some(
+                    ModeEvidence::Forecast(DumpForecast::Changes)
+                    | ModeEvidence::Fact(DumpFact::Partly),
+                ),
+            ) => (ReportedDumpMode::Incremental, None),
             (plan, None) => (plan.mode().into(), None),
         }
     }
@@ -576,13 +816,7 @@ fn run_dump_over_directory_designer(
         &resolved.source_set_name,
         label,
     )?;
-    // Прогноз меняет только ответ: при «полной» `-update` сам выгрузит всё (замер #173).
-    let forecast = match how {
-        OverDirectory::ByVersionFile => Some(forecast_designer(
-            context, config, resolved, binary, runner,
-        )?),
-        OverDirectory::Whole(_) => None,
-    };
+    // Прогноза нет: режим, который случился, раннер узнаёт по факту после выгрузки.
     let dump_result = match how {
         OverDirectory::ByVersionFile => dsl.dump_config_to_files_incremental(
             &resolved.platform_target_path,
@@ -595,54 +829,7 @@ fn run_dump_over_directory_designer(
     }
     .map_err(AppError::from)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((
-        dump_result,
-        DumpNotes {
-            forecast,
-            ..DumpNotes::default()
-        },
-    ))
-}
-
-/// Прогноз Конфигуратора перед выгрузкой по изменившемуся: `-getChanges` в той же команде,
-/// под тем же замком (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). Отказ
-/// платформы и ответ вне словаря — «неизвестен»; выгрузка идёт как просили.
-fn forecast_designer(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    resolved: &ResolvedDumpTarget,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-) -> Result<DumpForecast, AppError> {
-    let list = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
-    })?;
-    let dsl = build_designer_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        &resolved.source_set_name,
-        "forecast",
-    )?;
-    log_live_stage(
-        "dump: forecast",
-        "[Конфигуратор] asking what the dump will do",
-    );
-    let result = dsl
-        .dump_changes_list(
-            &resolved.platform_target_path,
-            &list,
-            resolved.extension.as_deref(),
-        )
-        .map_err(AppError::from)?;
-    ensure_interruption_clear(context, "after the dump forecast")?;
-    Ok(match result.process.outcome() {
-        Ok(()) => std::fs::read(&list).map_or(DumpForecast::Unknown, |bytes| {
-            crate::platform::dump_forecast::read_changes_list(&bytes)
-        }),
-        Err(_) => DumpForecast::Unknown,
-    })
+    Ok((dump_result, DumpNotes::default()))
 }
 
 /// Прогноз `ibcmd` перед выгрузкой по изменившемуся: `config export status` по файлу версий
@@ -753,7 +940,7 @@ fn run_dump_over_directory_ibcmd(
         return Ok((
             dump_result,
             DumpNotes {
-                forecast: Some(forecast),
+                evidence: Some(ModeEvidence::Forecast(forecast)),
                 ..notes
             },
         ));
@@ -769,7 +956,7 @@ fn run_dump_over_directory_ibcmd(
     Ok((
         dump_result,
         DumpNotes {
-            forecast: Some(forecast),
+            evidence: Some(ModeEvidence::Forecast(forecast)),
             ..DumpNotes::default()
         },
     ))
@@ -955,7 +1142,6 @@ fn run_incremental_dump_edt_designer(
         runner,
         &OverDirectory::ByVersionFile,
     )?;
-    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -966,7 +1152,6 @@ fn run_incremental_dump_edt_designer(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 fn run_full_dump_edt_designer(
@@ -1015,7 +1200,6 @@ fn run_partial_dump_edt_designer(
     )?;
     let (dump_result, dump_notes) =
         run_partial_dump_designer(context, config, resolved, binary, runner, objects)?;
-    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -1026,7 +1210,6 @@ fn run_partial_dump_edt_designer(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 fn run_incremental_dump_edt_ibcmd(
@@ -1058,7 +1241,7 @@ fn run_incremental_dump_edt_ibcmd(
         runner,
         &OverDirectory::ByVersionFile,
     )?;
-    let forecast = dump_notes.forecast;
+    let evidence = dump_notes.evidence;
     finalize_edt_dump(
         context,
         config,
@@ -1069,7 +1252,7 @@ fn run_incremental_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
+    .map(|(result, notes)| (result, DumpNotes { evidence, ..notes }))
 }
 
 fn run_full_dump_edt_ibcmd(
@@ -1117,7 +1300,7 @@ fn run_partial_dump_edt_ibcmd(
     )?;
     let (dump_result, dump_notes) =
         run_partial_dump_ibcmd(context, config, resolved, binary, runner, objects)?;
-    let forecast = dump_notes.forecast;
+    let evidence = dump_notes.evidence;
     finalize_edt_dump(
         context,
         config,
@@ -1128,7 +1311,7 @@ fn run_partial_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
+    .map(|(result, notes)| (result, DumpNotes { evidence, ..notes }))
 }
 
 /// Полная выгрузка, переданная как значение: обратная синхронизация EDT сеет снимок
@@ -1194,7 +1377,7 @@ fn finalize_edt_dump(
         .import_configuration_files(
             &staging_dir,
             &resolved.platform_target_path,
-            normalize_config_hint(config.tools.platform.version.as_deref()),
+            crate::platform::utilities::edt_import_version(config).as_deref(),
             resolved.edt_base_project_name.as_deref(),
             false,
         )
@@ -1237,7 +1420,7 @@ fn finalize_edt_dump(
                 dump_publication_warning(context.command(), publish_phase.deferred_interruption),
             ),
             discarded: publish_phase.discarded,
-            forecast: None,
+            evidence: None,
         }
         .after(inherited_message),
     ))
@@ -1324,10 +1507,6 @@ fn build_edt_dsl<'a>(
         Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner, policy)
             .with_timeout(context.edt_timeout()))
     }
-}
-
-fn normalize_config_hint(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 pub(crate) fn run_external_dump_designer(
@@ -2157,6 +2336,35 @@ mod tests {
         resolve_target(&config, &args).expect("partial allowed");
     }
 
+    /// Полная выгрузка заменила бы каталог вместе с `localPath` внутри: стенды и база
+    /// пропали бы, поэтому она отказывает так же, как над `workPath`.
+    #[test]
+    fn only_full_pull_refuses_a_target_containing_local_path() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = build_config(
+            dir.path(),
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+        );
+        config.local_path = dir.path().join("main").join("personal");
+        fs::create_dir_all(config.local_path.join("db")).expect("local");
+        let mut args = DumpArgs {
+            mode: DumpModeRequest::Full,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+            discard_uncommitted: true,
+            force_way_out: ForceWayOut::PullForce,
+            dry_run: false,
+        };
+        assert!(resolve_target(&config, &args)
+            .expect_err("full refused")
+            .to_string()
+            .contains("localPath"));
+        args.mode = DumpModeRequest::Incremental;
+        resolve_target(&config, &args).expect("incremental allowed");
+    }
+
     #[cfg(unix)]
     #[test]
     fn full_pull_refuses_an_aliased_work_path_but_allows_a_mirror_beneath_work_path() {
@@ -2458,6 +2666,7 @@ exit 0"#,
         >,
     ) -> AppConfig {
         AppConfig {
+            local_path: base_path.join(".local"),
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,
@@ -3674,31 +3883,6 @@ exit 0"#,
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn a_forecast_hands_the_designer_a_closed_changes_file() {
-        let (dir, config, resolved) = designer_dump_fixture(&["Catalog.Items"]);
-        let runner = TestProcessRunner::with_on_run(move |request| {
-            use std::io::Write;
-            let changes = designer_option(request, "-getChanges").expect("-getChanges");
-            open_as_the_designer(&changes, true)
-                .expect("the changes file holds no writer handle")
-                .write_all(b"FullDump\r\n")
-                .expect("write forecast");
-        });
-
-        let forecast = super::forecast_designer(
-            &ExecutionContext::cli(crate::use_cases::context::CommandName::Dump),
-            &config,
-            &resolved,
-            &dir.path().join("1cv8"),
-            &runner,
-        )
-        .expect("forecast");
-
-        assert_eq!(forecast, super::DumpForecast::Full);
-    }
-
     #[test]
     fn dump_partial_designer_extension_uses_extension_flag() {
         let dir = tempdir().expect("tempdir");
@@ -3804,7 +3988,7 @@ exit 0"#,
             .expect("warning")
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains(" export --threads=1 --sync "), "{calls}");
+        assert!(calls.contains(" export --sync "), "{calls}");
     }
 
     #[test]
@@ -3894,10 +4078,7 @@ exit 0"#,
         assert_eq!(result.requested_mode, DumpMode::Partial);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(
-            calls.contains(" export --threads=1 --extension ext --sync "),
-            "{calls}"
-        );
+        assert!(calls.contains(" export --extension ext --sync "), "{calls}");
         assert!(result
             .message
             .as_deref()
@@ -4225,7 +4406,7 @@ exit 0"#,
     }
 
     /// Набор с годным файлом версий в игноре и закоммиченными исходниками: выгрузка идёт по
-    /// изменившемуся, и перед ней — прогноз.
+    /// изменившемуся.
     fn project_with_a_version_file(base: &Path) {
         create_source_tree(base);
         fs::write(
@@ -4237,14 +4418,404 @@ exit 0"#,
         commit_sources(base);
     }
 
-    /// Конфигуратор: `-getChanges` пишет в файл списка `forecast` (`printf %b`).
-    fn write_forecasting_designer_script(script: &Path, calls: &Path, forecast: &str) {
+    /// Конфигуратор: выгрузка переписывает в каталоге файлы `rewrites`, остальное не трогает;
+    /// поколение называет `token`, а без него — не называет.
+    fn write_rewriting_designer_script(
+        script: &Path,
+        calls: &Path,
+        token: Option<&str>,
+        rewrites: &[&str],
+    ) {
+        let writes = rewrites
+            .iter()
+            .map(|file| {
+                format!(
+                    "  mkdir -p \"$(dirname \"$target/{file}\")\"\n  printf 'from the base\\n' > \"$target/{file}\"\n"
+                )
+            })
+            .collect::<String>();
         write_script(
             script,
             &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" /GetConfigGenerationID\"*) exit 0;; esac\nprev=\"\"\nlist=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then : > \"$a\"; fi\n  if [ \"$prev\" = \"-getChanges\" ]; then list=\"$a\"; fi\n  prev=\"$a\"\ndone\nif [ -n \"$list\" ]; then printf '%b' '{forecast}' > \"$list\"; fi\nexit 0",
-                calls.display()
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\nprev=\"\"\ntarget=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then printf '%s' '{token}' > \"$a\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$a\"; fi\n  prev=\"$a\"\ndone\nif [ -n \"$target\" ]; then\n{writes}  :\nfi\nexit 0",
+                calls.display(),
+                token = token.unwrap_or_default(),
             ),
+        );
+    }
+
+    /// Зонд начала выгрузки убран: в каталоге его нет.
+    fn assert_no_clock_probe(dir: &Path) {
+        let probes: Vec<_> = fs::read_dir(dir)
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with(crate::change_detection::scanner::DUMP_START_PROBE)
+            })
+            .collect();
+        assert!(probes.is_empty(), "{probes:?}");
+    }
+
+    /// Конфигуратор прогноза не спрашивает: одна выгрузка с `-update`, без `-getChanges`;
+    /// файл, которого она не переписала, оставляет режим `INCREMENTAL`
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). Агента проверяет
+    /// `tests/cli_dump_agent.rs::the_agent_asks_no_forecast`.
+    #[test]
+    fn the_designer_asks_no_forecast() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        let token = format!("{:040}", 7);
+        write_rewriting_designer_script(&script, &calls, Some(&token), &[]);
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
+        assert_eq!(result.mode_reason, None);
+        // Ровно три вызова платформы: поколение, выгрузка с `-update`, поколение. Вопрос о
+        // прогнозе в любом виде был бы лишним вызовом.
+        let calls = fs::read_to_string(calls).expect("calls");
+        let steps: Vec<&str> = calls
+            .lines()
+            .map(|line| {
+                if line.contains("/GetConfigGenerationID") {
+                    "generation"
+                } else if line.contains("/DumpConfigToFiles")
+                    && line.contains("-update")
+                    && !line.contains("-getChanges")
+                {
+                    "dump -update"
+                } else {
+                    line
+                }
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            ["generation", "dump -update", "generation"],
+            "{calls}"
+        );
+        assert_no_clock_probe(&base.join("main"));
+    }
+
+    /// Набор, выгрузка которого ничего не запоминает (поколение не прочитано, списка дерева
+    /// до выгрузки нет), режим всё равно узнаёт по факту: выгрузка переписала каждый файл —
+    /// `FULL` с причиной `platform_rewrote_all`. Файл версий в область не входит.
+    #[test]
+    fn a_set_without_memory_still_decides_by_fact() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_rewriting_designer_script(
+            &script,
+            &calls,
+            None,
+            &["Catalogs.Items/ObjectModule.bsl"],
+        );
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.requested_mode, DumpMode::Incremental);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformRewroteAll));
+        assert!(fs::read_to_string(calls)
+            .expect("calls")
+            .lines()
+            .any(|line| line.contains("/DumpConfigToFiles") && line.contains("-update")));
+        assert_no_clock_probe(&base.join("main"));
+    }
+
+    /// У EDT выгрузка ложится в зеркало Конфигуратора: начало отмечается и каталог
+    /// перечисляется там, а не в проекте EDT, файлы которого выгрузка не пишет.
+    #[test]
+    fn an_edt_dump_decides_its_mode_on_the_designer_mirror() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let designer = dir.path().join("1cv8");
+        let edt = dir.path().join("edt").join("1cedtcli");
+        let designer_calls = dir.path().join("designer-calls.log");
+        let edt_calls = dir.path().join("edt-calls.log");
+        create_edt_source_tree(&base);
+        write_designer_dump_script_for_edt(&designer, &designer_calls, None);
+        write_edt_import_script(&edt, &edt_calls);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
+        let mirror = designer_snapshot(&config, "main");
+        fs::create_dir_all(&mirror).expect("mirror");
+        fs::write(mirror.join("Configuration.xml"), "<Configuration/>").expect("mirror root");
+        fs::write(
+            mirror.join("ConfigDumpInfo.xml"),
+            "<ConfigDumpInfo version=\"2.20\"/>",
+        )
+        .expect("mirror version file");
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
+        let dumps: Vec<&str> = designer_calls
+            .lines()
+            .filter(|line| line.contains("/DumpConfigToFiles"))
+            .collect();
+        assert_eq!(dumps.len(), 1, "{designer_calls}");
+        assert!(dumps[0].contains("-update"), "{designer_calls}");
+        // Зеркало держит только `Configuration.xml`, и выгрузка его переписала; в проекте
+        // EDT остались файлы, которых она не писала, — по нему режим был бы `INCREMENTAL`.
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformRewroteAll));
+        assert_no_clock_probe(&mirror);
+    }
+
+    /// Каталог набора с файлами `files`, помеченными часом раньше: выгрузка их не писала.
+    fn a_tree_before_the_dump(root: &Path, files: &[&str]) {
+        fs::create_dir_all(root).expect("root");
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            fs::write(&path, "before").expect("file");
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open")
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+                .expect("old mtime");
+        }
+    }
+
+    /// Режим выгрузки по изменившемуся, которая в каталоге с файлами `before` переписала
+    /// `rewritten`: отмечено начало, перечень после выгрузки — тот же шаг, что у команды.
+    fn mode_by_fact(
+        before: &[&str],
+        rewritten: &[&str],
+    ) -> (
+        ReportedDumpMode,
+        Option<crate::domain::dump::DumpModeReason>,
+    ) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        a_tree_before_the_dump(&root, before);
+        let set =
+            crate::domain::source_set::SourceSetContext::new("main", root.clone(), "designer-main")
+                .without_memory();
+        let start = crate::change_detection::analyzer::mark_dump_start(&root).expect("start");
+        for file in rewritten {
+            fs::write(root.join(file), "from the base").expect("rewrite");
+        }
+        let ((), observed) = super::observe_dump_writes_while(
+            Some(&set),
+            &dir.path().join("work"),
+            Some(&Ok(start)),
+            None,
+            &|| false,
+            || (),
+        );
+        assert!(observed.writes.is_none());
+        super::DumpPlan::OverDirectory(super::OverDirectory::ByVersionFile)
+            .reported(observed.fact.map(super::ModeEvidence::Fact))
+    }
+
+    /// Выгрузка, переписавшая часть файлов, — по изменившемуся.
+    #[test]
+    fn a_partly_rewritten_dump_is_incremental() {
+        assert_eq!(
+            mode_by_fact(&["A.bsl", "B.bsl"], &["A.bsl"]),
+            (ReportedDumpMode::Incremental, None)
+        );
+    }
+
+    /// Посторонний файл, которого платформа не трогает, не даёт назвать выгрузку полной,
+    /// даже когда каждый её файл переписан.
+    #[test]
+    fn a_stray_file_keeps_the_dump_incremental() {
+        assert_eq!(
+            mode_by_fact(
+                &["Configuration.xml", "Catalogs/Items.xml", "Notes.txt"],
+                &["Configuration.xml", "Catalogs/Items.xml"]
+            ),
+            (ReportedDumpMode::Incremental, None)
+        );
+    }
+
+    /// Пустая область — не полная перезапись: `ConfigDumpInfo.xml` выгрузка переписывает
+    /// всегда, и в область он не входит.
+    #[test]
+    fn an_empty_scope_is_not_full() {
+        assert_eq!(
+            mode_by_fact(&["ConfigDumpInfo.xml"], &["ConfigDumpInfo.xml"]),
+            (ReportedDumpMode::Incremental, None)
+        );
+        assert_eq!(
+            mode_by_fact(&[], &[]),
+            (ReportedDumpMode::Incremental, None)
+        );
+    }
+
+    /// Каталог после выгрузки не перечислен или начало не отмечено — режим «неизвестен»;
+    /// отмена во время перечня оставляет режим плана.
+    #[test]
+    fn a_failed_listing_reports_the_mode_as_unknown() {
+        use crate::domain::dump::DumpModeReason;
+        let plan = super::DumpPlan::OverDirectory(super::OverDirectory::ByVersionFile);
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        fs::create_dir_all(&root).expect("root");
+        let set =
+            crate::domain::source_set::SourceSetContext::new("main", root.clone(), "designer-main")
+                .without_memory();
+        let start = crate::change_detection::analyzer::mark_dump_start(&root).expect("start");
+        fs::remove_dir(&root).expect("the directory is gone before the listing");
+        let observe = |mark: super::StartMark, interrupted: bool| {
+            super::observe_dump_writes_while(
+                Some(&set),
+                &dir.path().join("work"),
+                Some(&mark),
+                None,
+                &|| interrupted,
+                || (),
+            )
+            .1
+            .fact
+            .map(super::ModeEvidence::Fact)
+        };
+
+        let unlisted = observe(Ok(start), false);
+        assert_eq!(
+            plan.reported(unlisted),
+            (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
+        );
+        let cancelled = observe(Ok(start), true);
+        assert_eq!(cancelled, None);
+        assert_eq!(
+            plan.reported(cancelled),
+            (ReportedDumpMode::Incremental, None)
+        );
+        fs::create_dir_all(&root).expect("root again");
+        let unmarked = observe(Err(std::io::Error::other("no probe")), false);
+        assert_eq!(
+            plan.reported(unmarked),
+            (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
+        );
+    }
+
+    /// Команда отмечает конец выгрузки перед перечнем: файл, изменённый после выгрузки, память
+    /// не принимает за записанный платформой (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`).
+    #[test]
+    fn the_command_keeps_an_edit_after_the_dump_as_a_change() {
+        use crate::change_detection::analyzer::{mark_dump_start, rescan_and_commit_full};
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::domain::source_set::SourceSetContext;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        a_tree_before_the_dump(&root, &["A.bsl", "Late.bsl"]);
+        let set = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "base-identity".to_owned());
+        rescan_and_commit_full(&set, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("start");
+        let watch = super::dump_watch(
+            &build_config(dir.path(), &work, &dir.path().join("1cv8")),
+            Some(&set),
+            Some(start),
+        )
+        .expect("memory of this base");
+
+        fs::write(root.join("A.bsl"), "from the base").expect("A");
+        // Правка после выгрузки: её время позже отметки конца, которую ставит команда.
+        fs::write(root.join("Late.bsl"), "edited later").expect("late");
+        fs::File::options()
+            .write(true)
+            .open(root.join("Late.bsl"))
+            .expect("open")
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .expect("later mtime");
+        let (answer, observed) = super::observe_dump_writes_while(
+            Some(&set),
+            &work,
+            Some(&Ok(start)),
+            Some(&watch),
+            &|| false,
+            || "g1",
+        );
+        let note =
+            super::remember_dump_writes(&set, &work, observed.writes, Some("g1"), Some(answer));
+        assert!(note.is_none(), "{note:?}");
+        let snapshot = HashStorage::new(set.storage_path(&work).expect("memory path"))
+            .load_snapshot()
+            .expect("snapshot");
+        let hash = |name: &str| {
+            crate::change_detection::scanner::hash_file(&root.join(name), &mut || false)
+                .expect("hash")
+        };
+        assert_eq!(snapshot.entries["A.bsl"].hash, hash("A.bsl"));
+        assert_ne!(snapshot.entries["Late.bsl"].hash, hash("Late.bsl"));
+    }
+
+    /// Выгрузка, переписавшая каждый файл набора, — полная по факту; тот же перечень
+    /// запоминает записанное, второго обхода нет.
+    #[test]
+    fn a_dump_that_rewrote_every_file_is_full_by_fact() {
+        use crate::change_detection::analyzer::{mark_dump_start, rescan_and_commit_full};
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::domain::dump::DumpModeReason;
+        use crate::domain::source_set::SourceSetContext;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        a_tree_before_the_dump(&root, &["A.bsl", "B.bsl", "ConfigDumpInfo.xml"]);
+        let set = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "base-identity".to_owned());
+        rescan_and_commit_full(&set, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("start");
+        let watch = super::dump_watch(
+            &build_config(dir.path(), &work, &dir.path().join("1cv8")),
+            Some(&set),
+            Some(start),
+        )
+        .expect("memory of this base");
+
+        fs::write(root.join("A.bsl"), "from the base").expect("A");
+        fs::write(root.join("B.bsl"), "from the base too").expect("B");
+        let (answer, observed) = super::observe_dump_writes_while(
+            Some(&set),
+            &work,
+            Some(&Ok(start)),
+            Some(&watch),
+            &|| false,
+            || "g1",
+        );
+        let plan = super::DumpPlan::OverDirectory(super::OverDirectory::ByVersionFile);
+        assert_eq!(
+            plan.reported(observed.fact.map(super::ModeEvidence::Fact)),
+            (
+                ReportedDumpMode::Full,
+                Some(DumpModeReason::PlatformRewroteAll)
+            )
+        );
+        let note =
+            super::remember_dump_writes(&set, &work, observed.writes, Some("g1"), Some(answer));
+        assert!(note.is_none(), "{note:?}");
+        let snapshot = HashStorage::new(set.storage_path(&work).expect("memory path"))
+            .load_snapshot()
+            .expect("snapshot");
+        let written =
+            crate::change_detection::scanner::hash_file(&root.join("B.bsl"), &mut || false)
+                .expect("hash");
+        assert_eq!(
+            snapshot
+                .entries
+                .get("B.bsl")
+                .map(|entry| entry.hash.as_str()),
+            Some(written.as_str())
         );
     }
 
@@ -4259,104 +4830,6 @@ exit 0"#,
         );
     }
 
-    /// Конфигуратор предсказал полную выгрузку: `-update` идёт как есть (платформа выгрузит
-    /// всё сама), а ответ называет случившийся режим и причину.
-    #[test]
-    fn a_designer_full_forecast_is_reported_as_full_by_the_platform() {
-        use crate::domain::dump::DumpModeReason;
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let script = dir.path().join("1cv8");
-        let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
-        write_forecasting_designer_script(&script, &calls, "\\0357\\0273\\0277FullDump\\r\\n");
-        let config = build_config(&base, &dir.path().join("work"), &script);
-
-        let result = run_dump(&config, &incremental_main()).expect("dump");
-
-        assert_eq!(result.requested_mode, DumpMode::Incremental);
-        assert_eq!(result.mode, ReportedDumpMode::Full);
-        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
-        let calls = fs::read_to_string(calls).expect("calls");
-        let forecast = calls.find("-getChanges").expect("the forecast ran");
-        let update = calls.rfind("-update").expect("the dump ran with -update");
-        assert!(forecast < update, "{calls}");
-        assert_eq!(calls.matches("-getChanges").count(), 1, "{calls}");
-    }
-
-    /// Ответ прогноза вне словаря — режим «неизвестен», выгрузка идёт как просили.
-    #[test]
-    fn an_unrecognized_forecast_reports_the_mode_as_unknown() {
-        use crate::domain::dump::DumpModeReason;
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let script = dir.path().join("1cv8");
-        let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
-        write_forecasting_designer_script(&script, &calls, "Deleted: Catalog.Items\\r\\n");
-        let config = build_config(&base, &dir.path().join("work"), &script);
-
-        let result = run_dump(&config, &incremental_main()).expect("dump");
-
-        assert_eq!(result.mode, ReportedDumpMode::Unknown);
-        assert_eq!(result.mode_reason, Some(DumpModeReason::Unknown));
-        assert!(fs::read_to_string(calls)
-            .expect("calls")
-            .contains("-update"));
-    }
-
-    /// Изменившееся по прогнозу — по изменившемуся, без причины.
-    #[test]
-    fn a_changes_forecast_keeps_the_incremental_mode() {
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let script = dir.path().join("1cv8");
-        let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
-        write_forecasting_designer_script(
-            &script,
-            &calls,
-            "\\0357\\0273\\0277Modified: Catalog.Items\\r\\n",
-        );
-        let config = build_config(&base, &dir.path().join("work"), &script);
-
-        let result = run_dump(&config, &incremental_main()).expect("dump");
-
-        assert_eq!(result.mode, ReportedDumpMode::Incremental);
-        assert_eq!(result.mode_reason, None);
-    }
-
-    /// Отказ процесса прогноза — режим «неизвестен», выгрузка идёт как просили.
-    #[test]
-    fn a_failed_forecast_reports_the_mode_as_unknown() {
-        use crate::domain::dump::DumpModeReason;
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let script = dir.path().join("1cv8");
-        let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
-        write_script(
-            &script,
-            &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" -getChanges \"*) exit 1;; esac\nexit 0",
-                calls.display()
-            ),
-        );
-        let config = build_config(&base, &dir.path().join("work"), &script);
-
-        let result = run_dump(&config, &incremental_main()).expect("dump");
-
-        assert_eq!(result.mode, ReportedDumpMode::Unknown);
-        assert_eq!(result.mode_reason, Some(DumpModeReason::Unknown));
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(
-            calls
-                .lines()
-                .any(|line| line.contains("-update") && !line.contains("-getChanges")),
-            "{calls}"
-        );
-    }
-
     /// Без файла версий выгрузка полная по плану, и прогноз не спрашивается.
     #[test]
     fn a_dump_without_a_version_file_asks_for_no_forecast() {
@@ -4366,7 +4839,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_forecasting_designer_script(&script, &calls, "FullDump\\r\\n");
+        write_rewriting_designer_script(&script, &calls, None, &[]);
         let config = build_config(&base, &dir.path().join("work"), &script);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
@@ -5617,5 +6090,57 @@ exit 0"#,
         .expect_err("missing descriptor");
 
         assert!(matches!(error.0, AppError::Validation(_)));
+    }
+
+    /// The walk of what the dump wrote now runs before the platform answers about the
+    /// generation; a changed generation must still leave the memory as it was
+    /// (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`, #571).
+    #[test]
+    fn writes_observed_during_the_generation_answer_are_remembered_only_for_the_same_generation() {
+        use crate::change_detection::analyzer::{
+            mark_dump_start, rescan_and_commit_full, watch_before_dump,
+        };
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::domain::source_set::SourceSetContext;
+
+        for (after, remembered) in [("g1", true), ("g2", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path().join("src");
+            let work = dir.path().join("work");
+            fs::create_dir_all(&root).expect("root");
+            fs::write(root.join("Kept.bsl"), "before").expect("kept");
+            let set = SourceSetContext::new("main", root.clone(), "designer-main")
+                .with_infobase_memory("origin", "base-identity".to_owned());
+            rescan_and_commit_full(&set, &work).expect("prime");
+            let storage = HashStorage::new(set.storage_path(&work).expect("memory path"));
+            let primed = storage.current_generation().expect("generation");
+            let start = mark_dump_start(&root).expect("start");
+            let watch = watch_before_dump(&set, &work, start).expect("memory of this base");
+
+            fs::write(root.join("Written.bsl"), "from the base").expect("written");
+            let (answer, observed) = super::observe_dump_writes_while(
+                Some(&set),
+                &work,
+                Some(&Ok(start)),
+                Some(&watch),
+                &|| false,
+                || after,
+            );
+            let note =
+                super::remember_dump_writes(&set, &work, observed.writes, Some("g1"), Some(answer));
+
+            assert!(note.is_none(), "{note:?}");
+            let snapshot = storage.load_snapshot().expect("snapshot");
+            assert_eq!(
+                snapshot.entries.contains_key("Written.bsl"),
+                remembered,
+                "generation after: {after}"
+            );
+            assert_eq!(
+                snapshot.generation,
+                if remembered { primed + 1 } else { primed },
+                "generation after: {after}"
+            );
+        }
     }
 }

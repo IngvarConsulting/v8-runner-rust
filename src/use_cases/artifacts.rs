@@ -106,6 +106,23 @@ pub fn execute_in(
 
 type ArtifactsExecutionFailure = UseCaseFailure<ArtifactsResult>;
 
+/// Сборка пакета отказывает, если правило игнорирования git прячет файл набора: изменения
+/// набора берутся у git, и такой файл не дошёл бы до базы при отправке
+/// (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+fn refuse_hidden_set(config: &AppConfig, source_set: &str) -> Result<(), AppError> {
+    if config.format != crate::config::model::SourceFormat::Designer {
+        return Ok(());
+    }
+    let inventory = crate::use_cases::source_inventory::SourceSetInventory::new(config);
+    let Some(set) = inventory.designer_context(source_set) else {
+        return Ok(());
+    };
+    crate::use_cases::source_changes::refuse_hidden_sets(
+        std::slice::from_ref(set),
+        &config.work_path,
+    )
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedArtifactsTarget {
     mode: ArtifactBuildMode,
@@ -179,8 +196,9 @@ fn run_artifacts(
         }
     };
 
-    if let Err(error) =
-        build_infobase::validate_project(config).and_then(|()| validate_publish_target(&resolved))
+    if let Err(error) = build_infobase::validate_project(config)
+        .and_then(|()| validate_publish_target(&resolved))
+        .and_then(|()| refuse_hidden_set(config, &resolved.source_set_name))
     {
         let message = error.to_string();
         return Err(ArtifactsExecutionFailure::with_payload(
@@ -1601,6 +1619,7 @@ fi"#;
         format: SourceFormat,
     ) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format,

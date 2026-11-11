@@ -213,9 +213,9 @@ impl TargetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Implementation {
-    /// В цепочке умолчаний.
+    /// Исполнитель реализован; участие в умолчаниях задаёт строка матрицы.
     Implemented,
-    /// Реализован, но в умолчания не входит: назначается только переопределением.
+    /// Экспериментальный исполнитель, назначаемый только переопределением.
     Experimental,
 }
 
@@ -234,6 +234,7 @@ pub struct Capability {
     pub provider: Provider,
     pub implementation: Implementation,
     pub evidence: Evidence,
+    in_default_chain: bool,
 }
 
 const fn implemented(provider: Provider, evidence: Evidence) -> Capability {
@@ -241,21 +242,23 @@ const fn implemented(provider: Provider, evidence: Evidence) -> Capability {
         provider,
         implementation: Implementation::Implemented,
         evidence,
+        in_default_chain: true,
     }
 }
 
-const fn experimental(provider: Provider, evidence: Evidence) -> Capability {
+const fn explicit_only(provider: Provider, evidence: Evidence) -> Capability {
     Capability {
         provider,
-        implementation: Implementation::Experimental,
+        implementation: Implementation::Implemented,
         evidence,
+        in_default_chain: false,
     }
 }
 
 /// Строки матрицы в порядке умолчаний.
 ///
-/// Первый реализованный исполнитель в строке — умолчание; остальные реализованные
-/// пробуются, если он не готов; экспериментальные назначаются только переопределением.
+/// Участники цепочки пробуются в порядке строки; строка также может объявлять
+/// реализованного исполнителя только для явного ключа настройки.
 pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capability] {
     use Evidence::{ArgvTested, Documented, LiveVerified};
     use Provider::{Agent, Designer, Ibcmd, Webinst};
@@ -360,7 +363,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     const SNAPSHOT_FILE: &[Capability] = &[
         implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
-        experimental(Ibcmd, Documented),
+        explicit_only(Ibcmd, LiveVerified),
     ];
     const SNAPSHOT_CLUSTER: &[Capability] = &[
         implemented(Agent, LiveVerified),
@@ -422,7 +425,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
 pub fn default_chain(operation: Operation, target: TargetKind) -> Vec<Provider> {
     capabilities(operation, target)
         .iter()
-        .filter(|capability| capability.implementation == Implementation::Implemented)
+        .filter(|capability| capability.in_default_chain)
         .map(|capability| capability.provider)
         .collect()
 }
@@ -483,6 +486,44 @@ pub fn default_chain_for(
         .into_iter()
         .filter(|provider| serves_project(operation, *provider, shape))
         .collect()
+}
+
+/// Объём операции, по которому раннер упорядочивает цепочку умолчаний (#559).
+///
+/// Имя идёт в квитанцию полем `reason`: им раннер объясняет, почему первым в цепочке стоит
+/// тот, кто стоит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationSize {
+    /// Каждый набор, который команда загружает или выгружает, идёт целиком.
+    Whole,
+    /// Хотя бы один набор идёт по изменившемуся или выборкой.
+    ByChanges,
+}
+
+/// Упорядочивает ли объём цепочку умолчаний операции на цели: только `push` и `pull`
+/// файловой базы. Кластер и автономный сервер держат строку матрицы.
+pub const fn ordered_by_size(operation: Operation, target: TargetKind) -> bool {
+    matches!(
+        (operation, target),
+        (Operation::Build | Operation::Dump, TargetKind::File)
+    )
+}
+
+/// Цепочка умолчаний для объёма: целиком — `ibcmd` первым, остальные в порядке строки;
+/// по изменившемуся — строка как есть. Цепочку без `ibcmd` объём не меняет. Замер,
+/// по которому решено (#559): полная выгрузка и полная загрузка файловой базы через `ibcmd`
+/// вдвое быстрее Конфигуратора и агента, частичная — медленнее.
+pub fn chain_for_size(chain: Vec<Provider>, size: OperationSize) -> Vec<Provider> {
+    match size {
+        OperationSize::ByChanges => chain,
+        OperationSize::Whole => {
+            let (ibcmd, rest): (Vec<_>, Vec<_>) = chain
+                .into_iter()
+                .partition(|provider| *provider == Provider::Ibcmd);
+            ibcmd.into_iter().chain(rest).collect()
+        }
+    }
 }
 
 /// Есть ли у пары «операция и цель» настоящая развилка.
@@ -588,6 +629,11 @@ pub struct ProviderReceipt {
     /// открывалась: исполнял процесс платформы, это превью или отказ до подключения.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<SessionEndpoint>,
+    /// Почему цепочка умолчаний стоит в этом порядке: объём операции. Есть только у
+    /// умолчания, которое раннер упорядочил по объёму (`push` и `pull` файловой базы);
+    /// у ключа `providers.*` и у остальных цепочек поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OperationSize>,
 }
 
 /// Как раннер добрался до точки входа агента.
@@ -610,6 +656,85 @@ pub enum SessionMode {
 pub struct SessionEndpoint {
     pub mode: SessionMode,
     pub address: String,
+    /// Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    /// Есть только у управляемого агента.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<Box<LiveAgentReceipt>>,
+}
+
+/// Живой ли был управляемый агент команды и остался ли он жить.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveAgentReceipt {
+    /// Команда взяла уже живого агента (`true`) или подняла его сама (`false`).
+    pub reused: bool,
+    /// Держатели агента на момент ответа; без держателей — пустой список.
+    pub holders: Vec<LiveAgentHolder>,
+    /// Остался ли агент жить после команды.
+    pub kept: bool,
+    /// Почему агент не остался жить; у оставшегося поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveAgentReason>,
+}
+
+/// Держатель живого агента в квитанции.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum LiveAgentHolder {
+    /// Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.
+    Process {
+        pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
+    /// Держатель со сроком: до какого мгновения (UTC, RFC 3339).
+    Ttl { until: String },
+}
+
+impl std::fmt::Display for LiveAgentHolder {
+    /// Держатель для людей: в тексте `agent` и в отказе занятой базы.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Process { pid, .. } => write!(f, "process {pid}"),
+            Self::Ttl { until } => write!(f, "until {until}"),
+        }
+    }
+}
+
+impl LiveAgentHolder {
+    /// Держатели через запятую; без держателей — `none`.
+    pub fn list_text(holders: &[Self]) -> String {
+        if holders.is_empty() {
+            return "none".to_owned();
+        }
+        holders
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Почему управляемый агент не остался жить после команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAgentReason {
+    /// `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.
+    Limit,
+    /// Раннер в Job, из которого сторож не может выйти.
+    Job,
+    /// Команду прервали, пока агент выполнял её запрос.
+    Interrupted,
+    /// Живой агент этой рабочей копии ещё служит сессии другой команды: команда работала с
+    /// разовым.
+    Busy,
+    /// Сторож живого агента не поднялся или не ответил (путь канала, отказ запуска, срок):
+    /// команда работала с разовым агентом.
+    KeeperFailed,
+    /// Сторож снял агента после команды: его сессия оборвалась, его остановили или ушёл
+    /// последний держатель.
+    Removed,
 }
 
 impl ProviderReceipt {
@@ -619,6 +744,7 @@ impl ProviderReceipt {
             origin,
             skipped: Vec::new(),
             endpoint: None,
+            reason: None,
         }
     }
 
@@ -629,7 +755,14 @@ impl ProviderReceipt {
             origin,
             skipped,
             endpoint: None,
+            reason: None,
         }
+    }
+
+    /// Квитанция с причиной порядка цепочки.
+    pub fn with_reason(mut self, reason: Option<OperationSize>) -> Self {
+        self.reason = reason;
+        self
     }
 
     pub fn with_skipped(mut self, skipped: Vec<SkippedProvider>) -> Self {
@@ -882,8 +1015,8 @@ mod tests {
                             .map(|capability| {
                                 serde_json::json!({
                                     "provider": capability.provider.as_str(),
-                                    "implemented":
-                                        capability.implementation == Implementation::Implemented,
+                                    // The pinned site's legacy field describes the default chain.
+                                    "implemented": capability.in_default_chain,
                                 })
                             })
                             .collect();
@@ -984,6 +1117,76 @@ mod tests {
                     target.as_str()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ibcmd_snapshots_are_implemented_but_require_an_explicit_key() {
+        for operation in [Operation::InfobaseDump, Operation::InfobaseRestore] {
+            let capability = capability_of(operation, TargetKind::File, Provider::Ibcmd)
+                .expect("file snapshot capability");
+            assert_eq!(capability.implementation, Implementation::Implemented);
+            assert_eq!(
+                default_chain(operation, TargetKind::File),
+                [Provider::Agent, Provider::Designer]
+            );
+        }
+    }
+
+    /// Объём упорядочивает только `push` и `pull` файловой базы (#559): целиком `ibcmd` идёт
+    /// первым, остальные в порядке строки и с сужением формой проекта; по изменившемуся строка
+    /// не меняется. Кластер, автономный сервер и другие операции объём не упорядочивает.
+    #[test]
+    fn a_whole_push_or_pull_of_a_file_base_leads_with_ibcmd() {
+        use Provider::{Agent, Designer, Ibcmd};
+        let edt = ProjectShape {
+            edt_sources: true,
+            ..ProjectShape::default()
+        };
+        for operation in [Operation::Build, Operation::Dump] {
+            assert!(ordered_by_size(operation, TargetKind::File));
+            assert!(!ordered_by_size(operation, TargetKind::Cluster));
+            assert!(!ordered_by_size(operation, TargetKind::Standalone));
+            let row = default_chain(operation, TargetKind::File);
+            assert_eq!(
+                chain_for_size(row.clone(), OperationSize::Whole),
+                [Ibcmd, Agent, Designer]
+            );
+            assert_eq!(chain_for_size(row.clone(), OperationSize::ByChanges), row);
+            assert_eq!(
+                chain_for_size(
+                    default_chain_for(operation, TargetKind::File, edt),
+                    OperationSize::Whole
+                ),
+                [Ibcmd, Designer]
+            );
+        }
+        assert_eq!(
+            chain_for_size(vec![Agent, Designer], OperationSize::Whole),
+            [Agent, Designer]
+        );
+        for operation in Operation::ALL {
+            if !matches!(operation, Operation::Build | Operation::Dump) {
+                for target in TargetKind::ALL {
+                    assert!(!ordered_by_size(operation, target), "{operation}");
+                }
+            }
+        }
+    }
+
+    /// Причина порядка в квитанции — `whole` или `by_changes`; без неё поля нет.
+    #[test]
+    fn a_receipt_names_the_size_only_when_it_ordered_the_chain() {
+        let plain = ProviderReceipt::new(Provider::Agent, ProviderOrigin::Default);
+        let json = serde_json::to_value(&plain).expect("receipt");
+        assert!(json.get("reason").is_none(), "{json}");
+        for (size, name) in [
+            (OperationSize::Whole, "whole"),
+            (OperationSize::ByChanges, "by_changes"),
+        ] {
+            let json =
+                serde_json::to_value(plain.clone().with_reason(Some(size))).expect("receipt");
+            assert_eq!(json["reason"], name, "{json}");
         }
     }
 

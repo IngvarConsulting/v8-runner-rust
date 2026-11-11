@@ -23,7 +23,7 @@ use crate::config::loader::{load_declared_infobases, ConfigLoadError};
 use crate::config::model::{AppConfig, InfobaseConfig};
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
-use crate::support::machine::{host_name, machine_id};
+use crate::support::machine::{host_name, machine_hash, machine_id};
 use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
 use crate::use_cases::infobase_lock::BaseAccess;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
@@ -133,13 +133,6 @@ impl ThisCopy {
     fn is_on_the_machine_of(&self, record: &OwnerRecord) -> bool {
         self.machine.as_deref() == Some(record.machine.as_str())
     }
-}
-
-/// Хеш идентификатора машины для метки: идентификатор в открытом виде не хранится.
-fn machine_hash(identity: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("v8-runner/owner/{identity}").as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Чего команда ждёт от проверки: прогон записывает свою копию, превью только называет то,
@@ -318,7 +311,12 @@ fn check_as(
         version: OWNER_MARKER_VERSION,
         owners: kept,
     };
-    write_marker(&marker_path, &marker).map_err(|error| {
+    // Метка базы под `localPath` — тоже первый писатель в нём.
+    config
+        .local_dir()
+        .prepare_for(&marker_path)
+        .and_then(|()| write_marker(&marker_path, &marker))
+        .map_err(|error| {
         UseCaseError::new(
             UseCaseErrorKind::Runtime,
             format!(
@@ -387,9 +385,15 @@ fn declares<'a>(
     base_dir: &Path,
 ) -> bool {
     sections.into_iter().any(|infobase| {
-        V8Connection::from_connection_string(&infobase.connection)
-            .file_infobase_dir(project)
-            .is_some_and(|dir| same_path(&dir, base_dir))
+        let managed = infobase
+            .standalone
+            .as_ref()
+            .and_then(|standalone| standalone.managed.as_ref())
+            .and_then(|managed| managed.db_path.as_ref());
+        managed.is_some_and(|dir| same_path(dir, base_dir))
+            || V8Connection::from_connection_string(&infobase.connection)
+                .file_infobase_dir(project)
+                .is_some_and(|dir| same_path(&dir, base_dir))
     })
 }
 
@@ -487,7 +491,8 @@ fn unreadable_declarations_reason(error: &ConfigLoadError) -> String {
         | ConfigLoadError::LocalOverlayForbiddenKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedShape(_)
-        | ConfigLoadError::UnsupportedShape(_) => {
+        | ConfigLoadError::UnsupportedShape(_)
+        | ConfigLoadError::StandOfAnotherProject(_) => {
             "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned()
         }
     }
@@ -750,6 +755,9 @@ mod tests {
         .expect("local layer");
         let infobase = InfobaseConfig::file(format!("File={}", base.display()));
         AppConfig {
+            local_path: fs::canonicalize(root)
+                .expect("canonical project")
+                .join(".local"),
             base_path: fs::canonicalize(root).expect("canonical project"),
             work_path: root.join("work"),
             format: SourceFormat::Designer,

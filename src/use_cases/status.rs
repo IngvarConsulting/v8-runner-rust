@@ -13,12 +13,14 @@
 //! которые держат файловую базу (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Ни памяти, ни
 //! метки он не пишет — только журналы платформы и сессии агента.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::git_worktree::ChangeDetection;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{
     BaseGeneration, ExtensionsStatus, InfobaseStatus, InstalledExtensionStatus, MemoryState,
@@ -29,10 +31,12 @@ use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationRecord,
+    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationRecord, TokenScope,
 };
 use crate::use_cases::context::ExecutionContext;
-use crate::use_cases::exchange_guard::{memory_of, new_owner_since, predict, recorded_generation};
+use crate::use_cases::exchange_guard::{
+    memory_of, new_owner_since, predict, recorded_generation, token_scope,
+};
 use crate::use_cases::generation_reader::{
     designer_log_file, read_generation, read_unapplied, GenerationProcess,
 };
@@ -94,19 +98,44 @@ fn from_memory(
     let base_path = crate::support::path::absolute_from_current_dir(&config.base_path)
         .unwrap_or_else(|_| config.base_path.clone());
     let inventory = SourceSetInventory::new(config);
-    let source_sets = inventory
+    let sets: Vec<_> = inventory
         .configuration_packages()
         .into_iter()
         .filter_map(|(set, _)| {
             let context = inventory.designer_context(&set.name)?;
-            Some((set, context))
-        })
-        .map(|(set, context)| {
             let memory = memory_of(context, &config.work_path);
             let sources = match config.format {
                 SourceFormat::Designer => Some(context),
                 SourceFormat::Edt => inventory.edt_context(&set.name),
             };
+            Some((set, context, memory, sources))
+        })
+        .collect();
+    // Изменения ищутся одним разбором на все наборы с памятью: git спрашивается один раз на
+    // рабочую копию (#575). Набор без памяти не сравнивается, но правило игнорирования,
+    // которое прячет его файл, отказывает и ему.
+    let compared: Vec<SourceSetContext> = sets
+        .iter()
+        .filter(|(_, _, memory, _)| *memory == MemoryState::Remembered)
+        .filter_map(|(_, _, _, sources)| sources.cloned())
+        .collect();
+    let mut analyses = changed_files(execution, config, &compared)?;
+    if config.format == SourceFormat::Designer {
+        let unread: Vec<SourceSetContext> = sets
+            .iter()
+            .filter(|(_, _, memory, _)| *memory != MemoryState::Remembered)
+            .map(|(_, context, _, _)| (*context).clone())
+            .collect();
+        crate::use_cases::source_changes::refuse_hidden_sets(&unread, &config.work_path)?;
+    }
+    let source_sets = sets
+        .into_iter()
+        .map(|(set, context, memory, sources)| {
+            let (changed_files, detection) =
+                match sources.filter(|_| memory == MemoryState::Remembered) {
+                    Some(sources) => analyses.remove(sources.name()).unwrap_or((None, None)),
+                    None => (None, None),
+                };
             Ok(SourceSetStatus {
                 name: set.name.clone(),
                 purpose: set.purpose,
@@ -120,10 +149,8 @@ fn from_memory(
                         recorded_at: record.recorded_at,
                     }
                 }),
-                changed_files: match sources.filter(|_| memory == MemoryState::Remembered) {
-                    Some(sources) => changed_files(execution, sources, &config.work_path)?,
-                    None => None,
-                },
+                changed_files,
+                detection,
                 base: None,
             })
         })
@@ -145,31 +172,45 @@ fn from_memory(
     })
 }
 
-/// Сколько файлов каталога изменилось с последнего чтения; анализ ничего не записывает.
-/// `None` — сравнить не с чем: памяти нет или хранилище не читается.
+/// Сколько файлов каждого набора изменилось с последнего чтения и каким путём это найдено, по
+/// имени набора; анализ памяти не пишет. Число `None` — сравнить не с чем: памяти нет или
+/// хранилище не читается.
+#[allow(clippy::type_complexity)]
 fn changed_files(
     execution: &ExecutionContext,
-    context: &SourceSetContext,
-    work_path: &Path,
-) -> Result<Option<u64>, AppError> {
-    let analysis = analyzer::analyze_context(context, work_path, &mut || {
-        crate::use_cases::interruption::pending_interruption_error(
-            execution,
-            "during source analysis",
-        )
-        .is_some()
-    });
+    config: &AppConfig,
+    contexts: &[SourceSetContext],
+) -> Result<HashMap<String, (Option<u64>, Option<ChangeDetection>)>, AppError> {
+    if contexts.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let analyses = crate::use_cases::source_changes::analyze(
+        execution,
+        contexts,
+        &config.work_path,
+        false,
+        config.format == SourceFormat::Designer,
+    )?;
     interrupted(execution, "during source analysis")?;
-    Ok(match analysis.outcome {
-        Ok(AnalysisOutcome::NoChanges) => Some(0),
-        Ok(AnalysisOutcome::Changes { changes, .. }) => Some(changes.len() as u64),
-        Err(analyzer::ChangeDetectionError::Interrupted) => {
-            return Err(AppError::Runtime(
-                "source analysis interrupted without a command cancellation".to_owned(),
+    analyses
+        .into_iter()
+        .map(|analysis| {
+            let changed = match analysis.outcome {
+                Ok(AnalysisOutcome::NoChanges) => Some(0),
+                Ok(AnalysisOutcome::Changes { changes, .. }) => Some(changes.len() as u64),
+                Err(analyzer::ChangeDetectionError::Interrupted) => {
+                    return Err(AppError::Runtime(
+                        "source analysis interrupted without a command cancellation".to_owned(),
+                    ))
+                }
+                Ok(AnalysisOutcome::Fallback) | Err(_) => None,
+            };
+            Ok((
+                analysis.context.name().to_owned(),
+                (changed, analysis.detection),
             ))
-        }
-        Ok(AnalysisOutcome::Fallback) | Err(_) => None,
-    })
+        })
+        .collect()
 }
 
 /// Отмена между вопросами к платформе: безопасная точка, после которой вопросов нет.
@@ -191,6 +232,10 @@ fn deepen(
     let asker = Asker::open(context, config);
     let (tool, mut asker) = match asker {
         Ok(asker) => (Some(asker.tool), Ok(asker)),
+        // Нет выпуска формата исходников — отказ команды, а не причина «нет ответа» у каждого
+        // набора: глубокий статус спросил бы платформу, которой нет
+        // (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+        Err((_, error)) if error.platform_release().is_some() => return Err(error),
         Err((tool, error)) => (tool, Err(error)),
     };
     let mut outcome = Ok(());
@@ -205,9 +250,9 @@ fn deepen(
         else {
             continue;
         };
-        let record = inventory
-            .designer_context(&declared.name)
-            .and_then(|context| recorded_generation(context, &config.work_path));
+        let memory = inventory.designer_context(&declared.name);
+        let record = memory.and_then(|context| recorded_generation(context, &config.work_path));
+        let scope = memory.map_or(TokenScope::OwnTool, |context| token_scope(config, context));
         set.base = Some(match asker.as_mut() {
             Ok(asker) => {
                 let base = base_generation(
@@ -217,6 +262,7 @@ fn deepen(
                         .as_ref()
                         .map(Option::as_deref),
                     record.as_ref(),
+                    scope,
                 );
                 let unapplied = asker
                     .unapplied(context, config, *extension)
@@ -224,13 +270,13 @@ fn deepen(
                 with_unapplied(base, unapplied)
             }
             Err(error) => with_unapplied(
-                base_generation(tool, Err(&*error), record.as_ref()),
+                base_generation(tool, Err(&*error), record.as_ref(), scope),
                 Err(error.to_string()),
             ),
         });
     }
     if let Ok(asker) = asker {
-        asker.close();
+        asker.close(context);
     }
     outcome?;
     interrupted(context, "the extension inventory")?;
@@ -254,6 +300,7 @@ fn base_generation(
     tool: Option<Provider>,
     answer: Result<Option<&str>, &AppError>,
     record: Option<&GenerationRecord>,
+    scope: TokenScope,
 ) -> BaseGeneration {
     let (token, reason) = match answer {
         Ok(Some(token)) => (Some(token.to_owned()), None),
@@ -263,7 +310,7 @@ fn base_generation(
         ),
         Err(error) => (None, Some(error.to_string())),
     };
-    let comparison = predict(record, tool.zip(token.as_deref()));
+    let comparison = predict(record, tool.zip(token.as_deref()), scope);
     BaseGeneration {
         tool,
         token,
@@ -460,9 +507,7 @@ impl Asker {
                 },
                 extension,
             ),
-            How::Agent { handle, wait } => {
-                generation_id(handle.session(), extension, wait).map(Some)
-            }
+            How::Agent { handle, wait } => generation_id(handle, extension, wait).map(Some),
         }
     }
 
@@ -505,9 +550,9 @@ impl Asker {
         }
     }
 
-    fn close(self) {
+    fn close(self, context: &ExecutionContext) {
         if let How::Agent { handle, wait } = self.how {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }
@@ -575,12 +620,37 @@ mod tests {
             ),
         ];
         for (tool, answer, record, expected) in cases {
-            assert_eq!(base_generation(tool, answer, record).comparison, expected);
+            assert_eq!(
+                base_generation(tool, answer, record, TokenScope::OwnTool).comparison,
+                expected
+            );
+        }
+        // Основная конфигурация файловой базы (#559): ответ другого инструмента сверяется с
+        // записью, как ответ того же.
+        for (token, expected) in [
+            (a.as_str(), GenerationVerdict::Unchanged),
+            (b.as_str(), GenerationVerdict::MovedAhead),
+        ] {
+            assert_eq!(
+                base_generation(
+                    Some(Provider::Ibcmd),
+                    Ok(Some(token)),
+                    Some(&designer),
+                    TokenScope::AnyTool
+                )
+                .comparison,
+                expected
+            );
         }
         assert_eq!(
-            base_generation(Some(Provider::Designer), Ok(None), Some(&designer))
-                .reason
-                .as_deref(),
+            base_generation(
+                Some(Provider::Designer),
+                Ok(None),
+                Some(&designer),
+                TokenScope::OwnTool
+            )
+            .reason
+            .as_deref(),
             Some("the tool gave no configuration generation")
         );
     }

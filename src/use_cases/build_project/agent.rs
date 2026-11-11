@@ -9,6 +9,7 @@
 use super::coordinator::SourceSetLoader;
 use super::helpers::apply_subject;
 use super::*;
+use crate::change_detection::runner_dirs::RunnerDirs;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
@@ -100,7 +101,7 @@ impl SourceSetLoader for AgentLoader {
         _step_index: usize,
     ) -> Result<Option<String>, AppError> {
         let (handle, wait) = self.handle(context, config)?;
-        generation_id(handle.session(), extension_name(source_set), &wait).map(Some)
+        generation_id(handle, extension_name(source_set), &wait).map(Some)
     }
 
     fn load(
@@ -137,6 +138,34 @@ impl SourceSetLoader for AgentLoader {
             let (handle, wait) = self.handle(context, config)?;
             let exchange = handle.exchange(config)?;
             let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
+            // По SFTP модуль без описаний владельца не замерен: туда список и файлы идут
+            // с описаниями, как раньше
+            // (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+            let with_descriptors;
+            let partial_paths = match (partial_paths, &exchange) {
+                (Some(paths), Exchange::Sftp) => {
+                    with_descriptors =
+                        partial_load::with_module_descriptors(paths, source_context.path())
+                            .map_err(|error| {
+                                AppError::SourceLoadNotStarted(match error {
+                                    partial_load::DescriptorWidening::Missing(path) => format!(
+                                        "'{}' of the partial load for source-set '{}' was \
+                                         removed after the load was planned",
+                                        path.display(),
+                                        source_set.name
+                                    ),
+                                    partial_load::DescriptorWidening::Rejected(path) => format!(
+                                        "descriptor '{}' of the partial load for source-set \
+                                         '{}' failed the path check",
+                                        path.display(),
+                                        source_set.name
+                                    ),
+                                })
+                            })?;
+                    Some(with_descriptors.as_slice())
+                }
+                (paths, _) => paths,
+            };
             // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
             // входа и половины каталога.
             let staged = match partial_paths {
@@ -146,14 +175,14 @@ impl SourceSetLoader for AgentLoader {
                     &relative,
                     source_context.path(),
                     paths,
-                    &config.work_path,
+                    RunnerDirs::of(config),
                 ),
                 None => stage_dir(
                     handle,
                     &exchange,
                     &relative,
                     source_context.path(),
-                    &config.work_path,
+                    RunnerDirs::of(config),
                 ),
             };
             let exposed = match staged {
@@ -214,9 +243,9 @@ impl SourceSetLoader for AgentLoader {
         )
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, context: &ExecutionContext) {
         if let Some((handle, wait)) = self.session.take() {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }

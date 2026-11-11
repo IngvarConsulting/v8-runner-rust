@@ -63,7 +63,7 @@ pub(super) trait SourceSetLoader {
     ) -> Result<(), AppError>;
 
     /// Вызывается после последнего набора, и при отказе тоже.
-    fn finish(&mut self) {}
+    fn finish(&mut self, _context: &ExecutionContext) {}
 }
 
 /// Пакетный Конфигуратор: процесс на каждую команду, утилита — `1cv8`.
@@ -194,25 +194,54 @@ pub(super) fn run_build_designer(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
-    run_build_with(context, config, args, &mut DesignerLoader::new(config))
+    run_build_with(
+        context,
+        config,
+        args,
+        analysis,
+        &mut DesignerLoader::new(config),
+    )
 }
 
 pub(super) fn run_build_agent(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let mut loader = super::agent::AgentLoader::new(config);
-    let outcome = run_build_with(context, config, args, &mut loader);
-    loader.finish();
+    let outcome = run_build_with(context, config, args, analysis, &mut loader);
+    loader.finish(context);
     outcome
+}
+
+/// Разбор изменений исполнителя: сделанный до выбора исполнителя (`build_project::push_size`)
+/// берётся как есть, без него исполнитель разбирает сам. Полной отправке разбор не нужен.
+fn analysis_or_analyze(
+    context: &ExecutionContext,
+    inventory: &SourceSetInventory<'_>,
+    contexts: &[SourceSetContext],
+    args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
+) -> Result<Option<AnalysisByName>, BuildExecutionFailure> {
+    if args.load.is_whole() {
+        return Ok(None);
+    }
+    match analysis {
+        Some(analysis) => Ok(Some(analysis)),
+        None => analyze_contexts_by_name(context, inventory, contexts, args.dry_run)
+            .map(Some)
+            .map_err(BuildExecutionFailure::without_payload),
+    }
 }
 
 fn run_build_with(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
     loader: &mut dyn SourceSetLoader,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
@@ -230,11 +259,13 @@ fn run_build_with(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -242,14 +273,13 @@ fn run_build_with(
     let selected_designer_contexts =
         designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
-    let analysis_by_name = if args.load.is_whole() {
-        None
-    } else {
-        Some(
-            analyze_contexts_by_name(context, &inventory, &selected_designer_contexts)
-                .map_err(BuildExecutionFailure::without_payload)?,
-        )
-    };
+    let analysis_by_name = analysis_or_analyze(
+        context,
+        &inventory,
+        &selected_designer_contexts,
+        args,
+        analysis,
+    )?;
 
     let mut steps = Vec::new();
     let gate = GenerationGate::new(context, config, args.load);
@@ -257,6 +287,9 @@ fn run_build_with(
     let loading = sets_to_load(&inventory, &ordered_source_sets, args, |set| {
         loads_into_the_base(set, args.load, analysis_by_name.as_ref())
     });
+    gate.check_foreign(&loading, tool).map_err(|(set, error)| {
+        refused_before_the_loads(started, &ordered_source_sets, &set, error)
+    })?;
     gate.check_early(&loading, tool, |set| {
         let Some((index, source_set)) = source_set_named(&ordered_source_sets, set.name()) else {
             return Ok(None);
@@ -469,9 +502,7 @@ fn run_build_with(
                                 args.apply,
                             )
                             .map(|loaded| (before, loaded))
-                            .inspect_err(|error| {
-                                gate.after_failed_load(&source_context, tool, error)
-                            })
+                            .inspect_err(|error| gate.after_failed_load(&source_context, error))
                     })
                     .and_then(|(before, Loaded { warnings, apply })| {
                         let read = loader.read_generation(context, config, source_set, index);
@@ -577,11 +608,13 @@ fn run_build_with(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
 }
 
@@ -589,6 +622,7 @@ pub(super) fn run_build_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
         load = ?args.load,
@@ -605,11 +639,13 @@ pub(super) fn run_build_ibcmd(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -617,14 +653,13 @@ pub(super) fn run_build_ibcmd(
     let selected_designer_contexts =
         designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
-    let analysis_by_name = if args.load.is_whole() {
-        None
-    } else {
-        Some(
-            analyze_contexts_by_name(context, &inventory, &selected_designer_contexts)
-                .map_err(BuildExecutionFailure::without_payload)?,
-        )
-    };
+    let analysis_by_name = analysis_or_analyze(
+        context,
+        &inventory,
+        &selected_designer_contexts,
+        args,
+        analysis,
+    )?;
 
     let mut utilities = PlatformUtilities::from_config(config);
     let mut ibcmd_binary: Option<PathBuf> = None;
@@ -633,6 +668,10 @@ pub(super) fn run_build_ibcmd(
     let loading = sets_to_load(&inventory, &ordered_source_sets, args, |set| {
         loads_into_the_base(set, args.load, analysis_by_name.as_ref())
     });
+    gate.check_foreign(&loading, Provider::Ibcmd)
+        .map_err(|(set, error)| {
+            refused_before_the_loads(started, &ordered_source_sets, &set, error)
+        })?;
     gate.check_early(&loading, Provider::Ibcmd, |set| {
         let Some((_, source_set)) = source_set_named(&ordered_source_sets, set.name()) else {
             return Ok(None);
@@ -783,8 +822,9 @@ pub(super) fn run_build_ibcmd(
                 }
 
                 let step_started = Instant::now();
-                // Загрузка `ibcmd` файл версий не пишет; временные файлы прошлых замен
-                // убираются и здесь.
+                // Загрузка `ibcmd` файл версий не пишет (после полной его выгружает
+                // `version_file_after_ibcmd_load`); временные файлы прошлых замен убираются и
+                // здесь.
                 let runner = utilities.runner_for(UtilityType::Ibcmd);
                 let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
                 match remove_left_candidates(source_context.path())
@@ -818,6 +858,22 @@ pub(super) fn run_build_ibcmd(
                             },
                         )
                     })
+                    .map(|mut loaded| {
+                        // Загрузка `ibcmd` файл версий не пишет: после полной его пишет
+                        // `config export info`, иначе в каталоге осталась бы опись прежней
+                        // базы (#559).
+                        if partial_paths.is_none() {
+                            loaded.warnings.extend(version_file_after_ibcmd_load(
+                                context,
+                                config,
+                                &binary,
+                                runner,
+                                source_set,
+                                &source_context,
+                            ));
+                        }
+                        loaded
+                    })
                     .and_then(|Loaded { warnings, apply }| {
                         settle_loaded(context, &source_set.name, warnings, apply)
                     }) {
@@ -847,12 +903,133 @@ pub(super) fn run_build_ibcmd(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
+}
+
+/// Файл версий после удачной полной загрузки основной конфигурации через `ibcmd`
+/// (`INV.USE-CASES.THE-RUNNER-COPY-TAKES-THE-PLATFORM-FILE-AFTER-SUCCESS`).
+///
+/// `ibcmd config import` файла версий в каталоге не пишет, и там осталась бы опись прежней
+/// базы. Поэтому опись выгружается `config export info` во временный каталог под `workPath`,
+/// и поколение читается до выгрузки и после: одно и то же — опись описывает загруженное,
+/// ложится в каталог набора и становится копией раннера; иначе, без ответа или при сбое
+/// прежний файл из каталога убирается, и следующая выгрузка идёт полной. У набора
+/// расширения файл версий не трогается: `export info` расширения не замерен. Строка — для
+/// ответа; загрузка уже прошла, и сбой здесь её не отменяет.
+fn version_file_after_ibcmd_load(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    source_context: &SourceSetContext,
+) -> Option<String> {
+    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
+    if source_set.purpose != crate::config::model::SourceSetPurpose::Configuration {
+        return None;
+    }
+    let file = source_context.path().join(VERSION_FILE_NAME);
+    let why = match export_version_file(context, config, binary, runner, source_set, &file) {
+        Ok(None) => {
+            return RunnerVersionFile::of(config, source_context).and_then(|copy| copy.record())
+        }
+        Ok(Some(why)) => format!(": {why}"),
+        Err(error) => format!(": {error}"),
+    };
+    // Копия раннера описывала базу до загрузки: и она не должна вернуться в каталог.
+    let copy = RunnerVersionFile::of(config, source_context)
+        .map_or(Ok(()), |copy| copy.forget())
+        .err()
+        .map(|error| format!("; the runner's copy was not removed: {error}"))
+        .unwrap_or_default();
+    match std::fs::remove_file(&file) {
+        Ok(()) => Some(format!(
+            "{VERSION_FILE_NAME} of source-set '{}' was not rewritten after the ibcmd load{why}; the old one is removed, so the next pull runs full{copy}",
+            source_set.name
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (!copy.is_empty()).then(|| copy.trim_start_matches("; ").to_owned())
+        }
+        Err(error) => Some(format!(
+            "{VERSION_FILE_NAME} of source-set '{}' was not rewritten after the ibcmd load{why}, and the old one could not be removed: {error}; delete '{}' before the next pull{copy}",
+            source_set.name,
+            file.display()
+        )),
+    }
+}
+
+/// Файл версий основной конфигурации после полной загрузки `ibcmd`: `config export info` во
+/// временный каталог под `workPath`, поколение до и после. `None` — поколение то же, и файл
+/// лёг в каталог набора `file`; иначе — почему он не лёг: отмена, нет ответа, выгрузка не
+/// удалась или база изменилась.
+fn export_version_file(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    file: &Path,
+) -> Result<Option<String>, AppError> {
+    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
+    let read = || read_ibcmd_generation(context, config, binary, runner, source_set);
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the version file after the load",
+    )
+    .is_some()
+    {
+        return Ok(Some("the command was cancelled".to_owned()));
+    }
+    let Some(before) = read()? else {
+        return Ok(Some("ibcmd gave no configuration generation".to_owned()));
+    };
+    std::fs::create_dir_all(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to create '{}': {error}",
+            config.work_path.display()
+        ))
+    })?;
+    let stage = tempfile::Builder::new()
+        .prefix("ibcmd-dump-info-")
+        .tempdir_in(&config.work_path)
+        .map_err(|error| {
+            AppError::Runtime(format!("failed to create a temporary directory: {error}"))
+        })?;
+    let exported = build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_export_info(stage.path())
+    .map_err(map_ibcmd_error)?;
+    let staged = stage.path().join(VERSION_FILE_NAME);
+    if let Err(error) = exported.process.outcome() {
+        return Ok(Some(format!("`ibcmd config export info` failed: {error}")));
+    }
+    if !staged.is_file() {
+        return Ok(Some(format!(
+            "`ibcmd config export info` wrote no {VERSION_FILE_NAME}"
+        )));
+    }
+    if read()?.as_deref() != Some(before.as_str()) {
+        return Ok(Some(
+            "the configuration generation changed while it was written".to_owned(),
+        ));
+    }
+    crate::support::fs::write_file_atomically(file, |out| {
+        std::io::copy(&mut std::fs::File::open(&staged)?, out).map(|_| ())
+    })
+    .map_err(|error| AppError::Runtime(format!("failed to write '{}': {error}", file.display())))?;
+    Ok(None)
 }
 
 /// Утилита, которая загрузит файлы конфигуратора в базу. Кэш тот же, что у боевого
@@ -903,15 +1080,17 @@ pub(super) fn run_build_edt(
         source_set = args.source_set.as_deref(),
         "preparing edt build plan"
     );
-    if let Some(error) = validate_edt_supported_matrix(config) {
+    if let Some(error) = validate_edt_supported_matrix(config, provider) {
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             },
         ));
     }
@@ -925,11 +1104,13 @@ pub(super) fn run_build_edt(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -940,7 +1121,7 @@ pub(super) fn run_build_edt(
         None
     } else {
         Some(
-            analyze_contexts_by_name(context, &inventory, &selected_edt_contexts)
+            analyze_contexts_by_name(context, &inventory, &selected_edt_contexts, args.dry_run)
                 .map_err(BuildExecutionFailure::without_payload)?,
         )
     };
@@ -965,6 +1146,10 @@ pub(super) fn run_build_edt(
         ) {
             return Err(BuildExecutionFailure::without_payload(error));
         }
+        gate.check_foreign(&loading, provider)
+            .map_err(|(set, error)| {
+                refused_before_the_loads(started, &ordered_source_sets, &set, error)
+            })?;
         gate.check_early(&loading, provider, |set| {
             let Some((index, source_set)) = source_set_named(&ordered_source_sets, set.name())
             else {
@@ -1708,17 +1893,20 @@ pub(super) fn run_build_edt(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
 }
 
 /// Загрузка набора под сверкой поколения: до неё — отказ, если база ушла вперёд записанного
-/// тем же инструментом; после — запись поколения. Восстановления файла версий здесь нет:
-/// `ibcmd` один файл версий не выгружает, а снимок EDT пишет его полной выгрузкой.
+/// сравнимым инструментом; после — запись поколения. Файла версий здесь нет: после полной
+/// загрузки `ibcmd` его выгружает `version_file_after_ibcmd_load`, а снимок EDT пишет его
+/// полной выгрузкой.
 fn guarded_load(
     gate: &GenerationGate<'_>,
     set: &SourceSetContext,
@@ -1729,7 +1917,7 @@ fn guarded_load(
 ) -> Result<Loaded, AppError> {
     gate.before_load(set, tool, &read)?;
     let Loaded { warnings, apply } =
-        load().inspect_err(|error| gate.after_failed_load(set, tool, error))?;
+        load().inspect_err(|error| gate.after_failed_load(set, error))?;
     let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read())?;
     let recorded = gate.after_load(set, tool, token.as_deref(), apply.mark());
     warnings.extend(remember_unapplied(&apply, recorded, commit)?);
@@ -1801,7 +1989,9 @@ pub(super) fn settle_loaded(
 
 /// Непринятая запись набора, которую видит отправка без изменений.
 enum Unapplied {
-    /// Запись этого же инструмента: её применяет отправка, если поколение базы ей равно.
+    /// Запись инструмента, чей токен сравним с этим (у основной конфигурации файловой базы —
+    /// любого из агента, Конфигуратора и `ibcmd`, #559): её применяет отправка, если поколение
+    /// базы ей равно.
     Ours(crate::use_cases::agent_session::GenerationRecord),
     /// Запись другого инструмента: его токен с этим несравним, и отправка только называет
     /// непринятое и выход `apply`.
@@ -1822,7 +2012,8 @@ fn unapplied_record(
     }
     let record = crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
         .filter(|record| !record.applied)?;
-    Some(if record.tool == tool {
+    let scope = crate::use_cases::exchange_guard::token_scope(config, set);
+    Some(if scope.compares(record.tool, tool) {
         Unapplied::Ours(record)
     } else {
         Unapplied::OtherTool(format!(

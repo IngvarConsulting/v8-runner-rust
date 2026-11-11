@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.CHECK-DATA
-version: 6
+version: 8
 artifact: docs/schemas/command-data/check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -51,6 +51,10 @@ check:
 имени отвечает под новым. Это же значение попадает в имя файла журнала платформы, поэтому у проверки модулей он
 теперь `syntax_designer-config_*.log`; у ветки EDT в имя входит ещё и набор исходников —
 `syntax_edt_<набор>_*.log`.
+
+**Что изменила версия 8.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+
+**Что изменила версия 7.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 6.** Схема квитанции `provider` допускает необязательное поле
 `endpoint` — точку входа сессии агента ([правило](a-session-receipt-names-its-endpoint.md)): тип квитанции

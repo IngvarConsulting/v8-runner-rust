@@ -4,7 +4,6 @@ use std::path::Path;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
-use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::source_descriptor::{
     extract_designer_configuration_version, SourceDescriptorParseError,
 };
@@ -35,7 +34,7 @@ pub(super) fn apply(
     let temp = private_temp_dir(work_path, "upload-settings-").map_err(error)?;
     let settings = temp.path().join("settings.xml");
     fs::write(&settings, settings_xml).map_err(error)?;
-    let result = designer.update_cfg(package, &normalize_windows_verbatim_path(&settings));
+    let result = designer.update_cfg(package, &settings);
     if let Err(error) = temp.close() {
         tracing::warn!(%error, "could not remove the validated update settings");
     }
@@ -58,11 +57,7 @@ pub(super) fn read_working_version(
     fs::write(&list, "Configuration\n").map_err(workspace_error)?;
     let output = temp.path().join("export");
     fs::create_dir(&output).map_err(workspace_error)?;
-    let result = designer.dump_config_to_files_partial(
-        &normalize_windows_verbatim_path(&output),
-        &normalize_windows_verbatim_path(&list),
-        None,
-    )?;
+    let result = designer.dump_config_to_files_partial(&output, &list, None)?;
     if let Err(code) = result.process.outcome() {
         let mut message =
             format!("reading the working configuration version exited with code {code}");

@@ -6,7 +6,7 @@
 <title>v8-runner · Компоненты</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
   td.k { white-space: nowrap; }
@@ -58,6 +58,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -231,7 +232,7 @@
 <thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
 <tbody>
 <tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
-<tr><td class="k">где бывает</td><td>файловая база и кластер; автономный сервер, который поднял раннер <span class="plan-badge">План</span></td><td>автономный сервер, который подняли вы, — он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
+<tr><td class="k">где бывает</td><td>файловая база и кластер; автономный сервер, который поднял раннер</td><td>автономный сервер, который подняли вы, — он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
 <tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам; у автономного сервера — <code>standalone.managed</code></td><td><code>standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
 <tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
 <tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
@@ -257,11 +258,11 @@
 <thead><tr><th>Операция</th><th>Файловая база</th><th>Кластер 1С · connection</th><th>Автономный сервер</th></tr></thead>
 <tbody>
 <tr><td class="k">infobase create</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill neutral">rac</span> регистрация в кластере и база данных одной командой <span class="ref">(<a href="platform.html#t73">73</a>)</span></td><td><span class="pill no">нет</span> создаётся ibcmd в автономном режиме до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span></td></tr>
-<tr><td class="k">push</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — файлы через канал обмена</td></tr>
+<tr><td class="k">push</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span>; полная загрузка всех наборов — первым ibcmd</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — файлы через канал обмена</td></tr>
 <tr><td class="k">apply</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span></td></tr>
 <tr><td class="k">reset</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> по SSH нет: в наборе шлюза нет отката <span class="ref">(<a href="platform.html#t60">60</a>)</span></td></tr>
 <tr><td class="k">upload</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> по SSH нет: в наборе шлюза нет сравнения <span class="ref">(<a href="platform.html#t61">61</a>)</span></td></tr>
-<tr><td class="k">pull</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — результат через канал обмена</td></tr>
+<tr><td class="k">pull</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span>; полная выгрузка — первым ibcmd</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — результат через канал обмена</td></tr>
 <tr><td class="k">download</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> только основная конфигурация</td></tr>
 <tr><td class="k">diff</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> только по файлу версий</td></tr>
 <tr><td class="k">make</td><td colspan="3"><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> — своя постоянная база сборки</td></tr>
@@ -395,6 +396,6 @@
 
 </main>
 
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

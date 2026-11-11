@@ -73,6 +73,9 @@ pub struct SourceSetStatus {
     /// Файлы каталога, изменившиеся с тех пор, как раннер его последний раз читал; `null` —
     /// сравнить не с чем.
     pub changed_files: Option<u64>,
+    /// Каким путём найдены изменения: у git (`git`, `git+fsmonitor`) или чтением файлов
+    /// (`scan`) с причиной; `null` — изменений не искали.
+    pub detection: Option<crate::domain::git_worktree::ChangeDetection>,
     /// Что о поколении ответила платформа; только у `--deep`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<BaseGeneration>,
@@ -82,9 +85,9 @@ pub struct SourceSetStatus {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryState {
-    /// Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `no_memory`.
+    /// Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `untracked_base`.
     Remembered,
-    /// Памяти нет: `push` откажет `no_memory`.
+    /// Памяти нет: `push` откажет `untracked_base`.
     #[serde(rename = "none")]
     Missing,
     /// Под именем базы лежит память другой пары «база ↔ каталог»; она не используется.
@@ -99,7 +102,8 @@ pub enum MemoryState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RecordedGeneration {
     pub token: String,
-    /// Инструмент, которым токен получен: токены разных инструментов несравнимы.
+    /// Инструмент, которым токен получен: токены разных инструментов сравнимы только у
+    /// основной конфигурации файловой базы (агент, Конфигуратор и `ibcmd`, замер #559).
     pub tool: Provider,
     /// После чего записан токен.
     pub after: GenerationAfter,
@@ -162,7 +166,7 @@ pub enum GenerationVerdict {
     /// Тот же инструмент отдал другой токен: база ушла вперёд, и `push`, который грузит этот
     /// набор без `--force`, откажет `non_fast_forward`.
     MovedAhead,
-    /// Запись сделана другим инструментом: сравнивать не с чем.
+    /// Запись сделана инструментом, чей токен с этим несравним: сравнивать не с чем.
     OtherTool,
     /// Записи этой пары нет.
     NoRecord,

@@ -249,6 +249,13 @@ fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
     );
 }
 
+/// Разовый агент, как до живого: тест проверяет его подъём и снятие на каждую команду.
+/// Конфигурация кончается блоком `tools.designer_agent`, и ключ ложится в него.
+fn one_shot(harness: &Harness) {
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(&harness.config_path, format!("{config}    live: false\n")).expect("live off");
+}
+
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
     let output = v8_runner_command()
         .args([
@@ -282,6 +289,7 @@ fn commands(harness: &Harness) -> Vec<String> {
 #[test]
 fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk() {
     let harness = harness(true, Some(true), false);
+    one_shot(&harness);
 
     let (code, payload) = run_dump(&harness, &["--force"]);
 
@@ -370,7 +378,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
     );
     assert_eq!(
         lines.last().map(String::as_str),
-        Some("common shutdown"),
+        Some("common disconnect-ib"),
         "{lines:?}"
     );
 
@@ -485,11 +493,65 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
-/// Токен, записанный другим инструментом или записью без имени инструмента (журнал
-/// прежних версий), — отсутствие ответа: выгрузка по изменившемуся не пропускается, и
-/// команда не падает.
+/// Агент прогноза не спрашивает: перед `--update` нет `--get-changes`, а режим называет то,
+/// что выгрузка сделала с каталогом — файл, которого она не переписала, оставляет его
+/// `INCREMENTAL` (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
 #[test]
-fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
+fn the_agent_asks_no_forecast() {
+    let harness = harness(true, Some(true), false);
+    fs::write(
+        harness.target.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+    .expect("version file");
+    commit_project(&harness);
+
+    let (code, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(code, 0, "{payload}");
+    // Ровно три команды конфигурации: поколение, выгрузка с `--update`, поколение. Вопрос о
+    // прогнозе в любом виде был бы лишней командой.
+    let lines = commands(&harness);
+    let steps: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.starts_with("config "))
+        .map(|line| {
+            if line.starts_with("config generation-id") {
+                "generation"
+            } else if line.starts_with("config dump-config-to-files --dir=target/")
+                && line.ends_with(" --update")
+            {
+                "dump --update"
+            } else {
+                line.as_str()
+            }
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        ["generation", "dump --update", "generation"],
+        "{lines:?}"
+    );
+    assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
+    assert!(payload["data"]["mode_reason"].is_null(), "{payload}");
+    let leftovers: Vec<_> = fs::read_dir(&harness.target)
+        .expect("target")
+        .map(|entry| entry.expect("entry").file_name())
+        // `change_detection::scanner::DUMP_START_PROBE`: the binary exports no library.
+        .filter(|name| name.to_string_lossy().starts_with(".v8-runner-dump-start-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the clock probe is removed: {leftovers:?}"
+    );
+}
+
+/// Основная конфигурация файловой базы (#559): токен, записанный другим инструментом из
+/// агента, Конфигуратора и `ibcmd`, сравнивается с токеном агента — равный пропускает
+/// выгрузку. Запись без имени инструмента (журнал прежних версий) — отсутствие ответа:
+/// выгрузка по изменившемуся не пропускается, и команда не падает.
+#[test]
+fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_not() {
     let harness = harness(true, Some(true), false);
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
@@ -503,54 +565,60 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
         serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
     assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
 
-    // Прогноз (`--get-changes`) — вопрос, а не выгрузка.
     let dumps = |harness: &Harness| {
         commands(harness)
             .iter()
-            .filter(|line| {
-                line.starts_with("config dump-config-to-files") && !line.contains("--get-changes")
-            })
+            .filter(|line| line.starts_with("config dump-config-to-files"))
             .count()
     };
-    fn another_tool(record: &mut Value) {
-        record["tool"] = Value::from("designer");
-    }
-    fn no_tool(record: &mut Value) {
-        record.as_object_mut().expect("record").remove("tool");
-    }
-    type Rewrite = fn(&mut Value);
-    let rewrites: [(Rewrite, usize); 2] = [(another_tool, 2), (no_tool, 3)];
-    for (rewrite, expected_dumps) in rewrites {
+    let rewrite = |change: fn(&mut Value)| {
         let mut ledger: Value =
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
-        rewrite(&mut ledger["main"]);
+        change(&mut ledger["main"]);
         fs::write(&ledger_file, ledger.to_string()).expect("rewrite ledger");
         // Прошлая выгрузка оставила файлы вне учёта; без фиксации сторож откажет.
         commit_project(&harness);
+    };
 
-        let (code, payload) = run_dump(&harness, &[]);
-
-        assert_eq!(code, 0, "{payload}");
-        assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
-        assert_eq!(dumps(&harness), expected_dumps, "{payload}");
-        // Прогноз в той же сессии перед выгрузкой по изменившемуся; пустой список — изменившееся.
-        assert!(
-            commands(&harness)
-                .iter()
-                .any(|line| line.contains("--update --get-changes=")),
-            "{payload}"
-        );
-        assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
-        let ledger: Value =
-            serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
-        assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
-    }
-
-    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает.
+    // Запись Конфигуратора с тем же токеном: у основной конфигурации файловой базы токены
+    // инструментов общие, и выгружать нечего.
+    rewrite(|record| record["tool"] = Value::from("designer"));
     let (code, payload) = run_dump(&harness, &[]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
-    assert_eq!(dumps(&harness), 3, "{payload}");
+    assert_eq!(dumps(&harness), 1, "{payload}");
+
+    // Запись без имени инструмента — отсутствие ответа: выгрузка идёт.
+    rewrite(|record| {
+        record.as_object_mut().expect("record").remove("tool");
+    });
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+    assert_eq!(dumps(&harness), 2, "{payload}");
+    // Прогноза нет; двойник переписал каждый файл каталога, и режим по факту — полный.
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|line| line.contains("--get-changes")),
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    assert_eq!(
+        payload["data"]["mode_reason"], "platform_rewrote_all",
+        "{payload}"
+    );
+    let ledger: Value =
+        serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
+    assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
+
+    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает. Выгрузка
+    // выше оставила файлы вне учёта; без фиксации сторож откажет.
+    commit_project(&harness);
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(dumps(&harness), 2, "{payload}");
 }
 
 /// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —

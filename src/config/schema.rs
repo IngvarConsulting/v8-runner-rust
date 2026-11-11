@@ -328,6 +328,17 @@ where
 struct MainConfigSchema {
     /// Working directory for generated state, logs, temporary files, and hash storages.
     work_path: PathBuf,
+    /// Directory of the personal state of this checkout: data of managed stands and the
+    /// default file infobase. Deleting workPath leaves it intact. Relative to the directory of
+    /// v8project.yaml; `.local` by default. It must not hold that directory or a source set,
+    /// and must not overlap workPath or infobase.standalone.exchange.dir.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    local_path: Option<PathBuf>,
     /// Source format used by project source sets when a nested source does not override it.
     #[serde(
         default,
@@ -429,6 +440,16 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PathBuf")]
     work_path: Option<PathBuf>,
+    /// Machine-local directory of the personal state of this checkout: data of managed stands
+    /// and the default file infobase. Relative to the directory of v8project.yaml.
+    #[serde(
+        rename = "localPath",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    local_path: Option<PathBuf>,
     /// Infobases of this checkout by name, like remotes of a repository; commands work
     /// with `origin` unless `--infobase` names another one. A name is a plain identifier:
     /// it becomes a directory under workPath.
@@ -634,6 +655,9 @@ struct InfobaseSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct InfobaseStandaloneSchema {
+    /// The runner starts this server itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedServerSchema>,
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
     /// port is required — `ibsrv` listens on 1543 unless told otherwise. Optional when
     /// `connection` declares the direct gate: the agent then is not offered.
@@ -719,6 +743,9 @@ struct InfobaseWebSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseClusterSchema {
+    /// The runner starts this cluster itself; `connection` is not declared next to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedServerSchema>,
     /// Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4
     /// address: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes
     /// to `rac` as is, so the port default (1545) stays with the platform. Left empty, the
@@ -755,9 +782,30 @@ struct InfobaseClusterAgentSchema {
     password: Option<String>,
 }
 
+/// A server the runner starts itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct ManagedServerSchema {
+    /// Name of the infobase on the server, `Ref=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// File infobase of a standalone server; not for `cluster.managed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_path: Option<String>,
+}
+
+/// `dbms.managed`: an empty map; the runner starts this PostgreSQL itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ManagedDbmsSchema {}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseDbmsSchema {
+    /// The runner starts this PostgreSQL itself; `kind`, `server`, `user` and `password` are
+    /// refused next to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedDbmsSchema>,
     /// DBMS kind passed to `ibcmd --dbms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
@@ -858,6 +906,14 @@ struct ToolsSchema {
     )]
     #[schemars(with = "VanessaToolSchema")]
     va: Option<VanessaToolSchema>,
+    /// PostgreSQL build for 1C.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PostgresToolSchema")]
+    postgres: Option<PostgresToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -913,6 +969,14 @@ struct PartialToolsSchema {
     )]
     #[schemars(with = "VanessaToolSchema")]
     va: Option<VanessaToolSchema>,
+    /// PostgreSQL build for 1C.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PostgresToolSchema")]
+    postgres: Option<PostgresToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -924,7 +988,7 @@ struct PlatformToolSchema {
     /// Enforce `version` for a configured `path`. Without `path`, `version` is applied to normal default-root and PATH discovery.
     #[serde(default)]
     strict: bool,
-    /// Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.
+    /// Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true. `sources` selects the release that writes the sources format of the main Configuration set (DESIGNER format only) and refuses with `platform_release_missing` when it is not installed, inside `path` too, where `strict: true` keeps its boundary guarantees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
 }
@@ -1025,6 +1089,22 @@ struct DesignerAgentSchema {
     )]
     #[schemars(with = "u64")]
     startup_timeout_ms: Option<u64>,
+    /// Whether the runner-launched agent outlives the command and serves the next one (managed mode). Absent: it does; `false`: every command removes its own agent.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "bool")]
+    live: Option<bool>,
+    /// How many live agents one OS account keeps at most (managed mode), from 1. Absent: 2.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u8", range(min = 1))]
+    live_max: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1141,6 +1221,14 @@ struct PartialToolExtensionSourceSchema {
 struct ToolExtensionArtifactSchema {
     /// Path to a `.cfe` extension artifact.
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct PostgresToolSchema {
+    /// Directory of the build, or its `bin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

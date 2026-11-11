@@ -647,6 +647,7 @@ fn run_infobase_restore(
         prepared.provider,
         prepared.executable.as_deref(),
         &request.input,
+        request.target_mode,
     ) {
         Ok(platform_result) => platform_result,
         Err(failure) => {
@@ -738,6 +739,7 @@ pub(crate) fn run_restore_provider(
     provider: Provider,
     executable: Option<&Path>,
     source_file: &Path,
+    target_mode: RestoreTargetMode,
 ) -> Result<PlatformCommandResult, CommandFailure> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
@@ -768,9 +770,22 @@ pub(crate) fn run_restore_provider(
             // отвечает результатом, а не ошибкой.
             .map_err(|error| CommandFailure::without_deferral(AppError::from(error)))
         }
-        Provider::Ibcmd => Err(CommandFailure::without_deferral(AppError::capability(
-            "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
-        ))),
+        Provider::Ibcmd => {
+            let executable = executable_of(executable).map_err(CommandFailure::without_deferral)?;
+            let runner = crate::platform::process::ProcessExecutor;
+            crate::use_cases::dump_config::helpers::build_ibcmd_dsl(
+                context,
+                config,
+                executable,
+                &runner,
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )
+            .and_then(|dsl| {
+                dsl.restore_infobase(source_file, target_mode)
+                    .map_err(AppError::from)
+            })
+            .map_err(CommandFailure::without_deferral)
+        }
     }
 }
 
@@ -991,7 +1006,7 @@ fn select_provider(
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::use_cases::provider_selection::{
-        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way,
+        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way, ReleaseRefusal,
     };
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
@@ -1017,6 +1032,7 @@ fn select_provider(
         ));
     }
     let mut utilities = PlatformUtilities::from_config(config);
+    let mut release = ReleaseRefusal::default();
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
@@ -1037,7 +1053,14 @@ fn select_provider(
             "a transfer executor needs at most one utility, {provider} needs {needed:?}"
         );
         let utility = needed.first().copied();
-        match readiness(config, &mut utilities, intent, provider, utility) {
+        match readiness(
+            config,
+            &mut utilities,
+            &mut release,
+            intent,
+            provider,
+            utility,
+        ) {
             Ok(executable) => {
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(PreparedTransferProvider {
@@ -1051,7 +1074,7 @@ fn select_provider(
         }
     }
 
-    let error = nobody_ready(config, &plan, &skipped);
+    let error = nobody_ready(config, &plan, &skipped, release);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
@@ -1125,6 +1148,7 @@ fn database_configuration_plan(
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    release: &mut crate::use_cases::provider_selection::ReleaseRefusal,
     intent: InfobaseTransferIntent,
     provider: Provider,
     utility: Option<UtilityType>,
@@ -1170,7 +1194,7 @@ fn readiness(
     };
     let location = utilities
         .locate(utility)
-        .map_err(|error| format!("environment is not ready: {error}"))?;
+        .map_err(|error| release.not_ready(error))?;
     if provider == Provider::Agent
         && matches!(intent, InfobaseTransferIntent::SnapshotRestore { .. })
     {
@@ -1618,9 +1642,19 @@ pub(crate) fn run_snapshot_provider(
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        Provider::Ibcmd => Err(AppError::capability(
-            "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
-        )),
+        Provider::Ibcmd => {
+            let executable = executable_of(executable)?;
+            let runner = crate::platform::process::ProcessExecutor;
+            crate::use_cases::dump_config::helpers::build_ibcmd_dsl(
+                context,
+                config,
+                executable,
+                &runner,
+                InterruptionSafetyClass::GracefulThenKill,
+            )?
+            .dump_infobase(staging_path)
+            .map_err(AppError::from)
+        }
     }
 }
 
@@ -1712,7 +1746,7 @@ mod tests {
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::ExecutionContext;
-    use crate::use_cases::result::UseCaseErrorKind;
+    use crate::use_cases::result::{EnvironmentReason, UseCaseErrorKind};
 
     use super::{
         acquire_target_lock, cleanup_export_orphans, observe_locked_output,
@@ -1723,6 +1757,7 @@ mod tests {
 
     fn config(base: &Path, work: &Path) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format: SourceFormat::Designer,
@@ -2177,7 +2212,10 @@ mod tests {
                 InfobaseTransferPhase::ProviderCommand,
             );
 
-            assert_eq!(failure.error.kind(), UseCaseErrorKind::Environment);
+            assert_eq!(
+                failure.error.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
             let data = serde_json::to_value(failure.payload.expect("dump payload"))
                 .expect("serialize dump data");
             assert_eq!(data["execution"]["status"], "failed", "{data}");
@@ -2332,6 +2370,7 @@ mod tests {
     #[track_caller]
     fn restore_cancelled_while_the_platform_writes(
         exit_code: i32,
+        provider: Provider,
     ) -> (
         tempfile::TempDir,
         crate::use_cases::result::UseCaseResult<
@@ -2381,8 +2420,8 @@ mod tests {
             target_mode: RestoreTargetMode::Replace,
         };
         let prepared = super::PreparedTransferProvider {
-            receipt: ProviderReceipt::new(Provider::Designer, ProviderOrigin::Default),
-            provider: Provider::Designer,
+            receipt: ProviderReceipt::new(provider, ProviderOrigin::Default),
+            provider,
             executable: Some(designer),
             configuration_state: None,
         };
@@ -2405,7 +2444,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral() {
-        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0);
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0, Provider::Designer);
 
         let result = outcome.expect("the restore finishes despite the cancellation");
         assert!(
@@ -2433,12 +2472,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_restore_defers_cancellation_until_its_terminal_outcome() {
+        for exit_code in [0, 255] {
+            let (dir, outcome) =
+                restore_cancelled_while_the_platform_writes(exit_code, Provider::Ibcmd);
+            assert!(!dir.path().join("terminated").exists());
+            assert!(dir.path().join("finished").exists());
+            let result = match outcome {
+                Ok(result) => {
+                    assert_eq!(exit_code, 0);
+                    result
+                }
+                Err(failure) => {
+                    assert_ne!(exit_code, 0);
+                    failure.payload.expect("restore payload")
+                }
+            };
+            assert_eq!(result.restored, exit_code == 0);
+            assert_eq!(result.execution.interruptions.len(), 1);
+            assert!(result.execution.interruptions[0].deferred);
+            assert_eq!(
+                result.execution.interruptions[0].kind,
+                ExecutionInterruptionKind::Cancelled
+            );
+        }
+    }
+
     /// Загрузка, неудачная уже после отложенной отмены, называет и отмену: оператор
     /// просил остановить, и отказ говорит, почему его не послушали.
     #[cfg(unix)]
     #[test]
     fn a_failed_restore_after_a_deferred_cancellation_still_names_it() {
-        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1);
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1, Provider::Designer);
 
         let failure = outcome.expect_err("the platform reported a failure");
         assert!(!dir.path().join("terminated").exists());

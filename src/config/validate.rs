@@ -9,7 +9,7 @@ use crate::config::model::{
 };
 use crate::domain::capability::Operation;
 use crate::platform::connection::V8Connection;
-use crate::platform::locator::PlatformVersionRequirement;
+use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, host_of_authority};
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::path::is_safe_path_segment;
@@ -72,6 +72,44 @@ pub enum ConfigValidationError {
     #[error("infobase.dbms is not allowed for a standalone server: the server opens its database itself")]
     DbmsNotAllowedForStandalone,
 
+    #[error("infobase.dbms.{field} is not allowed next to infobase.dbms.managed: the runner chooses it itself")]
+    ManagedDbmsWithAccessField { field: &'static str },
+
+    #[error("infobase.dbms.managed stands only next to infobase.cluster.managed or infobase.standalone.managed: the runner cannot answer for the order of a server it did not start")]
+    ManagedDbmsNeedsManagedServer,
+
+    #[error("infobase.connection is not declared next to infobase.cluster.managed: the runner knows the address of its own cluster")]
+    ManagedClusterWithConnection,
+
+    #[error("infobase.standalone.managed names one storage: either db-path or the section infobase.dbms")]
+    ManagedStandaloneStorage,
+
+    #[error("the {what} of this infobase is not running: run `{start}`")]
+    ManagedServerNotRunning {
+        what: &'static str,
+        start: &'static str,
+    },
+
+    #[error("the PostgreSQL of this infobase is not running under its cluster: run `dbms start`")]
+    ManagedDbmsNotRunning,
+
+    #[error(
+        "the infobase is not created in the cluster of this infobase yet: run `infobase create`"
+    )]
+    ManagedBaseNotCreated,
+
+    #[error("infobase.cluster.managed is not declared for this infobase: the cluster commands start only a cluster the runner owns")]
+    ClusterNotManaged,
+
+    #[error("the standalone server of this infobase is running: an infobase is not created under its server; run `standalone stop` first")]
+    ManagedServerIsRunning,
+
+    #[error("infobase.standalone.managed is not declared for this infobase: the standalone commands start only a server the runner owns")]
+    StandaloneNotManaged,
+
+    #[error("infobase.dbms.managed is not declared for this infobase: the dbms commands start only a PostgreSQL the runner owns")]
+    DbmsNotManaged,
+
     #[error("infobase.standalone.gate: {0}")]
     StandaloneGateInvalid(String),
 
@@ -92,6 +130,32 @@ pub enum ConfigValidationError {
         "workPath stays on the runner's side: '{work_path}' overlaps the target-side directory infobase.standalone.exchange.dir '{dir}'"
     )]
     WorkPathOverlapsTargetSideDir { work_path: String, dir: String },
+
+    #[error(
+        "localPath '{local_path}' holds the project directory '{project}': the personal state of the checkout lies beside its sources, not around them"
+    )]
+    LocalPathHoldsTheProject { local_path: String, project: String },
+
+    #[error(
+        "localPath '{local_path}' holds the root of source-set '{source_set}': the personal state of the checkout is never a source"
+    )]
+    LocalPathHoldsASourceSet {
+        local_path: String,
+        source_set: String,
+    },
+
+    #[error(
+        "localPath '{local_path}' overlaps workPath '{work_path}': workPath is rebuilt and may be deleted, the personal state of the checkout must outlive it"
+    )]
+    LocalPathOverlapsWorkPath {
+        local_path: String,
+        work_path: String,
+    },
+
+    #[error(
+        "localPath stays on the runner's side: '{local_path}' overlaps the target-side directory infobase.standalone.exchange.dir '{dir}'"
+    )]
+    LocalPathOverlapsTargetSideDir { local_path: String, dir: String },
 
     #[error(
         "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through its gates and is never started by the runner"
@@ -212,6 +276,11 @@ pub enum ConfigValidationError {
     #[error("tools.designer_agent.startup_timeout_ms must be greater than 0")]
     InvalidDesignerAgentStartupTimeoutMs,
 
+    #[error(
+        "tools.designer_agent.live-max must be at least 1; to keep no live agent set live: false"
+    )]
+    InvalidDesignerAgentLiveMax,
+
     #[error("format EDT requires at least one source-set with a valid EDT project path")]
     EdtNoProjects,
 
@@ -230,8 +299,10 @@ pub enum ConfigValidationError {
         generated_path: String,
     },
 
-    #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
-    InvalidPlatformVersion(String),
+    #[error(
+        "tools.platform.version: sources chooses the platform release by the sources format of the main Configuration set, {0}: set tools.platform.version to a mask"
+    )]
+    PlatformVersionSourcesNotApplicable(SourcesNotApplicable),
 
     #[error(
         "{section}.partialLoadThreshold is not supported: there is no partial-load threshold any more — delete the line; a full load on demand is `push <SET> --full`"
@@ -411,9 +482,141 @@ impl ConfigValidationError {
             Self::ProviderRemoved { way_out, .. } => {
                 Some(crate::domain::next_step::NextStep::command(*way_out))
             }
+            Self::ManagedServerNotRunning { start, .. } => {
+                Some(crate::domain::next_step::NextStep::command(*start))
+            }
+            Self::ManagedDbmsNotRunning => {
+                Some(crate::domain::next_step::NextStep::command("dbms start"))
+            }
+            Self::ManagedBaseNotCreated => Some(crate::domain::next_step::NextStep::command(
+                "infobase create",
+            )),
+            Self::ManagedServerIsRunning => Some(crate::domain::next_step::NextStep::command(
+                "standalone stop",
+            )),
             _ => None,
         }
     }
+}
+
+/// Сервер, который поднимает раннер.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedServer {
+    Cluster,
+    Standalone,
+}
+
+impl ManagedServer {
+    /// Объявленный у базы сервер раннера, если он есть.
+    fn of(infobase: &crate::config::model::InfobaseConfig) -> Option<Self> {
+        if infobase
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| cluster.managed.is_some())
+        {
+            Some(Self::Cluster)
+        } else if infobase
+            .standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+        {
+            Some(Self::Standalone)
+        } else {
+            None
+        }
+    }
+
+    /// Отказ рабочей команды, чей сервер раннера не поднят: называет команду, которая его поднимает.
+    pub fn not_running(self) -> ConfigValidationError {
+        match self {
+            Self::Cluster => ConfigValidationError::ManagedServerNotRunning {
+                what: "cluster",
+                start: "cluster start",
+            },
+            Self::Standalone => ConfigValidationError::ManagedServerNotRunning {
+                what: "standalone server",
+                start: "standalone start",
+            },
+        }
+    }
+}
+
+/// Объявления управляемого стенда, общие для всех команд. Проверка реквизитов идёт раньше проверки
+/// соседа: отказ называет ключ, который надо убрать.
+fn validate_managed_declarations(
+    infobase: &crate::config::model::InfobaseConfig,
+) -> Result<(), ConfigValidationError> {
+    if let Some(dbms) = infobase.dbms.as_ref().filter(|dbms| dbms.managed.is_some()) {
+        let declared = [
+            ("kind", dbms.kind.is_some()),
+            ("server", dbms.server.is_some()),
+            ("user", dbms.user.is_some()),
+            ("password", dbms.password.is_some()),
+        ];
+        if let Some((field, _)) = declared.into_iter().find(|(_, present)| *present) {
+            return Err(ConfigValidationError::ManagedDbmsWithAccessField { field });
+        }
+        if ManagedServer::of(infobase).is_none() {
+            return Err(ConfigValidationError::ManagedDbmsNeedsManagedServer);
+        }
+    }
+    let cluster_managed = infobase
+        .cluster
+        .as_ref()
+        .is_some_and(|cluster| cluster.managed.is_some());
+    if cluster_managed && !infobase.connection_projected && !infobase.connection.trim().is_empty() {
+        return Err(ConfigValidationError::ManagedClusterWithConnection);
+    }
+    if let Some(managed) = infobase
+        .standalone
+        .as_ref()
+        .and_then(|standalone| standalone.managed.as_ref())
+    {
+        if managed.db_path.is_some() == infobase.dbms.is_some() {
+            return Err(ConfigValidationError::ManagedStandaloneStorage);
+        }
+    }
+    Ok(())
+}
+
+/// Проверка для команд `dbms`: база объявляет `dbms.managed`. Проект и наборы им не нужны.
+pub fn validate_managed_dbms(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    if config
+        .infobase
+        .dbms
+        .as_ref()
+        .is_none_or(|dbms| dbms.managed.is_none())
+    {
+        return Err(ConfigValidationError::DbmsNotManaged);
+    }
+    Ok(())
+}
+
+/// Проверка для команд `cluster`: база объявляет `cluster.managed`.
+pub fn validate_managed_cluster(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    validate_platform_version(config)?;
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Cluster) {
+        return Err(ConfigValidationError::ClusterNotManaged);
+    }
+    Ok(())
+}
+
+/// Проверка для команд `standalone`: база объявляет `standalone.managed`.
+pub fn validate_managed_standalone(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    validate_platform_version(config)?;
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Standalone) {
+        return Err(ConfigValidationError::StandaloneNotManaged);
+    }
+    Ok(())
 }
 
 /// Validate high-level application configuration consistency and filesystem references.
@@ -984,6 +1187,13 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         })?;
     }
     validate_infobase_form(&config.infobase)?;
+    match ManagedServer::of(&config.infobase) {
+        // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
+        Some(server) if config.infobase.connection.trim().is_empty() => {
+            return Err(server.not_running());
+        }
+        _ => {}
+    }
     validate_selected_infobase_environment(config)
 }
 
@@ -994,6 +1204,11 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
 fn validate_infobase_form(
     infobase: &crate::config::model::InfobaseConfig,
 ) -> Result<(), ConfigValidationError> {
+    validate_managed_declarations(infobase)?;
+    // Строки у такой цели нет: её адрес знает раннер. Рядом с обычной базой она никому не мешает.
+    if ManagedServer::of(infobase).is_some() {
+        return Ok(());
+    }
     let connection = infobase.connection.trim();
     // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
     // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
@@ -1069,6 +1284,53 @@ fn validate_cluster_address(
         return Err(ConfigValidationError::ClusterAddressInvalid {
             key,
             value: value.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// `localPath` держит личное состояние копии: он не держит ни проекта, ни набора исходников,
+/// не пересекается с пересобираемым `workPath` и лежит на стороне раннера
+/// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`). Проверка только сравнивает пути и
+/// ничего не создаёт, превью тоже.
+pub(crate) fn validate_local_path(
+    config: &AppConfig,
+    config_dir: &Path,
+) -> Result<(), ConfigValidationError> {
+    use crate::support::path::compared_path;
+    let local = compared_path(&config.local_path);
+    let shown = || config.local_path.display().to_string();
+    if compared_path(config_dir).starts_with(&local) {
+        return Err(ConfigValidationError::LocalPathHoldsTheProject {
+            local_path: shown(),
+            project: config_dir.display().to_string(),
+        });
+    }
+    if let Some(set) = config
+        .source_sets
+        .iter()
+        .find(|set| compared_path(&set.root_in(&config.base_path)).starts_with(&local))
+    {
+        return Err(ConfigValidationError::LocalPathHoldsASourceSet {
+            local_path: shown(),
+            source_set: set.name.clone(),
+        });
+    }
+    if paths_overlap(&local, &compared_path(&config.work_path)) {
+        return Err(ConfigValidationError::LocalPathOverlapsWorkPath {
+            local_path: shown(),
+            work_path: config.work_path.display().to_string(),
+        });
+    }
+    if let Some(dir) = std::iter::once(&config.infobase)
+        .chain(config.infobases.values())
+        .filter_map(|infobase| infobase.standalone.as_ref())
+        .filter_map(|standalone| standalone.exchange_dir())
+        .find(|dir| paths_overlap(&local, &compared_path(dir)))
+    {
+        return Err(ConfigValidationError::LocalPathOverlapsTargetSideDir {
+            local_path: shown(),
+            dir: dir.display().to_string(),
         });
     }
     Ok(())
@@ -1320,15 +1582,48 @@ fn validate_providers(
     Ok(())
 }
 
-fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if let Some(version) = config.tools.platform.version.as_deref() {
-        if PlatformVersionRequirement::parse(version).is_none() {
-            return Err(ConfigValidationError::InvalidPlatformVersion(
-                version.to_owned(),
-            ));
-        }
-    }
+/// Почему `tools.platform.version: sources` к проекту не применим.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcesNotApplicable {
+    /// Формат проекта EDT: у его исходников нет версии формата выпуска.
+    EdtFormat,
+    /// Основного набора нет: формат читать не из чего.
+    NoMainSet,
+}
 
+impl std::fmt::Display for SourcesNotApplicable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EdtFormat => {
+                "and the project format is EDT: its sources carry no format version of a release"
+            }
+            Self::NoMainSet => "and the project declares no main Configuration set",
+        })
+    }
+}
+
+/// `tools.platform.version: sources` применим только к проекту Конфигуратора с основным
+/// набором. Само значение разобрано при загрузке; проверка идёт во всех путях проверки
+/// настроек, где команда может искать платформу
+/// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if config.tools.platform.version != Some(PlatformVersionSetting::Sources) {
+        return Ok(());
+    }
+    if config.format == SourceFormat::Edt {
+        return Err(ConfigValidationError::PlatformVersionSourcesNotApplicable(
+            SourcesNotApplicable::EdtFormat,
+        ));
+    }
+    if !config
+        .source_sets
+        .iter()
+        .any(|set| set.purpose == SourceSetPurpose::Configuration)
+    {
+        return Err(ConfigValidationError::PlatformVersionSourcesNotApplicable(
+            SourcesNotApplicable::NoMainSet,
+        ));
+    }
     Ok(())
 }
 
@@ -1547,6 +1842,9 @@ fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValida
     if agent.startup_timeout_ms == 0 {
         return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
     }
+    if agent.live_max == Some(0) {
+        return Err(ConfigValidationError::InvalidDesignerAgentLiveMax);
+    }
     validate_host_fingerprint(
         "tools.designer_agent.host-fingerprint",
         agent.host_fingerprint.as_deref(),
@@ -1709,12 +2007,15 @@ fn validate_tool_extension_edt_runtime_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate, ConfigValidationError, ProviderScope};
+    use super::{
+        validate, validate_launch, ConfigValidationError, ProviderScope, SourcesNotApplicable,
+    };
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput,
         ToolExtensionSourceConfig, ToolsConfig, VanessaProfileConfig,
     };
+    use crate::platform::locator::PlatformVersionSetting;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -1737,6 +2038,7 @@ mod tests {
         path: &Path,
     ) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format,
@@ -1842,6 +2144,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -1863,7 +2166,7 @@ mod tests {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8.3.25".to_owned()),
+                    version: PlatformVersionSetting::parse("8.3.25"),
                 },
                 ..ToolsConfig::default()
             },
@@ -1882,6 +2185,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -1903,7 +2207,7 @@ mod tests {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8.3".to_owned()),
+                    version: PlatformVersionSetting::parse("8.3"),
                 },
                 ..ToolsConfig::default()
             },
@@ -1914,14 +2218,16 @@ mod tests {
         validate(&config).expect("expected valid minor version prefix");
     }
 
+    /// `tools.platform.version: sources` принят у проекта Конфигуратора с основным набором и
+    /// отвергнут до команды у формата EDT и у проекта без основного набора.
     #[test]
-    fn rejects_platform_versions_with_too_few_parts() {
+    fn the_sources_platform_version_needs_a_designer_main_set() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("source dir");
-
-        let config = AppConfig {
+        let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -1934,28 +2240,48 @@ mod tests {
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
-                path: source_dir
-                    .strip_prefix(base.path())
-                    .expect("relative")
-                    .to_path_buf(),
+                path: "src".into(),
             }],
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8".to_owned()),
+                    version: Some(PlatformVersionSetting::Sources),
                 },
                 ..ToolsConfig::default()
             },
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
+        validate(&config).expect("sources is accepted");
 
-        let err = validate(&config).expect_err("expected invalid version");
-        assert!(matches!(
-            err,
-            ConfigValidationError::InvalidPlatformVersion(_)
-        ));
+        config.format = SourceFormat::Edt;
+        let error = validate_launch(&config).expect_err("EDT has no release by format");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::PlatformVersionSourcesNotApplicable(
+                    SourcesNotApplicable::EdtFormat
+                )
+            ),
+            "{error}"
+        );
+
+        config.format = SourceFormat::Designer;
+        config.source_sets[0].purpose = SourceSetPurpose::Extension;
+        let error = validate_launch(&config).expect_err("no main set");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::PlatformVersionSourcesNotApplicable(
+                    SourcesNotApplicable::NoMainSet
+                )
+            ),
+            "{error}"
+        );
+
+        config.tools.platform.version = PlatformVersionSetting::parse("8.3.27");
+        validate_launch(&config).expect("a mask needs no main set");
     }
 
     #[test]
@@ -1966,6 +2292,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2003,6 +2330,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2040,6 +2368,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2073,6 +2402,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2111,6 +2441,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2471,6 +2802,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2741,6 +3073,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2773,6 +3106,7 @@ mod tests {
         let missing = base.path().join("missing-src");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2806,6 +3140,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2838,6 +3173,7 @@ mod tests {
         let missing = base.path().join("missing-project");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2874,6 +3210,7 @@ mod tests {
         let work = tempdir().expect("work");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2907,6 +3244,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: shared.path().join(".local"),
             base_path: shared.path().to_path_buf(),
             work_path: shared.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2951,6 +3289,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2996,6 +3335,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3004,6 +3344,8 @@ mod tests {
             ),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
+                managed_memory: None,
+                connection_projected: false,
                 connection: "Srvr=localhost;Ref=ib".to_owned(),
                 user: None,
                 password: None,
@@ -3046,6 +3388,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3106,6 +3449,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3186,6 +3530,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3232,7 +3577,7 @@ mod tests {
 
     /// Всякая цель, которую принимает проверка формы, помнится: адрес памяти у неё есть.
     /// Страж против «нераспознанного адреса»: форма, которую проверка пропустила бы без
-    /// адреса памяти, оставила бы базу без памяти навсегда, и отказ `no_memory` повторялся бы.
+    /// адреса памяти, оставила бы базу без памяти навсегда, и отказ `untracked_base` повторялся бы.
     #[test]
     fn every_accepted_target_has_a_memory_address() {
         let base = std::path::Path::new("/srv/project");
@@ -3509,6 +3854,129 @@ mod tests {
         }
     }
 
+    fn managed_infobase(
+        yaml_dbms: crate::config::model::InfobaseDbmsConfig,
+    ) -> crate::config::model::InfobaseConfig {
+        let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+        infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig::default()),
+            ..Default::default()
+        });
+        infobase.dbms = Some(yaml_dbms);
+        infobase
+    }
+
+    fn managed_dbms() -> crate::config::model::InfobaseDbmsConfig {
+        crate::config::model::InfobaseDbmsConfig {
+            managed: Some(crate::config::model::ManagedDbmsConfig::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_managed_dbms_refuses_every_access_field_by_its_name() {
+        for (field, dbms) in [
+            (
+                "kind",
+                crate::config::model::InfobaseDbmsConfig {
+                    kind: Some("PostgreSQL".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "server",
+                crate::config::model::InfobaseDbmsConfig {
+                    server: Some("h".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "user",
+                crate::config::model::InfobaseDbmsConfig {
+                    user: Some("u".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "password",
+                crate::config::model::InfobaseDbmsConfig {
+                    password: Some("p".into()),
+                    ..managed_dbms()
+                },
+            ),
+        ] {
+            let error = super::validate_managed_declarations(&managed_infobase(dbms)).unwrap_err();
+            assert!(
+                matches!(error, ConfigValidationError::ManagedDbmsWithAccessField { field: f } if f == field),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_managed_dbms_needs_a_managed_server_beside_it() {
+        let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+        infobase.connection = "Srvr=srv;Ref=demo".to_owned();
+        infobase.dbms = Some(managed_dbms());
+        assert!(matches!(
+            super::validate_managed_declarations(&infobase),
+            Err(ConfigValidationError::ManagedDbmsNeedsManagedServer)
+        ));
+        assert!(super::validate_managed_declarations(&managed_infobase(managed_dbms())).is_ok());
+    }
+
+    #[test]
+    fn a_managed_cluster_declares_no_connection() {
+        let mut infobase = managed_infobase(managed_dbms());
+        infobase.connection = "Srvr=srv;Ref=demo".to_owned();
+        assert!(matches!(
+            super::validate_managed_declarations(&infobase),
+            Err(ConfigValidationError::ManagedClusterWithConnection)
+        ));
+    }
+
+    #[test]
+    fn a_projected_connection_of_the_managed_cluster_is_not_a_declared_one() {
+        let mut infobase = managed_infobase(managed_dbms());
+        infobase.connection = "Srvr=127.0.0.1:24001;Ref=demo".to_owned();
+        infobase.connection_projected = true;
+        assert!(super::validate_managed_declarations(&infobase).is_ok());
+    }
+
+    #[test]
+    fn a_managed_standalone_names_exactly_one_storage() {
+        let standalone = |db_path: Option<&str>, dbms| {
+            let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+            infobase.standalone = Some(crate::config::model::StandaloneConfig {
+                managed: Some(crate::config::model::ManagedServerConfig {
+                    name: Some("demo".to_owned()),
+                    db_path: db_path.map(std::path::PathBuf::from),
+                }),
+                gate: None,
+                host_fingerprint: None,
+                exchange: None,
+            });
+            infobase.dbms = dbms;
+            super::validate_managed_declarations(&infobase)
+        };
+        assert!(standalone(Some("ib"), None).is_ok());
+        assert!(standalone(None, Some(managed_dbms())).is_ok());
+        for refused in [
+            standalone(None, None),
+            standalone(Some("ib"), Some(managed_dbms())),
+        ] {
+            assert!(matches!(
+                refused,
+                Err(ConfigValidationError::ManagedStandaloneStorage)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_managed_server_is_a_valid_neighbour_of_the_selected_base() {
+        assert!(super::validate_infobase_form(&managed_infobase(managed_dbms())).is_ok());
+    }
+
     #[test]
     fn file_connection_rejects_dbms_contract() {
         let base = tempdir().expect("base");
@@ -3517,6 +3985,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3557,6 +4026,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3592,6 +4062,7 @@ mod tests {
         let work = tempdir().expect("work");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3626,6 +4097,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3664,6 +4136,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = |allowed: &str| AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3714,6 +4187,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = |fingerprint: &str| AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3770,6 +4244,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4089,6 +4564,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4139,6 +4615,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4185,6 +4662,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4238,6 +4716,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,

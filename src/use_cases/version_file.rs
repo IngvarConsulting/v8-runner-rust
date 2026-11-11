@@ -156,7 +156,14 @@ impl RunnerVersionFile {
     /// Возвращает предупреждение, если копию записать не удалось.
     #[must_use]
     pub(crate) fn record(&self) -> Option<String> {
-        self.record_when(|_| true)
+        // Every written file becomes the copy, so its fingerprint is not needed: the copy reads
+        // the file once instead of hashing it first (#571).
+        let recorded = match fs::metadata(&self.in_directory) {
+            Ok(_) => self.write_copy(write_identity),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error("read", &self.in_directory, &error)),
+        };
+        recorded.err().map(|error| self.not_recorded(&error))
     }
 
     /// После удачной загрузки: копия обновляется, только если платформа переписала файл
@@ -166,17 +173,29 @@ impl RunnerVersionFile {
         self.record_when(|written| before != Some(written))
     }
 
+    /// Копия больше не описывает базу: она стирается, и следующая выгрузка по изменившемуся
+    /// не подложит её в каталог. Копии не было — не ошибка.
+    pub(crate) fn forget(&self) -> Result<(), AppError> {
+        match fs::remove_file(&self.copy) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error("remove", &self.copy, &error)),
+        }
+    }
+
     fn record_when(&self, rewritten: impl Fn(&Fingerprint) -> bool) -> Option<String> {
         let recorded = fingerprint(&self.in_directory).and_then(|written| match written {
             Some(written) if rewritten(&written) => self.write_copy(write_identity),
             Some(_) | None => Ok(()),
         });
-        recorded.err().map(|error| {
-            format!(
-                "the runner's copy of {VERSION_FILE_NAME} for source-set '{}' was not updated: {error}; the next pull may dump more than changed",
-                self.source_set
-            )
-        })
+        recorded.err().map(|error| self.not_recorded(&error))
+    }
+
+    fn not_recorded(&self, error: &AppError) -> String {
+        format!(
+            "the runner's copy of {VERSION_FILE_NAME} for source-set '{}' was not updated: {error}; the next pull may dump more than changed",
+            self.source_set
+        )
     }
 
     fn copy_is_ours(&self) -> Result<bool, AppError> {

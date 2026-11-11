@@ -1,6 +1,7 @@
 ---
 id: INV.USE-CASES.A-DATABASE-WRITE-IS-A-CRITICAL-PHASE
 check:
+  - src/use_cases/infobase_export.rs::an_ibcmd_restore_defers_cancellation_until_its_terminal_outcome
   - src/use_cases/infobase_export.rs::a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral
   - src/use_cases/build_project.rs::execute_ibcmd_build_honors_interruption_before_apply_safe_point
   - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point

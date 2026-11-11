@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tempfile::{NamedTempFile, TempPath};
+use tempfile::NamedTempFile;
 
 /// Private scratch space for complete database snapshots. The directory is
 /// created with its restricted access policy before a CFE is written to it.
@@ -58,28 +58,51 @@ pub fn private_temp_dir(work_path: &Path, prefix: &str) -> std::io::Result<Priva
 
 #[cfg(windows)]
 fn windows_private_temp_dir(root: &Path, prefix: &str) -> std::io::Result<PrivateTempDir> {
+    for _ in 0..8 {
+        let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
+        match create_private_dir(&path) {
+            Ok(()) => return Ok(PrivateTempDir { path: Some(path) }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique private snapshot directory",
+    ))
+}
+
+/// Creates one directory that only its owner may open: mode 0700 on Unix, a protected
+/// DACL for the owner and LocalSystem on Windows. The parent must exist; an existing
+/// directory is `AlreadyExists` and keeps whatever access it had.
+#[cfg(unix)]
+pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// Creates one directory that only its owner may open: mode 0700 on Unix, a protected
+/// DACL for the owner and LocalSystem on Windows. The parent must exist; an existing
+/// directory is `AlreadyExists` and keeps whatever access it had.
+#[cfg(windows)]
+pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, GetVolumeInformationW, GetVolumePathNameW,
     };
     use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
 
-    // A successful CreateDirectoryW does not apply SECURITY_ATTRIBUTES on a
-    // volume without persistent ACLs. Refuse before writing a complete CFE.
-    let root_wide: Vec<u16> = root
+    let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    // A successful CreateDirectoryW does not apply SECURITY_ATTRIBUTES on a
+    // volume without persistent ACLs. Refuse before anything private is written.
     let mut volume_root = vec![0u16; 32768];
     if unsafe {
         GetVolumePathNameW(
-            root_wide.as_ptr(),
+            wide.as_ptr(),
             volume_root.as_mut_ptr(),
             volume_root.len() as u32,
         )
@@ -106,17 +129,45 @@ fn windows_private_temp_dir(root: &Path, prefix: &str) -> std::io::Result<Privat
     if fs_flags & FS_PERSISTENT_ACLS == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "snapshot volume does not support persistent access controls",
+            "the volume does not support persistent access controls",
         ));
     }
 
-    // Protected DACL: only the owner and LocalSystem can read/write the
-    // directory and its children. No inherited workspace ACL can widen it.
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    with_owner_only_security(|attributes| {
+        if unsafe { CreateDirectoryW(wide.as_ptr(), attributes) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })?
+}
+
+/// Hands `create` security attributes that let only the owner and LocalSystem in: a protected
+/// DACL, so no inherited ACL can widen it. The one place that spells the owner-only descriptor:
+/// private directories and the live agent keeper's named pipe take it from here.
+#[cfg(windows)]
+pub fn with_owner_only_security<R>(
+    create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> R,
+) -> std::io::Result<R> {
+    with_security("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)", create)
+}
+
+/// Hands `create` security attributes built from the descriptor `sddl`.
+#[cfg(windows)]
+pub fn with_security<R>(
+    sddl: &str,
+    create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> R,
+) -> std::io::Result<R> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+    let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is a null-terminated UTF-16 string; on success `descriptor` holds memory
+    // to `LocalFree`, freed below once.
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -133,29 +184,18 @@ fn windows_private_temp_dir(root: &Path, prefix: &str) -> std::io::Result<Privat
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let result = (|| {
-        for _ in 0..8 {
-            let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0 {
-                return Ok(PrivateTempDir { path: Some(path) });
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(error);
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "could not allocate a unique private snapshot directory",
-        ))
-    })();
+    let result = create(&attributes);
+    // SAFETY: allocated by the conversion above; `attributes` is not used after this.
     unsafe { LocalFree(descriptor) };
-    result
+    Ok(result)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn create_private_dir(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private directories are not supported on this platform",
+    ))
 }
 
 /// Return the root temp directory inside `work_path`.
@@ -193,17 +233,6 @@ pub fn partial_list_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
         .prefix("partial-list-")
         .suffix(".txt")
         .tempfile_in(partial_lists_dir(work_path)?)
-}
-
-/// Файл, куда Конфигуратор или агент пишет прогноз выгрузки (`-getChanges`); убирается вместе
-/// с `TempPath`. Дескриптор закрыт: пока файл открыт на запись, Конфигуратор на Windows в него
-/// не пишет и отвечает «Ошибка приемника потока».
-pub fn dump_forecast_file(work_path: &Path) -> std::io::Result<TempPath> {
-    tempfile::Builder::new()
-        .prefix("dump-forecast-")
-        .suffix(".txt")
-        .tempfile_in(partial_lists_dir(work_path)?)
-        .map(NamedTempFile::into_temp_path)
 }
 
 /// Create a temporary text file for a partial dump object list inside

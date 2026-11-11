@@ -200,6 +200,19 @@ impl AppError {
         })
     }
 
+    /// Отказ выпуска формата исходников, если это он: ему положено дойти до ответа как есть
+    /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+    pub const fn platform_release(
+        &self,
+    ) -> Option<&crate::platform::locator::PlatformReleaseMissing> {
+        match self {
+            Self::PlatformLocator(source) | Self::PlatformLocatorContext { source, .. } => {
+                source.platform_release()
+            }
+            _ => None,
+        }
+    }
+
     /// Отмена ли это и где она остановила команду — по самой ошибке, а не по сигналу:
     /// сигнал, пришедший во время чужого отказа, отказа отменой не делает. Здесь и только
     /// здесь отмена узнаётся, как бы глубоко платформа её ни завернула. Истёкший срок —
@@ -223,6 +236,9 @@ impl AppError {
                     IbcmdError::Spawn(error) => process_cancellation(error),
                     IbcmdError::MissingServerDbmsField(_)
                     | IbcmdError::DirectoryWipingExport
+                    | IbcmdError::SnapshotBusy { .. }
+                    | IbcmdError::SnapshotProbe { .. }
+                    | IbcmdError::SnapshotUnsupported
                     | IbcmdError::PartialImportCommandLineTooLong { .. } => None,
                 }
             }
@@ -351,7 +367,8 @@ fn process_cancellation(error: &ProcessError) -> Option<CancelledAt> {
         | ProcessError::StdoutLogIo { .. }
         | ProcessError::StderrLogIo { .. }
         | ProcessError::TimedOut { .. }
-        | ProcessError::ManagedSpawnUnsupported { .. } => None,
+        | ProcessError::ManagedSpawnUnsupported { .. }
+        | ProcessError::UnexpressiblePath { .. } => None,
     }
 }
 
@@ -394,6 +411,11 @@ fn session_cancellation(error: &EdtSessionError) -> Option<CancelledAt> {
 impl From<IbcmdError> for AppError {
     fn from(error: IbcmdError) -> Self {
         match error {
+            IbcmdError::SnapshotBusy { .. } => Self::InfobaseBusy(error.to_string()),
+            IbcmdError::SnapshotProbe { .. } => Self::EnvironmentUnavailable(error.to_string()),
+            IbcmdError::SnapshotUnsupported => {
+                Self::capability_for(CapabilityReason::Target, error.to_string())
+            }
             IbcmdError::MissingServerDbmsField(_) => Self::ValidationIbcmd(error),
             IbcmdError::Spawn(error) => Self::PlatformProcess(error),
             IbcmdError::DirectoryWipingExport => Self::Runtime(error.to_string()),
@@ -466,7 +488,8 @@ impl From<AgentError> for AppError {
             // а не отказ платформы: отказом платформа отвечает сообщением `error`.
             AgentError::InvalidReply { .. } => Self::InvalidOutput(error.to_string()),
             AgentError::Workspace { .. } => Self::Runtime(error.to_string()),
-            AgentError::Unreachable { .. }
+            AgentError::HostKeyPathNotReadable { .. }
+            | AgentError::Unreachable { .. }
             | AgentError::Handshake { .. }
             | AgentError::AuthenticationRejected { .. }
             // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
@@ -478,7 +501,10 @@ impl From<AgentError> for AppError {
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. }
-            | AgentError::ExitedBeforeSession { .. } => {
+            | AgentError::ExitedBeforeSession { .. }
+            | AgentError::LiveAgentGone { .. }
+            | AgentError::Keeper { .. }
+            | AgentError::KeeperUnreachable { .. } => {
                 Self::EnvironmentUnavailable(error.to_string())
             }
         }
@@ -507,6 +533,19 @@ impl From<DownloadError> for AppError {
             | DownloadError::Runtime(_) => Self::Runtime(error.to_string()),
         }
     }
+}
+
+/// Отказ с цепочкой причин через `: `: для ошибок, которые держат отказ ОС источником, а не
+/// в своём тексте.
+pub fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]

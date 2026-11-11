@@ -78,6 +78,24 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         ),
     )
     .expect("write config");
+    // База со службами раннера, для команд `dbms`: рядом с обычной она никому не мешает.
+    fs::write(
+        dir.join("v8project.local.yaml"),
+        "infobases:
+  stand:
+    cluster:
+      managed:
+        name: demo
+    dbms:
+      managed: {}
+  server:
+    standalone:
+      managed:
+        name: demo
+        db-path: server-ib
+",
+    )
+    .expect("write local config");
     config_path
 }
 
@@ -160,6 +178,60 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             "clone",
             "clone",
             cloned,
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "start"],
+            "dbms start",
+            "dbms start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "stop"],
+            "dbms stop",
+            "dbms stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "restart"],
+            "dbms restart",
+            "dbms restart",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "start"],
+            "standalone start",
+            "standalone start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "stop"],
+            "standalone stop",
+            "standalone stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "restart"],
+            "standalone restart",
+            "standalone restart",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "cluster", "start"],
+            "cluster start",
+            "cluster start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "cluster", "stop"],
+            "cluster stop",
+            "cluster stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "cluster", "restart"],
+            "cluster restart",
+            "cluster restart",
+            work.clone(),
         ),
         row(&["extensions"], "extensions", "extensions", work.clone()),
         row(

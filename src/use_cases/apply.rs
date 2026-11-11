@@ -4,6 +4,7 @@
 //! ([`act`]), которым применяют и `push`, и расширение-инструмент.
 
 pub(crate) mod act;
+pub mod sessions;
 
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::PathBuf;
@@ -48,11 +49,14 @@ pub(crate) fn load_kept_unapplied(
     if error.cancellation().is_some() {
         return error.with_context(kept);
     }
-    AppError::Refused(Box::new(
-        UseCaseError::from(error)
-            .followed_by(&kept)
-            .with_next(NextStep::command("apply").for_source_set(set)),
-    ))
+    let refusal = UseCaseError::from(error).followed_by(&kept);
+    // Отказ «базу держат» уже назвал выход: тот же вызов, с `--sessions force` или без. У MCP
+    // этого вызова нет, и выход остаётся прежним — `apply` набора.
+    AppError::Refused(Box::new(if refusal.next().is_some() {
+        refusal
+    } else {
+        refusal.with_next(NextStep::command("apply").for_source_set(set))
+    }))
 }
 
 type ApplyFailure = UseCaseFailure<ApplyResult>;
@@ -64,7 +68,10 @@ pub fn execute(
     request: &ApplyRequest,
 ) -> UseCaseResult<ApplyResult> {
     stamp_dispatch(
-        stamp_session(run(context, config, request), context),
+        stamp_session(
+            sessions::stamp_sessions(run(context, config, request), context),
+            context,
+        ),
         context.work(),
     )
 }
@@ -76,6 +83,7 @@ fn empty(started: Instant) -> ApplyResult {
         provider_dispatched: false,
         steps: Vec::new(),
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     }
 }
 
@@ -108,7 +116,7 @@ fn run(
         utilities,
     );
     let outcome = walk(context, config, request, &mut executor, started);
-    executor.finish();
+    executor.finish(context);
     crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
 
@@ -588,8 +596,7 @@ impl Executor {
                 return Ok(None);
             }
             let (handle, wait) = self.session(context, config)?;
-            return agent_session::generation_id(handle.session(), target.extension, wait)
-                .map(Some);
+            return agent_session::generation_id(handle, target.extension, wait).map(Some);
         }
         read_by_record_tool(
             context,
@@ -605,9 +612,9 @@ impl Executor {
         )
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, context: &ExecutionContext) {
         if let Some((handle, wait)) = self.session.take() {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }
@@ -658,6 +665,7 @@ mod tests {
         fs::write(base.join("main").join("Configuration.xml"), "<x/>").expect("marker");
         fs::create_dir_all(base.join("epf")).expect("epf");
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base,
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

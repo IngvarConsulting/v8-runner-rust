@@ -225,7 +225,7 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         );
     fs::write(
         &project.config,
-        format!("{config}  designer_agent:\n    port: {port}\n"),
+        format!("{config}  designer_agent:\n    port: {port}\n    live: false\n"),
     )
     .expect("agent config");
     fs::write(
@@ -255,8 +255,8 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         apply_commands,
         [
             "config extensions properties get --all-extensions",
-            "config update-db-cfg",
-            "config update-db-cfg --extension=ext",
+            "config update-db-cfg --dynamic-disable",
+            "config update-db-cfg --extension=ext --dynamic-disable",
         ],
     );
     let launches = fs::read_to_string(designer_args_log).expect("Designer invocations");
@@ -543,7 +543,8 @@ fn providers_apply_assigns_the_executor_of_the_apply() {
     let calls = fs::read_to_string(project.root().join("ibcmd.log")).expect("ibcmd calls");
     assert!(calls.contains("config apply"), "{calls}");
     assert!(calls.contains("--force"), "{calls}");
-    assert!(calls.contains("--dynamic auto"), "{calls}");
+    assert!(calls.contains("--force --dynamic=disable"), "{calls}");
+    assert!(!calls.contains("--dynamic auto"), "{calls}");
     assert!(
         !project.calls().contains("/UpdateDBCfg"),
         "{}",
@@ -719,16 +720,18 @@ fn a_push_with_nothing_to_load_applies_an_unapplied_designer_extension() {
     assert!(ledger["ext"].get("applied").is_none(), "{ledger}");
 }
 
-/// Запись «не применено» сделал другой инструмент: его токен несравним с исполнителем этой
-/// отправки, и она не применяет, а называет непринятое и выход `apply`.
+/// Запись «не применено» сделал Конфигуратор, а отправляет `ibcmd`. У основной конфигурации
+/// файловой базы их токены сравнимы (#559): отправка без изменений применяет непринятое своим
+/// исполнителем, Конфигуратора не зовёт.
 #[test]
-fn a_push_with_nothing_to_load_names_an_unapplied_load_of_another_tool() {
+fn a_push_with_nothing_to_load_applies_an_unapplied_load_of_another_measured_tool() {
     let project = Project::new();
+    let log = project.root().join("ibcmd.log");
     write_shell_script(
         &project.root().join("ibcmd"),
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\nexit 0",
-            project.root().join("ibcmd.log").display()
+            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'config generation-id'*) printf '%s\\n' '{FIRST}' ;; esac\nexit 0",
+            log.display()
         ),
     );
     succeeded(&project.run(&["push", "--force"]));
@@ -747,15 +750,14 @@ fn a_push_with_nothing_to_load_names_an_unapplied_load_of_another_tool() {
 
     let step = &pushed["data"]["steps"][0];
     assert_eq!(step["mode"], "skipped", "{pushed}");
-    assert_eq!(step["applied"], false, "{pushed}");
-    let message = step["message"].as_str().unwrap_or_default();
+    assert_eq!(step["applied"], true, "{pushed}");
+    let calls = fs::read_to_string(&log).expect("ibcmd calls");
+    assert!(calls.contains("config apply"), "{calls}");
     assert!(
-        message.contains("was loaded without apply earlier by designer"),
-        "{message}"
+        !project.calls().contains("/UpdateDBCfg"),
+        "{}",
+        project.calls()
     );
-    assert!(message.contains("apply main"), "{message}");
-    assert!(!project.root().join("ibcmd.log").exists());
-    assert!(project.calls().is_empty(), "{}", project.calls());
 }
 
 /// Инструмент не ответил поколением после загрузки без применения: записи «не применено»

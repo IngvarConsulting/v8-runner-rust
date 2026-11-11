@@ -67,6 +67,61 @@
     toc.appendChild(link);
   });
   if (toc.children.length > 1) sidebar.appendChild(toc);
+  // Якорь у заголовка раздела: ссылка ведёт на раздел, щелчок копирует полный адрес.
+  var anchorStatus = node('div', 'heading-anchor-status');
+  anchorStatus.setAttribute('role', 'status');
+  anchorStatus.setAttribute('aria-live', 'polite');
+  document.body.appendChild(anchorStatus);
+  var anchorTimer;
+  function announce(text, near) {
+    anchorStatus.textContent = text;
+    var box = near.getBoundingClientRect();
+    anchorStatus.style.left = Math.max(8, Math.min(box.left, window.innerWidth - 200)) + 'px';
+    anchorStatus.style.top = (box.bottom + 6) + 'px';
+    anchorStatus.classList.add('shown');
+    clearTimeout(anchorTimer);
+    anchorTimer = setTimeout(function () { anchorStatus.classList.remove('shown'); }, 1600);
+  }
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(function () { return copyBySelection(text); });
+    }
+    return copyBySelection(text);
+  }
+  // Запасной путь, если браузер не дал доступ к буферу обмена.
+  function copyBySelection(text) {
+    return new Promise(function (resolve, reject) {
+      var area = node('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed'; area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      var done = false;
+      try { done = document.execCommand('copy'); } catch (error) { done = false; }
+      document.body.removeChild(area);
+      if (done) resolve(); else reject(new Error('copy refused'));
+    });
+  }
+  Array.prototype.forEach.call(page.querySelectorAll('h2[id], h3[id]'), function (heading) {
+    if (heading.querySelector('.heading-anchor')) return;
+    var title = heading.textContent.trim();
+    var anchor = node('a', 'heading-anchor');
+    anchor.href = '#' + heading.id;
+    anchor.title = 'Скопировать ссылку на раздел';
+    anchor.setAttribute('aria-label', 'Скопировать ссылку на раздел «' + title + '»');
+    anchor.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6.5 9.5a3 3 0 0 0 4.24 0l2.12-2.12a3 3 0 0 0-4.24-4.24l-.7.7M9.5 6.5a3 3 0 0 0-4.24 0L3.14 8.62a3 3 0 0 0 4.24 4.24l.7-.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    anchor.addEventListener('click', function (event) {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      var url = location.href.split('#')[0] + '#' + heading.id;
+      // Смена адреса отмечает раздел (:target) и прокручивает к нему с учётом шапки.
+      if (location.hash !== '#' + heading.id) location.hash = heading.id;
+      copyText(url).then(function () { announce('Ссылка скопирована', anchor); },
+        function () { announce('Адрес раздела в строке браузера', anchor); });
+    });
+    heading.appendChild(anchor);
+  });
   var brand = node('a', 'reference-brand');
   brand.href = 'https://ingvar.pro/';
   brand.title = 'Ingvar Consulting';

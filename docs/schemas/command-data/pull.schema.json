@@ -48,12 +48,17 @@
         },
         {
           "const": "platform_forecast",
-          "description": "Платформа предсказала полную выгрузку (`FullDump`, `modified: all`).",
+          "description": "`ibcmd` предсказал полную выгрузку (`modified: all`).",
+          "type": "string"
+        },
+        {
+          "const": "platform_rewrote_all",
+          "description": "Выгрузка Конфигуратора или агента с обновлением переписала каждый файл набора.",
           "type": "string"
         },
         {
           "const": "unknown",
-          "description": "Прогноз не распознан или не получен: режим не известен.",
+          "description": "Прогноз `ibcmd` не распознан или не получен либо каталог после выгрузки не\nперечислен: режим не известен.",
           "type": "string"
         }
       ]
@@ -73,6 +78,138 @@
         "normalized"
       ],
       "type": "object"
+    },
+    "LiveAgentHolder": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.",
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Держатель со сроком: до какого мгновения (UTC, RFC 3339).",
+          "properties": {
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "until"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Держатель живого агента в квитанции."
+    },
+    "LiveAgentReason": {
+      "description": "Почему управляемый агент не остался жить после команды.",
+      "oneOf": [
+        {
+          "const": "live_agent_off",
+          "description": "`tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.",
+          "type": "string"
+        },
+        {
+          "const": "job",
+          "description": "Раннер в Job, из которого сторож не может выйти.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Команду прервали, пока агент выполнял её запрос.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "Живой агент этой рабочей копии ещё служит сессии другой команды: команда работала с\nразовым.",
+          "type": "string"
+        },
+        {
+          "const": "keeper_failed",
+          "description": "Сторож живого агента не поднялся или не ответил (путь канала, отказ запуска, срок):\nкоманда работала с разовым агентом.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Сторож снял агента после команды: его сессия оборвалась, его остановили или ушёл\nпоследний держатель.",
+          "type": "string"
+        }
+      ]
+    },
+    "LiveAgentReceipt": {
+      "additionalProperties": false,
+      "description": "Живой ли был управляемый агент команды и остался ли он жить.",
+      "properties": {
+        "holders": {
+          "description": "Держатели агента на момент ответа; без держателей — пустой список.",
+          "items": {
+            "$ref": "#/$defs/LiveAgentHolder"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "description": "Остался ли агент жить после команды.",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему агент не остался жить; у оставшегося поля нет."
+        },
+        "reused": {
+          "description": "Команда взяла уже живого агента (`true`) или подняла его сама (`false`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reused",
+        "holders",
+        "kept"
+      ],
+      "type": "object"
+    },
+    "OperationSize": {
+      "description": "Объём операции, по которому раннер упорядочивает цепочку умолчаний (#559).\n\nИмя идёт в квитанцию полем `reason`: им раннер объясняет, почему первым в цепочке стоит\nтот, кто стоит.",
+      "oneOf": [
+        {
+          "const": "whole",
+          "description": "Каждый набор, который команда загружает или выгружает, идёт целиком.",
+          "type": "string"
+        },
+        {
+          "const": "by_changes",
+          "description": "Хотя бы один набор идёт по изменившемуся или выборкой.",
+          "type": "string"
+        }
+      ]
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -159,6 +296,17 @@
         "origin": {
           "$ref": "#/$defs/ProviderOrigin"
         },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationSize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему цепочка умолчаний стоит в этом порядке: объём операции. Есть только у\nумолчания, которое раннер упорядочил по объёму (`push` и `pull` файловой базы);\nу ключа `providers.*` и у остальных цепочек поля нет."
+        },
         "selected": {
           "anyOf": [
             {
@@ -182,7 +330,7 @@
       "type": "object"
     },
     "ReportedDumpMode": {
-      "description": "Случившийся режим выгрузки в ответе. В отличие от [`DumpMode`] знает «неизвестен»:\nпрогноз платформы не распознан или не получен, и обещать «по изменившемуся» нельзя.\nПлана с таким режимом не бывает, поэтому значение живёт только в ответе.",
+      "description": "Случившийся режим выгрузки в ответе. В отличие от [`DumpMode`] знает «неизвестен»:\nпрогноз `ibcmd` не распознан или не получен либо каталог после выгрузки не перечислен, и\nобещать «по изменившемуся» нельзя.\nПлана с таким режимом не бывает, поэтому значение живёт только в ответе.",
       "enum": [
         "FULL",
         "INCREMENTAL",
@@ -197,6 +345,17 @@
       "properties": {
         "address": {
           "type": "string"
+        },
+        "live": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).\nЕсть только у управляемого агента."
         },
         "mode": {
           "$ref": "#/$defs/SessionMode"
@@ -280,7 +439,7 @@
     },
     "mode": {
       "$ref": "#/$defs/ReportedDumpMode",
-      "description": "Режим, который случился: по плану раннера и прогнозу платформы\n(`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). У превью — режим плана."
+      "description": "Режим, который случился: по плану раннера, по прогнозу `ibcmd` и по тому, что выгрузка\nКонфигуратора или агента сделала с каталогом\n(`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). У превью — режим плана."
     },
     "mode_reason": {
       "anyOf": [

@@ -1,0 +1,2433 @@
+//! Управляемый стенд: единственный владелец записи о службе, различия своего и чужого, порядка
+//! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
+
+mod cluster;
+mod recreate;
+mod standalone;
+
+pub(crate) use cluster::ClusterBase;
+pub use cluster::ClusterCommand;
+pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use crate::config::model::AppConfig;
+use crate::domain::dbms::{DbmsResult, ServiceAction, ServiceState};
+use crate::platform::postgres::{self, PostgresBuild};
+use crate::platform::process::{
+    ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessRunner, WorkGiven,
+};
+use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
+use crate::platform::service_record::{
+    machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
+    Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord, StandService,
+};
+use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::interruption::interruption_before_safe_point;
+use crate::use_cases::result::{
+    EnvironmentReason, UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult,
+};
+
+/// Сколько ждать готовности и конца процесса.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+const STOP_TIMEOUT: Duration = Duration::from_secs(70);
+const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(200);
+/// Порты вне динамического диапазона Windows (49152 и выше) и вне первых тысяч.
+const PORT_BASE: u32 = 20_000;
+const PORT_SPAN: u32 = 29_000;
+const PORT_TRIES: u32 = 64;
+/// Шаг перебора: блок портов сервера занимает столько же, порт PostgreSQL не мешает.
+const PORT_STEP: u32 = 32;
+const PASSWORD_LENGTH: usize = 24;
+/// Службы сервера над этой СУБД: их запись делает `dbms stop` отказом.
+const SERVERS: [(StandService, &str); 2] = [
+    (StandService::Cluster, "cluster stop"),
+    (StandService::Standalone, "standalone stop"),
+];
+
+/// Что о машине и её процессах нужно сценарию. Подменяется в тестах.
+pub(crate) trait ServiceHost {
+    fn supported(&self) -> bool;
+    fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError>;
+    fn facts(&self, pid: u32) -> Option<ProcessFacts>;
+    fn machine(&self) -> Option<String>;
+    fn listening_pid(&self, port: u16) -> Option<u32>;
+    fn port_answers(&self, port: u16) -> bool;
+    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
+    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
+    fn sleep(&self, duration: Duration);
+    /// Сколько ждать. Подмена в тестах не ждёт настоящего времени.
+    fn patience(&self, default: Duration) -> Duration {
+        default
+    }
+    /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю. `None` —
+    /// перечня нет.
+    fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
+        Some(Vec::new())
+    }
+}
+
+struct RealHost;
+
+impl ServiceHost for RealHost {
+    fn supported(&self) -> bool {
+        cfg!(windows)
+    }
+    fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError> {
+        ProcessExecutor.spawn_service(request, work)
+    }
+    fn facts(&self, pid: u32) -> Option<ProcessFacts> {
+        service::process_facts(pid)
+    }
+    fn machine(&self) -> Option<String> {
+        machine_fingerprint()
+    }
+    fn listening_pid(&self, port: u16) -> Option<u32> {
+        service::listening_pid(port)
+    }
+    fn port_answers(&self, port: u16) -> bool {
+        service::port_answers(port)
+    }
+    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
+        let request = taskkill(&["/PID", &pid.to_string()]);
+        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+    }
+    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
+        let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
+        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+    }
+    fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
+        service::processes(images)
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+fn taskkill(args: &[&str]) -> ProcessRequest {
+    ProcessRequest {
+        program: PathBuf::from("taskkill"),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        workdir: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        startup_probe: None,
+        windows_verbatim_args: Vec::new(),
+    }
+}
+
+fn policy(context: &ExecutionContext) -> ProcessExecutionPolicy {
+    context.process_policy(
+        crate::use_cases::context::InterruptionSafetyClass::GracefulThenKill,
+        None,
+    )
+}
+
+fn validation(message: impl Into<String>) -> UseCaseError {
+    UseCaseError::new(UseCaseErrorKind::Validation, message)
+}
+
+fn environment(message: impl Into<String>) -> UseCaseError {
+    UseCaseError::new(
+        UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+        message,
+    )
+}
+
+fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
+    UseCaseError::new(
+        UseCaseErrorKind::Runtime,
+        format!("{what} '{}': {error}", path.display()),
+    )
+}
+
+/// Отказ `infobase_sessions` управляемой базы: форму `error.sessions` строит владелец из
+/// применения (`apply::sessions::infobase_sessions`); раннер сеансы для пересоздания не
+/// завершает (`terminable: false`). `list: None` — признак занятости есть, а перечня нет.
+fn sessions_refusal(
+    config: &AppConfig,
+    message: String,
+    list: Option<Vec<crate::domain::sessions::SessionEntry>>,
+) -> UseCaseError {
+    UseCaseError::new(UseCaseErrorKind::InfobaseSessions, message).with_sessions(
+        crate::use_cases::apply::sessions::infobase_sessions(config, list, false),
+    )
+}
+
+fn not_on_this_system() -> UseCaseError {
+    environment(
+        "managed services run on Windows only: on this system the runner starts no PostgreSQL",
+    )
+}
+
+fn being_started(what: &str, infobase: &str) -> UseCaseError {
+    UseCaseError::new(
+        UseCaseErrorKind::WorkspaceBusy,
+        format!("{what} of '{infobase}' is being started by another running command"),
+    )
+}
+
+fn write_record(paths: &ServicePaths, record: &ServiceRecord) -> Result<(), UseCaseError> {
+    write_json(&paths.record(), record)
+        .map_err(|error| io_failure("cannot write", &paths.record(), &error))
+}
+
+fn forget_record(paths: &ServicePaths) {
+    let _ = std::fs::remove_file(paths.record());
+}
+
+/// Конец процесса: pid исчез или занят процессом с другим временем старта.
+fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let same = host
+            .facts(pid)
+            .is_some_and(|facts| Some(facts.started) == started);
+        if !same {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        host.sleep(POLL);
+    }
+}
+
+/// Занятость порта: кто слушает, а если система не назвала — что порт отвечает.
+fn occupant_of(host: &dyn ServiceHost, port: u16) -> Option<u32> {
+    host.listening_pid(port)
+        .or_else(|| host.port_answers(port).then_some(0))
+}
+
+/// Закреплённый порт, занятый чужим процессом: что сказать в предупреждении о переносе.
+#[derive(Debug, Clone, Copy)]
+struct Taken {
+    port: u16,
+    /// `0` — система не назвала процесс (как у [`occupant_of`]).
+    pid: u32,
+}
+
+impl Taken {
+    fn who(self) -> String {
+        occupant_name(self.pid)
+    }
+}
+
+/// Первый занятый порт блока — единственный перебор занятости закреплённых портов для сервера и
+/// кластера.
+fn first_taken(host: &dyn ServiceHost, ports: impl IntoIterator<Item = u16>) -> Option<Taken> {
+    ports
+        .into_iter()
+        .find_map(|port| occupant_of(host, port).map(|pid| Taken { port, pid }))
+}
+
+/// Кто держит порт, словами отказа или предупреждения: `0` — система процесс не назвала.
+fn occupant_name(pid: u32) -> String {
+    if pid == 0 {
+        "another process".to_owned()
+    } else {
+        format!("process {pid}")
+    }
+}
+
+/// Смещения первого порта от пути копии: копии не мешают друг другу.
+fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
+    let digest = Sha256::digest(root.to_string_lossy().as_bytes());
+    let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    (0..PORT_TRIES).map(move |attempt| {
+        let offset = seed.wrapping_add(attempt.wrapping_mul(PORT_STEP)) % PORT_SPAN;
+        u16::try_from(PORT_BASE + offset).expect("the span stays below 49152")
+    })
+}
+
+/// База команды: объявленная, с `dbms.managed`. Строка соединения — отказ
+/// (`INV.CLI.SERVICE-COMMANDS-TAKE-A-DECLARED-BASE`).
+fn declared_base(config: &AppConfig) -> Result<String, UseCaseError> {
+    config.infobase_name.clone().ok_or_else(|| {
+        validation("dbms takes a declared infobase: a connection string has neither a record nor a managed section")
+    })
+}
+
+/// База сервера в СУБД, как её объявили: PostgreSQL раннера или ваша СУБД.
+enum Database {
+    /// PostgreSQL поднимает раннер; доступ к нему — из его записи и файла пароля.
+    Managed { name: String },
+    /// СУБД ваша; доступ — из `infobase.dbms`.
+    Own(DbmsAccess),
+}
+
+/// Доступ сервера 1С к БД.
+#[derive(Debug, Clone)]
+struct DbmsAccess {
+    kind: String,
+    server: String,
+    name: String,
+    user: Option<String>,
+    password: Option<String>,
+}
+
+impl Database {
+    /// `infobase.dbms` как база сервера раннера.
+    fn declared(dbms: &crate::config::model::InfobaseDbmsConfig) -> Result<Self, UseCaseError> {
+        let name = dbms
+            .name
+            .clone()
+            .ok_or_else(|| validation("infobase.dbms.name is not declared"))?;
+        if dbms.managed.is_some() {
+            return Ok(Self::Managed { name });
+        }
+        let required = |value: &Option<String>, key: &str| {
+            value
+                .clone()
+                .ok_or_else(|| validation(format!("infobase.dbms.{key} is not declared")))
+        };
+        Ok(Self::Own(DbmsAccess {
+            kind: required(&dbms.kind, "kind")?,
+            server: required(&dbms.server, "server")?,
+            name,
+            user: dbms.user.clone(),
+            password: dbms.password.clone(),
+        }))
+    }
+
+    /// Адрес сервера СУБД и имя БД без поднятия чего-либо: у PostgreSQL раннера — по закреплённому
+    /// порту, если он уже запускался.
+    fn address(&self, stand: Option<&Stand<'_>>) -> Option<(String, String)> {
+        match self {
+            Self::Managed { name } => Some((
+                postgres::server_address(stand?.pinned_port()?),
+                name.clone(),
+            )),
+            Self::Own(access) => Some((access.server.clone(), access.name.clone())),
+        }
+    }
+
+    /// Доступ для сервера 1С. У PostgreSQL раннера он должен работать.
+    fn access(&self, stand: Option<&Stand<'_>>) -> Result<DbmsAccess, UseCaseError> {
+        match (self, stand) {
+            (Self::Own(access), _) => Ok(access.clone()),
+            (Self::Managed { name }, Some(stand)) => {
+                let (port, _) = stand.running_record()?;
+                Ok(DbmsAccess {
+                    kind: "PostgreSQL".to_owned(),
+                    server: postgres::server_address(port),
+                    name: name.clone(),
+                    user: Some(postgres::SUPERUSER.to_owned()),
+                    password: Some(stand.password()?),
+                })
+            }
+            (Self::Managed { .. }, None) => Err(validation(
+                "the PostgreSQL of this infobase could not be reached",
+            )),
+        }
+    }
+}
+
+/// Свой работающий кластер над той же БД: этой же базы или другой объявленной базы с тем же адресом
+/// СУБД и именем БД. Пока он работает, другой сервер и прямой `ibcmd` эту БД не открывают
+/// (`INV.USE-CASES.ONE-SERVER-OWNS-A-DATABASE`).
+fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database) -> Option<String> {
+    if let Some(own) = config
+        .infobase_name
+        .as_deref()
+        .filter(|own| cluster_runs(config, host, own))
+    {
+        return Some(own.to_owned());
+    }
+    other_cluster_over(config, host, database)
+}
+
+fn cluster_runs(config: &AppConfig, host: &dyn ServiceHost, infobase: &str) -> bool {
+    let paths = ServicePaths::new(&config.local_dir(), infobase, StandService::Cluster);
+    record_names_own_process(&paths, host.machine().as_deref(), &|pid| host.facts(pid))
+}
+
+/// Свой работающий кластер другой объявленной базы над той же вашей БД. У PostgreSQL раннера
+/// у каждой базы своя БД, и другая база её не открывает.
+fn other_cluster_over(
+    config: &AppConfig,
+    host: &dyn ServiceHost,
+    database: &Database,
+) -> Option<String> {
+    let own = config.infobase_name.as_deref();
+    let Database::Own(access) = database else {
+        // PostgreSQL раннера у каждой базы свой: другая база его БД не открывает.
+        return None;
+    };
+    config
+        .infobases
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != own)
+        .filter(|(_, infobase)| {
+            infobase
+                .cluster
+                .as_ref()
+                .is_some_and(|cluster| cluster.managed.is_some())
+        })
+        .find(|(name, infobase)| {
+            infobase.dbms.as_ref().is_some_and(|dbms| {
+                dbms.managed.is_none()
+                    && dbms
+                        .server
+                        .as_deref()
+                        .is_some_and(|server| same_address(server, &access.server))
+                    && dbms.name.as_deref() == Some(access.name.as_str())
+            }) && cluster_runs(config, host, name)
+        })
+        .map(|(name, _)| name.clone())
+}
+
+/// Отказ: БД держит свой кластер.
+fn owned_by_a_cluster(infobase: &str) -> UseCaseError {
+    validation(format!(
+        "the cluster of '{infobase}' is running over this database, and one server owns a database: run `cluster stop` for '{infobase}' first"
+    ))
+}
+
+/// Один адрес СУБД в двух записях: регистр и пробелы не различаются, иначе сравнение буквальное.
+fn same_address(left: &str, right: &str) -> bool {
+    let normal = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    normal(left) == normal(right)
+}
+
+struct Stand<'a> {
+    config: &'a AppConfig,
+    context: &'a ExecutionContext,
+    runner: &'a dyn ProcessRunner,
+    host: &'a dyn ServiceHost,
+    infobase: String,
+    paths: ServicePaths,
+    started_at: Instant,
+    /// `dbms start` делает СУБД явной; шаг сервера — нет (`INV.USE-CASES.MANAGED-DBMS-OWNERSHIP`).
+    explicit: bool,
+}
+
+impl<'a> Stand<'a> {
+    fn new(
+        config: &'a AppConfig,
+        context: &'a ExecutionContext,
+        runner: &'a dyn ProcessRunner,
+        host: &'a dyn ServiceHost,
+    ) -> Result<Self, UseCaseError> {
+        let infobase = declared_base(config)?;
+        let paths = ServicePaths::new(&config.local_dir(), &infobase, StandService::Postgres);
+        Ok(Self {
+            config,
+            context,
+            runner,
+            host,
+            infobase,
+            paths,
+            started_at: Instant::now(),
+            explicit: true,
+        })
+    }
+
+    /// Та же СУБД как шаг сервера: поднятая так, она гаснет вместе с ним.
+    fn server_step(mut self) -> Self {
+        self.explicit = false;
+        self
+    }
+
+    /// Порт и каталог утилит работающей своей СУБД.
+    fn running_record(&self) -> Result<(u16, PathBuf), UseCaseError> {
+        match self.observe() {
+            Observed::Own(record) => Ok((record.port, record.bin)),
+            _ => Err(validation(
+                "the PostgreSQL of this infobase is not running: run `dbms start`",
+            )),
+        }
+    }
+
+    fn password(&self) -> Result<String, UseCaseError> {
+        std::fs::read_to_string(self.paths.password())
+            .map(|text| text.trim().to_owned())
+            .map_err(|error| io_failure("cannot read", &self.paths.password(), &error))
+    }
+
+    /// Есть ли БД с этим именем у своего PostgreSQL.
+    fn database_exists(&self, port: u16, bin: &Path, name: &str) -> Result<bool, UseCaseError> {
+        let passfile = self.paths.passfile();
+        let password = self.password()?;
+        crate::support::fs::write_file_atomically(&passfile, |file| {
+            file.write_all(postgres::passfile_line(port, &password).as_bytes())
+        })
+        .map_err(|error| io_failure("cannot write", &passfile, &error))?;
+        let build = PostgresBuild::at(bin.to_path_buf());
+        let asked = self.runner.run_with_policy(
+            &build.database_exists(port, &passfile, name),
+            &policy(self.context),
+        );
+        // Вторая копия пароля на диске нужна только на время вопроса.
+        let _ = std::fs::remove_file(&passfile);
+        let answer = asked.map_err(|error| {
+            UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("psql did not run: {error}"),
+            )
+        })?;
+        if answer.outcome().is_err() {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!(
+                    "psql could not read the list of databases: {}",
+                    answer.stderr.trim()
+                ),
+            ));
+        }
+        Ok(answer.stdout.trim() == "1")
+    }
+
+    /// Гасит СУБД, если она поднята шагом сервера, а явную не трогает.
+    fn stop_if_step(&self) -> Result<Option<u32>, UseCaseError> {
+        match self.observe() {
+            Observed::Own(record) if !record.explicit => Ok(self.stop(false)?.stopped_pid),
+            _ => Ok(None),
+        }
+    }
+
+    fn observe(&self) -> Observed {
+        let host = self.host;
+        observe_service(
+            &self.paths,
+            host.machine().as_deref(),
+            &|pid| host.facts(pid),
+            &|record| match self.identified_postgres(record.port) {
+                Some((pid, facts)) => {
+                    record.pid = Some(pid);
+                    record.started = Some(facts.started);
+                    record.image = Some(facts.image);
+                    true
+                }
+                None => false,
+            },
+        )
+    }
+
+    /// Живой `postgres` из `postmaster.pid`. Файл переживает перезагрузку, поэтому pid из него свой,
+    /// только если этот процесс — `postgres` и слушает порт записи.
+    fn identified_postgres(&self, port: u16) -> Option<(u32, ProcessFacts)> {
+        let pid = postgres::postmaster_pid(&self.paths.data())?;
+        let facts = self.host.facts(pid)?;
+        (facts.image.starts_with("postgres") && self.host.listening_pid(port) == Some(pid))
+            .then_some((pid, facts))
+    }
+
+    fn pinned_port(&self) -> Option<u16> {
+        read_json::<PinnedPorts>(&self.paths.pins()).map(|pins| pins.port)
+    }
+
+    fn result(&self, state: ServiceState, action: ServiceAction) -> DbmsResult {
+        DbmsResult {
+            ok: true,
+            infobase: self.infobase.clone(),
+            state,
+            action,
+            pid: None,
+            version: None,
+            address: None,
+            user: None,
+            password_file: None,
+            data_dir: None,
+            log_path: None,
+            explicit: None,
+            ready: false,
+            stale_record: false,
+            occupant_pid: None,
+            stopped_pid: None,
+            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// Форма отказа: что осталось после неудачи и где искать причину.
+    fn failed(&self) -> DbmsResult {
+        let mut result = self.status();
+        result.ok = false;
+        result.log_path = Some(self.paths.log());
+        result
+    }
+
+    fn describe(&self, mut result: DbmsResult, record: &ServiceRecord) -> DbmsResult {
+        result.pid = record.pid;
+        result.version.clone_from(&record.version);
+        result.address = Some(postgres::server_address(record.port));
+        result.user = Some(postgres::SUPERUSER.to_owned());
+        result.password_file = Some(self.paths.password());
+        result.data_dir = Some(self.paths.data());
+        result.log_path = Some(self.paths.log());
+        result.explicit = Some(record.explicit);
+        result
+    }
+
+    /// Порт на первый запуск выводится из пути копии, чтобы копии не мешали друг другу; занятый
+    /// заменяется при этом запуске (`INV.PLATFORM.FIRST-PORTS-COME-FROM-THE-COPY-PATH`).
+    fn choose_port(&self) -> Result<u16, UseCaseError> {
+        port_offsets(self.paths.root())
+            .find(|port| occupant_of(self.host, *port).is_none())
+            .ok_or_else(|| {
+                environment(format!(
+                    "no free port for PostgreSQL after {PORT_TRIES} tries"
+                ))
+            })
+    }
+
+    fn occupant(&self, port: u16) -> Option<u32> {
+        occupant_of(self.host, port)
+    }
+
+    fn occupied(&self, port: u16, pid: u32) -> UseCaseError {
+        let who = occupant_name(pid);
+        UseCaseError::new(
+            UseCaseErrorKind::WorkspaceBusy,
+            format!(
+                "port {port} of the PostgreSQL of '{}' is taken by {who}, which this runner did not start; it is left running: free the port and repeat",
+                self.infobase
+            ),
+        )
+    }
+
+    fn start(&self, dry_run: bool) -> Result<DbmsResult, UseCaseError> {
+        if dry_run {
+            return self.plan_start();
+        }
+        if !self.host.supported() {
+            return Err(not_on_this_system());
+        }
+        // Без идентификатора машины свою службу не опознать и потому не остановить.
+        let Some(machine) = self.host.machine() else {
+            return Err(environment(
+                "this system gives no machine id: the runner could not tell its PostgreSQL from a foreign one",
+            ));
+        };
+        let stale = match self.observe() {
+            Observed::Own(mut record) => {
+                record.explicit |= self.explicit;
+                self.write_record(&record)?;
+                let mut result = self.result(
+                    ServiceState::StartedByThisCopy,
+                    ServiceAction::AlreadyRunning,
+                );
+                result.ready = self.host.port_answers(record.port);
+                return Ok(self.describe(result, &record));
+            }
+            Observed::Starting(_) => return Err(being_started("the PostgreSQL", &self.infobase)),
+            Observed::Stale => true,
+            Observed::Nothing => false,
+        };
+        let build = self.build()?;
+        self.paths
+            .prepare()
+            .map_err(|error| io_failure("cannot prepare", self.paths.root(), &error))?;
+        let port = match self.pinned_port() {
+            Some(port) => {
+                if let Some(pid) = self.occupant(port) {
+                    return Err(self.occupied(port, pid));
+                }
+                port
+            }
+            None => self.choose_port()?,
+        };
+        write_json(&self.paths.pins(), &PinnedPorts { port })
+            .map_err(|error| io_failure("cannot write", &self.paths.pins(), &error))?;
+        self.initialize(&build)?;
+        let version = self.version(&build);
+        let mut record = ServiceRecord {
+            state: RecordState::Starting,
+            pid: None,
+            started: None,
+            image: None,
+            machine: Some(machine),
+            starter: self.starter(),
+            port,
+            explicit: self.explicit,
+            bin: build.bin().to_path_buf(),
+            version,
+            agent: None,
+            location: self.paths.location(),
+        };
+        self.write_record(&record)?;
+        let request = build.start(&self.paths.data(), &self.paths.log(), port);
+        self.host
+            .spawn(&request, self.context.work())
+            .map_err(|error| {
+                self.forget_record();
+                if let ServiceSpawnError::Io(_) = error {
+                    UseCaseError::new(
+                        UseCaseErrorKind::Platform,
+                        format!("pg_ctl did not start: {error}"),
+                    )
+                } else {
+                    environment(error.to_string())
+                }
+            })?;
+        self.await_ready(&build, port)?;
+        let pid = postgres::postmaster_pid(&self.paths.data());
+        let facts = pid.and_then(|pid| self.host.facts(pid));
+        let Some(facts) = facts else {
+            self.stop_started(&build, port);
+            return Err(self.not_ready("the PostgreSQL process could not be identified"));
+        };
+        record.state = RecordState::Running;
+        record.pid = pid;
+        record.started = Some(facts.started);
+        record.image = Some(facts.image);
+        record.starter = None;
+        if let Err(error) = self.write_record(&record) {
+            self.stop_started(&build, port);
+            return Err(error);
+        }
+        let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
+        result.ready = true;
+        result.stale_record = stale;
+        Ok(self.describe(result, &record))
+    }
+
+    fn plan_start(&self) -> Result<DbmsResult, UseCaseError> {
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::Planned);
+        result.data_dir = Some(self.paths.data());
+        result.log_path = Some(self.paths.log());
+        result.password_file = Some(self.paths.password());
+        result.address = self.pinned_port().map(postgres::server_address);
+        match self.observe() {
+            Observed::Own(record) => {
+                result.state = ServiceState::StartedByThisCopy;
+                result.pid = record.pid;
+            }
+            Observed::Starting(_) => result.state = ServiceState::Starting,
+            Observed::Stale => result.stale_record = true,
+            Observed::Nothing => {}
+        }
+        Ok(result)
+    }
+
+    fn build(&self) -> Result<PostgresBuild, UseCaseError> {
+        let Some(path) = self.config.tools.postgres.path.as_ref() else {
+            return Err(environment(format!(
+                "the PostgreSQL build was not found, and the runner does not download it: declare tools.postgres.path, the directory of the build or its bin; {}",
+                postgres::WHERE_TO_GET_A_BUILD
+            )));
+        };
+        PostgresBuild::locate(path).ok_or_else(|| {
+            environment(format!(
+                "the PostgreSQL build was not found in '{}', and the runner does not download it: tools.postgres.path names the directory of the build or its bin; {}",
+                path.display(),
+                postgres::WHERE_TO_GET_A_BUILD
+            ))
+        })
+    }
+
+    fn version(&self, build: &PostgresBuild) -> Option<String> {
+        let answer = self
+            .runner
+            .run_with_policy(&build.version(), &policy(self.context))
+            .ok()?;
+        postgres::parse_version(&answer.stdout)
+    }
+
+    /// Первый запуск создаёт каталог данных и пароль, второй берёт готовые. `initdb` работает во
+    /// временном каталоге: прерванный запуск не оставит полусобранных данных.
+    fn initialize(&self, build: &PostgresBuild) -> Result<(), UseCaseError> {
+        let data = self.paths.data();
+        if postgres::data_dir_is_initialized(&data) {
+            return Ok(());
+        }
+        let password = self.paths.password();
+        if !password.is_file() {
+            write_password(&password)
+                .map_err(|error| io_failure("cannot write", &password, &error))?;
+        }
+        let staged = self.paths.staged_data();
+        let _ = std::fs::remove_dir_all(&staged);
+        let request = build.initdb(&staged, &password);
+        let outcome = self.runner.run_with_policy(&request, &policy(self.context));
+        let failure = match outcome {
+            Ok(answer) if answer.outcome().is_ok() => None,
+            Ok(answer) => Some(format!("exit code {}", answer.exit_code)),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(failure) = failure {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("initdb failed: {failure}"),
+            ));
+        }
+        std::fs::rename(&staged, &data).map_err(|error| io_failure("cannot move", &staged, &error))
+    }
+
+    fn await_ready(&self, build: &PostgresBuild, port: u16) -> Result<(), UseCaseError> {
+        let deadline = Instant::now() + self.host.patience(READY_TIMEOUT);
+        loop {
+            if let Some(error) =
+                interruption_before_safe_point(self.context, "waiting for PostgreSQL")
+            {
+                self.stop_started(build, port);
+                return Err(error.into());
+            }
+            let answer = self
+                .runner
+                .run_with_policy(&build.is_ready(port), &policy(self.context));
+            if answer.is_ok_and(|answer| answer.outcome().is_ok()) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                self.stop_started(build, port);
+                return Err(self.not_ready("PostgreSQL did not accept connections in time"));
+            }
+            self.host.sleep(POLL);
+        }
+    }
+
+    fn not_ready(&self, why: &str) -> UseCaseError {
+        UseCaseError::new(
+            UseCaseErrorKind::Platform,
+            format!("{why}; log: {}", self.paths.log().display()),
+        )
+    }
+
+    /// Гасит только то, что подняла эта команда. Процесс появляется не сразу, а `postmaster.pid`
+    /// может остаться от прошлого запуска, поэтому ждут опознанный `postgres`. Не дождались или не
+    /// подтвердили его конец — запись остаётся: когда этого раннера не станет, её разберёт следующая
+    /// команда (`observe_service`).
+    fn stop_started(&self, build: &PostgresBuild, port: u16) {
+        let deadline = Instant::now() + self.host.patience(IDENTIFY_TIMEOUT);
+        let mut identified = self.identified_postgres(port);
+        while identified.is_none() && Instant::now() < deadline {
+            self.host.sleep(POLL);
+            identified = self.identified_postgres(port);
+        }
+        let Some((pid, facts)) = identified else {
+            return;
+        };
+        self.stop_tool(build);
+        if self.await_gone(pid, Some(facts.started), self.host.patience(STOP_TIMEOUT)) {
+            self.forget_record();
+        }
+    }
+
+    /// `pg_ctl stop`. Сам отмене не подлежит: иначе останется поднятое.
+    fn stop_tool(&self, build: &PostgresBuild) {
+        let _ = self.runner.run_with_policy(
+            &build.stop(&self.paths.data()),
+            &self.context.cleanup_policy(),
+        );
+    }
+
+    fn write_record(&self, record: &ServiceRecord) -> Result<(), UseCaseError> {
+        write_record(&self.paths, record)
+    }
+
+    fn forget_record(&self) {
+        forget_record(&self.paths);
+    }
+
+    /// Свой сервер над этой СУБД: пока он работает, её не останавливают.
+    fn running_server(&self) -> Option<(StandService, &'static str)> {
+        let machine = self.host.machine();
+        SERVERS.into_iter().find(|(service, _)| {
+            record_names_own_process(&self.paths.sibling(*service), machine.as_deref(), &|pid| {
+                self.host.facts(pid)
+            })
+        })
+    }
+
+    fn refuse_under_a_server(&self) -> Result<(), UseCaseError> {
+        match self.running_server() {
+            Some((service, next)) => Err(validation(format!(
+                "the {service} of '{}' is still running on this PostgreSQL; run {next} first",
+                self.infobase
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn stop(&self, dry_run: bool) -> Result<DbmsResult, UseCaseError> {
+        self.refuse_under_a_server()?;
+        if dry_run {
+            let observed = self.observe();
+            let mut result = self.result(ServiceState::NotRunning, ServiceAction::Planned);
+            if let Observed::Own(record) = observed {
+                result.state = ServiceState::StartedByThisCopy;
+                result = self.describe(result, &record);
+            }
+            return Ok(result);
+        }
+        let record = match self.observe() {
+            Observed::Own(record) => record,
+            Observed::Starting(_) => return Err(being_started("the PostgreSQL", &self.infobase)),
+            Observed::Nothing => return Ok(self.nothing_to_stop(false)),
+            Observed::Stale => {
+                self.forget_record();
+                return Ok(self.nothing_to_stop(true));
+            }
+        };
+        let build = PostgresBuild::at(record.bin.clone());
+        self.stop_tool(&build);
+        let pid = record.pid.expect("an own service has a pid");
+        if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
+            self.host.hard_stop(self.runner, pid, self.context);
+            if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Platform,
+                    format!("PostgreSQL pid {pid} did not stop; repeat dbms stop"),
+                ));
+            }
+        }
+        self.forget_record();
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::Stopped);
+        result.stopped_pid = Some(pid);
+        Ok(result)
+    }
+
+    fn await_gone(&self, pid: u32, started: Option<u64>, timeout: Duration) -> bool {
+        await_gone(self.host, pid, started, timeout)
+    }
+
+    /// Этот раннер: запись `starting` верна, пока он жив.
+    fn starter(&self) -> Option<(u32, u64)> {
+        let pid = std::process::id();
+        self.host.facts(pid).map(|facts| (pid, facts.started))
+    }
+
+    fn nothing_to_stop(&self, stale: bool) -> DbmsResult {
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::NothingToStop);
+        result.stale_record = stale;
+        if let Some(port) = self.pinned_port() {
+            if let Some(pid) = self.occupant(port) {
+                result.state = ServiceState::Foreign;
+                result.occupant_pid = (pid != 0).then_some(pid);
+            }
+        }
+        result
+    }
+
+    fn status(&self) -> DbmsResult {
+        match self.observe() {
+            Observed::Own(record) => {
+                let mut result =
+                    self.result(ServiceState::StartedByThisCopy, ServiceAction::Reported);
+                result.ready = self.host.port_answers(record.port);
+                self.describe(result, &record)
+            }
+            Observed::Starting(record) => {
+                let result = self.result(ServiceState::Starting, ServiceAction::Reported);
+                self.describe(result, &record)
+            }
+            observed => {
+                let stale = matches!(observed, Observed::Stale);
+                let mut result = self.result(ServiceState::NotRunning, ServiceAction::Reported);
+                result.stale_record = stale;
+                if let Some(port) = self.pinned_port() {
+                    result.address = Some(postgres::server_address(port));
+                    if let Some(pid) = self.occupant(port) {
+                        result.state = ServiceState::Foreign;
+                        result.occupant_pid = (pid != 0).then_some(pid);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    fn restart(&self, dry_run: bool) -> Result<DbmsResult, UseCaseError> {
+        self.refuse_under_a_server()?;
+        if dry_run {
+            return self.plan_start();
+        }
+        if !self.host.supported() {
+            return Err(not_on_this_system());
+        }
+        // Без сборки второй половины не будет: работающий PostgreSQL остаётся работать.
+        self.build()?;
+        let stopped = self.stop(false)?;
+        if let Some(error) =
+            interruption_before_safe_point(self.context, "starting PostgreSQL again")
+        {
+            return Err(error.into());
+        }
+        let mut started = self.start(false)?;
+        started.stopped_pid = stopped.stopped_pid;
+        Ok(started)
+    }
+}
+
+/// Пароль из `getrandom`: буквы и цифры, чтобы ни одна утилита не разбирала его по-своему.
+fn write_password(path: &Path) -> std::io::Result<()> {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0u8; PASSWORD_LENGTH];
+    getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
+    let text: String = bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
+        .collect();
+    crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+}
+
+/// `standalone start|stop|restart`: команда записи, под замком `workPath`.
+pub(crate) fn create_standalone_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: PathBuf,
+    dry_run: bool,
+) -> Result<String, UseCaseError> {
+    standalone::create_base(
+        context,
+        config,
+        binary,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+    )
+}
+
+pub fn execute_standalone(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: ServiceCommand,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
+    standalone::run_standalone(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate_ibsrv(config),
+    )
+}
+
+/// `standalone status`: читает запись без замка, чтобы отвечать и пока идёт другая команда.
+pub fn standalone_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
+    standalone::run_standalone(
+        context,
+        config,
+        ServiceCommand::Status,
+        false,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate_ibsrv(config),
+    )
+}
+
+fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {
+    locate(config, crate::platform::locator::UtilityType::Ibsrv)
+}
+
+/// `cluster start|stop|restart`: команда записи, под замком `workPath`.
+pub fn execute_cluster(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: ClusterCommand,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::cluster::ClusterResult> {
+    cluster::run_cluster(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate(config, crate::platform::locator::UtilityType::Ragent),
+    )
+}
+
+/// `cluster status`: читает записи без замка, чтобы отвечать и пока идёт другая команда.
+pub fn cluster_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> UseCaseResult<crate::domain::cluster::ClusterResult> {
+    cluster::run_cluster(
+        context,
+        config,
+        ClusterCommand::Status,
+        false,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate(config, crate::platform::locator::UtilityType::Ragent),
+    )
+}
+
+/// `infobase create` в кластере раннера: цель для `CREATEINFOBASE` или ответ, что база уже есть.
+pub(crate) fn cluster_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    dry_run: bool,
+) -> Result<ClusterBase, UseCaseError> {
+    cluster::cluster_base(context, config, dry_run, &ProcessExecutor, &RealHost)
+}
+
+/// База создана в реестре кластера раннера: рабочие команды её откроют.
+pub(crate) fn remember_cluster_base(config: &AppConfig) -> Result<(), UseCaseError> {
+    cluster::remember_registered(config)
+}
+
+fn locate(
+    config: &AppConfig,
+    utility: crate::platform::locator::UtilityType,
+) -> Result<PathBuf, UseCaseError> {
+    crate::platform::utilities::PlatformUtilities::from_config(config)
+        .locate(utility)
+        .map(|location| location.path)
+        // Род и код отказа решает сама ошибка поиска: отказ выпуска формата исходников
+        // остаётся собой, а не пересказом.
+        .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
+}
+
+/// Какая из команд службы: `dbms`, `standalone` или `cluster`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceCommand {
+    Start,
+    Status,
+    Stop,
+    Restart,
+}
+
+/// `dbms start|stop|restart`: команда записи, под замком `workPath`.
+pub fn execute_dbms(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: ServiceCommand,
+    dry_run: bool,
+) -> UseCaseResult<DbmsResult> {
+    run_dbms(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+    )
+}
+
+/// `dbms status`: читает запись без замка, чтобы отвечать и пока идёт другая команда
+/// (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
+pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<DbmsResult> {
+    run_dbms(
+        context,
+        config,
+        ServiceCommand::Status,
+        false,
+        &ProcessExecutor,
+        &RealHost,
+    )
+}
+
+/// Стенд этой базы в общем `localPath` принадлежит другому проекту — работает он или остановлен.
+/// Команда стенда его не трогает и отказывает, называя тот проект
+/// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+fn refuse_a_stand_of_another_project(config: &AppConfig) -> Result<(), UseCaseError> {
+    let Some(infobase) = config.infobase_name.as_deref() else {
+        return Ok(());
+    };
+    match crate::platform::service_record::stand_of_another_project(&config.local_dir(), infobase) {
+        Some(refusal) => Err(UseCaseError::new(
+            UseCaseErrorKind::WorkspaceBusy,
+            refusal.to_string(),
+        )),
+        None => Ok(()),
+    }
+}
+
+fn run_dbms(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: ServiceCommand,
+    dry_run: bool,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> UseCaseResult<DbmsResult> {
+    refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
+    let stand =
+        Stand::new(config, context, runner, host).map_err(UseCaseFailure::without_payload)?;
+    let outcome = match command {
+        ServiceCommand::Start => stand.start(dry_run),
+        ServiceCommand::Status => Ok(stand.status()),
+        ServiceCommand::Stop => stand.stop(dry_run),
+        ServiceCommand::Restart => stand.restart(dry_run),
+    };
+    outcome.map_err(|error| UseCaseFailure::with_payload(error, stand.failed()))
+}
+
+/// Сценарий `dbms` с подделкой утилит и машины: файлы настоящие, процессы нет.
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::config::model::{
+        InfobaseClusterConfig, InfobaseConfig, InfobaseDbmsConfig, ManagedDbmsConfig,
+        ManagedServerConfig,
+    };
+    use crate::platform::process::{ProcessError, ProcessResult, SpawnResult};
+    use crate::use_cases::context::CommandName;
+
+    const PID: u32 = 40112;
+    const STARTED: u64 = 1000;
+    const MACHINE: &str = "machine";
+
+    /// Утилиты: `initdb` создаёт каталог данных, `pg_ctl stop` гасит подделанный процесс.
+    struct FakeRunner<'a> {
+        host: &'a FakeHost,
+        calls: RefCell<Vec<String>>,
+        initdb_fails: Cell<bool>,
+        ready: Cell<bool>,
+        stop_works: Cell<bool>,
+    }
+
+    impl<'a> FakeRunner<'a> {
+        fn new(host: &'a FakeHost) -> Self {
+            Self {
+                host,
+                calls: RefCell::default(),
+                initdb_fails: Cell::new(false),
+                ready: Cell::new(true),
+                stop_works: Cell::new(true),
+            }
+        }
+
+        fn called(&self, tool: &str) -> usize {
+            self.calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with(tool))
+                .count()
+        }
+    }
+
+    impl ProcessRunner for FakeRunner<'_> {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            let tool =
+                service::image_name(&request.program).replace(std::env::consts::EXE_SUFFIX, "");
+            let line = format!("{tool} {}", request.args.join(" "));
+            self.calls.borrow_mut().push(line);
+            let mut exit_code = 0;
+            let mut stdout = String::new();
+            match tool.as_str() {
+                "pg_ctl" if request.args[0] == "--version" => {
+                    stdout = "pg_ctl (PostgreSQL) 17.11\n".to_owned();
+                }
+                "pg_ctl" if request.args[0] == "stop" && self.stop_works.get() => {
+                    self.host.processes.borrow_mut().remove(&PID);
+                    self.host.listeners.borrow_mut().clear();
+                }
+                "initdb" => {
+                    if self.initdb_fails.get() {
+                        exit_code = 1;
+                    } else {
+                        let data = PathBuf::from(&request.args[1]);
+                        std::fs::create_dir_all(&data).unwrap();
+                        std::fs::write(data.join("PG_VERSION"), "17\n").unwrap();
+                        std::fs::write(data.join("postgresql.conf"), "# conf\n").unwrap();
+                    }
+                }
+                "pg_isready" if !self.ready.get() => exit_code = 2,
+                _ => {}
+            }
+            Ok(ProcessResult {
+                exit_code,
+                stdout,
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            unreachable!("a service is started through the host")
+        }
+    }
+
+    /// Машина: какие процессы живы и кто слушает порты.
+    #[derive(Default)]
+    struct FakeHost {
+        unsupported: Cell<bool>,
+        no_machine_id: Cell<bool>,
+        would_not_survive: Cell<bool>,
+        processes: RefCell<HashMap<u32, ProcessFacts>>,
+        listeners: RefCell<HashMap<u16, u32>>,
+        spawned: Cell<u32>,
+        hard_stops: RefCell<HashSet<u32>>,
+        start_args: RefCell<Vec<String>>,
+        spawn_is_slow: Cell<bool>,
+    }
+
+    use tokio_util::sync::CancellationToken;
+
+    impl ServiceHost for FakeHost {
+        fn supported(&self) -> bool {
+            !self.unsupported.get()
+        }
+        fn spawn(
+            &self,
+            request: &ServiceRequest,
+            _work: &WorkGiven,
+        ) -> Result<u32, ServiceSpawnError> {
+            if self.would_not_survive.get() {
+                return Err(ServiceSpawnError::WouldNotSurvive);
+            }
+            self.spawned.set(self.spawned.get() + 1);
+            let data = PathBuf::from(&request.args[3]);
+            if self.spawn_is_slow.get() {
+                return Ok(7);
+            }
+            std::fs::write(data.join("postmaster.pid"), format!("{PID}\n")).unwrap();
+            self.start_args.replace(request.args.clone());
+            let port = request
+                .args
+                .last()
+                .and_then(|options| options.split_whitespace().nth(1))
+                .and_then(|port| port.parse().ok())
+                .expect("the port of the service");
+            self.listeners.borrow_mut().insert(port, PID);
+            self.processes.borrow_mut().insert(
+                PID,
+                ProcessFacts {
+                    started: STARTED,
+                    image: "postgres.exe".to_owned(),
+                },
+            );
+            Ok(7)
+        }
+        fn facts(&self, pid: u32) -> Option<ProcessFacts> {
+            self.processes.borrow().get(&pid).cloned()
+        }
+        fn machine(&self) -> Option<String> {
+            (!self.no_machine_id.get()).then(|| MACHINE.to_owned())
+        }
+        fn listening_pid(&self, port: u16) -> Option<u32> {
+            self.listeners.borrow().get(&port).copied()
+        }
+        fn port_answers(&self, port: u16) -> bool {
+            self.listeners.borrow().contains_key(&port)
+        }
+        fn soft_stop(&self, _runner: &dyn ProcessRunner, _pid: u32, _context: &ExecutionContext) {}
+        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+            self.hard_stops.borrow_mut().insert(pid);
+            self.processes.borrow_mut().remove(&pid);
+        }
+        fn patience(&self, _default: Duration) -> Duration {
+            Duration::ZERO
+        }
+        fn sleep(&self, _duration: Duration) {}
+    }
+
+    struct Setup {
+        root: tempfile::TempDir,
+        build: PathBuf,
+        config: AppConfig,
+    }
+
+    fn setup() -> Setup {
+        let root = tempfile::tempdir().unwrap();
+        let build = root.path().join("pg");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(
+            build
+                .join("bin")
+                .join(format!("pg_ctl{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )
+        .unwrap();
+        let mut infobase = InfobaseConfig::file(String::new());
+        infobase.cluster = Some(InfobaseClusterConfig {
+            managed: Some(ManagedServerConfig::default()),
+            ..Default::default()
+        });
+        infobase.dbms = Some(InfobaseDbmsConfig {
+            managed: Some(ManagedDbmsConfig::default()),
+            ..Default::default()
+        });
+        let mut config = AppConfig {
+            local_path: root.path().join(".local"),
+            base_path: root.path().to_path_buf(),
+            work_path: root.path().join("work"),
+            format: crate::config::model::SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase,
+            infobases: Default::default(),
+            infobase_name: Some("origin".to_owned()),
+            working_copy: None,
+            source_sets: Vec::new(),
+            tools: Default::default(),
+            mcp: Default::default(),
+            tests: Default::default(),
+        };
+        config.tools.postgres.path = Some(build.clone());
+        Setup {
+            root,
+            build,
+            config,
+        }
+    }
+
+    impl Setup {
+        fn paths(&self) -> ServicePaths {
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Postgres)
+        }
+
+        fn run(
+            &self,
+            command: ServiceCommand,
+            dry_run: bool,
+            runner: &FakeRunner<'_>,
+            host: &FakeHost,
+        ) -> Result<DbmsResult, UseCaseError> {
+            self.run_in(
+                &ExecutionContext::cli(CommandName::DbmsStart),
+                command,
+                dry_run,
+                runner,
+                host,
+            )
+        }
+
+        fn run_in(
+            &self,
+            context: &ExecutionContext,
+            command: ServiceCommand,
+            dry_run: bool,
+            runner: &FakeRunner<'_>,
+            host: &FakeHost,
+        ) -> Result<DbmsResult, UseCaseError> {
+            run_dbms(context, &self.config, command, dry_run, runner, host)
+                .map_err(|failure| failure.error)
+        }
+    }
+
+    fn own_process(host: &FakeHost) {
+        host.processes.borrow_mut().insert(
+            PID,
+            ProcessFacts {
+                started: STARTED,
+                image: "postgres.exe".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn the_first_start_creates_the_data_directory_and_the_second_reuses_it() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let started = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(started.action, ServiceAction::Started);
+        assert_eq!(started.pid, Some(PID));
+        assert_eq!(started.version.as_deref(), Some("17.11"));
+        assert!(started.ready);
+        assert_eq!(runner.called("initdb"), 1);
+        assert!(
+            host.start_args
+                .borrow()
+                .iter()
+                .any(|arg| arg.contains("listen_addresses=127.0.0.1")),
+            "{:?}",
+            host.start_args.borrow()
+        );
+        assert!(!setup.paths().staged_data().exists());
+
+        setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        let again = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(again.action, ServiceAction::Started);
+        assert_eq!(runner.called("initdb"), 1, "the data directory is reused");
+        assert_eq!(again.address, started.address, "the port stays pinned");
+    }
+
+    #[test]
+    fn a_running_service_is_named_and_no_new_process_starts() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let second = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(second.action, ServiceAction::AlreadyRunning);
+        assert_eq!(second.pid, Some(PID));
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn a_foreign_process_on_the_pinned_port_is_named_and_left_alone() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let started = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        let port = read_json::<PinnedPorts>(&setup.paths().pins())
+            .unwrap()
+            .port;
+        host.listeners.borrow_mut().insert(port, 555);
+
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(refused.to_string().contains("process 555"), "{refused}");
+        assert_eq!(host.spawned.get(), 1, "{started:?}");
+
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::Foreign);
+        assert_eq!(status.occupant_pid, Some(555));
+
+        let stop = setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert_eq!(stop.occupant_pid, Some(555));
+        assert!(host.hard_stops.borrow().is_empty());
+    }
+
+    /// Копия `.local` в другой проект чужую СУБД своей не считает: запись помнит своё место,
+    /// и в копии она устаревшая. `status` называет процесс на порту чужим, `stop` его не
+    /// трогает (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+    #[test]
+    fn a_copied_local_directory_does_not_adopt_the_foreign_postgres() {
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().flatten() {
+                let target = to.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let copy = self::setup();
+        copy_tree(&setup.config.local_path, &copy.config.local_path);
+
+        let status = copy
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::Foreign);
+        assert_eq!(status.occupant_pid, Some(PID));
+        let stop = copy
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(host.hard_stops.borrow().is_empty());
+        assert!(host.processes.borrow().contains_key(&PID));
+        let refused = copy
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains(&format!("process {PID}")),
+            "{refused}"
+        );
+        assert_eq!(
+            host.spawned.get(),
+            1,
+            "the copy starts nothing over the foreign one"
+        );
+
+        let own = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(own.state, ServiceState::StartedByThisCopy);
+    }
+
+    /// Общий `localPath` у двух проектов: стенд записал первый, и второй его не трогает —
+    /// ни `stop`, ни `start`, ни `status`; отказ называет первый проект, запись первого цела.
+    #[test]
+    fn a_shared_local_directory_leaves_the_stand_of_the_other_project_alone() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let record = std::fs::read(first.paths().record()).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        for command in [
+            ServiceCommand::Stop,
+            ServiceCommand::Start,
+            ServiceCommand::Restart,
+            ServiceCommand::Status,
+        ] {
+            let refused = second.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&first.config.base_path.display().to_string()),
+                "{command:?}: {refused}"
+            );
+        }
+        assert_eq!(std::fs::read(first.paths().record()).unwrap(), record);
+        assert!(host.hard_stops.borrow().is_empty());
+        assert_eq!(
+            first
+                .run(ServiceCommand::Status, false, &runner, &host)
+                .unwrap()
+                .state,
+            ServiceState::StartedByThisCopy
+        );
+    }
+
+    /// Проект A остановил свой стенд — запись о процессе снята, но стенд остаётся его: проект B
+    /// с тем же `localPath` его не поднимает и не переписывает закреплённое, а отказ не говорит о
+    /// процессе, которого нет.
+    #[test]
+    fn a_stopped_stand_of_another_project_is_refused_and_its_data_is_kept() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        first
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert!(!first.paths().record().exists(), "stop forgets the record");
+        let pins = std::fs::read(first.paths().pins()).unwrap();
+        let version = std::fs::read(first.paths().data().join("PG_VERSION")).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Restart,
+            ServiceCommand::Stop,
+            ServiceCommand::Status,
+        ] {
+            let refused = second.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+            let message = refused.to_string();
+            assert!(
+                message.contains(&first.config.base_path.display().to_string()),
+                "{command:?}: {message}"
+            );
+            assert!(message.contains("belongs to the project"), "{message}");
+            assert!(!message.contains("started"), "{message}");
+        }
+        assert_eq!(host.spawned.get(), 1, "the second project starts nothing");
+        assert_eq!(std::fs::read(first.paths().pins()).unwrap(), pins);
+        assert_eq!(
+            std::fs::read(first.paths().data().join("PG_VERSION")).unwrap(),
+            version
+        );
+        assert!(!first.paths().record().exists());
+
+        let restarted = first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(restarted.action, ServiceAction::Started);
+    }
+
+    /// После перезагрузки запись о процессе A осталась, а процесса нет: стенд всё равно
+    /// принадлежит A, и B отказывает тем же текстом.
+    #[test]
+    fn after_a_reboot_the_stand_of_another_project_is_still_refused() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let record = std::fs::read(first.paths().record()).unwrap();
+        let pins = std::fs::read(first.paths().pins()).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        let refused = second
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        let message = refused.to_string();
+        assert!(
+            message.contains(&first.config.base_path.display().to_string()),
+            "{message}"
+        );
+        assert!(!message.contains("started"), "{message}");
+        assert_eq!(host.spawned.get(), 1);
+        assert_eq!(std::fs::read(first.paths().record()).unwrap(), record);
+        assert_eq!(std::fs::read(first.paths().pins()).unwrap(), pins);
+    }
+
+    #[test]
+    fn a_first_port_taken_by_someone_is_chosen_again() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let context = ExecutionContext::cli(CommandName::DbmsStart);
+        let stand = Stand::new(&setup.config, &context, &runner, &host).unwrap();
+        let first = stand.choose_port().unwrap();
+        assert!((20_000..49_000).contains(&first), "{first}");
+        host.listeners.borrow_mut().insert(first, 9);
+        assert_ne!(stand.choose_port().unwrap(), first);
+    }
+
+    #[test]
+    fn a_cancelled_start_stops_what_it_started() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        runner.ready.set(false);
+        let token = CancellationToken::new();
+        token.cancel();
+        let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
+        let error = setup
+            .run_in(&context, ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{error}"
+        );
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("pg_ctl stop")));
+        assert!(!setup.paths().record().exists());
+        assert!(
+            host.processes.borrow().is_empty(),
+            "what it started is stopped"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_never_passes_names_the_log_and_stops_what_it_started() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        runner.ready.set(false);
+        let error = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform);
+        assert!(error.to_string().contains("postgres.log"), "{error}");
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("pg_ctl stop")));
+        assert!(!setup.paths().record().exists());
+    }
+
+    #[test]
+    fn a_stale_record_is_replaced_and_named_and_the_data_stays() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        // Перезагрузка: процесса из записи больше нет, данные и порт на месте.
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record);
+
+        let again = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(again.action, ServiceAction::Started);
+        assert!(again.stale_record);
+        assert_eq!(runner.called("initdb"), 1);
+    }
+
+    #[test]
+    fn a_recycled_pid_is_not_taken_for_the_service() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        host.processes.borrow_mut().insert(
+            PID,
+            ProcessFacts {
+                started: STARTED + 1,
+                image: "postgres.exe".to_owned(),
+            },
+        );
+        let stop = setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(stop.stale_record);
+        assert_eq!(runner.called("pg_ctl stop"), 0);
+        assert!(
+            host.processes.borrow().contains_key(&PID),
+            "a foreign process stays"
+        );
+    }
+
+    #[test]
+    fn stop_refuses_under_a_running_own_server_and_names_it() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        host.processes.borrow_mut().insert(
+            777,
+            ProcessFacts {
+                started: STARTED,
+                image: "postgres.exe".to_owned(),
+            },
+        );
+        for (service, next) in SERVERS {
+            let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+            server.pid = Some(777);
+            let sibling = setup.paths().sibling(service);
+            sibling.prepare().unwrap();
+            server.location = sibling.location();
+            let record = sibling.record();
+            write_json(&record, &server).unwrap();
+            for command in [ServiceCommand::Stop, ServiceCommand::Restart] {
+                let refused = setup.run(command, false, &runner, &host).unwrap_err();
+                assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
+                assert!(refused.to_string().contains(next), "{service}: {refused}");
+            }
+            std::fs::remove_file(record).unwrap();
+        }
+        assert!(host.processes.borrow().contains_key(&PID));
+    }
+
+    #[test]
+    fn a_dead_server_record_does_not_hold_the_dbms() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+        server.pid = Some(777);
+        write_json(
+            &setup.paths().sibling_record(StandService::Standalone),
+            &server,
+        )
+        .unwrap();
+        assert_eq!(
+            setup
+                .run(ServiceCommand::Stop, false, &runner, &host)
+                .unwrap()
+                .action,
+            ServiceAction::Stopped
+        );
+    }
+
+    #[test]
+    fn stop_that_failed_keeps_the_record_and_a_repeat_goes_on() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        runner.stop_works.set(false);
+        let context = ExecutionContext::cli(CommandName::DbmsStop);
+        let stand = Stand::new(&setup.config, &context, &runner, &host).unwrap();
+        assert!(!stand.await_gone(PID, Some(STARTED), Duration::ZERO));
+        assert!(
+            stand.await_gone(PID, Some(STARTED + 1), Duration::ZERO),
+            "a recycled pid is gone"
+        );
+        assert!(setup.paths().record().exists());
+        let stopped = setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stopped.stopped_pid, Some(PID));
+        assert!(
+            host.hard_stops.borrow().contains(&PID),
+            "soft stop did not end it"
+        );
+        assert!(!setup.paths().record().exists());
+    }
+
+    #[test]
+    fn status_and_stop_work_from_the_record_when_the_tool_key_is_gone() {
+        let mut setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup.config.tools.postgres.path = None;
+        assert_eq!(
+            setup
+                .run(ServiceCommand::Status, false, &runner, &host)
+                .unwrap()
+                .state,
+            ServiceState::StartedByThisCopy
+        );
+        assert_eq!(
+            setup
+                .run(ServiceCommand::Stop, false, &runner, &host)
+                .unwrap()
+                .action,
+            ServiceAction::Stopped
+        );
+    }
+
+    #[test]
+    fn a_start_without_the_build_names_where_to_get_it() {
+        let mut setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup.config.tools.postgres.path = None;
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert_names_where_to_get_a_build(&refused.to_string());
+        let missing = setup.root.path().join("no-such");
+        setup.config.tools.postgres.path = Some(missing.clone());
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert!(
+            refused.to_string().contains(&missing.display().to_string()),
+            "{refused}"
+        );
+        assert_names_where_to_get_a_build(&refused.to_string());
+        assert!(host.processes.borrow().is_empty(), "nothing is started");
+        let _ = setup.build;
+    }
+
+    #[test]
+    fn a_restart_without_the_build_leaves_the_running_postgres_alone() {
+        let mut setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let started = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup.config.tools.postgres.path = None;
+        let refused = setup
+            .run(ServiceCommand::Restart, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert_names_where_to_get_a_build(&refused.to_string());
+        let pid = started.pid.unwrap();
+        assert!(
+            host.processes.borrow().contains_key(&pid),
+            "it keeps running"
+        );
+    }
+
+    fn assert_names_where_to_get_a_build(refused: &str) {
+        assert!(
+            !refused.contains("  "),
+            "one line, single spaces: {refused}"
+        );
+        for part in [
+            "tools.postgres.path",
+            "pg_ctl",
+            "does not download",
+            "PostgreSQL for 1C",
+            "https://repo.postgrespro.ru/1c/1c-17/win/",
+            "PostgreSQL License",
+            "license.txt",
+            "administrator rights",
+        ] {
+            assert!(refused.contains(part), "{part}: {refused}");
+        }
+    }
+
+    #[test]
+    fn other_systems_refuse_start_and_restart_without_starting_anything() {
+        let setup = setup();
+        let host = FakeHost::default();
+        host.unsupported.set(true);
+        let runner = FakeRunner::new(&host);
+        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+            let refused = setup.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
+        }
+        assert!(runner.calls.borrow().is_empty());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn a_service_that_would_not_survive_is_refused_as_the_environment() {
+        let setup = setup();
+        let host = FakeHost::default();
+        host.would_not_survive.set(true);
+        let runner = FakeRunner::new(&host);
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert!(!setup.paths().record().exists());
+    }
+
+    #[test]
+    fn a_failed_initdb_leaves_no_half_made_data_directory() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        runner.initdb_fails.set(true);
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Platform);
+        assert!(!setup.paths().data().exists());
+        assert!(!setup.paths().staged_data().exists());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn a_preview_changes_nothing() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Stop,
+            ServiceCommand::Restart,
+        ] {
+            let plan = setup.run(command, true, &runner, &host).unwrap();
+            assert_eq!(plan.action, ServiceAction::Planned);
+        }
+        assert!(runner.calls.borrow().is_empty());
+        assert!(!setup.config.work_path.exists());
+    }
+
+    #[test]
+    fn the_password_stays_out_of_the_answer_and_the_arguments() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let started = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let password = std::fs::read_to_string(setup.paths().password()).unwrap();
+        assert_eq!(password.len(), PASSWORD_LENGTH);
+        let answer = serde_json::to_string(&started).unwrap();
+        assert!(!answer.contains(&password), "{answer}");
+        assert!(answer.contains("password"), "the file is named: {answer}");
+        assert!(!runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.contains(&password)));
+        let record = std::fs::read_to_string(setup.paths().record()).unwrap();
+        assert!(!record.contains(&password));
+    }
+
+    #[test]
+    fn an_already_running_service_started_elsewhere_becomes_explicit() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let mut record = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+        record.explicit = false;
+        write_json(&setup.paths().record(), &record).unwrap();
+        own_process(&host);
+        let answer = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(answer.explicit, Some(true));
+        assert!(
+            read_json::<ServiceRecord>(&setup.paths().record())
+                .unwrap()
+                .explicit
+        );
+    }
+
+    #[test]
+    fn a_machine_without_an_id_treats_the_recorded_process_as_foreign() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        host.no_machine_id.set(true);
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::Foreign);
+        assert!(status.stale_record);
+    }
+
+    #[test]
+    fn an_ad_hoc_connection_is_refused() {
+        let mut setup = setup();
+        setup.config.infobase_name = None;
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let refused = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
+    }
+
+    /// Запись `starting` от раннера с этим pid.
+    fn starting_record(setup: &Setup, starter: Option<(u32, u64)>) {
+        setup.paths().prepare().unwrap();
+        std::fs::create_dir_all(setup.paths().data()).unwrap();
+        write_json(
+            &setup.paths().record(),
+            &ServiceRecord {
+                state: RecordState::Starting,
+                pid: None,
+                started: None,
+                image: None,
+                machine: Some(MACHINE.to_owned()),
+                starter,
+                port: 24432,
+                explicit: true,
+                bin: PathBuf::from("bin"),
+                version: None,
+                agent: None,
+                location: setup.paths().location(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_start_in_progress_is_reported_and_refused() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        host.processes.borrow_mut().insert(
+            900,
+            ProcessFacts {
+                started: 5,
+                image: "v8-runner.exe".to_owned(),
+            },
+        );
+        starting_record(&setup, Some((900, 5)));
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::Starting);
+        for command in [ServiceCommand::Start, ServiceCommand::Stop] {
+            let refused = setup.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_crashed_start_with_a_live_postgres_is_taken_over() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        starting_record(&setup, Some((900, 5)));
+        std::fs::write(
+            setup.paths().data().join("postmaster.pid"),
+            format!("{PID}\n"),
+        )
+        .unwrap();
+        own_process(&host);
+        host.listeners.borrow_mut().insert(24432, PID);
+        assert_eq!(
+            setup
+                .run(ServiceCommand::Status, false, &runner, &host)
+                .unwrap()
+                .state,
+            ServiceState::StartedByThisCopy
+        );
+        let stopped = setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stopped.stopped_pid, Some(PID));
+    }
+
+    #[test]
+    fn a_leftover_pid_file_after_a_reboot_never_names_a_foreign_process() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        starting_record(&setup, Some((900, 5)));
+        std::fs::write(setup.paths().data().join("postmaster.pid"), "777\n").unwrap();
+        host.processes.borrow_mut().insert(
+            777,
+            ProcessFacts {
+                started: 1,
+                image: "other.exe".to_owned(),
+            },
+        );
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record);
+        let stop = setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(host.processes.borrow().contains_key(&777));
+        assert!(host.hard_stops.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_start_whose_service_would_not_stop_keeps_the_record() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        runner.stop_works.set(false);
+        let token = CancellationToken::new();
+        token.cancel();
+        let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
+        setup
+            .run_in(&context, ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(setup.paths().record().exists());
+    }
+
+    #[test]
+    fn stop_goes_through_pg_ctl_in_fast_mode() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("pg_ctl stop") && call.contains("-m fast")));
+    }
+
+    #[test]
+    fn status_of_a_running_service_runs_no_utility() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        runner.calls.borrow_mut().clear();
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::StartedByThisCopy);
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn restart_names_what_it_stopped() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let restarted = setup
+            .run(ServiceCommand::Restart, false, &runner, &host)
+            .unwrap();
+        assert_eq!(restarted.action, ServiceAction::Started);
+        assert_eq!(restarted.stopped_pid, Some(PID));
+    }
+
+    #[test]
+    fn a_cancellation_before_postgres_appears_keeps_the_record_despite_an_old_pid_file() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        // После перезагрузки файл остался, процесса нет, новый ещё не поднялся.
+        std::fs::write(
+            setup.paths().data().join("postmaster.pid"),
+            format!("{PID}\n"),
+        )
+        .unwrap();
+        host.spawn_is_slow.set(true);
+        let token = CancellationToken::new();
+        token.cancel();
+        let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
+        setup
+            .run_in(&context, ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(
+            setup.paths().record().exists(),
+            "the next command sorts it out"
+        );
+    }
+
+    #[test]
+    fn a_record_of_another_machine_is_not_taken_over() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        starting_record(&setup, Some((900, 5)));
+        let mut record = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+        record.machine = Some("other".to_owned());
+        write_json(&setup.paths().record(), &record).unwrap();
+        std::fs::write(
+            setup.paths().data().join("postmaster.pid"),
+            format!("{PID}\n"),
+        )
+        .unwrap();
+        own_process(&host);
+        host.listeners.borrow_mut().insert(24432, PID);
+        let status = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record);
+    }
+
+    #[test]
+    fn a_cleanup_step_runs_after_a_cancellation() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
+        assert!(!context.cleanup_policy().cancellation.is_cancelled());
+    }
+
+    /// Утилиту управляемой службы (`ragent`, `ibsrv`) ищет тот же поиск: при `sources` без
+    /// выпуска формата отказ `cluster start` и `standalone start` остаётся отказом выпуска с
+    /// описью, а не пересказом в `environment_unavailable`.
+    #[test]
+    fn a_service_utility_answers_the_release_refusal_typed() {
+        use crate::config::model::{
+            PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+            ToolsConfig,
+        };
+        use crate::platform::locator::{PlatformVersionSetting, UtilityType};
+        use crate::use_cases::result::EnvironmentReason;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("src");
+        std::fs::write(
+            src.join("Configuration.xml"),
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\">\n</MetaDataObject>\n",
+        )
+        .expect("Configuration.xml");
+        let platform = dir.path().join("platform");
+        for utility in [UtilityType::Ragent, UtilityType::Ibsrv] {
+            let path = platform
+                .join("8.5.4.1306")
+                .join("bin")
+                .join(utility.executable_name());
+            std::fs::create_dir_all(path.parent().expect("bin")).expect("bin");
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("utility");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        let config = AppConfig {
+            local_path: dir.path().join(".local"),
+            base_path: dir.path().to_path_buf(),
+            work_path: dir.path().join("work"),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            working_copy: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: "src".into(),
+            }],
+            tools: ToolsConfig {
+                platform: PlatformToolConfig {
+                    path: Some(platform),
+                    strict: false,
+                    version: Some(PlatformVersionSetting::Sources),
+                },
+                ..ToolsConfig::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        for utility in [UtilityType::Ragent, UtilityType::Ibsrv] {
+            let refused = locate(&config, utility).expect_err("refused");
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing)
+            );
+            assert!(refused.platform_release().is_some(), "{refused}");
+        }
+    }
+}

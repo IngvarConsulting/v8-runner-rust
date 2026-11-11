@@ -10,10 +10,14 @@ pub mod bootstrap;
 pub mod build;
 /// Capability matrix: who executes which operation on which target.
 pub mod capability;
+/// Ответ команд `cluster`.
+pub mod cluster;
 /// Config bootstrap domain models.
 pub mod config_init;
 /// Source-format conversion domain models.
 pub mod convert;
+/// Ответ команд `dbms`.
+pub mod dbms;
 /// Ответ и предмет сравнения команды `diff`.
 pub mod diff;
 /// Dump domain models.
@@ -22,6 +26,8 @@ pub mod dump;
 pub mod execution;
 /// Extension-management domain models.
 pub mod extensions;
+/// Разобранный ответ git о рабочей копии и путь поиска изменений набора.
+pub mod git_worktree;
 /// Information-base configuration package and snapshot export domain models.
 pub mod infobase_export;
 /// Init domain models.
@@ -30,6 +36,8 @@ pub mod init;
 pub mod issue;
 /// Launch domain models.
 pub mod launch;
+/// Ответ команд `agent hold`, `release`, `stop` и `status`.
+pub mod live_agent;
 /// Artifact load/import domain models.
 pub mod load;
 /// Следующий шаг, который называет отказ.
@@ -44,8 +52,12 @@ pub mod publish;
 pub mod reset;
 /// Shared runner models.
 pub mod runner;
+/// Чужие сеансы базы у применения конфигурации.
+pub mod sessions;
 /// Source set domain models.
 pub mod source_set;
+/// Ответ команд `standalone`.
+pub mod standalone;
 /// Состояние пары «каталог ↔ база» у `status`.
 pub mod status;
 /// Syntax-check domain models.

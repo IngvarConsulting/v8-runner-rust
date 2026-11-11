@@ -179,11 +179,22 @@ impl V8Connection {
         creation: &ClusterInfobaseCreation<'_>,
     ) -> Option<String> {
         let (server, reference) = self.cluster_address()?;
+        let database_server = creation.database_server;
+        // CREATEINFOBASE expects single quotes around a PostgreSQL address with a port (#546).
+        // Preserve the previously working manually quoted form.
+        let already_quoted = database_server.starts_with('\'')
+            && database_server.ends_with('\'')
+            && !database_server.contains([';', '"']);
+        let database_server = if database_server.contains(char::is_whitespace) && !already_quoted {
+            format!("DBSrvr='{}'", database_server.replace('\'', "''"))
+        } else {
+            connection_segment("DBSrvr", database_server)
+        };
         let mut parts = vec![
             connection_segment("Srvr", &server),
             connection_segment("Ref", &reference),
             connection_segment("DBMS", creation.dbms),
-            connection_segment("DBSrvr", creation.database_server),
+            database_server,
             connection_segment("DB", creation.database_name),
         ];
         let optional = [
@@ -253,6 +264,15 @@ pub struct ClusterInfobaseCreation<'a> {
     pub locale: &'a str,
     pub cluster_user: Option<&'a str>,
     pub cluster_password: Option<&'a str>,
+}
+
+impl<'a> ClusterInfobaseCreation<'a> {
+    pub(crate) fn passwords(&self) -> Vec<&'a str> {
+        [self.database_password, self.cluster_password]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 }
 
 /// Часть `ключ=значение` строки подключения. Значение с `;`, кавычкой или пробелом по
@@ -456,6 +476,23 @@ mod tests {
                 .as_deref(),
             Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SchJobDn=Y")
         );
+    }
+
+    #[test]
+    fn cluster_creation_quotes_a_dbms_server_with_a_port() {
+        let connection = V8Connection::from_connection_string("Srvr=srv;Ref=demo");
+        for (server, expected) in [
+            ("db", "DBSrvr=db;"),
+            ("127.0.0.1 port=35432", "DBSrvr='127.0.0.1 port=35432';"),
+            ("'127.0.0.1 port=35432'", "DBSrvr='127.0.0.1 port=35432';"),
+        ] {
+            let mut creation = creation(None, None);
+            creation.database_server = server;
+            let arg = connection
+                .create_cluster_infobase_arg(&creation)
+                .expect("cluster string");
+            assert!(arg.contains(expected), "expected {expected} in {arg}");
+        }
     }
 
     /// Адрес берётся и из ключа `/S`, а у файловой базы строки кластера нет.

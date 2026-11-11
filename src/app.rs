@@ -116,11 +116,29 @@ pub fn run() -> i32 {
         return run_mcp_command(&cli, args);
     }
 
+    if let Command::Agent(crate::cli::args::AgentArgs {
+        command: crate::cli::args::AgentCommand::Keeper(keeper),
+    }) = &cli.command
+    {
+        return run_agent_keeper(&cli, keeper);
+    }
+
     let color_mode = color_mode(cli.no_color);
     let presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &cli, &presenter);
+    }
+
+    // `agent stop --all` и `agent status --all` — область учётной записи ОС: проект им не
+    // нужен, и его отсутствие не отказ.
+    if let Command::Agent(crate::cli::args::AgentArgs { command }) = &cli.command {
+        if execute::agent_needs_no_project(command) {
+            return match execute::execute_agent_account(command, &presenter) {
+                Ok(()) => 0,
+                Err(error) => error.exit_code(),
+            };
+        }
     }
 
     if let Command::Bootstrap(args) = &cli.command {
@@ -272,6 +290,9 @@ pub fn run() -> i32 {
         | Command::Build(_)
         | Command::Apply(_)
         | Command::Reset(_)
+        | Command::Dbms(_)
+        | Command::Standalone(_)
+        | Command::Cluster(_)
         | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)
@@ -282,6 +303,7 @@ pub fn run() -> i32 {
         | Command::Launch(_)
         | Command::Publish(_)
         | Command::Platforms
+        | Command::Agent(_)
         | Command::Status(_) => execute::execute_command(
             &config,
             &cli.command,
@@ -368,11 +390,41 @@ pub(crate) fn load_cli_config(
             operation,
             cli.dry_run,
         )
+    } else if matches!(
+        &cli.command,
+        Command::Agent(crate::cli::args::AgentArgs {
+            command: crate::cli::args::AgentCommand::Status(_)
+                | crate::cli::args::AgentCommand::Stop(_)
+        })
+    ) {
+        // `agent status` и `agent stop` только говорят со сторожами: из проекта им нужен ключ
+        // агента, а рабочего каталога они не готовят.
+        crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
     } else if matches!(&cli.command, Command::Platforms) {
         // `platforms` только читает: рабочего каталога он не готовит.
-        load_config_for_preview(config_path, workdir, &selector)
+        crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
+    } else if matches!(&cli.command, Command::Status(args) if !args.deep) {
+        crate::config::loader::load_config_for_inspection(
+            config_path,
+            workdir,
+            &selector,
+            cli.dry_run,
+        )
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Dbms(_)) {
+        crate::config::loader::load_config_for_managed_dbms(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Standalone(_)) {
+        crate::config::loader::load_config_for_managed_standalone(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Cluster(_)) {
+        crate::config::loader::load_config_for_managed_cluster(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Init(_)) {
+        crate::config::loader::load_config_for_infobase_create(
+            config_path,
+            workdir,
+            &selector,
+            cli.dry_run,
+        )
     } else if cli.dry_run {
         // Превью не создаёт рабочего каталога: проверки те же, готовит `workPath` только
         // применение. Прежде так загружалось одно лишь `extensions --dry-run`.
@@ -390,6 +442,9 @@ fn command_name(command: &Command) -> &'static str {
         // Сервер отвечает голой строкой в stderr, имени конверта ему не нужно; здесь оно
         // есть, чтобы имя было у всякой команды.
         Command::Mcp(_) => "mcp serve",
+        Command::Agent(crate::cli::args::AgentArgs {
+            command: crate::cli::args::AgentCommand::Keeper(_),
+        }) => "agent keeper",
         _ => execute::command_name(command).as_str(),
     }
 }
@@ -839,6 +894,17 @@ pub(crate) fn command_line_target(
         // того, откуда совет выполнят.
         workdir: cli.workdir.as_ref().map(|_| config.work_path.clone()),
     }
+}
+
+/// Сторож живого агента: его вывод уходит в журнал сторожа, ответа команды у него нет.
+fn run_agent_keeper(cli: &Cli, keeper: &crate::cli::args::AgentKeeperArgs) -> i32 {
+    let level = cli.log_level.as_deref().unwrap_or("info");
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(level))
+        .try_init();
+    crate::platform::agent_keeper::run_keeper(&keeper.key)
 }
 
 fn run_mcp_command(cli: &Cli, args: &crate::cli::args::McpArgs) -> i32 {

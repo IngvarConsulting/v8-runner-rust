@@ -6,7 +6,7 @@
 <title>infobase create — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -88,19 +88,20 @@
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-cluster" href="glossary.html#mode-cluster"><span class="mode-icon" aria-hidden="true"></span>Кластер</a></dt>
-    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>. В <a href="#create-cluster-managed">кластере под управлением раннера</a> — так же, после <code>cluster start</code> <span class="plan-badge">План</span>.</dd>
+    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>. В <a href="#create-cluster-managed">кластере под управлением раннера</a> — так же, после <code>cluster start</code>.</dd>
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-standalone" href="glossary.html#mode-standalone"><span class="mode-icon" aria-hidden="true"></span>Автономный</a></dt>
-    <dd>Для вашего сервера <a href="#create-standalone-refused">отказывает в создании</a>: базу создают через <code>ibcmd</code> в автономном режиме на машине сервера, до запуска <code>ibsrv</code> <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Для сервера <a href="#create-standalone-managed">под управлением раннера</a> создаёт базу сам <span class="plan-badge">План</span>.</dd>
+    <dd>Для вашего сервера <a href="#create-standalone-refused">отказывает в создании</a>: базу создают через <code>ibcmd</code> в автономном режиме на машине сервера, до запуска <code>ibsrv</code> <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Для сервера <a href="#create-standalone-managed">под управлением раннера</a> создаёт базу сам.</dd>
   </div>
 </dl>
 <p>Для формата EDT после шага создания команда подготавливает рабочую область. Оба шага имеют отдельные статусы; подготовка EDT выполняется и после ошибки создания базы. Если рабочая область не нужна, этот шаг пропускается.</p>
-<h3 id="create-cluster-managed">Кластер под управлением раннера <span class="plan-badge">План</span></h3>
-<p>Для базы, объявленной <a href="variant-cluster.html#d-cluster-managed"><code>cluster.managed</code></a>, команда регистрирует базу в кластере, который поднял раннер, и создаёт её данные в объявленной СУБД — так же, как в любом кластере <span class="ref">(<a href="platform.html#t73">73</a>)</span>. Кластер должен быть поднят: если нет, команда отказывает и называет <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> следующим шагом.</p>
-<h3 id="create-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h3>
-<p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.managed</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd server config init</code>, затем <code>ibcmd infobase create</code> с конфигурацией из исходников: <code>--import</code> для XML, <code>--load</code> для <code>.cf</code>, <code>--restore</code> для <code>.dt</code>. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a>.</p>
-<p><span class="plan-badge">План</span> Созданную базу команда записывает в память, поэтому первый <code>push</code> после неё идёт как обычный.</p>
+<h3 id="create-cluster-managed">Кластер под управлением раннера</h3>
+<p>Для базы, объявленной <a href="variant-cluster.html#d-cluster-managed"><code>cluster.managed</code></a>, команда регистрирует базу в кластере, который поднял раннер, и создаёт её данные в объявленной СУБД — так же, как в любом кластере <span class="ref">(<a href="platform.html#t73">73</a>)</span>. Кластер должен быть поднят: если нет, команда отказывает и называет <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> следующим шагом. При <a href="cli-dbms.html"><code>dbms.managed</code></a> команда сначала проверяет, нет ли уже БД с именем <code>dbms.name</code>: если есть, отказывает и называет её, потому что платформа молча взяла бы чужие данные. Базу, которую кластер уже знает, команда не создаёт и отвечает, что она есть. После создания рабочие команды открывают базу; до него они отказывают и называют <code>infobase create</code>.</p>
+<h3 id="create-standalone-managed">Автономный сервер под управлением раннера</h3>
+<p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.managed</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd infobase create</code> с конфигурацией из исходников, теми же исполнителями, что у файловой базы. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a>.</p>
+<p>Если база лежит в СУБД, команда создаёт её через <code>ibcmd infobase create --create-database</code>, а <code>ibcmd server config init</code> не нужен. СУБД должна работать: при <code>dbms.managed</code> команда иначе отказывает и называет <a href="cli-dbms.html#op-dbms-start"><code>dbms start</code></a>. У PostgreSQL раннера существующая БД с именем <code>dbms.name</code> — отказ с её именем; у вашей СУБД так отвечает сам <code>ibcmd</code>, если в БД уже есть база. <code>--from</code>, создание копии другой базы, для такой базы отказывает: копию из образа кладут <a href="cli-infobase-restore.html"><code>infobase restore</code></a> через работающий сервер.</p>
+<p>Созданную базу команда записывает в память, поэтому первый <code>push</code> после неё идёт как обычный.</p>
 <h2 id="response-classes" class="response-classes">Успешные результаты</h2>
 <p>Варианты ответа показывают выполненные, пропущенные и запланированные шаги. Причины ошибок и поля ответа описаны в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h4 id="infobase-create-variant-1-outcome" data-response-class="success">База создана</h4>
@@ -108,7 +109,7 @@
 <pre data-output-example="infobase-create-variant-1" data-output-schema="infobase-create"><code>Init completed successfully</code></pre>
 <h4 id="create-already-exists" data-response-class="skipped">База уже существует</h4>
 <p>Для <a href="#op-infobase-create">создания файловой базы</a>, которая уже существует, шаг создания пропускается: существующая база не пересоздаётся. Команда успешна; ориентируйтесь на статусы шагов, а не только на <code>provider_dispatched</code>.</p>
-<pre data-output-example="create-already-exists" data-output-schema="infobase-create"><code>○ infobase: create - file infobase already exists: build/ib
+<pre data-output-example="create-already-exists" data-output-schema="infobase-create"><code>○ infobase: create - file infobase already exists: .local/db
 
 Init completed successfully</code></pre>
 <h4 id="infobase-create-example-outcome" data-response-class="preview">План создания подготовлен</h4>
@@ -241,7 +242,7 @@ ERROR: timed out: EDT workspace import timed out</code></pre>
           "action": "create",
           "status": "skipped",
           "duration_ms": 0,
-          "message": "file infobase already exists: build/ib"
+          "message": "file infobase already exists: .local/db"
         },
         {
           "target": "edt_workspace",
@@ -442,6 +443,6 @@ ERROR: timed out: EDT workspace import timed out</code></pre>
     }
   }
 }</script>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

@@ -1,6 +1,18 @@
 {
   "_comment": "Порождается UPDATE_COMMAND_DATA_SCHEMAS=1 cargo test generated_command_data_schemas_are_current; руками не правится.",
   "forms": {
+    "agent hold": [
+      "agent-hold"
+    ],
+    "agent release": [
+      "agent-release"
+    ],
+    "agent status": [
+      "agent-status"
+    ],
+    "agent stop": [
+      "agent-stop"
+    ],
     "apply": [
       "apply"
     ],
@@ -10,8 +22,32 @@
     "clone": [
       "clone"
     ],
+    "cluster restart": [
+      "cluster-restart"
+    ],
+    "cluster start": [
+      "cluster-start"
+    ],
+    "cluster status": [
+      "cluster-status"
+    ],
+    "cluster stop": [
+      "cluster-stop"
+    ],
     "convert": [
       "convert"
+    ],
+    "dbms restart": [
+      "dbms-restart"
+    ],
+    "dbms start": [
+      "dbms-start"
+    ],
+    "dbms status": [
+      "dbms-status"
+    ],
+    "dbms stop": [
+      "dbms-stop"
     ],
     "diff": [
       "diff"
@@ -58,6 +94,18 @@
     ],
     "reset": [
       "reset"
+    ],
+    "standalone restart": [
+      "standalone-restart"
+    ],
+    "standalone start": [
+      "standalone-start"
+    ],
+    "standalone status": [
+      "standalone-status"
+    ],
+    "standalone stop": [
+      "standalone-stop"
     ],
     "status": [
       "status"

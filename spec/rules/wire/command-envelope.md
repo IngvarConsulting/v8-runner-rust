@@ -1,12 +1,14 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 4
+version: 5
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
   - src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
   - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
   - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
+  - tests/cli_platform_release.rs::every_platform_command_refuses_without_the_release_of_the_sources_format
+  - tests/cli_apply_sessions.rs::a_file_base_held_by_a_session_is_refused_with_the_session_list
 ---
 
 # Конверт ответа команды
@@ -14,18 +16,27 @@ check:
 Структурный ответ любой команды имеет одну оболочку, закреплённую схемой
 `docs/schemas/command-envelope.schema.json`: `ok`, `command`, `duration_ms`, `data`,
 `warnings`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
-нужде `next` — следующий шаг структурой, — и два поля поколений у отказа
-`non_fast_forward`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
+нужде `next` — следующий шаг структурой, — два поля поколений у отказа
+`non_fast_forward`, поле `platform_release` у отказа `platform_release_missing` и поле `sessions` у отказов `infobase_sessions` и `infobase_designer_busy`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
 них валит проверку.
 
 Рода и коды — закрытые перечисления, а не строки. Рода: `capability`, `environment`,
 `workspace`, `invalid_output`, `interruption`, `validation`, `runtime`, `platform`,
-`non_fast_forward`, `no_memory`. Коды подробнее рода: у `capability` их четыре —
+`non_fast_forward`, `untracked_base`. Коды подробнее рода: у `capability` их четыре —
 `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой
-цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. У `workspace` — чужая работа
+цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. Коды рода `environment` тоже отвечают
+кодом выхода 2: `environment_unavailable` (утилиты нет или она не та) и
+`platform_release_missing` (при `tools.platform.version: sources` нет выпуска, который пишет
+формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`). Его
+поле `platform_release` несёт `source_format` — версию формата, файл и выпуск, как в ответе
+`platforms`, — и `installations`, опись установок, по которой решён отказ. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
-`workspace_busy` (рабочий каталог держит другая команда) и `infobase_busy` (файловую базу
-держит другая команда). База другой рабочей копии отказом не служит: команда идёт, а
+`workspace_busy` (рабочий каталог держит другая команда), `infobase_busy` (файловую базу
+держит другая команда), `infobase_sessions` (обновлению конфигурации базы данных нужен
+монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (файловую базу
+держит чужой Конфигуратор). Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
+завершить и блокировку начала сеансов
+(`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). База другой рабочей копии отказом не служит: команда идёт, а
 `warnings` несёт предупреждение
 (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).
 
@@ -33,10 +44,13 @@ check:
 generated_envelope_schema_is_current`. Руками её не правят — иначе закрытый набор
 держится на внимательности.
 
-**Отказы обмена с базой.** Род и код `no_memory` — `push` в базу, о которой у рабочей копии нет
+**Отказы обмена с базой.** Род и код `untracked_base` — `push` в базу, о которой у рабочей копии нет
 памяти; `non_fast_forward` — `push` в базу, ушедшую вперёд записанного поколения, и только у
 него заполнены поля `base_generation` (поколение базы сейчас) и `local_generation` (записанное
-после прошлого обмена). Код выхода у этих отказов — 3. Их `next` — `pull` с `source_set`, а
+после прошлого обмена). Тем же кодом, но без этих полей отвечают отказы, в которых уход вперёд
+не доказан и не опровергнут: `apply` после неудачной загрузки, когда поколения нет, и `push`,
+когда поколение записи другого инструмента спросить не удалось
+(`INV.USE-CASES.A-PUSH-INTO-A-BASE-THAT-MOVED-AHEAD-IS-REFUSED`) — текст называет причину. Код выхода у этих отказов — 3. Их `next` — `pull` с `source_set`, а
 когда выгрузку предлагать нельзя, — `push` с `keys` `{"--force": ""}`: ключ без значения
 несёт пустую строку. Коды `subject` и `soon` таблица называет, и сторож это проверяет, но ни
 один отказ пока этими причинами не отвечает.
@@ -59,8 +73,17 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 `infobase lock`, когда файловую базу держит другая команда, и `infobase_held` — отказ на шаге
 `infobase owner`, когда её держит другая рабочая копия (убран в версии 4); его `next` — своя чистая база,
 `infobase create`. Рода не изменились. В эту же версию вошли производители кодов
-`non_fast_forward` и `no_memory` и шаг `next` с `source_set` и `keys`; код чужих изменений
+`non_fast_forward` и `untracked_base` и шаг `next` с `source_set` и `keys`; код чужих изменений
 войдёт в неё же, когда появится его производитель.
+
+**Отказы удержания живого агента.** `agent hold` отказывает тремя кодами
+(`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`): `agent_limit` рода `environment`, код
+выхода 2, — живых агентов учётной записи уже `tools.designer_agent.live-max`, и все они
+удерживаются; `live_agent_off` рода `capability`, код выхода 2, — живой агент
+выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
+2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
+
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. В эту же версию вошёл код `source_set_ignored_by_git` рода `validation`, код выхода 2: правило игнорирования git прячет файл набора, изменения которого берутся у git ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)). Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

@@ -935,8 +935,11 @@ fn adapter_error_envelope(
 }
 
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
-    EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
-        .with_next(error.next.clone())
+    EnvelopeError {
+        platform_release: error.platform_release.clone(),
+        ..EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
+            .with_next(error.next.clone())
+    }
 }
 
 fn invalid_syntax_request(
@@ -968,6 +971,7 @@ fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
         kind: McpBusinessErrorKind::Validation,
         message: error.message().to_owned(),
         next: None,
+        platform_release: None,
     }
 }
 
@@ -1397,6 +1401,7 @@ mod tests {
     #[test]
     fn build_project_maps_success_request_and_response() {
         let port = StubPort::with_build_result(Ok(BuildResult {
+            detection: Default::default(),
             provider: None,
             provider_dispatched: true,
             ok: true,
@@ -1409,6 +1414,7 @@ mod tests {
                 applied: true,
             }],
             duration_ms: 42,
+            sessions: None,
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1441,6 +1447,7 @@ mod tests {
         let port = StubPort::with_build_result(Err(UseCaseFailure::with_payload(
             UseCaseError::new(UseCaseErrorKind::Runtime, "builder failed"),
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: false,
@@ -1453,6 +1460,7 @@ mod tests {
                     applied: true,
                 }],
                 duration_ms: 19,
+                sessions: None,
             },
         )));
         let config = sample_config();
@@ -2828,11 +2836,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             })),
         );
 
@@ -2858,11 +2868,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             })),
         );
 
@@ -2879,6 +2891,7 @@ mod tests {
 
     fn sample_config() -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/project").join(".local"),
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
             format: SourceFormat::Designer,

@@ -832,7 +832,7 @@ fn infer_import_options(
     }
 
     Ok(ConvertImportOptions {
-        version: normalize_config_hint(config.tools.platform.version.as_deref()),
+        version: crate::platform::utilities::edt_import_version(config),
         base_project_name: match source_set.purpose {
             SourceSetPurpose::Configuration => None,
             SourceSetPurpose::Extension => None,
@@ -853,13 +853,6 @@ fn infer_import_options(
         },
         build: false,
     })
-}
-
-fn normalize_config_hint(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn validate_selected_source(
@@ -961,14 +954,16 @@ fn validate_explicit_convert_target_roots(
         )));
     }
 
-    let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("failed to canonicalize workPath: {error}")))?;
-    if canonical_target_path == canonical_work_path
-        || canonical_target_path.starts_with(&canonical_work_path)
-    {
+    // Выход не пересекается с каталогами раннера ни в какую сторону: внутри них он лёг бы в
+    // состояние раннера, а над ними — заменил бы его (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    if crate::change_detection::runner_dirs::overlaps_a_runner_dir(
+        canonical_target_path,
+        crate::change_detection::runner_dirs::RunnerDirs::of(config),
+    ) {
         return Err(AppError::Validation(format!(
-            "convert --output target must not be inside workPath: workPath={}, target={}",
+            "convert --output target must not overlap workPath or localPath: workPath={}, localPath={}, target={}",
             config.work_path.display(),
+            config.local_path.display(),
             target_path.display()
         )));
     }
@@ -1758,6 +1753,7 @@ mod tests {
 
     fn sample_config() -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/project").join(".local"),
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
             format: SourceFormat::Designer,
@@ -1794,6 +1790,79 @@ mod tests {
             .expect_err("an interrupted preview refuses");
         let payload = failure.payload.expect("the refusal carries the form");
         assert!(!payload.provider_dispatched, "{payload:?}");
+    }
+
+    /// `tools.platform.version: sources` — настройка раннера, а не версия для EDT: импорт
+    /// получает выпуск формата исходников, а без файла формата — ничего, но не `sources`.
+    #[test]
+    fn a_designer_to_edt_import_never_passes_sources_to_the_edt_cli() {
+        use crate::config::model::{SourceSetConfig, SourceSetPurpose};
+        use crate::platform::locator::PlatformVersionSetting;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config();
+        config.base_path = dir.path().to_path_buf();
+        config.tools.platform.version = Some(PlatformVersionSetting::Sources);
+        let main = SourceSetConfig {
+            name: "main".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: "src".into(),
+        };
+        config.source_sets = vec![main.clone()];
+        let import = |config: &AppConfig| {
+            super::infer_import_options(config, &main, super::ConvertDirection::DesignerToEdt, None)
+                .expect("options")
+                .version
+        };
+
+        assert_eq!(import(&config), None, "no format file, no version");
+
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("src").join("Configuration.xml"),
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\">\n</MetaDataObject>\n",
+        )
+        .expect("Configuration.xml");
+        assert_eq!(import(&config).as_deref(), Some("8.5.1"));
+
+        config.tools.platform.version = PlatformVersionSetting::parse("8.3.27");
+        assert_eq!(import(&config).as_deref(), Some("8.3.27"));
+    }
+
+    /// Выход `convert --output` не пересекается с `localPath` ни в какую сторону: ни внутри него,
+    /// ни над ним (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    #[test]
+    fn a_convert_output_overlapping_the_local_path_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config();
+        config.base_path = dir.path().join("project");
+        config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join("out").join("personal");
+        std::fs::create_dir_all(&config.base_path).expect("project");
+        std::fs::create_dir_all(&config.local_path).expect("localPath");
+        for target in [
+            config.local_path.join("converted"),
+            config.local_path.clone(),
+            dir.path().join("out"),
+        ] {
+            let refused =
+                super::validate_convert_target(&config, &target, "source-set 'main'", true)
+                    .expect_err("overlapping output refused");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("must not overlap workPath or localPath"),
+                "{}: {refused}",
+                target.display()
+            );
+        }
+        super::validate_convert_target(
+            &config,
+            &dir.path().join("elsewhere"),
+            "source-set 'main'",
+            true,
+        )
+        .expect("an output beside the runner directories");
     }
 
     #[test]

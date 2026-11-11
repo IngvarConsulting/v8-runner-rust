@@ -545,6 +545,7 @@ mod tests {
         let base = work_path.join("base");
         std::fs::create_dir_all(base.join("main")).expect("base");
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.clone(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,

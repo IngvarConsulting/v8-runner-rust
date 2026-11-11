@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "ApplicationCode": {
+      "description": "Устойчивый код приложения платформы.",
+      "oneOf": [
+        {
+          "const": "Designer",
+          "description": "Конфигуратор.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8C",
+          "description": "Тонкий клиент.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8",
+          "description": "Толстый клиент.",
+          "type": "string"
+        },
+        {
+          "const": "BackgroundJob",
+          "description": "Фоновое задание.",
+          "type": "string"
+        },
+        {
+          "const": "WebClient",
+          "description": "Веб-клиент.",
+          "type": "string"
+        },
+        {
+          "const": "COMConnection",
+          "description": "Внешнее соединение.",
+          "type": "string"
+        }
+      ]
+    },
     "ArtifactKind": {
       "description": "Stable artifact classification for runner/package outputs.",
       "oneOf": [
@@ -114,6 +149,28 @@
             }
           ],
           "description": "Шаг, которым вызывающий выходит из отказа. Проза остаётся человеку."
+        },
+        "platform_release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformReleaseRefusal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Формат исходников и опись установок; заполняется отказом `platform_release_missing`."
+        },
+        "sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseSessions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`."
         }
       },
       "required": [
@@ -157,8 +214,23 @@
           "type": "string"
         },
         {
+          "const": "platform_release_missing",
+          "description": "Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет\nформат исходников, среди установок нет.",
+          "type": "string"
+        },
+        {
           "const": "infobase_busy",
           "description": "Файловую базу держит другая команда; как `workspace_busy`, можно повторить.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_sessions",
+          "description": "Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_designer_busy",
+          "description": "Файловую базу держит чужой Конфигуратор; его раннер не закрывает.",
           "type": "string"
         },
         {
@@ -167,8 +239,28 @@
           "type": "string"
         },
         {
-          "const": "no_memory",
-          "description": "Пара к роду `no_memory`: памяти о базе нет.",
+          "const": "untracked_base",
+          "description": "Пара к роду `untracked_base`: памяти о базе нет.",
+          "type": "string"
+        },
+        {
+          "const": "agent_limit",
+          "description": "`agent hold`: живых агентов уже `live-max`, и снять некого.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_off",
+          "description": "`agent hold` при `tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_job",
+          "description": "`agent hold` в Job, из которого сторож не может выйти.",
+          "type": "string"
+        },
+        {
+          "const": "source_set_ignored_by_git",
+          "description": "Правило игнорирования git прячет файл набора; род `validation`.",
           "type": "string"
         }
       ]
@@ -195,7 +287,7 @@
           "type": "string"
         },
         {
-          "const": "no_memory",
+          "const": "untracked_base",
           "description": "Отправка в базу, о которой у рабочей копии нет памяти.",
           "type": "string"
         }
@@ -262,6 +354,74 @@
       ],
       "type": "string"
     },
+    "InfobaseSessions": {
+      "additionalProperties": false,
+      "description": "Кто держит базу — поле `error.sessions` отказов `infobase_sessions` и\n`infobase_designer_busy`.",
+      "properties": {
+        "base": {
+          "description": "Строка соединения базы без учётных данных.",
+          "type": "string"
+        },
+        "from_this_machine": {
+          "description": "Среди сеансов есть сеанс с этой машины.",
+          "type": "boolean"
+        },
+        "list": {
+          "description": "Сеансы, как их назвала платформа; `null` — список не получен или не разобран целиком.",
+          "items": {
+            "$ref": "#/$defs/SessionEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "lock": {
+          "$ref": "#/$defs/SessionLock",
+          "description": "Блокировка начала сеансов, которая уже стоит у базы."
+        },
+        "terminable": {
+          "description": "Может ли раннер завершить сеансы этой базы для этой команды (`--sessions force`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "base",
+        "from_this_machine",
+        "terminable",
+        "lock"
+      ],
+      "type": "object"
+    },
+    "InstalledComponents": {
+      "additionalProperties": false,
+      "description": "Какие компоненты есть в установке.",
+      "properties": {
+        "designer": {
+          "description": "Конфигуратор и толстый клиент (`1cv8`).",
+          "type": "boolean"
+        },
+        "ibcmd": {
+          "description": "Автономный сервер (`ibcmd`).",
+          "type": "boolean"
+        },
+        "thin_client": {
+          "description": "Тонкий клиент (`1cv8c`).",
+          "type": "boolean"
+        },
+        "web_extension": {
+          "description": "Расширение веб-сервера (`webinst`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "designer",
+        "thin_client",
+        "ibcmd",
+        "web_extension"
+      ],
+      "type": "object"
+    },
     "NextStep": {
       "additionalProperties": false,
       "description": "Шаг, которым вызывающий выходит из отказа: команда, при нужде набор исходников и ключи.\n\nПоле отвечает машине; человеку остаётся текст сообщения, и он не сокращается.",
@@ -287,6 +447,172 @@
       },
       "required": [
         "command"
+      ],
+      "type": "object"
+    },
+    "PlatformInstallation": {
+      "additionalProperties": false,
+      "description": "Установка платформы: версия, каталог и состав.",
+      "properties": {
+        "components": {
+          "$ref": "#/$defs/InstalledComponents"
+        },
+        "root": {
+          "description": "Каталог версии.",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "root",
+        "components"
+      ],
+      "type": "object"
+    },
+    "PlatformReleaseRefusal": {
+      "additionalProperties": false,
+      "description": "Отказ `platform_release_missing`: при `tools.platform.version: sources` выпуска, который\nпишет формат исходников, среди установок нет. Установки — те, по которым решён отказ.",
+      "properties": {
+        "installations": {
+          "description": "Установки, среди которых выпуска не нашлось, новейшие первыми.",
+          "items": {
+            "$ref": "#/$defs/PlatformInstallation"
+          },
+          "type": "array"
+        },
+        "source_format": {
+          "$ref": "#/$defs/SourceFormatInfo",
+          "description": "Формат исходников основного набора и выпуск, который его пишет; `release` — `null`,\nесли раннер такого выпуска не знает, `version` — `null`, если формат не прочитан."
+        }
+      },
+      "required": [
+        "source_format",
+        "installations"
+      ],
+      "type": "object"
+    },
+    "SessionEntry": {
+      "additionalProperties": false,
+      "description": "Один сеанс из списка платформы.",
+      "properties": {
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Устойчивый код приложения; `null` — название не из таблицы известных."
+        },
+        "application_title": {
+          "description": "Название приложения, как его написала платформа.",
+          "type": "string"
+        },
+        "computer": {
+          "description": "Компьютер сеанса.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Номер сеанса у платформы.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started": {
+          "description": "Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.",
+          "type": "string"
+        },
+        "user": {
+          "description": "Пользователь; текст платформы у файловой базы его не называет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "computer",
+        "application_title",
+        "started"
+      ],
+      "type": "object"
+    },
+    "SessionLock": {
+      "additionalProperties": false,
+      "description": "Блокировка начала сеансов базы.",
+      "properties": {
+        "message": {
+          "description": "Сообщение блокировки, если раннер его знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionLockState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionLockState": {
+      "description": "Чья блокировка начала сеансов стоит у базы.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Блокировки нет.",
+          "type": "string"
+        },
+        {
+          "const": "own",
+          "description": "Блокировка раннера.",
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Чужая блокировка; раннер её не трогает.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Узнать нельзя.",
+          "type": "string"
+        }
+      ]
+    },
+    "SourceFormatInfo": {
+      "additionalProperties": false,
+      "description": "Формат исходников проекта.",
+      "properties": {
+        "file": {
+          "description": "Прочитанный `Configuration.xml`.",
+          "type": "string"
+        },
+        "release": {
+          "description": "Выпуск платформы, который пишет этот формат; `null`, если раннер такого не знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "Версия формата; `null`, если файл есть, а версии в его корне нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
       ],
       "type": "object"
     },

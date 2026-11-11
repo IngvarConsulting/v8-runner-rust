@@ -3,17 +3,40 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::{InfobaseConfig, MissingDbmsField};
+use crate::domain::infobase_export::RestoreTargetMode;
 use crate::platform::connection::{file_infobase, name_the_account, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::session_list::SessionTerminate;
 
-// Parallel config export can fail on valid packages (#476).
-const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
+// Разбор пакета (`export --file`) в несколько потоков отказывает на годных пакетах (#476),
+// поэтому он идёт в один поток. Выгрузка из базы ключа не несёт и идёт в потоках платформы:
+// `INV.PLATFORM.AN-IBCMD-EXPORT-FROM-A-BASE-KEEPS-PLATFORM-THREADS`.
+const PACKAGE_EXPORT_THREADS_ARG: &str = "--threads=1";
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
+    #[cfg_attr(
+        not(unix),
+        allow(
+            dead_code,
+            reason = "only the POSIX kernel probe can report a lock holder"
+        )
+    )]
+    /// `pid` is `None` when the kernel names no holder (an open file description lock).
+    #[error("file infobase '{}' is held by {}; close its sessions before an IBCMD DT transfer", path.display(), lock_holder(*pid))]
+    SnapshotBusy { path: PathBuf, pid: Option<i32> },
+
+    #[error("cannot probe file infobase '{}': {source}", path.display())]
+    SnapshotProbe {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("IBCMD DT transfers require a local POSIX file infobase; Windows session detection has not been measured")]
+    SnapshotUnsupported,
     #[error(transparent)]
     MissingServerDbmsField(#[from] MissingDbmsField),
 
@@ -31,6 +54,21 @@ pub enum IbcmdError {
         "refusing to run 'ibcmd config export --sync --force': on a full fallback it deletes everything in the target directory, '.git' included"
     )]
     DirectoryWipingExport,
+}
+
+fn lock_holder(pid: Option<i32>) -> String {
+    match pid {
+        Some(pid) => format!("process {pid}"),
+        None => "an unknown holder".to_owned(),
+    }
+}
+
+/// Why this build refuses a file DT transfer through ibcmd, or `None` where it runs.
+///
+/// The single owner of the platform policy: only the POSIX lock probe is measured, so
+/// callers choosing an executor ask here instead of testing the OS themselves.
+pub fn dt_transfer_refusal() -> Option<IbcmdError> {
+    cfg!(not(unix)).then_some(IbcmdError::SnapshotUnsupported)
 }
 
 /// Connection contract passed to `ibcmd infobase ...` commands.
@@ -173,20 +211,6 @@ impl IbcmdConnection {
     }
 }
 
-/// Dynamic apply mode supported by `ibcmd config apply`.
-#[derive(Debug, Clone, Copy)]
-pub enum DynamicUpdateMode {
-    Auto,
-}
-
-impl DynamicUpdateMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            DynamicUpdateMode::Auto => "auto",
-        }
-    }
-}
-
 /// Result status returned by `ibcmd infobase create`. `Failed` and `Unconfirmed` are failures
 /// carried inside `Ok`, so the create result — and the interruption it deferred — stays with
 /// them.
@@ -215,6 +239,7 @@ pub struct IbcmdDsl<'a> {
     runner: &'a dyn ProcessRunner,
     execution_policy: ProcessExecutionPolicy,
     data_path: Option<PathBuf>,
+    locale: Option<String>,
 }
 
 impl<'a> IbcmdDsl<'a> {
@@ -233,13 +258,114 @@ impl<'a> IbcmdDsl<'a> {
             runner,
             execution_policy,
             data_path: None,
+            locale: None,
         }
+    }
+
+    /// Национальные настройки новой базы в СУБД: `--locale` у `infobase create`.
+    pub fn with_locale(mut self, locale: Option<String>) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// Uses an isolated standalone-server data directory for every IBCMD call.
     pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
         self.data_path = Some(data_path);
         self
+    }
+
+    /// A DT is written to the caller's staging file: ibcmd truncates it even on failure.
+    pub fn dump_infobase(&self, target: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let present = self.probe_snapshot_access()?;
+        if !present {
+            return Err(IbcmdError::SnapshotProbe {
+                path: self.snapshot_path()?,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "infobase does not exist",
+                ),
+            });
+        }
+        let mut args = self.authenticated_infobase_args(&["dump"]);
+        args.push(target.display().to_string());
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
+    /// The caller marks restore as a critical write and has already matched `mode`
+    /// against the base on disk, so only the session probe matters here: a held base is
+    /// refused, its presence is the caller's answer. --force does not end file sessions.
+    pub fn restore_infobase(
+        &self,
+        source: &Path,
+        mode: RestoreTargetMode,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let _present = self.probe_snapshot_access()?;
+        let mut args = match mode {
+            RestoreTargetMode::Create => {
+                // The newly created empty base has no named users yet. The image brings them.
+                let mut args = self.infobase_args(&["restore"]);
+                args.push("--create-database".to_owned());
+                args
+            }
+            RestoreTargetMode::Replace => self.authenticated_infobase_args(&["restore"]),
+        };
+        args.push(source.display().to_string());
+        self.run(&args)
+    }
+
+    fn snapshot_path(&self) -> Result<PathBuf, IbcmdError> {
+        match &self.connection {
+            IbcmdConnection::File { database_path, .. } => Ok(database_path.join("1Cv8.1CD")),
+            IbcmdConnection::Server { .. } => Err(IbcmdError::SnapshotUnsupported),
+        }
+    }
+
+    /// Queries another process's lock without acquiring one that would also block ibcmd.
+    /// `Ok(true)` is a present base no session holds, `Ok(false)` an absent one; a held
+    /// base is [`IbcmdError::SnapshotBusy`].
+    #[cfg(unix)]
+    fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = self.snapshot_path()?;
+        // A malformed target such as a FIFO must fail the metadata check without blocking.
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(IbcmdError::SnapshotProbe { path, source }),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|source| IbcmdError::SnapshotProbe {
+                path: path.clone(),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(IbcmdError::SnapshotProbe {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "expected a regular 1Cv8.1CD file",
+                ),
+            });
+        }
+        match crate::platform::file_base_hold::lock_holder(&file) {
+            Err(source) => Err(IbcmdError::SnapshotProbe { path, source }),
+            Ok(crate::platform::file_base_hold::Hold::Held { pid }) => {
+                Err(IbcmdError::SnapshotBusy { path, pid })
+            }
+            Ok(_) => Ok(true),
+        }
+    }
+
+    /// No session probe is measured off POSIX: the refusal is [`dt_transfer_refusal`]'s.
+    #[cfg(not(unix))]
+    fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
+        dt_transfer_refusal().map_or(Ok(false), Err)
     }
 
     /// Imports a full configuration or extension snapshot into the target infobase.
@@ -442,18 +568,28 @@ impl<'a> IbcmdDsl<'a> {
         }
     }
 
-    /// Applies imported configuration changes to the infobase.
+    /// `config apply [--extension <name>] --force --dynamic=disable`: применяет загруженную
+    /// конфигурацию к базе данных. Динамическое обновление запрещено всегда
+    /// (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`): если обычное невозможно, утилита
+    /// отказывает, и отказ доходит до вызывающего как есть.
     pub fn config_apply(
         &self,
         extension: Option<&str>,
-        dynamic: DynamicUpdateMode,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "apply"]);
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
         args.push("--force".to_owned());
-        push_option_value(&mut args, "--dynamic", dynamic.as_str());
+        args.push("--dynamic=disable".to_owned());
+        match sessions {
+            SessionTerminate::Keep => args.push("--session-terminate=disable".to_owned()),
+            SessionTerminate::Force { message } => {
+                args.push("--session-terminate=force".to_owned());
+                args.push(format!("--session-terminate-message={message}"));
+            }
+        }
         self.run(&args)
     }
 
@@ -479,7 +615,6 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -502,12 +637,7 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        // Цель может быть канонической, а `ibcmd` не находит путь с приставкой `\\?\`.
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         self.run(&args)
     }
 
@@ -526,7 +656,7 @@ impl<'a> IbcmdDsl<'a> {
         args.push("export".to_owned());
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
+        args.push(PACKAGE_EXPORT_THREADS_ARG.to_owned());
         args.push(format!("--file={}", source_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
@@ -544,6 +674,15 @@ impl<'a> IbcmdDsl<'a> {
             push_option_value(&mut args, "--extension", extension);
         }
         args.push(format!("--base={}", version_file.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
+    /// `config export info --out=<каталог>`: один файл версий `ConfigDumpInfo.xml` основной
+    /// конфигурации в каталог `out_dir`. `--out` — каталог, не файл; файл тот же, что пишет
+    /// полная выгрузка и Конфигуратор (замер «Версия формата файла версий», #403). Чтение базы.
+    pub fn config_export_info(&self, out_dir: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "info"]);
+        args.push(format!("--out={}", out_dir.display()));
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
@@ -567,7 +706,6 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -598,6 +736,9 @@ impl<'a> IbcmdDsl<'a> {
         let mut args = self.infobase_args(&["create"]);
         if matches!(self.connection, IbcmdConnection::Server { .. }) {
             args.push("--create-database".to_owned());
+            if let Some(locale) = &self.locale {
+                args.push(format!("--locale={locale}"));
+            }
         }
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
@@ -687,13 +828,16 @@ fn wipes_the_export_directory(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        wipes_the_export_directory, DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdError,
+        wipes_the_export_directory, IbcmdConnection, IbcmdDsl, IbcmdError,
         IbcmdInfobaseCreateStatus,
     };
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
+    #[cfg(not(unix))]
+    use crate::domain::infobase_export::RestoreTargetMode;
     #[cfg(unix)]
     use crate::platform::process::ProcessInterruptionSafety;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -860,13 +1004,89 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_apply(None, DynamicUpdateMode::Auto)
+        dsl.config_apply(None, SessionTerminate::Keep)
             .expect("apply");
 
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("apply"));
         assert!(args.contains("--force"));
-        assert!(args.contains("--dynamic\nauto"));
+        assert!(args.contains("--force\n--dynamic=disable"), "{args}");
+    }
+
+    /// Каждое `config apply` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn config_apply_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None, SessionTerminate::Keep)
+            .expect("apply the configuration");
+        dsl.config_apply(Some("ext"), SessionTerminate::Keep)
+            .expect("apply the extension");
+
+        let requests = runner.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        for (request, extension) in requests.iter().zip([None, Some("ext")]) {
+            let args = &request.args;
+            let apply = args
+                .iter()
+                .position(|arg| arg == "apply")
+                .expect("config apply");
+            assert_eq!(args[apply - 1], "config", "{args:?}");
+            let tail: Vec<&str> = args[apply + 1..].iter().map(String::as_str).collect();
+            let expected: Vec<&str> = match extension {
+                Some(name) => vec![
+                    "--extension",
+                    name,
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
+                None => vec![
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
+            };
+            assert_eq!(tail, expected, "{args:?}");
+        }
+    }
+
+    /// Без принуждения `ibcmd` слышит явный запрет завершать сеансы; с ним — ключ завершения
+    /// и всегда сообщение: без него `ibcmd` с 8.3.25 ждёт ввода
+    /// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[test]
+    fn config_apply_names_what_it_does_with_foreign_sessions() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None, SessionTerminate::Force { message: "bye" })
+            .expect("apply with the sessions ended");
+
+        let requests = runner.requests.borrow();
+        let args = &requests[0].args;
+        let tail: Vec<&str> = args[args.len() - 4..].iter().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "--force",
+                "--dynamic=disable",
+                "--session-terminate=force",
+                "--session-terminate-message=bye"
+            ],
+            "{args:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -926,6 +1146,56 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+        assert!(!args.contains("--threads"), "{args}");
+    }
+
+    /// Страж #481: один поток только у разбора пакета (#476); выгрузка из базы ключа не несёт.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_package_export_is_single_threaded() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let calls_log = dir.path().join("calls.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s ' \"$@\" >> \"{log}\"\nprintf '\\n' >> \"{log}\"\nexit 0",
+                log = calls_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        let target = dir.path().join("xml");
+
+        for extension in [None, Some("ext")] {
+            dsl.config_export_full(&target, extension).expect("full");
+            dsl.config_export_incremental(&target, extension)
+                .expect("incremental");
+        }
+        dsl.config_export_file(&dir.path().join("package.cf"), &target)
+            .expect("package");
+
+        let calls = fs::read_to_string(calls_log).expect("calls");
+        let exports = calls
+            .lines()
+            .filter(|call| call.contains(" export "))
+            .collect::<Vec<_>>();
+        assert_eq!(exports.len(), 5, "{calls}");
+        for call in exports {
+            assert_eq!(
+                call.contains("--threads"),
+                call.contains("--file="),
+                "{call}"
+            );
+            if call.contains("--file=") {
+                assert!(call.contains(" --threads=1 "), "{call}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -973,6 +1243,77 @@ mod tests {
         spawn_error: Option<i32>,
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn dt_transfers_without_a_measured_lock_probe_never_dispatch() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotUnsupported)
+        ));
+        for mode in [RestoreTargetMode::Create, RestoreTargetMode::Replace] {
+            assert!(matches!(
+                dsl.restore_infobase(Path::new("base.dt"), mode),
+                Err(IbcmdError::SnapshotUnsupported)
+            ));
+        }
+        assert!(runner.requests.borrow().is_empty());
+        assert!(matches!(
+            super::dt_transfer_refusal(),
+            Some(IbcmdError::SnapshotUnsupported)
+        ));
+    }
+
+    #[test]
+    fn a_lock_without_an_owning_process_names_an_unknown_holder() {
+        let busy = IbcmdError::SnapshotBusy {
+            path: PathBuf::from("ib/1Cv8.1CD"),
+            pid: None,
+        };
+        let text = busy.to_string();
+        assert!(text.contains("an unknown holder"), "{text}");
+        assert!(!text.contains("-1"), "{text}");
+        let held = IbcmdError::SnapshotBusy {
+            path: PathBuf::from("ib/1Cv8.1CD"),
+            pid: Some(4242),
+        };
+        assert!(held.to_string().contains("process 4242"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_snapshot_source_or_failed_probe_never_dispatches() {
+        let root = tempdir().expect("tempdir");
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            IbcmdConnection::File {
+                database_path: root.path().to_path_buf(),
+                user: None,
+                password: None,
+            },
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotProbe { .. })
+        ));
+        // A directory is not an absent database that restore may create.
+        std::fs::create_dir(root.path().join("1Cv8.1CD")).expect("invalid database");
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotProbe { .. })
+        ));
+        assert!(runner.requests.borrow().is_empty());
+    }
+
     impl ProcessRunner for CapturingRunner {
         fn run_with_policy(
             &self,
@@ -980,7 +1321,19 @@ mod tests {
             _policy: &ProcessExecutionPolicy,
         ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
         {
-            self.requests.borrow_mut().push(request.clone());
+            let mut seen = request.clone();
+            seen.args = crate::support::path::child_line(&request.args, None)
+                .map_err(
+                    |source| crate::platform::process::ProcessError::UnexpressiblePath {
+                        cmd: String::new(),
+                        source,
+                    },
+                )?
+                .args
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect();
+            self.requests.borrow_mut().push(seen);
             if let Some(code) = self.spawn_error {
                 return Err(crate::platform::process::ProcessError::SpawnFailed {
                     cmd: request.args.join(" "),
@@ -1214,7 +1567,6 @@ mod tests {
                 "/ib".to_owned(),
                 "config".to_owned(),
                 "export".to_owned(),
-                "--threads=1".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
             ]
@@ -1275,7 +1627,8 @@ mod tests {
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export\n--threads=1\n--sync\n"), "{args}");
+        assert!(args.contains("export\n--sync\n"), "{args}");
+        assert!(!args.contains("--threads"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }
 
@@ -1371,7 +1724,7 @@ mod tests {
         );
 
         let result = dsl
-            .config_apply(None, DynamicUpdateMode::Auto)
+            .config_apply(None, SessionTerminate::Keep)
             .expect("apply");
 
         assert_eq!(result.process.exit_code, 7);

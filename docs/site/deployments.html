@@ -6,7 +6,7 @@
 <title>v8-runner · Расстановки</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -53,6 +53,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html" aria-current="page">Расстановки</a>
@@ -96,8 +97,9 @@
   <li><a href="variant-containers.html#d-docker-standalone" id="d-docker-standalone">12. Автономный сервер в контейнере</a></li>
   <li><a href="variant-publication.html#d-web-remote" id="d-web-remote">13. Кластер с готовой веб-публикацией</a></li>
   <li><a href="variant-publication.html#d-web-docker" id="d-web-docker">14. Веб-сервер в контейнере</a></li>
-  <li><a href="variant-standalone.html#d-standalone-managed" id="d-standalone-managed">15. Автономный сервер под управлением раннера</a> <span class="plan-badge">План</span></li>
-  <li><a href="variant-cluster.html#d-cluster-managed" id="d-cluster-managed">16. Кластер под управлением раннера</a> <span class="plan-badge">План</span></li>
+  <li><a href="variant-standalone.html#d-standalone-managed" id="d-standalone-managed">15. Автономный сервер под управлением раннера</a></li>
+  <li><a href="variant-cluster.html#d-cluster-managed" id="d-cluster-managed">16. Кластер под управлением раннера</a></li>
+  <li><a href="cli-dbms.html" id="d-managed-dbms">PostgreSQL под управлением раннера</a> у вариантов 15 и 16</li>
 </ul>
 
 <h2 id="d-map">Общая карта</h2>
@@ -186,6 +188,6 @@
   if (routes[anchor]) location.replace(routes[anchor] + location.hash);
 })();
 </script>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 </body>
 </html>

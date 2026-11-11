@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::domain::capability::{self, Operation, Provider, ProviderPlan, TargetKind};
 use crate::domain::execution::ExecutionTimeouts;
 use crate::platform::connection::V8Connection;
+use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, Host};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -19,6 +20,12 @@ pub struct AppConfig {
 
     /// Working directory for temp files and hash storages
     pub work_path: PathBuf,
+
+    /// Личное состояние рабочей копии (`localPath`, по умолчанию `.local`): данные стендов и
+    /// файловая база по умолчанию. Удаление `workPath` его не задевает
+    /// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
+    #[serde(default = "default_local_path")]
+    pub local_path: PathBuf,
 
     /// Source format: DESIGNER or EDT
     #[serde(default = "default_format")]
@@ -159,6 +166,16 @@ pub struct InfobaseConfig {
     /// `ras` — #213, `infobase create` in a cluster — #204).
     #[serde(default)]
     pub cluster: Option<InfobaseClusterConfig>,
+
+    /// Адрес памяти цели, которую поднимает раннер: её порты могут меняться, база — нет
+    /// (`INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME`). Ставит загрузчик.
+    #[serde(skip)]
+    pub managed_memory: Option<String>,
+
+    /// `connection` вывел загрузчик из записи службы раннера, а не объявил пользователь: правило
+    /// «у `cluster.managed` нет `connection`» её не касается.
+    #[serde(skip)]
+    pub connection_projected: bool,
 }
 
 /// The cluster section of a server infobase. Every key is optional: each operation asks
@@ -181,6 +198,10 @@ pub struct InfobaseClusterConfig {
     /// The central server agent and its administrator.
     #[serde(default)]
     pub agent: Option<InfobaseClusterAgentConfig>,
+
+    /// The runner starts this cluster itself; `connection` is not declared next to it.
+    #[serde(default)]
+    pub managed: Option<ManagedServerConfig>,
 }
 
 /// The central server agent (`ragent`) of the cluster and its administrator.
@@ -200,6 +221,27 @@ pub struct InfobaseClusterAgentConfig {
     pub password: Option<String>,
 }
 
+/// `cluster.managed` and `standalone.managed`: a server the runner starts itself.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ManagedServerConfig {
+    /// Name of the infobase on the server, `Ref=`.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// File infobase of a standalone server, relative to the file that declares it.
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+}
+
+impl ManagedServerConfig {
+    /// `Ref=` of the infobase on the server: `name`, or the declared infobase name. The single
+    /// owner of this default for the loader and the service commands.
+    pub fn reference(&self, infobase: &str) -> String {
+        self.name.clone().unwrap_or_else(|| infobase.to_owned())
+    }
+}
+
 /// A standalone server as the target. The Designer goes to its direct gate, declared by
 /// `InfobaseConfig::connection`, and keeps its files on the runner's side; the agent
 /// attaches to its SSH gate and exchanges files through a declared channel, never through
@@ -207,6 +249,10 @@ pub struct InfobaseClusterAgentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct StandaloneConfig {
+    /// The runner starts this server itself; gates and addresses are its own.
+    #[serde(default)]
+    pub managed: Option<ManagedServerConfig>,
+
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
     /// port is required — `ibsrv` listens on 1543 unless told otherwise. Absent: the agent
     /// has no way to the server, and only the Designer serves it.
@@ -443,11 +489,25 @@ pub struct InfobaseWebConfig {
 }
 
 impl InfobaseConfig {
+    /// Сервер этой базы поднимает раннер.
+    pub fn declares_a_managed_server(&self) -> bool {
+        self.standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+            || self
+                .cluster
+                .as_ref()
+                .is_some_and(|cluster| cluster.managed.is_some())
+    }
+
     /// Адрес, к которому привязана память о базе, — без учётных данных и выбора исполнителя.
     /// У цели, которую приняла проверка конфигурации, он есть всегда
     /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
     /// проверка отвергает: такая цель память ни с кем не делит.
     pub fn memory_address(&self, base_path: &Path) -> Option<String> {
+        if let Some(address) = &self.managed_memory {
+            return Some(address.clone());
+        }
         // Автономный сервер помнится по SSH-шлюзу, если он объявлен: так память,
         // записанная до прямого шлюза, переживает появление строки рядом с секцией. Без
         // шлюза сервер помнится по строке прямого шлюза.
@@ -474,6 +534,8 @@ impl InfobaseConfig {
             web: None,
             standalone: None,
             cluster: None,
+            managed_memory: None,
+            connection_projected: false,
         }
     }
 
@@ -536,7 +598,6 @@ impl InfobaseConfig {
     }
 
     /// Build a server-based infobase config.
-    #[cfg(test)]
     pub fn server(connection: impl Into<String>, dbms: InfobaseDbmsConfig) -> Self {
         Self {
             connection: connection.into(),
@@ -546,6 +607,8 @@ impl InfobaseConfig {
             standalone: None,
             dbms: Some(dbms),
             cluster: None,
+            managed_memory: None,
+            connection_projected: false,
         }
     }
 }
@@ -576,6 +639,27 @@ pub struct InfobaseDbmsConfig {
     /// National settings of a new infobase in a cluster: `Locale=` of `CREATEINFOBASE`.
     #[serde(default)]
     pub locale: Option<String>,
+
+    /// The runner starts this PostgreSQL itself; the address and the password are its own.
+    /// An empty key means the same as an empty map.
+    #[serde(default, deserialize_with = "deserialize_present_section")]
+    pub managed: Option<ManagedDbmsConfig>,
+}
+
+/// `dbms.managed`: an empty map, its presence is the declaration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedDbmsConfig {}
+
+/// A key that means something by being there: `managed:` and `managed: {}` are the same.
+fn deserialize_present_section<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Some(
+        Option::<T>::deserialize(deserializer)?.unwrap_or_default(),
+    ))
 }
 
 /// Обязательное поле секции `infobase.dbms`, которого нет: раннер идёт в СУБД сам и берёт
@@ -686,6 +770,7 @@ impl InfobaseDbmsConfig {
         name: impl Into<String>,
     ) -> Self {
         Self {
+            managed: None,
             kind: Some(kind.into()),
             server: Some(server.into()),
             name: Some(name.into()),
@@ -705,6 +790,11 @@ impl InfobaseDbmsConfig {
 }
 
 impl AppConfig {
+    /// Каталог личного состояния этой рабочей копии и проект, которому он принадлежит.
+    pub fn local_dir(&self) -> crate::support::local_dir::LocalDir {
+        crate::support::local_dir::LocalDir::new(&self.local_path, &self.base_path)
+    }
+
     /// Builds a platform-ready 1C connection with infobase credentials applied.
     pub fn v8_connection(&self) -> V8Connection {
         let mut conn = V8Connection::from_connection_string(&self.infobase.connection);
@@ -800,6 +890,43 @@ impl AppConfig {
         }
     }
 
+    /// План операции с учётом её объёма и причина порядка для квитанции.
+    ///
+    /// Без ключа `providers.*` у `push` и `pull` файловой базы раннер упорядочивает цепочку
+    /// по объёму (`capability::chain_for_size`): целиком — `ibcmd` первым, по изменившемуся —
+    /// строка как есть. Ключ остаётся строгим, кластер и автономный сервер держат строку, а
+    /// при подключённом агенте (`tools.designer_agent.attach`) порядок не меняется: запись
+    /// `ibcmd` в базу, открытую чужим Конфигуратором, не замерена. Причина — `Some` только
+    /// там, где порядок выбран по объёму.
+    pub fn provider_plan_sized(
+        &self,
+        operation: Operation,
+        size: capability::OperationSize,
+    ) -> (ProviderPlan, Option<capability::OperationSize>) {
+        let plan = self.provider_plan(operation);
+        if !self.orders_by_size(operation) {
+            return (plan, None);
+        }
+        let ProviderPlan::Default { chain } = plan else {
+            return (plan, None);
+        };
+        (
+            ProviderPlan::Default {
+                chain: capability::chain_for_size(chain, size),
+            },
+            Some(size),
+        )
+    }
+
+    /// Упорядочивает ли объём цепочку операции у этого проекта — единственное место этого
+    /// решения: нет ключа `providers.<операция>`, операция и вид базы такие, что
+    /// `capability::ordered_by_size`, и агент не подключён (`tools.designer_agent.attach`).
+    pub fn orders_by_size(&self, operation: Operation) -> bool {
+        !self.providers.contains_key(&operation)
+            && capability::ordered_by_size(operation, self.target_kind())
+            && self.tools.designer_agent.attach.is_none()
+    }
+
     /// Форма проекта, которая сужает цепочки умолчаний (`capability::serves_project`).
     pub fn project_shape(&self) -> capability::ProjectShape {
         capability::ProjectShape {
@@ -876,6 +1003,13 @@ impl AppConfig {
     }
 }
 
+/// `localPath` по умолчанию: от каталога `v8project.yaml`.
+pub const DEFAULT_LOCAL_PATH: &str = ".local";
+
+fn default_local_path() -> PathBuf {
+    PathBuf::from(DEFAULT_LOCAL_PATH)
+}
+
 fn default_format() -> SourceFormat {
     SourceFormat::Designer
 }
@@ -938,6 +1072,17 @@ pub struct ToolsConfig {
 
     #[serde(default)]
     pub va: VanessaToolConfig,
+
+    #[serde(default)]
+    pub postgres: PostgresToolConfig,
+}
+
+/// The PostgreSQL build for 1C that `dbms start` runs.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, rename_all = "snake_case")]
+pub struct PostgresToolConfig {
+    /// Directory of the build, or its `bin`.
+    pub path: Option<PathBuf>,
 }
 
 /// MCP transport-neutral runtime configuration.
@@ -1241,8 +1386,47 @@ pub struct PlatformToolConfig {
     /// `major.minor.patch.build` format.
     ///
     /// A 2- or 3-part value selects the highest matching version; a 4-part value
-    /// selects an exact build.
-    pub version: Option<String>,
+    /// selects an exact build. `sources` selects the release that writes the format of the
+    /// main Configuration set and refuses when it is not installed.
+    ///
+    /// Разбирается один раз, при загрузке настроек: значение, которое не разбирается, —
+    /// отказ загрузки, и строку дальше никто не читает.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_platform_version",
+        serialize_with = "serialize_platform_version"
+    )]
+    pub version: Option<PlatformVersionSetting>,
+}
+
+fn deserialize_platform_version<'de, D>(
+    deserializer: D,
+) -> Result<Option<PlatformVersionSetting>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| {
+            PlatformVersionSetting::parse(&value).ok_or_else(|| {
+                D::Error::custom(format!(
+                    "platform version must use format major.minor, major.minor.patch or major.minor.patch.build, or be `sources`: {value}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn serialize_platform_version<S>(
+    value: &Option<PlatformVersionSetting>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(setting) => serializer.serialize_some(&setting.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -1343,7 +1527,19 @@ pub struct DesignerAgentConfig {
         rename = "startup_timeout_ms"
     )]
     pub startup_timeout_ms: u64,
+
+    /// Whether the managed agent outlives the command (`live`). Absent: it does; `false`:
+    /// every command removes its own agent, as before the live agent.
+    #[serde(default)]
+    pub live: Option<bool>,
+
+    /// How many live agents one OS account keeps at most (`live-max`). Absent: 2.
+    #[serde(default)]
+    pub live_max: Option<u8>,
 }
+
+/// Live agents one OS account keeps when `live-max` is not declared.
+pub const DEFAULT_LIVE_AGENTS: u8 = 2;
 
 impl Default for DesignerAgentConfig {
     fn default() -> Self {
@@ -1354,6 +1550,8 @@ impl Default for DesignerAgentConfig {
             host_key: None,
             host_fingerprint: None,
             startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
+            live: None,
+            live_max: None,
         }
     }
 }
@@ -1378,7 +1576,24 @@ impl DesignerAgentConfig {
         if self.host_key.is_some() {
             keys.push("host-key");
         }
+        if self.live.is_some() {
+            keys.push("live");
+        }
+        if self.live_max.is_some() {
+            keys.push("live-max");
+        }
         keys
+    }
+
+    /// Whether the managed agent outlives the command: unless `live: false`
+    /// (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
+    pub fn live_enabled(&self) -> bool {
+        self.live != Some(false)
+    }
+
+    /// How many live agents the OS account keeps at most.
+    pub fn live_limit(&self) -> u8 {
+        self.live_max.unwrap_or(DEFAULT_LIVE_AGENTS)
     }
 
     /// Keys that only make sense for an attached agent.
@@ -1452,6 +1667,108 @@ mod tests {
         DesignerAgentConfig, DesignerAgentMode, EdtCliConfig, Host, InfobaseConfig,
         PlatformToolConfig, StandaloneConfig,
     };
+
+    fn project_on(connection: &str) -> super::AppConfig {
+        super::AppConfig {
+            local_path: std::path::PathBuf::from("/tmp/base").join(".local"),
+            base_path: std::path::PathBuf::from("/tmp/base"),
+            work_path: std::path::PathBuf::from("/tmp/work"),
+            format: super::SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file(connection),
+            infobases: Default::default(),
+            infobase_name: None,
+            working_copy: None,
+            source_sets: Vec::new(),
+            tools: super::ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: super::TestsConfig::default(),
+        }
+    }
+
+    /// Без ключа у `push` и `pull` файловой базы цепочку упорядочивает объём (#559): целиком —
+    /// `ibcmd`, агент, Конфигуратор; по изменившемуся — строка матрицы. Квитанция называет
+    /// причину только у такого умолчания: ключ строгий, кластер, подключённый агент и другие
+    /// операции держат свою цепочку без причины.
+    #[test]
+    fn a_file_base_orders_push_and_pull_by_size_without_a_key() {
+        use crate::domain::capability::{Operation, ProviderPlan};
+        use crate::domain::capability::{
+            OperationSize::{ByChanges, Whole},
+            Provider::{Agent, Designer, Ibcmd},
+        };
+        let file = project_on("File=/tmp/ib");
+        for operation in [Operation::Build, Operation::Dump] {
+            assert_eq!(
+                file.provider_plan_sized(operation, Whole),
+                (
+                    ProviderPlan::Default {
+                        chain: vec![Ibcmd, Agent, Designer]
+                    },
+                    Some(Whole)
+                ),
+                "{operation}"
+            );
+            assert_eq!(
+                file.provider_plan_sized(operation, ByChanges),
+                (
+                    ProviderPlan::Default {
+                        chain: vec![Agent, Designer, Ibcmd]
+                    },
+                    Some(ByChanges)
+                ),
+                "{operation}"
+            );
+        }
+        assert_eq!(file.provider_plan_sized(Operation::Apply, Whole).1, None);
+
+        let mut edt = project_on("File=/tmp/ib");
+        edt.format = super::SourceFormat::Edt;
+        assert_eq!(
+            edt.provider_plan_sized(Operation::Build, Whole).0,
+            ProviderPlan::Default {
+                chain: vec![Ibcmd, Designer]
+            },
+            "the project shape still drops the agent"
+        );
+
+        let mut keyed = project_on("File=/tmp/ib");
+        keyed.providers.insert(Operation::Build, Designer);
+        assert_eq!(
+            keyed.provider_plan_sized(Operation::Build, Whole),
+            (
+                ProviderPlan::Override {
+                    provider: Designer,
+                    file: crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()
+                },
+                None
+            )
+        );
+
+        let cluster = project_on("Srvr=host;Ref=base");
+        assert_eq!(
+            cluster.provider_plan_sized(Operation::Build, Whole),
+            (
+                ProviderPlan::Default {
+                    chain: vec![Agent, Designer]
+                },
+                None
+            )
+        );
+
+        let mut attached = project_on("File=/tmp/ib");
+        attached.tools.designer_agent.attach = Some("127.0.0.1:1543".to_owned());
+        assert_eq!(
+            attached.provider_plan_sized(Operation::Dump, Whole),
+            (
+                ProviderPlan::Default {
+                    chain: vec![Agent, Designer, Ibcmd]
+                },
+                None
+            )
+        );
+    }
 
     #[test]
     fn edt_cli_path_is_a_location_unless_it_is_a_bare_name() {

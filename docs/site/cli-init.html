@@ -6,7 +6,7 @@
 <title>init — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=41">
+<link rel="stylesheet" href="styles.css?v=42">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -76,7 +77,7 @@
 <h2 class="command-variant" id="op-init">init</h2>
 <pre data-output-command><code>v8-runner init</code></pre>
 <p>Создаёт <code>v8project.yaml</code> и местный слой <code>v8project.local.yaml</code>, добавляет местный слой в <code>.gitignore</code>. Определяет формат исходников и, если возможно, версию платформы. Платформу не запускает и базу не создаёт.</p>
-<p>По умолчанию записывает <code>workPath: build</code> и объявляет <code>origin</code> с адресом <code>File=build/ib</code>. Это настройка будущей базы; для её создания нужна команда <a href="cli-infobase-create.html#op-infobase-create">infobase create</a>.</p>
+<p>По умолчанию записывает <code>workPath: build</code> и объявляет <code>origin</code> с адресом <code>File=.local/db</code> — файловой базой в <code>localPath</code>, которую удаление <code>workPath</code> не трогает. Это настройка будущей базы; для её создания нужна команда <a href="cli-infobase-create.html#op-infobase-create">infobase create</a>.</p>
 <p>Результаты: <a href="#init-detected">проект записан</a>, <a href="#init-warnings">предупреждения</a>, <a href="#init-existing">существующий проект</a>, <a href="#init-source-invalid">невалидные исходники</a>, <a href="#init-write-failed">ошибка записи</a>.</p>
 <h2 class="command-variant" id="init-infobase">init --infobase</h2>
 <pre data-output-command><code>v8-runner init --infobase 'Srvr=srv:1541;Ref=demo'</code></pre>
@@ -329,7 +330,7 @@ Config written successfully</code></pre>
     }
   }
 }</script>
-<script src="site.js?v=26" defer></script>
+<script src="site.js?v=27" defer></script>
 <script>if (location.hash === '#keys') location.replace('project.html#keys');</script>
 </body>
 </html>

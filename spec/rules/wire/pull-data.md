@@ -1,12 +1,13 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 7
+version: 10
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
   - tests/cli_dump.rs::a_pull_answer_does_not_grow_with_the_losses
+  - tests/contract_receipt.rs::a_file_base_picks_the_executor_by_the_size_of_the_operation
 ---
 
 # `data` команды `pull`
@@ -20,6 +21,23 @@ check:
 
 Размер ответа не растёт с числом файлов в каталоге набора: потери он называет счётом и
 первыми именами, а не каждым путём.
+
+**Что изменила версия 10.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+
+**Что изменила версия 9.** У `mode_reason` новое значение `platform_rewrote_all`: выгрузка
+агента или Конфигуратора с обновлением переписала каждый файл набора, и случившийся режим —
+`FULL` ([правило](../use-cases/the-dump-mode-is-forecast-in-the-same-command.md)). Агент и
+Конфигуратор прогноза больше не спрашивают: `platform_forecast` у них не бывает, а `UNKNOWN` с
+`unknown` означает, что не удался перечень каталога после выгрузки. У `ibcmd` всё прежнее.
+Прежде полную выгрузку агента и Конфигуратора называл прогноз `FullDump`, а выгрузку,
+переписавшую всё при смене версий всех объектов, ответ называл `INCREMENTAL`.
+
+**Что изменила версия 8.** Квитанция `provider` получила необязательное поле `reason` — почему
+цепочка умолчаний стоит в этом порядке: `whole` — каждый набор команды идёт целиком, и первым
+стоит `ibcmd`; `by_changes` — хоть один набор идёт по изменившемуся или выборкой, и первым
+стоит агент ([правило](../use-cases/the-agent-leads-a-default-chain.md)). Поле есть только у
+умолчания файловой базы, которое раннер упорядочил по объёму; у ключа `providers.*`, у кластера,
+автономного сервера и подключённого агента его нет. Прежде объём выбор не менял.
 
 **Что изменила версия 7.** `losses` — объект, а не перечень: `count` — сколько путей
 пропадает, `named` — первые из них, не больше двадцати. Пути прежние: от корня рабочей копии,

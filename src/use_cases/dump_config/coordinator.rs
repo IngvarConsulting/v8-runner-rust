@@ -1,6 +1,6 @@
 use super::helpers::read_dump_generation;
 use super::*;
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::{Operation, OperationSize, Provider};
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
@@ -26,6 +26,22 @@ pub(super) fn run_dump_with_context(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "starting dump"
     );
+    // Отказ несёт форму ответа: без неё конверт `--json-message` не печатается.
+    if let Err(error) = super::refuse_hidden_sets(config, args) {
+        let message = error.to_string();
+        return Err(DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                args.source_set.clone(),
+                args.extension.clone(),
+                None,
+                None,
+                Some(message),
+            ),
+        ));
+    }
 
     if let Some(error) = validate_supported_matrix(config) {
         return Err(DumpExecutionFailure::with_payload(
@@ -99,25 +115,29 @@ pub(super) fn run_dump_with_context(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected =
-        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Dump)
-        {
-            Ok(selected) => selected,
-            Err((error, receipt)) => {
-                let message = error.to_string();
-                let mut result = empty_result(
-                    mode,
-                    started,
-                    args.source_set.clone(),
-                    args.extension.clone(),
-                    selectors.clone(),
-                    None,
-                    Some(message),
-                );
-                result.provider = Some(receipt);
-                return Err(DumpExecutionFailure::with_payload(error, result));
-            }
-        };
+    let size = dump_size(config, &resolved, &mode, &mut utilities);
+    let selected = match crate::use_cases::provider_selection::select_sized(
+        config,
+        &mut utilities,
+        Operation::Dump,
+        size,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let message = error.to_string();
+            let mut result = empty_result(
+                mode,
+                started,
+                args.source_set.clone(),
+                args.extension.clone(),
+                selectors.clone(),
+                None,
+                Some(message),
+            );
+            result.provider = Some(receipt);
+            return Err(DumpExecutionFailure::with_payload(error, result));
+        }
+    };
     if let Some(external) = context.external_full_pull() {
         use crate::use_cases::full_pull_publication::{ExecutorKind, FullPullExecutor};
         let remote = config
@@ -587,10 +607,7 @@ fn run_dump_selected(
                     .designer_context(&resolved.source_set_name)
                     .and_then(|set| {
                         crate::use_cases::exchange_guard::unchanged_since_the_record(
-                            set,
-                            &config.work_path,
-                            provider,
-                            token,
+                            config, set, provider, token,
                         )
                     })
             });
@@ -601,6 +618,20 @@ fn run_dump_selected(
                 true,
             )
         } else {
+            // Начало выгрузки по изменившемуся отмечается в каталоге, куда она ляжет: по нему
+            // память узнаёт записанное, а Конфигуратор, который прогноза не спрашивает, — свой
+            // режим по факту; `ibcmd` режим называет прогнозом. Без поколения до выгрузки
+            // записанное не запоминается: список дерева до неё не нужен.
+            let inventory = SourceSetInventory::new(config);
+            let mark = mark_start(context, &resolved, &plan, partial_objects);
+            let fact_mark = mark.as_ref().filter(|_| provider == Provider::Designer);
+            let watch = generation_before.as_ref().and_then(|_| {
+                dump_watch(
+                    config,
+                    inventory.designer_context(&resolved.source_set_name),
+                    marked_start(mark.as_ref()),
+                )
+            });
             let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
                 (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
                     crate::use_cases::unimplemented_provider(Operation::Dump, other),
@@ -779,38 +810,56 @@ fn run_dump_selected(
                 )),
             };
             let result = result.map(|(platform_result, mut notes)| {
-                let generation_after = if context.external_full_pull().is_some() {
-                    None
-                } else {
-                    generation_before.as_ref().and_then(|_| {
-                        read_dump_generation(
-                            context,
-                            config,
-                            provider,
-                            &binary,
-                            tool_runner,
-                            &resolved,
-                        )
-                    })
-                };
-                let note = context
+                let set = context
                     .external_full_pull()
                     .is_none()
-                    .then(|| {
-                        SourceSetInventory::new(config)
-                            .designer_context(&resolved.source_set_name)
-                            .and_then(|set| {
-                                crate::use_cases::exchange_guard::record_after_dump(
-                                    set,
-                                    &config.work_path,
+                    .then(|| inventory.designer_context(&resolved.source_set_name))
+                    .flatten();
+                // Перечень каталога не ждёт платформу: он идёт, пока она отвечает про
+                // поколение. `watch` есть, только когда поколение до выгрузки прочитано.
+                let (generation_after, observed) = observe_dump_writes_while(
+                    set,
+                    &config.work_path,
+                    fact_mark,
+                    watch.as_ref(),
+                    &|| crate::use_cases::interruption::interruption_pending(context),
+                    || {
+                        if context.external_full_pull().is_some() {
+                            None
+                        } else {
+                            generation_before.as_ref().and_then(|_| {
+                                read_dump_generation(
+                                    context,
+                                    config,
                                     provider,
-                                    generation_before.as_deref(),
-                                    generation_after.as_deref(),
+                                    &binary,
+                                    tool_runner,
+                                    &resolved,
                                 )
                             })
-                    })
-                    .flatten();
+                        }
+                    },
+                );
+                let note = set.and_then(|set| {
+                    merge_optional_messages(
+                        crate::use_cases::exchange_guard::record_after_dump(
+                            config,
+                            set,
+                            provider,
+                            generation_before.as_deref(),
+                            generation_after.as_deref(),
+                        ),
+                        remember_dump_writes(
+                            set,
+                            &config.work_path,
+                            observed.writes,
+                            generation_before.as_deref(),
+                            generation_after.as_deref(),
+                        ),
+                    )
+                });
                 notes.message = merge_optional_messages(notes.message, note);
+                notes.evidence = notes.evidence.or(observed.fact.map(ModeEvidence::Fact));
                 (platform_result.platform_log_path, notes)
             });
             (result, false)
@@ -825,7 +874,7 @@ fn run_dump_selected(
         };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
-        let forecast = notes.forecast;
+        let evidence = notes.evidence;
         let message = merge_optional_messages(
             whole_note,
             merge_optional_messages(
@@ -834,13 +883,13 @@ fn run_dump_selected(
             ),
         );
         let losses = discarded.report();
-        (platform_log_path, message, losses, forecast)
+        (platform_log_path, message, losses, evidence)
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_log_path, cleanup_message, losses, forecast)) => {
-            let (reported, mode_reason) = plan.reported(forecast);
+        Ok((platform_log_path, cleanup_message, losses, evidence)) => {
+            let (reported, mode_reason) = plan.reported(evidence);
             Ok(DumpResult {
                 provider: None,
                 provider_dispatched: false,
@@ -862,7 +911,7 @@ fn run_dump_selected(
         }
         Err(error) => {
             let message = error.to_string();
-            // Отказ называет режим плана и его причину: прогноз до ответа не дошёл.
+            // Отказ называет режим плана и его причину: ни прогноз, ни факт до ответа не дошли.
             let (reported, mode_reason) = plan.reported(None);
             Err(DumpExecutionFailure::with_payload(
                 error,
@@ -951,6 +1000,37 @@ fn platform_of(location: Option<&UtilityLocation>) -> Option<&PlatformVersion> {
         Some(UtilityVersion::Platform(version)) => Some(version),
         Some(UtilityVersion::Edt(_)) | None => None,
     })
+}
+
+/// Объём выгрузки до выбора исполнителя (#559): целиком — `--force` и выгрузка по
+/// изменившемуся, которую план ([`preview_plan`], ничего не пишет) делает полной поверх
+/// каталога: файла версий нет или он чужой. Выборка объектов и выгрузка по файлу версий — по
+/// изменившемуся. Чужой формат файла сверяется с версией платформы найденного `ibcmd` —
+/// того, кого целиком выбрали бы первым; без неё, как и прежде, о чужом формате не судят.
+/// Где порядок цепочки от объёма не зависит, план не строится вовсе.
+fn dump_size(
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    mode: &DumpMode,
+    utilities: &mut PlatformUtilities,
+) -> OperationSize {
+    match mode {
+        DumpMode::Full => return OperationSize::Whole,
+        DumpMode::Partial => return OperationSize::ByChanges,
+        DumpMode::Incremental => {}
+    }
+    if !config.orders_by_size(Operation::Dump) {
+        return OperationSize::ByChanges;
+    }
+    let ibcmd = utilities.locate(UtilityType::Ibcmd).ok();
+    match preview_plan(config, resolved, mode, ibcmd.as_ref()) {
+        Ok(DumpPlan::OverDirectory(OverDirectory::Whole(_)) | DumpPlan::Full) => {
+            OperationSize::Whole
+        }
+        Ok(DumpPlan::OverDirectory(OverDirectory::ByVersionFile) | DumpPlan::Partial) | Err(_) => {
+            OperationSize::ByChanges
+        }
+    }
 }
 
 /// План превью: тот же [`plan_dump`], что у выгрузки, по файлу версий, который оставит в

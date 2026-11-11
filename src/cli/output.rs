@@ -4,7 +4,7 @@ use crate::command_envelope::{Envelope, EnvelopeError, ErrorCode, ErrorKind};
 use crate::output::presenter::Presenter;
 use crate::support::error::CapabilityReason;
 use crate::use_cases::context::CommandName;
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+use crate::use_cases::result::{EnvironmentReason, UseCaseError, UseCaseErrorKind};
 
 pub fn print_command_error(
     presenter: &Presenter,
@@ -64,6 +64,8 @@ fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
         envelope.base_generation = Some(generations.base.clone());
         envelope.local_generation = Some(generations.local.clone());
     }
+    envelope.platform_release = error.platform_release().cloned().map(Box::new);
+    envelope.sessions = error.sessions().cloned().map(Box::new);
     envelope
 }
 
@@ -80,13 +82,27 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
             },
             ErrorKind::Capability,
         ),
-        UseCaseErrorKind::Environment => {
-            (ErrorCode::EnvironmentUnavailable, ErrorKind::Environment)
-        }
+        UseCaseErrorKind::Environment(reason) => (
+            match reason {
+                EnvironmentReason::Unavailable => ErrorCode::EnvironmentUnavailable,
+                EnvironmentReason::PlatformReleaseMissing => ErrorCode::PlatformReleaseMissing,
+            },
+            ErrorKind::Environment,
+        ),
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseBusy => (ErrorCode::InfobaseBusy, ErrorKind::Workspace),
+        UseCaseErrorKind::InfobaseSessions => (ErrorCode::InfobaseSessions, ErrorKind::Workspace),
+        UseCaseErrorKind::InfobaseDesignerBusy => {
+            (ErrorCode::InfobaseDesignerBusy, ErrorKind::Workspace)
+        }
         UseCaseErrorKind::NonFastForward => (ErrorCode::NonFastForward, ErrorKind::NonFastForward),
-        UseCaseErrorKind::NoMemory => (ErrorCode::NoMemory, ErrorKind::NoMemory),
+        UseCaseErrorKind::UntrackedBase => (ErrorCode::UntrackedBase, ErrorKind::UntrackedBase),
+        UseCaseErrorKind::AgentLimit => (ErrorCode::AgentLimit, ErrorKind::Environment),
+        UseCaseErrorKind::LiveAgentOff => (ErrorCode::LiveAgentOff, ErrorKind::Capability),
+        UseCaseErrorKind::LiveAgentJob => (ErrorCode::LiveAgentJob, ErrorKind::Environment),
+        UseCaseErrorKind::SourceSetIgnoredByGit => {
+            (ErrorCode::SourceSetIgnoredByGit, ErrorKind::Validation)
+        }
         UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
         UseCaseErrorKind::Cancelled(_) => (ErrorCode::Cancelled, ErrorKind::Interruption),
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),

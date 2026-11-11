@@ -1,7 +1,12 @@
 ---
 id: INV.USE-CASES.IBCMD-TAKES-A-DT-ONLY-WITH-EXCLUSIVE-ACCESS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/226
+check:
+  - tests/cli_infobase.rs::a_busy_ibcmd_dt_transfer_names_the_holder_and_dispatches_nothing
+  - tests/cli_infobase.rs::ibcmd_dumps_dt_only_when_the_file_infobase_has_no_sessions
+  - tests/cli_infobase.rs::ibcmd_restores_an_existing_or_new_file_infobase
+  - tests/cli_infobase.rs::a_failed_ibcmd_dump_preserves_the_published_snapshot
+  - src/platform/ibcmd.rs::a_missing_snapshot_source_or_failed_probe_never_dispatches
+  - src/platform/ibcmd.rs::dt_transfers_without_a_measured_lock_probe_never_dispatch
 ---
 
 # `ibcmd` снимает и загружает `.dt` только у файловой базы без сеансов
@@ -16,3 +21,6 @@ infobase dump` или `ibcmd infobase restore` и называет процес�
 пускает новых клиентов на этой фазе. Решение об отказе раннер принимает по состоянию
 блокировки, а не по тексту вывода платформы. Проверка — на POSIX; на Windows `ibcmd` для
 `.dt` файловой базы не исполняется, пока признак там не замерен.
+
+Командные строки и блокировки на Linux замерены на 8.5.1.1343
+([замер](../../../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux)).

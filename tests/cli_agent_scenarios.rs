@@ -203,7 +203,11 @@ fn a_managed_agent_session_is_named_in_the_receipt() {
     assert_eq!(receipt["selected"], "agent", "{payload}");
     assert_eq!(
         receipt["endpoint"],
-        serde_json::json!({"mode": "managed", "address": format!("127.0.0.1:{}", harness.port)}),
+        serde_json::json!({
+            "mode": "managed",
+            "address": format!("127.0.0.1:{}", harness.port),
+            "live": {"reused": false, "holders": [], "kept": true},
+        }),
         "{payload}"
     );
     assert!(
@@ -394,6 +398,49 @@ fn infobase_restore_through_the_agent_survives_the_agent_closing_the_session() {
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
         "the DT copy is withdrawn"
+    );
+}
+
+/// Загрузка базы снимает простаивающего живого агента этой базы: его ключ больше ничему не
+/// отвечает, и `restore` работает с новым агентом
+/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+#[test]
+fn infobase_restore_removes_the_idle_live_agent_of_its_infobase() {
+    let harness = harness();
+    let (code, payload) = run(&harness, &["extensions", "list"]);
+    assert_eq!(code, 0, "{payload}");
+    let before: u32 = read_or_empty(&harness.dir.path().join("designer.pid"))
+        .trim()
+        .parse()
+        .expect("designer pid");
+    assert!(
+        process_is_alive(before),
+        "the live agent outlives the command"
+    );
+    let input = harness.dir.path().join("transfer").join("base.dt");
+    fs::create_dir_all(input.parent().unwrap()).expect("transfer");
+    fs::write(&input, "payload-42").expect("dt");
+
+    let (code, payload) = run(
+        &harness,
+        &[
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        !process_is_alive(before),
+        "the idle live agent of the restored infobase is removed"
+    );
+    assert_eq!(
+        read_or_empty(&harness.designer_args_log).lines().count(),
+        2,
+        "the restore launched its own agent"
     );
 }
 
@@ -1007,31 +1054,15 @@ fn a_cancellation_during_a_language_refusal_stops_the_synonym_forms() {
     assert_eq!(create_commands(&harness).len(), 1, "{payload}");
 }
 
-/// Агент 8.3.24 не выполняет `common shutdown`: не отвечает и не выходит. Команду ему отдают, но
-/// полные сроки закрытия, 45 с, не ждут, и исход команды от этого не меняется.
-#[test]
-fn an_agent_of_a_platform_ignoring_shutdown_is_not_awaited() {
-    let marks = temp_workspace();
-    let held = hold(&marks, "common shutdown", HoldReply::Normal);
-    let started = held.started.clone();
-    let harness = harness_speaking(
-        None,
-        EVERY_AGENT_PROVIDER,
-        Some(held),
-        &["ru", "en"],
-        "8.3.24.1819",
-    );
+/// Разовый агент, как до живого: тест проверяет его подъём и снятие на каждую команду.
+/// Конфигурация кончается блоком `tools.designer_agent`, и ключ ложится в него.
+fn one_shot(harness: &Harness) {
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(&harness.config_path, format!("{config}    live: false\n")).expect("live off");
+}
 
-    let began = std::time::Instant::now();
-    let (code, payload) = run(&harness, &["extensions", "list"]);
-
-    assert_eq!(code, 0, "{payload}");
-    assert!(started.exists(), "common shutdown was not sent: {payload}");
-    assert!(
-        began.elapsed() < std::time::Duration::from_secs(20),
-        "{:?}",
-        began.elapsed()
-    );
+/// Процесс агента, поднятого раннером, после команды снят.
+fn assert_agent_removed(harness: &Harness) {
     let pid = read_or_empty(&harness.dir.path().join("designer.pid"));
     let pid = pid.trim();
     let alive = process_is_alive(pid.parse().expect("designer pid"));
@@ -1041,6 +1072,83 @@ fn an_agent_of_a_platform_ignoring_shutdown_is_not_awaited() {
             .status();
     }
     assert!(!alive, "the agent process was left running");
+}
+
+/// Агента, которого поднял раннер, после работы отпускают `common disconnect-ib` и снимают,
+/// не отдавая `common shutdown` и не дожидаясь выхода, — на любой версии. Даже молчащий
+/// `disconnect-ib` держит команду лишь коротким сроком, а не полными сроками закрытия.
+#[test]
+fn a_managed_agent_is_released_and_removed_whatever_its_version() {
+    for platform in ["8.3.24.1819", "8.3.27.2342", "8.5.4.1"] {
+        let marks = temp_workspace();
+        let held = hold(&marks, "common disconnect-ib", HoldReply::Normal);
+        let started = held.started.clone();
+        let harness = harness_speaking(
+            None,
+            EVERY_AGENT_PROVIDER,
+            Some(held),
+            &["ru", "en"],
+            platform,
+        );
+        one_shot(&harness);
+
+        let began = std::time::Instant::now();
+        let (code, payload) = run(&harness, &["extensions", "list"]);
+
+        assert_eq!(code, 0, "{platform}: {payload}");
+        assert!(
+            started.exists(),
+            "{platform}: common disconnect-ib was not sent"
+        );
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(20),
+            "{platform}: {:?}",
+            began.elapsed()
+        );
+        let commands = read_or_empty(&harness.commands_log);
+        assert!(
+            !commands.lines().any(|line| line == "common shutdown"),
+            "{platform}: {commands}"
+        );
+        assert_agent_removed(&harness);
+    }
+}
+
+/// Отказ `common disconnect-ib` снятия процесса не отменяет и исхода команды не подменяет:
+/// удачная команда остаётся удачной, отказ команды остаётся её собственным отказом.
+#[test]
+fn a_refused_release_keeps_the_outcome_and_still_removes_the_agent() {
+    for (arguments, succeeds) in [
+        (&["extensions", "list"][..], true),
+        (&["extensions", "delete", "--name", "Нет"][..], false),
+    ] {
+        let marks = temp_workspace();
+        let held = hold(&marks, "common disconnect-ib", HoldReply::Error);
+        // Отпущен заранее: двойник отвечает отказом сразу.
+        fs::write(&held.release, "").expect("release");
+        let started = held.started.clone();
+        let harness = harness_speaking(
+            None,
+            EVERY_AGENT_PROVIDER,
+            Some(held),
+            &["ru", "en"],
+            "8.3.27.2342",
+        );
+        one_shot(&harness);
+
+        let (code, payload) = run(&harness, arguments);
+
+        assert!(
+            started.exists(),
+            "{arguments:?}: common disconnect-ib was not sent"
+        );
+        assert_eq!(code == 0, succeeds, "{arguments:?}: {payload}");
+        if !succeeds {
+            let text = payload.to_string();
+            assert!(!text.contains("disconnect"), "{arguments:?}: {payload}");
+        }
+        assert_agent_removed(&harness);
+    }
 }
 
 /// Строки журнала, которых ждут тесты, — те же, что пишет раннер: переименование падает
