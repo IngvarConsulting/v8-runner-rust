@@ -616,11 +616,12 @@ fn a_build_without_changes_opens_no_session() {
 }
 
 /// Отправка, которой грузить нечего, может поднять живого агента заранее и подключить его к базе,
-/// пока идёт разбор, но работы ему не даёт: кроме подключения, агент ничего не получает
-/// (#644, `INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`,
+/// пока идёт разбор. Подключение живёт с агентом, а не с работой: оно остаётся, а работы агент не
+/// получает — кроме подключения, ему ничего не приходит (#644,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`,
 /// `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
 #[test]
-fn a_push_with_nothing_to_load_gives_an_early_agent_no_work() {
+fn a_push_with_nothing_to_load_leaves_the_early_agent_connected_without_work() {
     let harness = harness();
     let (first, payload) = run(&harness, &["build"]);
     assert_eq!(first, 0, "{payload}");

@@ -1126,6 +1126,63 @@ fn a_critical_command_on_a_stale_connection_is_not_repeated_and_the_next_session
     assert_eq!(log.matches("common connect-ib").count(), 2, "{log}");
 }
 
+/// Некритическая команда, которая на устаревшем подключении успела прислать ход, прежде чем
+/// отказала, не повторяется (часть ответа уже у команды), но следующая сессия подключается
+/// заново (#644).
+#[test]
+fn a_streamed_read_on_a_stale_connection_marks_it_for_the_next_session() {
+    let (bench, stale) = Bench::with_server(false, |agent| {
+        let connected = Arc::clone(&agent.connected);
+        agent.require_connection.store(true, Ordering::SeqCst);
+        serve_managed_launches(agent, None);
+        connected
+    });
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    stale.store(false, Ordering::SeqCst);
+
+    let frames = keeper.once("config dump-config-to-files --dir dump");
+    assert!(
+        format!("{frames:?}").contains("DesignerNotConnectedToInfoBase"),
+        "{frames:?}"
+    );
+    let frames = keeper.once("config generation-id");
+
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(
+        log.matches("config dump-config-to-files").count(),
+        1,
+        "a streamed answer is not repeated: {log}"
+    );
+    assert_eq!(log.matches("common connect-ib").count(), 2, "{log}");
+}
+
+/// `attach` с отпечатком других учётных данных агента не подключает: сторож отказывает и снимает
+/// агента, как при `begin` (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`).
+#[test]
+fn an_attach_with_other_credentials_removes_the_agent() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start_idle(&bench, 600_000);
+    ready(&keeper);
+    let refused = keeper.last(json!({
+        "op": "attach",
+        "credentials": digest(&keeper.state, "", "another password"),
+    }));
+    assert_eq!(
+        refused["error"]["error"], "credentials_mismatch",
+        "{refused}"
+    );
+    assert!(
+        keeper.exited_within(GONE_WITHIN),
+        "the keeper removed the agent"
+    );
+    let log = fs::read_to_string(&bench.commands_log).unwrap_or_default();
+    assert!(!log.contains("common connect-ib"), "{log}");
+}
+
 /// Команда, ушедшая без `end`, не оставляет агента подключённым к базе: сторож не знает, в каком
 /// состоянии она его оставила, отключает его сам, и агент остаётся следующей команде
 /// (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
@@ -1193,6 +1250,8 @@ fn a_conditional_stop_spares_an_agent_in_use() {
     assert_eq!(status["connected"], true, "{status}");
     assert_eq!(status["closing"], false, "{status}");
     assert_eq!(keeper.end(session)["frame"], "ended");
+    // Агент остаётся подключённым к базе, но не занят: пересоздание его снимет.
+    assert_eq!(ready(&keeper)["attached"], true);
 
     let until = now_ms() + 600_000;
     let held =

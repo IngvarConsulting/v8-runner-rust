@@ -163,8 +163,7 @@ enum Job {
     End {
         session: String,
         reply: Option<oneshot::Sender<()>>,
-        /// Команда ушла без `end`: агента отключают от базы, его состояние неизвестно.
-        abandoned: bool,
+        how: SessionEnd,
     },
     Attach {
         reply: oneshot::Sender<Result<Vec<AgentMessage>, KeeperError>>,
@@ -173,6 +172,26 @@ enum Job {
         reply: oneshot::Sender<Result<bool, KeeperError>>,
     },
     Close,
+}
+
+/// Как кончилась сессия команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+    /// Команда закрыла её строкой `end`: агент остаётся подключённым к базе.
+    Closed,
+    /// Команда ушла без `end`: в каком состоянии она оставила агента, неизвестно, и его
+    /// отключают от базы.
+    Abandoned,
+}
+
+/// Что сессия команды делает с подключением агента в начале.
+enum Connection {
+    /// Берёт подключение, оставшееся от прежней сессии.
+    Kept,
+    /// Подключение под подозрением: агента отключают и подключают заново.
+    Suspect,
+    /// Агент не подключён: его подключают.
+    Absent,
 }
 
 struct Shared {
@@ -439,9 +458,9 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
             Job::End {
                 session,
                 reply,
-                abandoned,
+                how,
             } => {
-                end_session(shared, &mut agent, &session, abandoned);
+                end_session(shared, &mut agent, &session, how);
                 if let Some(reply) = reply {
                     let _ = reply.send(());
                 }
@@ -466,7 +485,7 @@ fn begin_session(
     agent: &mut ManagedAgent,
     session: String,
 ) -> Result<Vec<AgentMessage>, KeeperError> {
-    let attached = {
+    let connection = {
         let mut state = shared.lock();
         if state.close_requested || state.stop_requested {
             return Err(KeeperError::Closing);
@@ -478,22 +497,25 @@ fn begin_session(
         }
         // Сессия открыта с этой минуты: простой её не снимет и пока агент подключается.
         state.fresh_until = None;
-        let stale = state.attached && std::mem::take(&mut state.reconnect);
-        let attached = state.attached && !stale;
+        let connection = match (state.attached, std::mem::take(&mut state.reconnect)) {
+            (true, false) => Connection::Kept,
+            (true, true) => Connection::Suspect,
+            (false, _) => Connection::Absent,
+        };
         state.session = Some(Session {
             id: session,
             last: None,
-            reused: attached,
+            reused: matches!(connection, Connection::Kept),
         });
-        (attached, stale)
+        connection
     };
-    match attached {
-        (true, _) => {
+    match connection {
+        Connection::Kept => {
             debug!("the command session takes the connection left by the previous one");
             return Ok(Vec::new());
         }
-        (false, true) => drop_connection(shared, agent),
-        (false, false) => {}
+        Connection::Suspect => drop_connection(shared, agent),
+        Connection::Absent => {}
     }
     connect(shared, agent).inspect_err(|_| {
         let mut state = shared.lock();
@@ -576,18 +598,27 @@ fn disconnect(shared: &Shared, agent: &mut ManagedAgent) -> Result<bool, KeeperE
 }
 
 /// Отключает агента от базы. Отказ, после которого сессия SSH не годится, снимает агента.
+/// Агент, который отключения не подтвердил, а сессию сохранил, считается подключённым: следующее
+/// подключение он примет ответом «уже подключён».
 fn drop_connection(shared: &Shared, agent: &mut ManagedAgent) {
-    if let Err(error) = agent
+    let disconnected = match agent
         .session()
         .disconnect_infobase(&WaitPolicy::for_keeper_release())
     {
-        warn!(%error, "the live agent did not confirm common disconnect-ib");
-        if breaks_the_session(&error) {
-            shared.request_close("the agent session broke off");
+        Ok(()) => true,
+        Err(error) => {
+            warn!(%error, "the live agent did not confirm common disconnect-ib");
+            let broken = breaks_the_session(&error);
+            if broken {
+                shared.request_close("the agent session broke off");
+            }
+            broken
         }
-    }
+    };
     let mut state = shared.lock();
-    state.attached = false;
+    if disconnected {
+        state.attached = false;
+    }
     state.reconnect = false;
 }
 
@@ -595,10 +626,10 @@ fn drop_connection(shared: &Shared, agent: &mut ManagedAgent) {
 const CONNECT: &str = "common connect-ib";
 
 /// Конец сессии команды. Агент остаётся подключённым к базе (#644); команда, ушедшая без `end`
-/// (`abandoned`), могла оставить агента в любом состоянии, и сторож отключает его. Агента,
+/// ([`SessionEnd::Abandoned`]), могла оставить агента в любом состоянии, и сторож отключает его. Агента,
 /// которого снимают, не отключают: его сессия могла оборваться посреди ответа, а снятие само
 /// его отпустит.
-fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str, abandoned: bool) {
+fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str, how: SessionEnd) {
     let removing = {
         let state = shared.lock();
         if state.session.as_ref().is_none_or(|open| open.id != session) {
@@ -606,7 +637,7 @@ fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str, abandon
         }
         state.close_requested || state.stop_requested
     };
-    if abandoned && !removing {
+    if how == SessionEnd::Abandoned && !removing {
         drop_connection(shared, agent);
     }
     let mut state = shared.lock();
@@ -727,9 +758,10 @@ fn run_command(
         if let Some(held) = held.take() {
             forward(&held);
         }
-        // Критическую команду не повторяют; если она первой упала на старом подключении,
+        // Критическую команду не повторяют, некритическую с ответом из нескольких массивов —
+        // тоже (часть ответа уже у команды); если такая первой упала на старом подключении,
         // следующая сессия подключается заново.
-        if first_on_kept && critical && stale {
+        if first_on_kept && stale {
             warn!(%command, "the first command on the kept connection failed: the next session reconnects to the infobase");
             shared.lock().reconnect = true;
         }
@@ -1126,7 +1158,7 @@ where
         shared.send(Job::End {
             session,
             reply: None,
-            abandoned: true,
+            how: SessionEnd::Abandoned,
         });
         return;
     }
@@ -1140,7 +1172,7 @@ where
         if shared.send(Job::End {
             session,
             reply: Some(reply),
-            abandoned: false,
+            how: SessionEnd::Closed,
         }) {
             let _ = done.await;
         }
@@ -1150,7 +1182,7 @@ where
         shared.send(Job::End {
             session,
             reply: None,
-            abandoned: true,
+            how: SessionEnd::Abandoned,
         });
     }
 }

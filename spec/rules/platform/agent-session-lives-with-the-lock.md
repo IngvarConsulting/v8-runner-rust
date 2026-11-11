@@ -3,7 +3,7 @@ id: INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK
 check:
   - tests/cli_build_agent.rs::a_managed_build_loads_and_updates_in_one_session_and_records_the_generation
   - tests/cli_build_agent.rs::a_build_without_changes_opens_no_session
-  - tests/cli_build_agent.rs::a_push_with_nothing_to_load_gives_an_early_agent_no_work
+  - tests/cli_build_agent.rs::a_push_with_nothing_to_load_leaves_the_early_agent_connected_without_work
   - tests/architecture_guardrails.rs::every_scenario_is_dispatched_under_the_workspace_lock
 ---
 

@@ -13,6 +13,7 @@ check:
   - src/use_cases/apply/act.rs::a_file_base_open_in_the_designer_is_refused_as_designer_busy
   - src/use_cases/apply/act.rs::an_agent_update_always_forbids_dynamic_update
   - src/use_cases/apply/sessions.rs::the_agent_is_held_by_sessions_only_by_its_error_type_or_its_question
+  - src/use_cases/apply/sessions.rs::a_sessions_refusal_names_the_connected_live_agents_and_agent_release
   - src/use_cases/apply/sessions.rs::a_file_base_never_gets_the_key_that_ends_sessions
   - src/use_cases/apply/sessions.rs::a_relative_quoted_file_base_is_probed_where_the_platform_opens_it
   - src/use_cases/apply/sessions.rs::a_server_is_held_by_the_awake_sessions_of_its_own_list

@@ -392,10 +392,11 @@ impl EarlyAgent {
             launch,
             credentials,
         } = live_target(config, v8, port).ok()?;
-        // Базу, подключённую к живому агенту другого ключа, свой агент не получит: тот
-        // отключается до раннего подключения (#644).
-        release_live_connections(config, context.command().as_str(), Some(&key));
         let limit = agent.live_limit();
+        // Базу, подключённую к живому агенту другого ключа, свой агент не получит: тот
+        // отключается до раннего подключения (#644) — в потоке подъёма, не задерживая разбор.
+        let infobase = canonical_infobase(config);
+        let command = context.command().as_str();
         let cancel = context.cancellation();
         // Отмена команды останавливает и ожидание: `stop` — её дочерний знак.
         let stop = cancel.child_token();
@@ -406,6 +407,14 @@ impl EarlyAgent {
             .name("live-agent-start".to_owned())
             .spawn(move || {
                 span.in_scope(|| {
+                    crate::use_cases::infobase_lock::release_idle_connections_of(
+                        &infobase,
+                        command,
+                        Some(&thread_key),
+                    )
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "a live agent of this infobase stays connected to it");
+                    });
                     tracing::debug!(session = ?session, "starting the live agent while the command prepares");
                     KeeperClient::start_early(
                         &thread_key,
@@ -664,10 +673,12 @@ struct LiveKeyParts {
     platform: String,
     user: String,
     work_path: String,
+    /// Сборка раннера: сторож другой сборки той же версии не берётся (#644).
+    build: String,
 }
 
 impl LiveKeyParts {
-    fn as_parts(&self) -> [&str; 6] {
+    fn as_parts(&self) -> [&str; 7] {
         [
             "live-agent",
             &self.address,
@@ -675,6 +686,7 @@ impl LiveKeyParts {
             &self.user,
             &self.work_path,
             env!("CARGO_PKG_VERSION"),
+            &self.build,
         ]
     }
 }
@@ -686,6 +698,7 @@ fn live_key_parts(config: &AppConfig, v8: &Path) -> LiveKeyParts {
         platform: hex(v8.as_os_str().as_encoded_bytes()),
         user: connection.user.clone().unwrap_or_default(),
         work_path: hex(config.work_path.as_os_str().as_encoded_bytes()),
+        build: crate::platform::agent_keeper::client::build_stamp(),
     }
 }
 
@@ -1890,6 +1903,30 @@ impl GenerationLedger {
 
 #[cfg(test)]
 mod tests {
+    /// Сторож другой сборки той же версии раннера говорит другим протоколом: его ключ другой, и
+    /// команда его не берёт (#644, `INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`).
+    #[test]
+    fn a_live_agent_of_another_build_has_another_key() {
+        let state = tempfile::tempdir().expect("state");
+        let parts = |build: &str| super::LiveKeyParts {
+            address: "File=ib".to_owned(),
+            platform: "70".to_owned(),
+            user: String::new(),
+            work_path: "77".to_owned(),
+            build: build.to_owned(),
+        };
+        let key = |build: &str| {
+            crate::support::machine::account::account_key(state.path(), &parts(build).as_parts())
+                .expect("key")
+        };
+        assert_eq!(key("aa"), key("aa"));
+        assert_ne!(key("aa"), key("bb"));
+        assert!(
+            !crate::platform::agent_keeper::client::build_stamp().is_empty(),
+            "the running test binary has a build stamp"
+        );
+    }
+
     use super::*;
 
     /// Агент, поднятый заранее и не взятый командой, снимается за ограниченное время: снятие

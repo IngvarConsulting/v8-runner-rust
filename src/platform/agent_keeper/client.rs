@@ -1627,22 +1627,7 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
         .file_name()
         .ok_or_else(|| std::io::Error::other("the runner executable has no file name"))?
         .to_owned();
-    let metadata = std::fs::metadata(&source)?;
-    let modified = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let stamp = {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::new()
-            .chain_update(metadata.len().to_be_bytes())
-            .chain_update(modified.to_be_bytes())
-            .finalize();
-        digest[..6]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
+    let stamp = stamp_of(&source)?;
     let dir = state
         .join("bin")
         .join(env!("CARGO_PKG_VERSION"))
@@ -1671,6 +1656,34 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
             Err(error)
         }
     }
+}
+
+/// Отметка сборки исполняемого файла `path`: его размер и время изменения. Два файла одной
+/// версии раннера из разных сборок получают разные отметки.
+fn stamp_of(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let metadata = std::fs::metadata(path)?;
+    let modified = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let digest = Sha256::new()
+        .chain_update(metadata.len().to_be_bytes())
+        .chain_update(modified.to_be_bytes())
+        .finalize();
+    Ok(digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Отметка сборки этого раннера — часть ключа живого агента: сторож другой сборки той же версии
+/// говорит другим протоколом, и команда его не берёт (#644). Файла не прочитать — пусто: ключ
+/// тогда различает только версию.
+pub fn build_stamp() -> String {
+    std::env::current_exe()
+        .and_then(|exe| stamp_of(&exe))
+        .unwrap_or_default()
 }
 
 /// Убирает копии раннера под `<state>/bin`, кроме `current` и тех, из которых работает живой

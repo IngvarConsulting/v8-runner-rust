@@ -366,9 +366,16 @@ impl FakeAgent {
         }
         if self.require_connection.load(Ordering::SeqCst) && !self.connected.load(Ordering::SeqCst)
         {
+            // Долгая команда успевает прислать ход, прежде чем откажет.
+            let progress = if line.starts_with("config dump-config-to-files") {
+                "[{\"type\":\"progress\",\"body\":{\"message\":\"Выгрузка\",\"percent\":0}}]\n"
+            } else {
+                ""
+            };
             return (
-                "[{\"type\":\"error\",\"error-type\":\"DesignerNotConnectedToInfoBase\",\"message\":\"Конфигуратор не подключен к информационной базе\"}]
-".to_owned(),
+                format!(
+                    "{progress}[{{\"type\":\"error\",\"error-type\":\"DesignerNotConnectedToInfoBase\",\"message\":\"Конфигуратор не подключен к информационной базе\"}}]\n"
+                ),
                 false,
             );
         }

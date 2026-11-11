@@ -161,32 +161,34 @@ pub(crate) fn settle_live_agents(
             }
         }
     }
-    if agents == LiveAgents::Disconnect {
-        disconnect_attached(found, None, Some(&busy))?;
-        return Ok(removed);
+    match agents {
+        LiveAgents::Keep => return Ok(removed),
+        LiveAgents::Disconnect => {
+            disconnect_attached(found, None, Some(&busy))?;
+            return Ok(removed);
+        }
+        LiveAgents::Remove => {}
     }
-    if agents == LiveAgents::Remove {
-        // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
-        // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
-        for (keeper, status) in found {
-            match keeper
-                .client
-                .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
-            {
-                Ok(Stopped::Removed) => {
-                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed");
-                    removed.push(status.ok().and_then(|status| status.agent_pid));
-                }
-                Ok(Stopped::Pending) => {
-                    tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
-                }
-                Ok(Stopped::InUse { command, holders }) => {
-                    let agent_pid = status.ok().and_then(|status| status.agent_pid);
-                    return Err(busy(agent_pid, command.as_deref(), &holders));
-                }
-                Err(error) => {
-                    tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
-                }
+    // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
+    // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
+    for (keeper, status) in found {
+        match keeper
+            .client
+            .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
+        {
+            Ok(Stopped::Removed) => {
+                tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed");
+                removed.push(status.ok().and_then(|status| status.agent_pid));
+            }
+            Ok(Stopped::Pending) => {
+                tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
+            }
+            Ok(Stopped::InUse { command, holders }) => {
+                let agent_pid = status.ok().and_then(|status| status.agent_pid);
+                return Err(busy(agent_pid, command.as_deref(), &holders));
+            }
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
             }
         }
     }
@@ -216,11 +218,20 @@ pub(crate) fn release_idle_connections(
     command_name: &str,
     keep: Option<&str>,
 ) -> Result<(), AppError> {
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    release_idle_connections_of(&infobase, command_name, keep)
+}
+
+/// То же для базы `infobase` в каноническом виде: без конфига, для потока раннего подъёма.
+pub(crate) fn release_idle_connections_of(
+    infobase: &str,
+    command_name: &str,
+    keep: Option<&str>,
+) -> Result<(), AppError> {
     let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
         return Ok(());
     };
-    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
+    let found = crate::platform::agent_keeper::client::keepers_of(&state, infobase);
     let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
         AppError::InfobaseBusy(format!(
             "cannot start {command_name}: infobase '{infobase}' is in use: {}; retry when it finishes",
@@ -318,25 +329,35 @@ fn disconnect_attached(
 pub(crate) fn attached_live_agents_hint(config: &AppConfig) -> Option<String> {
     let state = crate::support::machine::account::existing_account_state_dir()?;
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    let attached: Vec<String> =
+    let attached: Vec<(Option<u32>, Option<String>)> =
         crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
             .into_iter()
             .filter_map(|(keeper, status)| {
                 let status = status.ok().filter(|status| status.attached)?;
-                let work_path = keeper.client.work_path();
-                Some(format!(
-                    "the live Designer agent (pid {}{}) stays connected to it",
-                    status
-                        .agent_pid
-                        .map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
-                    work_path.map_or_else(String::new, |path| format!(", workPath '{path}'")),
-                ))
+                Some((status.agent_pid, keeper.client.work_path()))
             })
             .collect();
-    (!attached.is_empty()).then(|| {
+    attached_agents_text(&attached)
+}
+
+/// Текст о подключённых живых агентах: pid и рабочая копия каждого и выход `agent release`.
+pub(crate) fn attached_agents_text(agents: &[(Option<u32>, Option<String>)]) -> Option<String> {
+    let named: Vec<String> = agents
+        .iter()
+        .map(|(pid, work_path)| {
+            format!(
+                "the live Designer agent (pid {}{}) stays connected to it",
+                pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+                work_path
+                    .as_deref()
+                    .map_or_else(String::new, |path| format!(", workPath '{path}'")),
+            )
+        })
+        .collect();
+    (!named.is_empty()).then(|| {
         format!(
             "{}; `v8-runner agent release` in its working copy disconnects it",
-            attached.join("; ")
+            named.join("; ")
         )
     })
 }

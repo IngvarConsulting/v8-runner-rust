@@ -2,8 +2,9 @@
 id: INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES
 check:
   - tests/agent_keeper.rs::an_agent_started_idle_connects_only_when_a_session_begins
-  - tests/cli_build_agent.rs::a_push_with_nothing_to_load_gives_an_early_agent_no_work
+  - tests/cli_build_agent.rs::a_push_with_nothing_to_load_leaves_the_early_agent_connected_without_work
   - tests/agent_keeper.rs::an_attach_connects_without_a_session_and_the_session_takes_it
+  - tests/agent_keeper.rs::an_attach_with_other_credentials_removes_the_agent
   - tests/cli_live_agent.rs::a_pull_the_guard_refuses_answers_alike_and_sends_the_platform_no_work
   - src/use_cases/agent_session.rs::an_early_agent_the_command_did_not_take_is_let_go_at_once
   - src/use_cases/agent_session.rs::an_early_agent_of_another_key_is_not_taken
@@ -25,7 +26,8 @@ check:
 тем временем. Первая рабочая команда платформе ждёт конца подготовки. Агента поднимают без
 подключения к базе: `pull` сразу открывает сессию, и агент подключается ею; `push` подключает
 его к базе без сессии команды, пока идёт разбор, а сессию открывает, только когда разбор нашёл
-работу (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`). Агент, уже подключённый к базе,
+работу (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`); без работы агент остаётся
+подключённым. Агент, уже подключённый к базе,
 подключения не повторяет (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`). Превью и
 выгрузка расширения агента заранее не поднимают; отправка, формат которой новее платформы,
 тоже: она отказывает до запуска платформы
