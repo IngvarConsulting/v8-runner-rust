@@ -5287,14 +5287,18 @@ exit 0"#,
 
         let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-        assert!(designer_calls.contains(
-            designer_snapshot(&config, "main")
-                .parent()
-                .expect("snapshot parent")
-                .display()
-                .to_string()
-                .as_str()
-        ));
+        // Полная выгрузка снимка идёт в промежуточный каталог `workPath/stage`
+        // (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+        assert!(
+            designer_calls.contains(
+                work.join("stage")
+                    .join(".dump-stage-")
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "{designer_calls}"
+        );
         assert!(edt_calls.contains(
             designer_snapshot(&config, "main")
                 .display()
@@ -5576,14 +5580,18 @@ exit 0"#,
         let ibcmd_calls = fs::read_to_string(ibcmd_calls).expect("ibcmd calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert!(ibcmd_calls.contains("--force"));
-        assert!(ibcmd_calls.contains(
-            designer_snapshot(&config, "main")
-                .parent()
-                .expect("snapshot parent")
-                .display()
-                .to_string()
-                .as_str()
-        ));
+        // Полная выгрузка снимка идёт в промежуточный каталог `workPath/stage`
+        // (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+        assert!(
+            ibcmd_calls.contains(
+                work.join("stage")
+                    .join(".dump-stage-")
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "{ibcmd_calls}"
+        );
         assert!(edt_calls.contains(
             designer_snapshot(&config, "main")
                 .display()

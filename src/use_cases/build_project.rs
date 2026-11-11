@@ -3702,6 +3702,8 @@ mod tests {
             "procedure Test()\n  // changed\nendprocedure",
         )
         .expect("modify main");
+        // Память о базе лежит под `localPath`: `workPath` после первой отправки может ещё не быть.
+        fs::create_dir_all(&work).expect("work");
         fs::write(work.join("logs"), "not a directory").expect("block platform logs dir");
 
         let failure = run_build(&config, &build_args(false)).expect_err("partial load setup fails");
