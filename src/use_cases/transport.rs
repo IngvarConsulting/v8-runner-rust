@@ -203,13 +203,23 @@ fn acquire(
         // `infobase create` снимает простаивающих агентов сам, после своих проверок и перед
         // тем, как тронуть базу (`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`);
         // здесь только отказ занятой базы.
-        let recreates = matches!(command, CommandName::InfobaseRestore);
-        crate::use_cases::infobase_lock::settle_live_agents(config, command.as_str(), recreates)
-            .map(|_| ())
-            .map_err(|error| BoundaryRefusal {
-                phase: InfobaseTransferPhase::InfobaseLock,
-                error: error.into(),
-            })?;
+        // Команда, которая открывает базу клиентом 1С, отключает простаивающих живых агентов
+        // этой базы от неё; та, что выбирает исполнителя, решает это при выборе (#644).
+        crate::use_cases::infobase_lock::settle_live_agents(
+            config,
+            command.as_str(),
+            live_agents_at_the_boundary(command),
+        )
+        .map(|_| ())
+        .map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::InfobaseLock,
+            error: error.into(),
+        })?;
+    }
+    if command.restarts_a_server() {
+        // Остановка кластера или его СУБД оставила бы подключение живых агентов к серверным
+        // базам устаревшим: следующая сессия взяла бы его без `common connect-ib` (#644).
+        crate::use_cases::infobase_lock::release_server_connections();
     }
     let mut notes: Vec<BoundaryNote> = infobase_lock
         .warning()
@@ -229,6 +239,22 @@ fn acquire(
         message,
     }));
     Ok((workspace_lock, infobase_lock, notes))
+}
+
+/// Что команда на границе делает с простаивающими живыми агентами своей базы (#644):
+/// восстановление их снимает, клиент 1С (`test`, `launch`) — отключает, остальные решают это при
+/// выборе исполнителя.
+fn live_agents_at_the_boundary(
+    command: CommandName,
+) -> crate::use_cases::infobase_lock::LiveAgents {
+    use crate::use_cases::infobase_lock::LiveAgents;
+    if matches!(command, CommandName::InfobaseRestore) {
+        LiveAgents::Remove
+    } else if command.opens_the_infobase_without_an_executor() {
+        LiveAgents::Disconnect
+    } else {
+        LiveAgents::Keep
+    }
 }
 
 /// Замок базы-источника у команды, которая читает её целиком, — `infobase create --from`.
@@ -282,6 +308,53 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// Граница команды: восстановление снимает простаивающих живых агентов базы, `test` и `launch`
+    /// отключают их, команды с выбором исполнителя оставляют, а остановка кластера и его СУБД
+    /// отключает агентов серверных баз (#644,
+    /// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+    #[test]
+    fn the_boundary_decides_what_happens_to_the_connected_live_agents() {
+        use crate::use_cases::context::CommandName;
+        use crate::use_cases::infobase_lock::LiveAgents;
+        assert_eq!(
+            super::live_agents_at_the_boundary(CommandName::InfobaseRestore),
+            LiveAgents::Remove
+        );
+        for command in [CommandName::Test, CommandName::Launch] {
+            assert_eq!(
+                super::live_agents_at_the_boundary(command),
+                LiveAgents::Disconnect
+            );
+        }
+        for command in [
+            CommandName::Build,
+            CommandName::Dump,
+            CommandName::Apply,
+            CommandName::Reset,
+            CommandName::InfobaseDump,
+        ] {
+            assert_eq!(
+                super::live_agents_at_the_boundary(command),
+                LiveAgents::Keep
+            );
+        }
+        for command in [
+            CommandName::ClusterStop,
+            CommandName::ClusterRestart,
+            CommandName::DbmsStop,
+            CommandName::DbmsRestart,
+        ] {
+            assert!(command.restarts_a_server(), "{command:?}");
+        }
+        assert!(!CommandName::ClusterStart.restarts_a_server());
+        assert!(crate::platform::connection::is_server_identity(
+            "server:host\\ib"
+        ));
+        assert!(!crate::platform::connection::is_server_identity(
+            "file:/srv/ib (/srv/ib)"
+        ));
+    }
+
     use super::{dispatch_with_workspace_lock, map_failure_response};
     use crate::config::model::{
         AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,

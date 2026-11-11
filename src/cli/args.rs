@@ -185,13 +185,9 @@ pub struct AgentHolderArgs {
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Command options")]
 pub struct AgentReleaseArgs {
-    /// Process whose mark to remove
-    #[arg(
-        long,
-        value_name = "PID",
-        required_unless_present = "ttl",
-        conflicts_with = "ttl"
-    )]
+    /// Process whose mark to remove; without it and without --ttl, release only disconnects the
+    /// live agent from the infobase
+    #[arg(long, value_name = "PID", conflicts_with = "ttl")]
     pub holder_pid: Option<u32>,
 
     /// Start time of the holder process (UTC, RFC 3339): only its mark is removed

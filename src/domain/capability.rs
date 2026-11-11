@@ -131,6 +131,25 @@ impl Operation {
         Self::Publish,
     ];
 
+    /// Открывает ли операция базу проекта: сравнение, перевод, сборка поставки и публикация её
+    /// не открывают (#644: им незачем отключать живого агента).
+    pub const fn opens_the_infobase(self) -> bool {
+        match self {
+            Self::Init
+            | Self::Build
+            | Self::Apply
+            | Self::Reset
+            | Self::Load
+            | Self::Dump
+            | Self::Extensions
+            | Self::ConfigurationExport
+            | Self::InfobaseDump
+            | Self::InfobaseRestore
+            | Self::Syntax => true,
+            Self::Diff | Self::Make | Self::Convert | Self::Publish => false,
+        }
+    }
+
     /// Ключ в `providers:` и имя в квитанции.
     pub const fn as_str(self) -> &'static str {
         match self {
