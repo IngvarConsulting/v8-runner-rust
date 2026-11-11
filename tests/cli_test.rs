@@ -485,7 +485,8 @@ fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
         5,
         None,
     );
-    fs::remove_dir_all(dir.path().join(".local").join("infobases")).expect("forget the base");
+    fs::remove_dir_all(dir.path().join("project").join(".local").join("infobases"))
+        .expect("forget the base");
 
     let output = v8_runner_command()
         .args([
