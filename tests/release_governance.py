@@ -315,13 +315,15 @@ class ReleaseGovernanceTest(unittest.TestCase):
             verifier.require_consolidated_manifest_version("0.7.0-01")
 
     def test_documented_attestation_is_bound_to_verified_manifest_commit(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("gh release verify-asset v0.7.0 ./v8-runner-assets.json", readme)
-        self.assertIn('source_commit="$(python3', readme)
+        releases = (ROOT / "docs/RELEASES.md").read_text(encoding="utf-8")
+        self.assertIn("gh release verify-asset v0.7.0 ./v8-runner-assets.json", releases)
+        self.assertIn('source_commit="$(python3', releases)
         self.assertIn(
-            "for asset in v8-runner-assets.json v8-runner-linux-x86_64-musl.tar.gz", readme
+            "for asset in v8-runner-assets.json v8-runner-linux-x86_64-musl.tar.gz", releases
         )
-        self.assertIn('--source-digest "$source_commit"', readme)
+        self.assertIn('--source-digest "$source_commit"', releases)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("docs/RELEASES.md", readme)
 
     def test_pr_ci_runs_release_asset_contract_tests(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
