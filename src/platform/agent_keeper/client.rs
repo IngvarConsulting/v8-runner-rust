@@ -366,9 +366,10 @@ impl KeeperClient {
         Ok(client)
     }
 
-    /// Открывает сессию команды у агента, взятого без неё ([`Self::start_early`]).
-    pub fn begin_session(&mut self) -> Result<(), KeeperStartError> {
-        self.begin(&CancellationToken::new())
+    /// Открывает сессию команды у агента, взятого без неё ([`Self::start_early`]). Отмена
+    /// команды `cancel` прекращает ожидание, как у [`Self::connect_or_start`].
+    pub fn begin_session(&mut self, cancel: &CancellationToken) -> Result<(), KeeperStartError> {
+        self.begin(&cancel.child_token())
     }
 
     /// Есть ли у клиента сессия команды.

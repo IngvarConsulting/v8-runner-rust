@@ -758,9 +758,11 @@ fn open_live(
     // работа. Ушедший сторож или снятый агент — как у взятого живого: берётся или поднимается
     // заново. Остальные отказы называются так же, как отказ подъёма (#574).
     let started = match early.and_then(|early| early.take(&key)) {
-        Some(Ok(client)) if !client.has_session() => {
-            begun_or_again(client, KeeperClient::begin_session, connect_or_start)
-        }
+        Some(Ok(client)) if !client.has_session() => begun_or_again(
+            client,
+            |client| client.begin_session(&context.cancellation()),
+            connect_or_start,
+        ),
         Some(started) => started,
         None => connect_or_start(),
     };
