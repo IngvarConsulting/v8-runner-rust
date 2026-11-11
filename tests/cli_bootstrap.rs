@@ -715,7 +715,7 @@ fn clone_refuses_a_busy_workspace_before_writing_the_project() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    hold_workspace_lock(&project_dir.join("build"));
+    hold_workspace_lock(&project_dir.join(".build").join("v8-runner"));
 
     let mut args = bootstrap_args(
         &project_dir,
@@ -804,7 +804,8 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
 
     assert!(
         !project_dir
-            .join("build")
+            .join(".build")
+            .join("v8-runner")
             .join(".v8-runner.workspace.lock")
             .exists(),
         "the lock owner file must not outlive the command"
@@ -821,9 +822,9 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
 }
 
 /// Память о базе минимального проекта, как после её создания раннером.
-fn remember_minimal(dir: &Path, work: &Path) {
+fn remember_minimal(dir: &Path) {
     support::memory::remember_base(
-        work,
+        dir,
         "origin",
         support::memory::Base::File(&dir.join("ib")),
         &[support::memory::Set::configuration(
@@ -894,7 +895,7 @@ fn missing_config_in_json_mode_keeps_error_envelope_shape() {
 fn default_config_path_uses_v8project_yaml_from_current_dir() {
     let dir = temp_workspace();
     let _config_path = write_minimal_config(dir.path());
-    remember_minimal(dir.path(), &dir.path().join("work"));
+    remember_minimal(dir.path());
 
     let output = v8_runner_command()
         .current_dir(dir.path())
@@ -918,7 +919,7 @@ fn default_config_path_applies_sibling_local_overlay() {
         "workPath: local-work\n",
     )
     .expect("local overlay");
-    remember_minimal(dir.path(), &local_work_path);
+    remember_minimal(dir.path());
 
     let output = v8_runner_command()
         .current_dir(dir.path())
@@ -1629,7 +1630,7 @@ fn clone_refuses_a_non_empty_directory_before_writing_anything() {
         "user file"
     );
 
-    hold_workspace_lock(&project_dir.join("build"));
+    hold_workspace_lock(&project_dir.join(".build").join("v8-runner"));
     let (code, payload) = run_clone_json(bootstrap_args(
         &project_dir,
         &platform_path,
@@ -1640,7 +1641,7 @@ fn clone_refuses_a_non_empty_directory_before_writing_anything() {
 }
 
 /// `workPath` нового проекта не в счёт, только пока в нём лишь замок и журналы этого
-/// запуска: старый файл в `build` делает каталог непустым — отказ `invalid_argument`.
+/// запуска: старый файл в `.build/v8-runner` делает каталог непустым — отказ `invalid_argument`.
 #[test]
 fn clone_refuses_a_work_path_holding_a_foreign_file() {
     let bases = support::temp_workspace();
@@ -1650,8 +1651,8 @@ fn clone_refuses_a_work_path_holding_a_foreign_file() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    fs::create_dir_all(project_dir.join("build")).expect("work dir");
-    fs::write(project_dir.join("build/stale.txt"), "old dump").expect("stale file");
+    fs::create_dir_all(project_dir.join(".build/v8-runner")).expect("work dir");
+    fs::write(project_dir.join(".build/v8-runner/stale.txt"), "old dump").expect("stale file");
 
     let (code, payload) = run_clone_json(bootstrap_args(
         &project_dir,

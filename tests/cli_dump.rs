@@ -453,7 +453,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     );
     assert_native_edt_project(&base_path.join("main"));
     assert!(!base_path.join("main").join("old.txt").exists());
-    // Снимок Конфигуратора лежит под памятью выбранной базы.
+    // Снимок Конфигуратора лежит в `workPath` по ключу выбранной базы.
     let bases: Vec<_> = fs::read_dir(work_path.join("infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path())
@@ -466,7 +466,15 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
 
     let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
     let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-    assert!(designer_calls.contains(base.join("designer").display().to_string().as_str()));
+    // Конфигуратор выгружает в промежуточный каталог `workPath/stage` на томе набора; путь
+    // сверяется по хвосту: на macOS временный каталог раскрывается в `/private`.
+    let stage = std::path::Path::new(work_path.file_name().expect("work dir"))
+        .join("stage")
+        .join(".dump-stage-");
+    assert!(
+        designer_calls.contains(stage.display().to_string().as_str()),
+        "{designer_calls}"
+    );
     assert!(edt_calls.contains(snapshot.display().to_string().as_str()));
 }
 

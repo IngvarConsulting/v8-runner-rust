@@ -117,11 +117,17 @@ fn platforms_name_every_installation_and_the_choice_without_starting_anything() 
     assert_eq!(data["selected"]["designer"]["source"], "explicit");
     assert!(!warns_about_the_format(&envelope), "{envelope}");
     assert!(!calls.exists(), "the platform was started");
-    // Структурный ответ пишет журнал действий в `workPath/logs`; другого команда не пишет.
+    // Структурный ответ пишет журнал действий в `workPath/logs`, а заводя `workPath`, раннер
+    // кладёт в него `.gitignore` (#624); другого команда не пишет.
     let written: Vec<_> = fs::read_dir(dir.path().join("work"))
         .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
         .unwrap_or_default();
-    assert!(written.iter().all(|name| name == "logs"), "{written:?}");
+    assert!(
+        written
+            .iter()
+            .all(|name| name == "logs" || name == ".gitignore"),
+        "{written:?}"
+    );
 }
 
 /// Версию не задали: формат исходников выбирает выпуск, который его пишет, а не

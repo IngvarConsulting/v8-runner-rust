@@ -160,7 +160,7 @@ impl Project {
     fn record(&self) -> Value {
         let file = self
             .root()
-            .join("work")
+            .join(".local")
             .join("infobases")
             .join("origin")
             .join("generation.json");
@@ -713,7 +713,9 @@ fn a_push_with_nothing_to_load_applies_an_unapplied_designer_extension() {
         "{}",
         project.calls()
     );
-    let file = project.root().join("work/infobases/origin/generation.json");
+    let file = project
+        .root()
+        .join(".local/infobases/origin/generation.json");
     let ledger: Value =
         serde_json::from_str(&fs::read_to_string(file).expect("ledger")).expect("json");
     assert_eq!(ledger["ext"]["token"], SECOND, "{ledger}");

@@ -422,7 +422,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         .path()
         .join("work/logs/platform/dump-main-agent.log")
         .is_file());
-    let ledgers: Vec<_> = fs::read_dir(harness.dir.path().join("work/infobases"))
+    let ledgers: Vec<_> = fs::read_dir(harness.dir.path().join(".local/infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path().join("generation.json"))
         .collect();
@@ -590,7 +590,7 @@ fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_no
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
     commit_project(&harness);
-    let ledger_file = fs::read_dir(harness.dir.path().join("work/infobases"))
+    let ledger_file = fs::read_dir(harness.dir.path().join(".local/infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path().join("generation.json"))
         .next()

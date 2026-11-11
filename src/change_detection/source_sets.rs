@@ -97,7 +97,7 @@ impl<'a> SourceSetsService<'a> {
             source_set.purpose.as_str(),
             source_set.name
         );
-        context.with_infobase_memory(&memory.key, identity)
+        context.with_infobase_memory(&self.local_path(), &memory.key, identity)
     }
 
     /// Context of a tool extension's sources: its hashes live under the memory of the
@@ -117,15 +117,19 @@ impl<'a> SourceSetsService<'a> {
             memory.address,
             source_identity(&root),
         );
-        context.with_tool_extension_memory(&memory.key, extension, identity)
+        context.with_tool_extension_memory(&self.local_path(), &memory.key, extension, identity)
     }
 
-    /// Каталог памяти выбранной базы `workPath/infobases/<ключ>`; `None`, если адрес базы не
+    /// Каталог памяти выбранной базы `localPath/infobases/<ключ>`; `None`, если адрес базы не
     /// распознан и помнить её нельзя.
     pub fn base_memory_dir(&self) -> Option<PathBuf> {
-        let work_path = absolutize_path(&self.config.work_path);
+        let local_path = self.local_path();
         self.base_memory()
-            .map(|memory| crate::domain::source_set::infobase_memory_dir(&work_path, &memory.key))
+            .map(|memory| crate::domain::source_set::infobase_memory_dir(&local_path, &memory.key))
+    }
+
+    fn local_path(&self) -> PathBuf {
+        absolutize_path(&self.config.local_path)
     }
 
     /// Where the selected base is remembered: a declared base under its name, a base named
@@ -189,7 +193,7 @@ mod tests {
     /// Проект с одним набором `main` в `src` и рабочим каталогом `work_path`.
     fn single_set_config(format: SourceFormat, work_path: &str) -> AppConfig {
         AppConfig {
-            local_path: PathBuf::from(".").join(".local"),
+            local_path: PathBuf::from("/tmp/project/.local"),
             base_path: PathBuf::from("."),
             work_path: PathBuf::from(work_path),
             format,
@@ -279,6 +283,7 @@ mod tests {
         let mut config = single_set_config(SourceFormat::Designer, "unused");
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join(".local");
         config.source_sets[0].path = PathBuf::from("build");
 
         assert_root_named_like_a_service_dir_is_analyzed(&config);
@@ -291,6 +296,7 @@ mod tests {
         let mut config = single_set_config(SourceFormat::Edt, "unused");
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join(".local");
         config.source_sets[0].name = "build".to_owned();
         let generated_root = SourceSetsService::new(&config).designer_contexts()[0]
             .path()
@@ -303,10 +309,10 @@ mod tests {
         assert_root_named_like_a_service_dir_is_analyzed(&config);
     }
 
-    /// Состояние анализа лежит под `workPath`, у каждого логического контекста набора своё:
-    /// у набора EDT контекстов два, и хранилища у них разные.
+    /// Память о базе лежит под `localPath`, общий кеш — под `workPath`; у каждого логического
+    /// контекста набора своё хранилище: у набора EDT контекстов два, и хранилища у них разные.
     #[test]
-    fn analysis_state_lies_under_the_work_path_by_logical_context() {
+    fn analysis_state_lies_under_the_local_path_and_the_cache_under_the_work_path() {
         let config = single_set_config(SourceFormat::Edt, "/tmp/work");
         let service = SourceSetsService::new(&config);
 
@@ -321,7 +327,12 @@ mod tests {
         assert_eq!(
             storages,
             [
-                config.work_path.join("infobases/main/hashes/main.redb"),
+                crate::support::path::absolute_from_current_dir(&config.local_path)
+                    .expect("absolute")
+                    .join("infobases")
+                    .join("main")
+                    .join("hashes")
+                    .join("main.redb"),
                 storage_root.join("edt-main.redb"),
             ]
         );
@@ -335,6 +346,7 @@ mod tests {
         let mut config = single_set_config(SourceFormat::Designer, "unused");
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join(".local");
         std::fs::create_dir(dir.path().join("src")).expect("source");
         std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
         let a = SourceSetsService::new(&config)
@@ -397,6 +409,7 @@ mod tests {
         let mut config = single_set_config(SourceFormat::Designer, "unused");
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join(".local");
         config.infobase_name = None;
         std::fs::create_dir(dir.path().join("src")).expect("source");
         let context = SourceSetsService::new(&config)
@@ -415,7 +428,7 @@ mod tests {
             context.storage_path(&config.work_path),
             Some(
                 config
-                    .work_path
+                    .local_path
                     .join("infobases")
                     .join(&key)
                     .join("hashes/main.redb")
@@ -442,7 +455,7 @@ mod tests {
             analyze_context(&again, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
-        let bases: Vec<_> = std::fs::read_dir(config.work_path.join("infobases"))
+        let bases: Vec<_> = std::fs::read_dir(config.local_path.join("infobases"))
             .expect("bases")
             .map(|entry| entry.expect("entry").file_name())
             .collect();
@@ -475,7 +488,7 @@ mod tests {
             tool.storage_path(&config.work_path),
             Some(
                 config
-                    .work_path
+                    .local_path
                     .join("infobases/main/hashes/tools/client_mcp.redb")
             )
         );
@@ -484,8 +497,8 @@ mod tests {
             set.storage_path(&config.work_path)
         );
         assert!(tool.storage_identity().expect("bound").contains("/tmp/ib"));
-        assert_eq!(tool.version_file_copy_dir(&config.work_path), None);
-        assert_eq!(tool.generation_file(&config.work_path), None);
+        assert_eq!(tool.version_file_copy_dir(), None);
+        assert_eq!(tool.generation_file(), None);
         config.infobase_name = Some("other".to_owned());
         let other = SourceSetsService::new(&config)
             .tool_extension_context("client_mcp", PathBuf::from("/tmp/tool"));
@@ -493,6 +506,67 @@ mod tests {
             other.storage_path(&config.work_path),
             tool.storage_path(&config.work_path)
         );
+    }
+
+    /// Исходники расширения-инструмента, которые `tools download client-mcp --sources` кладёт в
+    /// `workPath/tools`, разбираются как раньше, хотя `workPath` прячет себя от git
+    /// `.gitignore` со строкой `*`: их изменения ищет чтение файлов, а не git, каталоги раннера
+    /// под их корнем не лежат, и отказа `source_set_ignored_by_git` нет
+    /// (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`).
+    #[test]
+    fn tool_sources_under_the_work_path_are_analyzed_like_any_other() {
+        use crate::change_detection::analyzer::{analyze_context, commit_success, AnalysisOutcome};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join(".build").join("v8-runner");
+        config.local_path = dir.path().join(".local");
+        crate::support::local_dir::prepare_work_dir(&config.work_path).expect("workPath");
+        let root = config
+            .work_path
+            .join("tools/onec-client-mcp-devkit/exts/client-mcp");
+        std::fs::create_dir_all(root.join("src/CommonModules/Tool")).expect("tool sources");
+        std::fs::write(root.join("src/CommonModules/Tool/Module.bsl"), "a").expect("module");
+        let ignored = git(&["check-ignore", "-q", root.to_str().expect("utf-8")]);
+        assert!(ignored.status.success(), "workPath hides the tool from git");
+
+        let context =
+            SourceSetsService::new(&config).tool_extension_context("client_mcp", root.clone());
+        assert!(crate::change_detection::runner_dirs::runner_dirs_inside(
+            &root,
+            crate::change_detection::runner_dirs::RunnerDirs::of(&config)
+        )
+        .is_empty());
+        crate::use_cases::source_changes::refuse_hidden_sets(
+            std::slice::from_ref(&context),
+            &config.work_path,
+        )
+        .expect("no source_set_ignored_by_git");
+        let Ok(AnalysisOutcome::Changes { changes, prepared }) =
+            analyze_context(&context, &config.work_path, &mut || false).outcome
+        else {
+            panic!("the first analysis sees the tool sources");
+        };
+        assert_eq!(changes.len(), 1);
+        commit_success(&context, &config.work_path, &prepared).expect("remembered");
+        assert!(matches!(
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        std::fs::write(root.join("src/CommonModules/Tool/Module.bsl"), "b").expect("edit");
+        assert!(matches!(
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
     }
 
     /// Строка, чей адрес раннер не распознаёт, сравнить не с чем: памяти у неё нет.
@@ -604,6 +678,7 @@ mod tests {
         let mut config = single_set_config(SourceFormat::Designer, "unused");
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join(".local");
         config.source_sets[0].path = PathBuf::from(std::ffi::OsString::from_vec(vec![0xfe]));
         let original = SourceSetsService::new(&config)
             .designer_contexts()

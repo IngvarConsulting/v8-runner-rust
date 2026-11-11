@@ -348,9 +348,8 @@ fn owner_boundary_warns_for_status_and_preserves_marker_for_both_forms() {
 fn version_file_is_resolved_without_rewriting_the_sources() {
     let dir = tempfile::tempdir().unwrap();
     let project = Project::new(dir.path(), "project", Some("designer"));
-    let work = project.root.join("рабочая папка");
     support::memory::remember_base(
-        &project.root.join("рабочая папка"),
+        &project.root,
         "origin",
         support::memory::Base::File(&project.base),
         &[support::memory::Set::configuration(
@@ -358,10 +357,11 @@ fn version_file_is_resolved_without_rewriting_the_sources() {
             &project.root.join("src"),
         )],
     );
-    let memory: Value =
-        serde_json::from_slice(&fs::read(work.join("infobases/origin/generation.json")).unwrap())
-            .unwrap();
-    let copy = work.join("infobases/origin/dump-info/main");
+    let memory: Value = serde_json::from_slice(
+        &fs::read(project.root.join(".local/infobases/origin/generation.json")).unwrap(),
+    )
+    .unwrap();
+    let copy = project.root.join(".local/infobases/origin/dump-info/main");
     fs::create_dir_all(&copy).unwrap();
     fs::write(copy.join(VERSION_FILE), "saved version file").unwrap();
     fs::write(
