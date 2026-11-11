@@ -105,8 +105,9 @@ v8-runner init
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
 создает `v8project.yaml`, `v8project.local.yaml` со schema modeline и базой `origin`
 (`--infobase <строка соединения>`, по умолчанию `File=.local/db` — файловая база в `localPath`, которую удаление `workPath` не трогает) и дописывает в `.gitignore` каталога проекта
-недостающие шаблоны local overlay, описи версий `ConfigDumpInfo.xml` и замка выгрузки
-`.dump-*.lock*`. `pull` и `push` отказывают, если `ConfigDumpInfo.xml` лежит в индексе git;
+недостающие шаблоны local overlay и замка выгрузки `.dump-*.lock*`. Опись версий
+`ConfigDumpInfo.xml` раннер держит в своей памяти (`localPath/infobases/<база>/dump-info/`) и
+в каталог исходников не кладёт; файл, оставшийся там от прежних версий, он не читает и не трогает;
 подробности — в [docs/CAPABILITIES.md](docs/CAPABILITIES.md#init).
 
 Базы проекта объявляются в `v8project.local.yaml` картой `infobases`: умолчание — `origin`,
@@ -181,7 +182,7 @@ v8-runner push
 данных, а следующий `push` загружает отброшенное заново
 ([CAPABILITIES](docs/CAPABILITIES.md#reset)).
 
-`v8-runner diff` показывает изменения версий объектов по `ConfigDumpInfo.xml` без выгрузки.
+`v8-runner diff` показывает изменения версий объектов по копии `ConfigDumpInfo.xml` в памяти раннера без выгрузки.
 `v8-runner diff --against db|vendor:<имя>|<файл>` сохраняет полный TXT-отчёт сравнения
 основной конфигурации. [Исполнители и форма ответа](docs/CAPABILITIES.md#diff).
 

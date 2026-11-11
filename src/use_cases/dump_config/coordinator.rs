@@ -920,17 +920,17 @@ fn run_dump_selected(
     }
 }
 
-/// Как выгрузка по плану обходится с каталогом человека и какие файлы в его корне пишет
-/// заново. Проект EDT при любом плане заменяется целиком; в формате Конфигуратора полная
-/// выгрузка заменяет каталог, остальные ложатся поверх. Опись версий в каталог не попадает
-/// (#646): прежний `ConfigDumpInfo.xml` в нём — такой же файл, как любой другой.
+/// Как выгрузка по плану обходится с каталогом человека и какие файлы в его корне не теряет.
+/// Проект EDT при любом плане заменяется целиком; в формате Конфигуратора полная выгрузка
+/// заменяет каталог, остальные ложатся поверх. `ConfigDumpInfo.xml` в корне, оставшийся от
+/// прежних версий раннера, не потеря (#646): выгрузка поверх каталога его не трогает, а замена
+/// переносит в новое дерево.
 fn destruction_of(config: &AppConfig, plan: &DumpPlan) -> (Destruction, &'static [&'static str]) {
     match (config.format, plan) {
-        (SourceFormat::Edt, _) | (SourceFormat::Designer, DumpPlan::Full) => {
-            (Destruction::Replace, &[])
-        }
+        (SourceFormat::Edt, _) => (Destruction::Replace, &[]),
+        (SourceFormat::Designer, DumpPlan::Full) => (Destruction::Replace, &[VERSION_FILE_NAME]),
         (SourceFormat::Designer, DumpPlan::Partial | DumpPlan::OverDirectory(_)) => {
-            (Destruction::Overwrite, &[])
+            (Destruction::Overwrite, &[VERSION_FILE_NAME])
         }
     }
 }

@@ -880,9 +880,9 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     );
 }
 
-/// Опись версий, оставшаяся в игноре от прежних версий раннера, — такой же игнорируемый файл,
-/// как любой другой: полная выгрузка заменяет каталог без `--force`, а описи в новое дерево не
-/// кладёт (#646).
+/// Опись версий, оставшаяся в игноре от прежних версий раннера, не потеря: полная выгрузка
+/// заменяет каталог без `--force` и переносит её в новое дерево как была, а свою опись в дерево
+/// не кладёт (#646).
 #[test]
 fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
@@ -910,9 +910,10 @@ fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
         "an ignored version file must not stop a full dump: {}",
         answer.envelope
     );
-    assert!(
-        !version_file.exists(),
-        "the replaced directory carries no version file"
+    assert_eq!(
+        fs::read_to_string(&version_file).ok().as_deref(),
+        Some("<info previous=\"yes\"/>\n"),
+        "the left version file is carried over untouched"
     );
 }
 

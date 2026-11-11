@@ -533,9 +533,15 @@ fn publish_full_dump(
         .map_err(|error| publication.cleanup_failure(error))?;
 
     // Опись платформы в каталог набора не попадает (#646): она уходит из стадии до публикации
-    // и становится копией раннера только после удачной публикации.
+    // и становится копией раннера только после удачной публикации. `ConfigDumpInfo.xml`,
+    // оставшийся в каталоге человека от прежних версий раннера, переходит в новое дерево как
+    // был: раннер его не трогает.
     let version_snapshot =
         super::version_file::RunnerVersionFile::prepare_from(publication.staging_path())
+            .and_then(|prepared| {
+                carry_the_left_version_file_over(resolved, publication.staging_path())
+                    .map(|()| prepared)
+            })
             .map_err(|error| publication.cleanup_failure(error))?;
     if let Some(external) = context.external_full_pull() {
         let version_snapshot = Some(Ok::<_, AppError>(version_snapshot));
@@ -555,7 +561,7 @@ fn publish_full_dump(
             context,
             &resolved.platform_target_path,
             resolved.platform_consent(),
-            &[],
+            &[VERSION_FILE_NAME],
             Destruction::Replace,
         )?;
         let mut ready = super::full_pull_publication::FullPullReady {
@@ -642,9 +648,8 @@ fn publish_full_dump(
             DUMP_BACKUP_PREFIX,
             "failed to publish staged dump",
             resolved.platform_consent(),
-            // Опись версий в дерево не публикуется: прежний `ConfigDumpInfo.xml` в каталоге —
-            // такой же файл, как любой другой.
-            &[],
+            // Прежний `ConfigDumpInfo.xml` в корне переходит в новое дерево: это не потеря.
+            &[VERSION_FILE_NAME],
             // Прежнее дерево полной выгрузки ответу не нужно (#616).
             BackupRemoval::Background,
         )
@@ -696,6 +701,27 @@ fn publish_full_dump(
         discarded: published.discarded,
         evidence: None,
     })
+}
+
+/// `ConfigDumpInfo.xml` в корне каталога человека, оставшийся от прежних версий раннера,
+/// переходит в стадию полной выгрузки байт в байт: замена каталога его не теряет. Снимок EDT —
+/// каталог раннера, и его прежний файл не переносится.
+fn carry_the_left_version_file_over(
+    resolved: &ResolvedDumpTarget,
+    stage: &Path,
+) -> Result<(), AppError> {
+    if resolved.platform_target_path != resolved.target_path {
+        return Ok(());
+    }
+    let left = resolved.platform_target_path.join(VERSION_FILE_NAME);
+    match std::fs::copy(&left, stage.join(VERSION_FILE_NAME)) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Runtime(format!(
+            "failed to keep '{}' in the replaced directory: {error}",
+            left.display()
+        ))),
+    }
 }
 
 fn validate_full_dump_work_path(
@@ -4682,7 +4708,8 @@ exit 0"#,
         .to_path_buf();
         assert_eq!(
             fs::read_to_string(copy).expect("the description became the runner copy"),
-            "<ConfigDumpInfo version=\"2.20\"/>\n"
+            // Поддельный `ibcmd` пишет кавычки с обратной косой чертой.
+            "<ConfigDumpInfo version=\\\"2.20\\\"/>\n"
         );
         assert_eq!(
             fs::read_to_string(target.join("stray.txt")).expect("stray"),

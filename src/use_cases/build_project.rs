@@ -4091,7 +4091,9 @@ mod tests {
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(&script, &calls, Some("ext -Extension ext"));
+        // Отказывает только загрузка расширения: её каталог идёт перед `-partial`.
+        let ext_load = format!("{} -partial", base.join("ext").display());
+        write_designer_script(&script, &calls, Some(&ext_load));
         let config = build_config(
             &base,
             &work,
