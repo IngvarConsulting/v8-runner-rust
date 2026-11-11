@@ -142,6 +142,8 @@ pub struct KeeperClient {
     /// Взят ли уже живой агент, а не поднят этим клиентом.
     reused: bool,
     session: Option<OpenSession>,
+    /// Ответ агента на подключение `attach`, ещё не записанный в журнал команды.
+    attached: Vec<AgentMessage>,
     /// Прерывание, отложенное в критической фазе за всю сессию, и последней командой.
     deferred: Option<ProcessInterruptionReason>,
     last_deferral: Option<ProcessInterruptionReason>,
@@ -176,6 +178,20 @@ pub enum Removal {
     /// Сторож принял `stop`, но не ответил за срок или ожидание отменили: агент снимется после
     /// команды, которую выполняет.
     Pending,
+}
+
+/// Чем кончился `disconnect`.
+#[derive(Debug)]
+pub enum Disconnected {
+    /// Агент был подключён к базе и отключён.
+    Done,
+    /// Агент к базе не подключён или сторожа уже нет.
+    NotConnected,
+    /// Агент выполняет команду или идёт сессия команды: его подключение не снято.
+    InUse {
+        command: Option<String>,
+        holders: Vec<Holder>,
+    },
 }
 
 /// Чем кончился `stop` с условием.
@@ -228,8 +244,9 @@ enum Take<'a> {
     Session,
     /// Поставить держателя.
     Hold(&'a Holder),
-    /// Только взять поднятого агента: сессию команда откроет позже, [`KeeperClient::begin_session`].
-    Ready,
+    /// Подключить взятого агента к базе без сессии команды: сессию команда откроет позже,
+    /// [`KeeperClient::begin_session`], и возьмёт это подключение (#644).
+    Attach,
 }
 
 /// Чего ждёт клиент, поднимая агента (#574): `cancel` — отмена команды, при которой сторож,
@@ -247,8 +264,9 @@ pub struct EarlyWait<'w> {
 pub enum EarlySession {
     /// `pull`: сессия с подключением к базе открывается сразу, пока команда готовится.
     Now,
-    /// `push`: агент только поднимается и к базе не подключается, пока разбор не найдёт
-    /// работы (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`).
+    /// `push`: агент поднимается и подключается к базе, пока идёт разбор, а сессию команды
+    /// открывает, только когда разбор нашёл работу (#644,
+    /// `INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`).
     Later,
 }
 
@@ -301,6 +319,7 @@ impl KeeperClient {
             keeper,
             reused: true,
             session: None,
+            attached: Vec::new(),
             deferred: None,
             last_deferral: None,
             interrupted: false,
@@ -336,8 +355,8 @@ impl KeeperClient {
 
     /// Живой агент ключа `key`, поднятый в начале команды, пока она готовится (#574), — без
     /// подключения к базе при подъёме: [`EarlySession::Now`] — сразу с сессией команды (`pull`),
-    /// [`EarlySession::Later`] — без неё (`push` подключит агента сам, [`Self::begin_session`],
-    /// когда разбор найдёт работу).
+    /// [`EarlySession::Later`] — подключённый к базе без сессии (`push` откроет её сам,
+    /// [`Self::begin_session`], когда разбор найдёт работу).
     /// Ожидание кончают оба сигнала `wait`; подъём работой команды не считается.
     pub fn start_early(
         key: &str,
@@ -348,11 +367,11 @@ impl KeeperClient {
         session: EarlySession,
     ) -> Result<Self, KeeperStartError> {
         let mut client = Self::prepare(key, credentials)?;
-        // Агента поднимают без подключения к базе в обоих случаях: подъём не подключает и не
-        // отключает его зря, а к базе он подключается один раз — сессией команды.
+        // Агента поднимают без подключения к базе в обоих случаях: подключает его сессия
+        // команды или `attach`, и отказ подключения отвечает одинаково для свежего и взятого.
         let take = match session {
             EarlySession::Now => Take::Session,
-            EarlySession::Later => Take::Ready,
+            EarlySession::Later => Take::Attach,
         };
         client.obtain(
             launch,
@@ -378,7 +397,8 @@ impl KeeperClient {
     }
 
     /// Живой агент ключа `key` с держателем `holder`: берётся или поднимается, как у
-    /// [`connect_or_start`](Self::connect_or_start), но к базе не подключается. Отметка ставится,
+    /// [`connect_or_start`](Self::connect_or_start), но без сессии команды: поднятый агент
+    /// подключается к базе и остаётся подключённым (#644). Отметка ставится,
     /// как только агент взят, а агент, которого снимают, ожидается до ухода и поднимается заново:
     /// свежего агента ради предела не снимут, пока отметки нет. Ответ — клиент и держатели после
     /// отметки. Для `agent hold`.
@@ -566,10 +586,11 @@ impl KeeperClient {
     /// Ответ агента на подключение к базе в начале сессии команды — один раз: для журнала
     /// разговора команды.
     pub fn take_connect_reply(&mut self) -> Vec<AgentMessage> {
-        self.session
-            .as_mut()
-            .map(|session| std::mem::take(&mut session.connected))
-            .unwrap_or_default()
+        let mut said = std::mem::take(&mut self.attached);
+        if let Some(session) = self.session.as_mut() {
+            said.append(&mut session.connected);
+        }
+        said
     }
 
     /// Взят ли уже живой агент.
@@ -607,7 +628,10 @@ impl KeeperClient {
                 self.begin(stop)?;
                 Ok(Vec::new())
             }
-            Take::Ready => Ok(Vec::new()),
+            Take::Attach => {
+                self.connect_infobase(stop)?;
+                Ok(Vec::new())
+            }
             Take::Hold(holder) => {
                 let request = Request::Hold {
                     holder: (*holder).clone(),
@@ -822,8 +846,60 @@ impl KeeperClient {
         Ok(())
     }
 
-    /// Закрывает сессию команды: сторож отключает агента от базы, а сам агент остаётся жить,
-    /// если сторож не решил его снять. Ответ — `status` сторожа после `end`: `closing` в нём
+    /// Подключает агента к базе без сессии команды (`attach`, #644). `stop` прекращает ожидание:
+    /// сторож доводит подключение сам, и агент остаётся подключённым.
+    fn connect_infobase(&mut self, stop: &CancellationToken) -> Result<(), KeeperStartError> {
+        let request = Request::Attach {
+            credentials: self.digest.clone(),
+        };
+        let channel = self.channel.clone();
+        let keeper = self.keeper;
+        let answer = self.runtime.block_on(async {
+            let stream = connect_within(&channel, keeper, QUERY_PATIENCE).await?;
+            let mut stream = BufReader::new(stream);
+            write_line(stream.get_mut(), &request)
+                .await
+                .map_err(|source| unreachable_at(&channel, source))?;
+            tokio::select! {
+                answer = read_line::<_, Frame>(&mut stream) => Ok(answer),
+                () = stop.cancelled() => Err(cancelled_waiting()),
+            }
+        })?;
+        match answer {
+            Ok(Some(Frame::Attached { messages })) => {
+                self.attached = messages;
+                Ok(())
+            }
+            Ok(Some(Frame::Error { error })) => Err(error.into_agent().into()),
+            Ok(Some(other)) => Err(unexpected(&other).into()),
+            Ok(None) | Err(_) => Err(AgentError::LiveAgentGone {
+                detail: "the keeper closed the channel before the agent connected".to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    /// Отключает агента от базы, если он не занят: агент остаётся жить (#644). Ответ — был ли он
+    /// подключён; занятый — [`Disconnected::InUse`].
+    pub fn disconnect(&self) -> Result<Disconnected, AgentError> {
+        match self.exchange_frame(&Request::Disconnect, STOP_PATIENCE) {
+            Ok(Frame::Disconnected { was }) => Ok(if was {
+                Disconnected::Done
+            } else {
+                Disconnected::NotConnected
+            }),
+            Ok(Frame::Error {
+                error: KeeperError::NotIdle { command, holders },
+            }) => Ok(Disconnected::InUse { command, holders }),
+            Ok(Frame::Error { error }) => Err(error.into_agent()),
+            Ok(other) => Err(unexpected(&other)),
+            Err(error) if self.gone(&error) => Ok(Disconnected::NotConnected),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Закрывает сессию команды: агент остаётся подключённым к базе и жить, если сторож не
+    /// решил его снять (#644). Ответ — `status` сторожа после `end`: `closing` в нём
     /// значит, что агент не останется; отказ — сторож не ответил, и ушёл ли он, говорит
     /// [`Self::gone`].
     pub fn end(&mut self) -> Result<KeeperStatus, AgentError> {
@@ -869,6 +945,13 @@ impl KeeperClient {
     /// Процесс сторожа.
     pub fn keeper_pid(&self) -> u32 {
         self.keeper
+    }
+
+    /// Рабочая копия агента из записи сторожа.
+    pub fn work_path(&self) -> Option<String> {
+        read_json::<ServiceRecord>(&self.home.paths().record())
+            .and_then(|record| record.agent)
+            .and_then(|agent| agent.work_path)
     }
 
     /// Процесс агента из записи сторожа.
@@ -1544,22 +1627,7 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
         .file_name()
         .ok_or_else(|| std::io::Error::other("the runner executable has no file name"))?
         .to_owned();
-    let metadata = std::fs::metadata(&source)?;
-    let modified = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let stamp = {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::new()
-            .chain_update(metadata.len().to_be_bytes())
-            .chain_update(modified.to_be_bytes())
-            .finalize();
-        digest[..6]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
+    let stamp = stamp_of(&source)?;
     let dir = state
         .join("bin")
         .join(env!("CARGO_PKG_VERSION"))
@@ -1588,6 +1656,34 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
             Err(error)
         }
     }
+}
+
+/// Отметка сборки исполняемого файла `path`: его размер и время изменения. Два файла одной
+/// версии раннера из разных сборок получают разные отметки.
+fn stamp_of(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let metadata = std::fs::metadata(path)?;
+    let modified = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let digest = Sha256::new()
+        .chain_update(metadata.len().to_be_bytes())
+        .chain_update(modified.to_be_bytes())
+        .finalize();
+    Ok(digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Отметка сборки этого раннера — часть ключа живого агента: сторож другой сборки той же версии
+/// говорит другим протоколом, и команда его не берёт (#644). Файла не прочитать — пусто: ключ
+/// тогда различает только версию.
+pub fn build_stamp() -> String {
+    std::env::current_exe()
+        .and_then(|exe| stamp_of(&exe))
+        .unwrap_or_default()
 }
 
 /// Убирает копии раннера под `<state>/bin`, кроме `current` и тех, из которых работает живой

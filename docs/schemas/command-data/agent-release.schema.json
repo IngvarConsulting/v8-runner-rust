@@ -45,6 +45,10 @@
   "additionalProperties": false,
   "description": "`data` команды `agent release`.",
   "properties": {
+    "disconnected": {
+      "description": "Отключён ли агент от базы этим `release` (#644): `false` — он не был подключён или занят\nкомандой.",
+      "type": "boolean"
+    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,
@@ -72,6 +76,7 @@
   "required": [
     "released",
     "holders",
+    "disconnected",
     "duration_ms"
   ],
   "title": "AgentReleaseResult",

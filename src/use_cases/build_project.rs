@@ -129,8 +129,8 @@ fn run_build_branch(
         return Err(refused_before_work(error));
     }
     let memory = require_memory(context, config, args);
-    // Живой агент поднимается, пока идёт разбор (#574), но к базе не подключается, пока разбор
-    // не найдёт работы. Без памяти о базе платформа не запускается
+    // Живой агент поднимается и подключается к базе, пока идёт разбор (#574, #644), а работу
+    // получает, только когда разбор её нашёл. Без памяти о базе платформа не запускается
     // (`INV.USE-CASES.OWNERSHIP-IS-CHECKED-BEFORE-MEMORY-AND-GENERATION`).
     let mut early = match &memory {
         Ok(()) => agent::start_early(context, config, args),
@@ -252,7 +252,7 @@ fn refuse_hidden_sets_of_a_full_push(config: &AppConfig, args: &BuildArgs) -> Re
         return Ok(());
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
-    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path, args.dry_run)
 }
 
 /// Объём отправки (#559): целиком, если каждый набор, который она загрузит, идёт целиком —
@@ -1142,6 +1142,67 @@ mod tests {
             "{error}"
         );
         assert_eq!(ledger.read(), Recorded::Nothing);
+    }
+
+    /// Загрузка спрашивает поколение после себя, только когда ответ что-то решает (#637): у
+    /// набора с журналом поколений ответ записывается
+    /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`), у набора без
+    /// журнала — исполнителю без восстановления файла версий — второй запрос не уходит.
+    #[test]
+    fn a_load_asks_the_generation_after_itself_only_when_the_answer_decides_something() {
+        use crate::domain::capability::Provider;
+        use crate::use_cases::agent_session::{GenerationLedger, Recorded};
+        use std::cell::Cell;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let remembered = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        let unremembered = remembered.clone().without_memory();
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+        let token = "2".repeat(40);
+
+        for (set, asked) in [(&unremembered, 0), (&remembered, 1)] {
+            let reads = Cell::new(0);
+            super::coordinator::guarded_load(
+                &gate,
+                set,
+                Provider::Ibcmd,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(Some(token.clone()))
+                },
+                || {
+                    Ok(super::helpers::Loaded {
+                        warnings: Vec::new(),
+                        apply: super::helpers::AfterLoad::Applied,
+                    })
+                },
+                || Ok(()),
+            )
+            .expect("load");
+            assert_eq!(reads.get(), asked, "{}", set.name());
+        }
+        let Recorded::Ours(record) = GenerationLedger::of(&remembered).expect("ledger").read()
+        else {
+            panic!("the generation after the load was not recorded");
+        };
+        assert_eq!(record.token, token);
     }
 
     #[cfg(unix)]

@@ -3,13 +3,17 @@ id: INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY
 check:
   - tests/agent_keeper.rs::other_credentials_remove_the_agent
   - tests/agent_keeper.rs::a_hold_with_other_credentials_removes_the_agent
+  - tests/agent_keeper.rs::an_attach_with_other_credentials_removes_the_agent
+  - src/use_cases/agent_session.rs::a_live_agent_of_another_build_has_another_key
   - tests/cli_live_agent_portable.rs::agent_stop_removes_the_live_agent_and_status_lists_it
 ---
 
 # Живого агента берут только по его ключу
 
 Ключ живого агента считается из строки подключения базы, версии платформы, пользователя
-базы, `workPath`, версии раннера и учётной записи ОС. Команда берёт живого агента, только если
+базы, `workPath`, версии и сборки раннера и учётной записи ОС. Сборку называет отметка
+исполняемого файла (размер и время изменения): сторож другой сборки той же версии говорит
+другим протоколом, и команда его не берёт. Команда берёт живого агента, только если
 совпали все части ключа. Ключ — это HMAC с солью учётной записи, а соль лежит в файле,
 доступном только ей. В открытом виде ключ не хранится, потому что в строке подключения бывает
 пароль. Пароль базы в ключ не входит. Учётные данные команда передаёт сторожу с каждым

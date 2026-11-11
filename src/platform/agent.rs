@@ -1029,7 +1029,7 @@ impl AgentSession {
     }
 
     /// Отключает агента от базы (`common disconnect-ib`), не закрывая сессии: так живой агент
-    /// между командами базу не держит. Служебная команда работы команды не отмечает.
+    /// отпускает базу другому исполнителю (#644). Служебная команда работы команды не отмечает.
     pub fn disconnect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
         self.run(DISCONNECT_COMMAND, &policy.without_work())?
             .outcome()
@@ -2070,12 +2070,15 @@ impl ManagedAgent {
     /// (`INV.PLATFORM.A-MANAGED-AGENT-IS-RELEASED-AND-REMOVED`). Отказ или молчание
     /// `disconnect-ib` снятия не отменяют, исхода команды они не меняют; отмена команды
     /// срока отпускания не обрывает.
+    ///
+    /// Процесс снимается его job-объектом (на Unix — `SIGKILL` группы) без ожидания выхода:
+    /// команда отвечает сразу, а снятие дерева система доводит сама (#637).
     pub fn release_and_remove(mut self) {
         if let Some(session) = self.session.take() {
             session.release_under(&WaitPolicy::release_window(RELEASE_GRACE));
         }
         if let Some(process) = self.process.take() {
-            process.terminate();
+            process.remove();
         }
     }
 }

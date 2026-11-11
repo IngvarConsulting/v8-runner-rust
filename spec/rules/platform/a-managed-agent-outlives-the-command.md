@@ -2,7 +2,6 @@
 id: INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND
 check:
   - tests/agent_keeper.rs::a_second_client_reuses_the_live_agent_without_a_new_launch
-  - tests/agent_keeper.rs::a_session_left_without_end_disconnects_the_agent
   - tests/cli_live_agent.rs::a_second_command_reuses_the_live_agent
   - src/platform/agent_keeper/channel.rs::the_channel_is_open_to_its_own_account_only
 ---
@@ -11,11 +10,11 @@ check:
 
 Если агента Конфигуратора поднял сам раннер, то после работы команда не снимает ни его
 процесс, ни его сессию SSH. Их держит сторож (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`).
-Команда снимает только своё — подключение к базе (`common disconnect-ib`). Следующая команда
-того же ключа (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`) передаёт запросы агенту
-через сторожа и сама подключается к базе (`common connect-ib`). Если агент отвечает, что
-подключение уже есть, это считается подключением. Между командами агент не держит ни
-подключения к базе, ни учётных данных базы. Поэтому простаивающий агент базу не блокирует.
+Следующая команда того же ключа (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`) передаёт
+запросы агенту через сторожа. Подключение агента к базе тоже переживает команду
+(`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`); если агент на `common connect-ib`
+отвечает, что подключение уже есть, это считается подключением. Пока агент подключён, он
+держит базу как сеанс Конфигуратора с учётными данными, с которыми подключился.
 
 Это экономит запуск процесса и открытие сессии: на КА 8.3.27 6,4 с и 2,8 с из 9 с
 ([замер](../../../references/1c/confirmed-runtime-measurements.md), раздел о процессе агента

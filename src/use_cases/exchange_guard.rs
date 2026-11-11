@@ -977,6 +977,13 @@ impl<'a> GenerationGate<'a> {
     pub(crate) fn failed_load_note(&self) -> Vec<String> {
         self.failed_load.borrow_mut().take().into_iter().collect()
     }
+
+    /// Решает ли что-нибудь поколение после удачной загрузки набора: его ответ нужен записи
+    /// поколения, если у набора есть журнал. Иначе второй запрос не уходит (#637). Файла версий
+    /// загрузка не касается (#646), и ради него поколение не спрашивается.
+    pub(crate) fn generation_after_load_decides(&self, set: &SourceSetContext) -> bool {
+        GenerationLedger::of(set).is_some()
+    }
 }
 
 /// Отказ `apply` набора, чья запись помечена как сделанная перед неудачной загрузкой, — при
@@ -1043,6 +1050,13 @@ pub(crate) fn unchanged_since_the_record(
         )
         },
     )
+}
+
+/// Решает ли что-нибудь поколение после выгрузки набора `set`: его ответ нужен только записи
+/// поколения ([`record_after_dump`]) и хеш-памяти записанного (`watched` — выгрузку
+/// стерегут). У набора без журнала поколений и без сторожа второй запрос не уходит (#637).
+pub(crate) fn generation_after_dump_decides(set: &SourceSetContext, watched: bool) -> bool {
+    watched || GenerationLedger::of(set).is_some()
 }
 
 /// Поколение у выгрузки: до и после. Совпало — запись после выгрузки. Изменилось — базу
@@ -1301,6 +1315,41 @@ mod tests {
             &SourceSetsService::new(config).designer_contexts(),
             None,
         )
+    }
+
+    /// Второй запрос поколения после выгрузки уходит, только когда ответ что-то решает
+    /// (#637): у набора с журналом поколений — всегда
+    /// (`INV.USE-CASES.A-BASE-CHANGED-DURING-A-DUMP-IS-NAMED-AND-NOT-REMEMBERED`); у набора без
+    /// журнала — только ради хеш-памяти стерегомой выгрузки.
+    #[test]
+    fn the_generation_after_a_dump_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+        assert!(GenerationLedger::of(&unremembered).is_none());
+
+        assert!(generation_after_dump_decides(remembered, false));
+        assert!(generation_after_dump_decides(remembered, true));
+        assert!(generation_after_dump_decides(&unremembered, true));
+        assert!(!generation_after_dump_decides(&unremembered, false));
+    }
+
+    /// Второй запрос поколения после загрузки уходит, только когда ответ что-то решает (#637):
+    /// у набора с журналом — всегда, его ответ записывается
+    /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`); у набора без журнала
+    /// — никогда: файла версий загрузка не касается (#646).
+    #[test]
+    fn the_generation_after_a_load_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+
+        assert!(gate.generation_after_load_decides(remembered));
+        assert!(!gate.generation_after_load_decides(&unremembered));
     }
 
     #[test]

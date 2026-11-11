@@ -181,6 +181,7 @@ class Bench:
         """
         target = self.path("version")
         shutil.rmtree(target, ignore_errors=True)
+        self.runner.release_agents()
         ex.designer(self.stand, ["/DumpConfigToFiles", target, "-configDumpInfoOnly"], self.path("designer.out"))
         return os.path.join(target, "ConfigDumpInfo.xml")
 
@@ -225,6 +226,7 @@ class Bench:
             # before the push, dumped by batch Designer into an empty directory.
             dump = self.path("verify-dump")
             shutil.rmtree(dump, ignore_errors=True)
+            self.runner.release_agents()
             row["verify_seconds"] = ex.designer(self.stand, ex.batch_pull_args(dump, before), self.path("designer.out"))
             row["verified"] = self.markers_in(dump, rels, marker)
             shutil.rmtree(dump, ignore_errors=True)

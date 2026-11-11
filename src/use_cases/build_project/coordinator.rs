@@ -440,7 +440,12 @@ fn run_build_with(
                             .inspect_err(|error| gate.after_failed_load(&source_context, error))
                     })
                     .and_then(|(before, Loaded { warnings, apply })| {
-                        let read = loader.read_generation(context, config, source_set, index);
+                        // Ответ, который ничего не решает, не спрашивается (#637).
+                        let read = if gate.generation_after_load_decides(&source_context) {
+                            loader.read_generation(context, config, source_set, index)
+                        } else {
+                            Ok(None)
+                        };
                         generation_after_load(&gate, &source_context, tool, warnings, read)
                             .map(|(warnings, token)| (before, warnings, token, apply))
                     });
@@ -1666,7 +1671,7 @@ pub(super) fn run_build_edt(
 /// Загрузка набора под сверкой поколения: до неё — отказ, если база ушла вперёд записанного
 /// сравнимым инструментом; после — запись поколения. Файл версий загрузка не пишет: копия
 /// раннера устаревает на загруженное, и следующий `pull` его выгрузит (#646).
-fn guarded_load(
+pub(super) fn guarded_load(
     gate: &GenerationGate<'_>,
     set: &SourceSetContext,
     tool: Provider,
@@ -1677,7 +1682,13 @@ fn guarded_load(
     gate.before_load(set, tool, &read)?;
     let Loaded { warnings, apply } =
         load().inspect_err(|error| gate.after_failed_load(set, error))?;
-    let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read())?;
+    // Ответ, который ничего не решает, не спрашивается (#637).
+    let read = if gate.generation_after_load_decides(set) {
+        read()
+    } else {
+        Ok(None)
+    };
+    let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read)?;
     let recorded = gate.after_load(set, tool, token.as_deref(), apply.mark());
     warnings.extend(remember_unapplied(&apply, recorded, commit)?);
     Ok(Loaded { warnings, apply })

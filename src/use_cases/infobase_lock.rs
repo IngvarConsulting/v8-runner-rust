@@ -125,15 +125,16 @@ pub(crate) fn acquire_infobase_lock(
 }
 
 /// Живые агенты той же базы перед командой, которая её открывает
-/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`). Простаивающий агент к базе
-/// не подключён и команде не мешает. Агент, подключённый к базе сессией другой команды, —
-/// отказ `infobase_busy`, называющий его команду и держателей. Команда, которая пересоздаёт
-/// базу (`recreates`), снимает простаивающих агентов этой базы: их ключ больше ничему не
-/// отвечает. Ответ — pid снятых агентов (у агента без процесса — `None`).
+/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`). Агент, занятый командой или
+/// сессией другой команды, — отказ `infobase_busy`, называющий его команду и держателей.
+/// Простаивающий агент может оставаться подключённым к базе (#644): команда, которая открывает
+/// базу без выбора исполнителя ([`LiveAgents::Disconnect`]), отключает его. Команда, которая
+/// пересоздаёт базу ([`LiveAgents::Remove`]), снимает простаивающих агентов этой базы: их ключ
+/// больше ничему не отвечает. Ответ — pid снятых агентов (у агента без процесса — `None`).
 pub(crate) fn settle_live_agents(
     config: &AppConfig,
     command_name: &str,
-    recreates: bool,
+    agents: LiveAgents,
 ) -> Result<Vec<Option<u32>>, AppError> {
     let mut removed = Vec::new();
     // Нет каталога состояния — нет и живых агентов.
@@ -160,32 +161,205 @@ pub(crate) fn settle_live_agents(
             }
         }
     }
-    if recreates {
-        // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
-        // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
-        for (keeper, status) in found {
-            match keeper
-                .client
-                .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
-            {
-                Ok(Stopped::Removed) => {
-                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed");
-                    removed.push(status.ok().and_then(|status| status.agent_pid));
-                }
-                Ok(Stopped::Pending) => {
-                    tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
-                }
-                Ok(Stopped::InUse { command, holders }) => {
-                    let agent_pid = status.ok().and_then(|status| status.agent_pid);
-                    return Err(busy(agent_pid, command.as_deref(), &holders));
-                }
-                Err(error) => {
-                    tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
-                }
+    match agents {
+        LiveAgents::Keep => return Ok(removed),
+        LiveAgents::Disconnect => {
+            disconnect_attached(found, None, Some(&busy))?;
+            return Ok(removed);
+        }
+        LiveAgents::Remove => {}
+    }
+    // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
+    // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
+    for (keeper, status) in found {
+        match keeper
+            .client
+            .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
+        {
+            Ok(Stopped::Removed) => {
+                tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed");
+                removed.push(status.ok().and_then(|status| status.agent_pid));
+            }
+            Ok(Stopped::Pending) => {
+                tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
+            }
+            Ok(Stopped::InUse { command, holders }) => {
+                let agent_pid = status.ok().and_then(|status| status.agent_pid);
+                return Err(busy(agent_pid, command.as_deref(), &holders));
+            }
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
             }
         }
     }
     Ok(removed)
+}
+
+/// Что команда на границе делает с простаивающими живыми агентами своей базы; занятый агент — во
+/// всех случаях отказ `infobase_busy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveAgents {
+    /// Оставляет: исполнителя выберет сценарий и отключит их сам, если это не агент.
+    Keep,
+    /// Отключает от базы: команда открывает её клиентом 1С, не выбирая исполнителя.
+    Disconnect,
+    /// Снимает: база пересоздаётся или восстанавливается.
+    Remove,
+}
+
+/// Отключает от базы простаивающих живых агентов этой базы, кроме агента ключа `keep` (#644,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`). Единственное место, где команда
+/// снимает подключение живого агента: перед другим исполнителем той же базы, перед работой,
+/// которой база нужна монопольно, и перед своим агентом, если база подключена к агенту другого
+/// ключа. Условие «не занят» сторож проверяет сам: агент, занятый командой или сессией другой
+/// команды, — отказ `infobase_busy`. Сторож, который не ответил, команду не останавливает.
+pub(crate) fn release_idle_connections(
+    config: &AppConfig,
+    command_name: &str,
+    keep: Option<&str>,
+) -> Result<(), AppError> {
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    release_idle_connections_of(&infobase, command_name, keep)
+}
+
+/// То же для базы `infobase` в каноническом виде: без конфига, для потока раннего подъёма.
+pub(crate) fn release_idle_connections_of(
+    infobase: &str,
+    command_name: &str,
+    keep: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return Ok(());
+    };
+    let found = crate::platform::agent_keeper::client::keepers_of(&state, infobase);
+    let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
+        AppError::InfobaseBusy(format!(
+            "cannot start {command_name}: infobase '{infobase}' is in use: {}; retry when it finishes",
+            live_agent_text(agent_pid, command, holders),
+        ))
+    };
+    disconnect_attached(found, keep, Some(&busy))
+}
+
+/// Отключает от баз кластера живых агентов, которые простаивают, подключённые к серверной базе:
+/// остановка или перезапуск кластера и его СУБД оставили бы их подключение устаревшим. Занятого
+/// агента не трогают: его команда сама получит отказ платформы.
+pub(crate) fn release_server_connections() {
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return;
+    };
+    let found = crate::platform::agent_keeper::client::live_keepers(&state)
+        .into_iter()
+        .filter(|(_, record)| {
+            record.agent.as_ref().is_some_and(|agent| {
+                crate::platform::connection::is_server_identity(&agent.infobase)
+            })
+        })
+        .map(|(keeper, _)| {
+            let status = keeper.client.status();
+            (keeper, status)
+        })
+        .collect();
+    let _ = disconnect_attached(found, None, None);
+}
+
+/// Отказ занятого агента: его pid, команда и держатели.
+type BusyRefusal<'a> = &'a dyn Fn(Option<u32>, Option<&str>, &[Holder]) -> AppError;
+
+/// Отключает подключённых простаивающих агентов из `found`, кроме ключа `keep`. Занятый агент
+/// обход не останавливает: простаивающие отключаются все, а отказ `busy` о первом занятом
+/// приходит после; без `busy` занятый пропускается.
+fn disconnect_attached(
+    found: Vec<(
+        crate::platform::agent_keeper::client::LiveKeeper,
+        Result<
+            crate::platform::agent_keeper::protocol::KeeperStatus,
+            crate::platform::agent::AgentError,
+        >,
+    )>,
+    keep: Option<&str>,
+    busy: Option<BusyRefusal<'_>>,
+) -> Result<(), AppError> {
+    use crate::platform::agent_keeper::client::Disconnected;
+    let mut refusal = None;
+    for (keeper, status) in found {
+        if keep == Some(keeper.key.as_str()) {
+            continue;
+        }
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "a live agent of this infobase did not answer its status");
+                continue;
+            }
+        };
+        if status.holds_the_infobase() {
+            if let Some(busy) = busy {
+                refusal.get_or_insert_with(|| {
+                    busy(status.agent_pid, status.command(), &status.holders)
+                });
+            }
+            continue;
+        }
+        if !status.attached {
+            continue;
+        }
+        match keeper.client.disconnect() {
+            Ok(Disconnected::Done) => {
+                tracing::info!(key = %keeper.key, "the live agent is disconnected from the infobase");
+            }
+            Ok(Disconnected::NotConnected) => {}
+            Ok(Disconnected::InUse { command, holders }) => {
+                if let Some(busy) = busy {
+                    refusal.get_or_insert_with(|| {
+                        busy(status.agent_pid, command.as_deref(), &holders)
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "the live agent was not disconnected from the infobase");
+            }
+        }
+    }
+    refusal.map_or(Ok(()), Err)
+}
+
+/// Подключённые к базе живые агенты для текста отказа «базу держат» (#644): pid, рабочая копия
+/// и выход — `v8-runner agent release`. Пусто — таких агентов нет. Каталогов не создаёт.
+pub(crate) fn attached_live_agents_hint(config: &AppConfig) -> Option<String> {
+    let state = crate::support::machine::account::existing_account_state_dir()?;
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    let attached: Vec<(Option<u32>, Option<String>)> =
+        crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+            .into_iter()
+            .filter_map(|(keeper, status)| {
+                let status = status.ok().filter(|status| status.attached)?;
+                Some((status.agent_pid, keeper.client.work_path()))
+            })
+            .collect();
+    attached_agents_text(&attached)
+}
+
+/// Текст о подключённых живых агентах: pid и рабочая копия каждого и выход `agent release`.
+pub(crate) fn attached_agents_text(agents: &[(Option<u32>, Option<String>)]) -> Option<String> {
+    let named: Vec<String> = agents
+        .iter()
+        .map(|(pid, work_path)| {
+            format!(
+                "the live Designer agent (pid {}{}) stays connected to it",
+                pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+                work_path
+                    .as_deref()
+                    .map_or_else(String::new, |path| format!(", workPath '{path}'")),
+            )
+        })
+        .collect();
+    (!named.is_empty()).then(|| {
+        format!(
+            "{}; `v8-runner agent release` in its working copy disconnects it",
+            named.join("; ")
+        )
+    })
 }
 
 /// Простаивающие живые агенты базы, которых сняла бы команда, пересоздающая её: pid каждого

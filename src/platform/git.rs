@@ -697,9 +697,7 @@ pub fn worktree_under(
     optional_locks: bool,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<crate::domain::git_worktree::GitWorktree, GitQueryError> {
-    let mut view = ignore_view(toplevel, info_exclude, roots, interrupted)?;
-    view.index = index_entries_under(toplevel, roots, interrupted)?;
-
+    let started = std::time::Instant::now();
     let mut status = status_command(toplevel, optional_locks);
     status.args([
         "--porcelain=v2",
@@ -715,8 +713,55 @@ pub fn worktree_under(
     } else {
         OnCancel::Kill
     };
-    (view.worktree_changed, view.untracked) =
-        parse_status_v2(&run_git_query(status, None, on_cancel, interrupted)?)?;
+    // `git status` — самый долгий вопрос — идёт рядом с остальными (#645): они только читают
+    // индекс и настройки, а сведения о файлах, которые обновляет `status`, хешей индекса не
+    // меняют. Индекс читается первым: `status` заменяет его в самом конце, и на Windows замена
+    // файла, который ещё читают, откладывается. Отмену ему передаёт этот поток.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (others, answer) = std::thread::scope(|scope| {
+        let stop = &stop;
+        let status = scope.spawn(move || {
+            let mut stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+            let answer = run_git_query(status, None, on_cancel, &mut stopped);
+            (answer, started.elapsed().as_millis() as u64)
+        });
+        let others = index_entries_under(toplevel, roots, interrupted).and_then(|index| {
+            let index_ms = started.elapsed().as_millis() as u64;
+            let view = ignore_view(toplevel, info_exclude, roots, interrupted)?;
+            Ok((view, index, started.elapsed().as_millis() as u64, index_ms))
+        });
+        if others.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        while !status.is_finished() {
+            if interrupted() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            std::thread::sleep(GIT_INTERRUPTION_POLL);
+        }
+        let answer = status.join().unwrap_or_else(|_| {
+            (
+                Err(GitQueryError::failed("a thread asking git panicked")),
+                0,
+            )
+        });
+        (others, answer)
+    });
+    let (mut view, index, ignore_ms, index_ms) = others?;
+    let (answer, status_ms) = answer;
+    view.index = index;
+    (view.worktree_changed, view.untracked) = parse_status_v2(&answer?)?;
+    tracing::debug!(
+        toplevel = %toplevel.display(),
+        index = view.index.len(),
+        changed = view.worktree_changed.len(),
+        untracked = view.untracked.len(),
+        ignore_ms,
+        index_ms,
+        status_ms,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "git described the working tree"
+    );
     // Неотслеживаемый `.gitignore` внутри набора git применяет так же, как отслеживаемый.
     let untracked_gitignores: Vec<String> = view
         .untracked
