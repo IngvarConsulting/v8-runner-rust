@@ -7,6 +7,8 @@ check:
   - src/use_cases/apply/act.rs::a_cluster_refusal_without_executor_evidence_names_the_awake_rac_sessions
   - src/use_cases/apply/act.rs::a_forced_apply_refused_for_another_reason_neither_repeats_nor_terminates
   - src/use_cases/apply/act.rs::an_ibcmd_refusal_is_never_blamed_on_the_sessions_of_the_server
+  - src/use_cases/apply/act.rs::a_refusal_names_where_its_evidence_came_from
+  - src/use_cases/apply/act.rs::a_failed_retry_on_the_runners_file_ibsrv_names_its_restart
   - src/use_cases/apply/act.rs::a_file_base_held_by_a_session_is_refused_with_its_list_even_with_force
   - src/use_cases/apply/act.rs::a_file_base_open_in_the_designer_is_refused_as_designer_busy
   - src/use_cases/apply/act.rs::an_agent_update_always_forbids_dynamic_update
@@ -85,10 +87,19 @@ SSH-шлюза автономного сервера, который отказ�
 **Отказ `infobase_sessions`** (род `workspace`, выход 3): обновлению нужен монопольный
 доступ, а базу держат сеансы. `error.sessions` называет базу (`base`, строка соединения без
 пароля), сеансы (`list`: компьютер, код и название приложения, начало, пользователь и номер;
-`null`, если список не получен или не разобран), `from_this_machine`, `terminable` и
-блокировку начала сеансов `lock: {state: none|own|foreign|unknown, message}`. `next` — тот же
-вызов: с `--sessions force`, если сеансы можно завершить, иначе без ключей — «закрыл,
-повторить».
+`null`, если список не получен или не разобран), `from_this_machine`, `terminable`,
+блокировку начала сеансов `lock: {state: none|own|foreign|unknown, message}` и источник
+признака `evidence`:
+
+- `executor` — улика исполнителя или состояния базы (`error-type` и вопрос агента, блокировка
+  файлов файловой базы, отказ СУБД из-за подключений): отказ точно из-за сеансов;
+  `executor_error: null`;
+- `server_list` — улики исполнителя нет, а список сервера называет чужие живые сеансы: база
+  занята, но причина отказа может быть другой; `executor_error` — отказ исполнителя как он
+  есть (он же в конце `message`).
+
+`next` — тот же вызов: с `--sessions force`, если сеансы можно завершить, иначе без ключей —
+«закрыл, повторить».
 
 **Отказ `infobase_designer_busy`** (род `workspace`, выход 3): файловую базу держит чужой
 Конфигуратор. `push` отказывает уже на загрузке. Поле `sessions` той же формы: `list: null` —
@@ -123,7 +134,9 @@ force`, ни `--session-terminate=force` у агента и `ibcmd` (замер 
 базой после завершения сеанса при живом процессе клиента обновление падает «Ошибка определения
 принадлежности клиентского и серверного процессов одному компьютеру.», пока `ibsrv` не
 перезапустят (`standalone restart`); над СУБД и на 8.3.27 этого нет (замер #613). Отказ
-приходит отказом платформы.
+приходит отказом платформы. Решение — по состоянию, а не по тексту: если цель — свой
+`ibsrv` над файловой базой (`standalone.managed.db-path`), ключ завершения отдан, а повтор
+отказал и признака сеансов уже нет, отказ называет выход `next: standalone restart`.
 
 **Ключ по умолчанию.** Без `force` `ibcmd config apply` получает явный
 `--session-terminate=disable`; Конфигуратор и агент — ничего.

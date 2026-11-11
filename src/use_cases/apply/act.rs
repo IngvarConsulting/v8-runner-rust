@@ -211,6 +211,7 @@ fn apply_with(
     // ключ не отдаётся: отказ доходит до команды как есть.
     let terminated = match holder {
         Some(sessions::Holder::Sessions(list)) => list,
+        Some(sessions::Holder::Listed(ref list)) => Some(list.clone()),
         Some(sessions::Holder::Designer) => {
             return Err(refuse(gate, config, holder, refused.error));
         }
@@ -244,6 +245,11 @@ fn apply_with(
             &refused.evidence(),
             server_sessions,
         );
+        // Сеансы завершены, а повтор не прошёл: свой `ibsrv` над файловой базой после этого
+        // отказывает, пока его не перезапустят (замер #613 на 8.5.4.2028) — выход называется.
+        if holder.is_none() && sessions::restart_heals(config) {
+            return sessions::restart_refusal(refused.error);
+        }
         refuse(gate, config, holder, refused.error)
     })
 }
@@ -407,7 +413,7 @@ mod tests {
     use super::{agent_update_command, apply, apply_with, Applier, Subject, SubjectKind};
     use crate::config::model::{AppConfig, InfobaseConfig, SourceFormat, TestsConfig, ToolsConfig};
     use crate::domain::next_step::NextStep;
-    use crate::domain::sessions::{SessionEntry, SessionLockState};
+    use crate::domain::sessions::{SessionEntry, SessionLockState, SessionsEvidence};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest,
         ProcessResult, ProcessRunner, SpawnResult, WorkGiven,
@@ -757,6 +763,99 @@ mod tests {
             "{error:?}"
         );
         assert!(context.sessions().outcome().is_none(), "nothing terminated");
+    }
+
+    /// Признак из списка сервера: `evidence: server_list`, а отказ исполнителя — отдельным полем
+    /// `executor_error`; у улики исполнителя — `evidence: executor` без него.
+    #[test]
+    fn a_refusal_names_where_its_evidence_came_from() {
+        let dir = tempdir().expect("tempdir");
+        let config = server_config(dir.path());
+        let plain = || {
+            ExecutionContext::cli(CommandName::Apply).with_sessions(SessionsGate::new(
+                SessionsPolicy::Disable,
+                NextStep::command("apply"),
+            ))
+        };
+        let runner = Scripted::new(vec![(1, OTHER_FAILURE)]);
+        let error = designer_apply_seeing(
+            &plain(),
+            &config,
+            &runner,
+            dir.path(),
+            Some(vec![rac_session()]),
+        )
+        .expect_err("refused");
+        let refusal = crate::use_cases::result::UseCaseError::from(error);
+        let sessions = refusal.sessions().expect("sessions");
+        assert_eq!(sessions.evidence, SessionsEvidence::ServerList);
+        let executor_error = sessions.executor_error.as_deref().expect("executor_error");
+        assert!(executor_error.contains("update_db_cfg"), "{executor_error}");
+
+        let held = crate::use_cases::apply::sessions::refusal(
+            &SessionsGate::default(),
+            &config,
+            crate::use_cases::apply::sessions::Holder::Sessions(None),
+            &crate::support::error::AppError::InvalidOutput("exclusive".to_owned()),
+        );
+        let held = crate::use_cases::result::UseCaseError::from(held);
+        let sessions = held.sessions().expect("sessions");
+        assert_eq!(sessions.evidence, SessionsEvidence::Executor);
+        assert_eq!(sessions.executor_error, None);
+    }
+
+    /// Свой `ibsrv` над файловой базой: сеансы завершены ключом, а повтор отказал — отказ с
+    /// выходом `standalone restart` (замер #613 на 8.5.4.2028), а исход называет завершённые.
+    #[test]
+    fn a_failed_retry_on_the_runners_file_ibsrv_names_its_restart() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = server_config(dir.path());
+        config.infobase.standalone = Some(crate::config::model::StandaloneConfig {
+            managed: Some(crate::config::model::ManagedServerConfig {
+                name: None,
+                db_path: Some(dir.path().join("fib")),
+            }),
+            gate: None,
+            host_fingerprint: None,
+            exchange: None,
+        });
+        let runner = Scripted::new(vec![(1, MEASURED_LIST_RU), (1, "")]);
+        let context = forced("apply");
+        let mut awake = Some(vec![rac_session()]);
+        let listed = std::cell::RefCell::new(&mut awake);
+
+        let error = collecting_deferrals(|deferrals| {
+            apply_with(
+                &context,
+                &config,
+                Applier::Designer {
+                    binary: Path::new("1cv8"),
+                    runner: &runner,
+                    log_file: {
+                        std::fs::create_dir_all(dir.path().join("logs")).expect("logs");
+                        dir.path().join("logs").join("update.log")
+                    },
+                },
+                &Subject {
+                    kind: SubjectKind::SourceSet,
+                    name: "main",
+                    extension: None,
+                    timeline: "main",
+                },
+                deferrals,
+                &|| listed.borrow_mut().take(),
+            )
+        })
+        .expect_err("refused");
+
+        assert_eq!(runner.calls().len(), 2);
+        let refusal = crate::use_cases::result::UseCaseError::from(error);
+        assert_eq!(
+            refusal.next().map(|next| next.command.as_str()),
+            Some("standalone restart")
+        );
+        let outcome = context.sessions().outcome().expect("outcome");
+        assert_eq!(outcome.terminated, Some(vec![rac_session()]));
     }
 
     /// `ibcmd` с прямым доступом к БД сеансов сервера не видит (замер #613): его отказ при живых

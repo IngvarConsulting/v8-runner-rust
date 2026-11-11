@@ -153,9 +153,10 @@ fn sessions_refusal(
     config: &AppConfig,
     message: String,
     list: Option<Vec<crate::domain::sessions::SessionEntry>>,
+    evidence: crate::domain::sessions::SessionsEvidence,
 ) -> UseCaseError {
     UseCaseError::new(UseCaseErrorKind::InfobaseSessions, message).with_sessions(
-        crate::use_cases::apply::sessions::infobase_sessions(config, list, false),
+        crate::use_cases::apply::sessions::infobase_sessions(config, list, false, evidence, None),
     )
 }
 

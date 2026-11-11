@@ -1528,6 +1528,7 @@ impl Registered {
                 self.name
             ),
             Some(super::session_entries(sessions)),
+            crate::domain::sessions::SessionsEvidence::ServerList,
         )
     }
 

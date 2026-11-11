@@ -1108,8 +1108,11 @@ v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [
   `error.sessions`: `base` без пароля, `list` — компьютер, `application` (`1CV8C`, `1CV8`,
   `Designer`, `BackgroundJob`, `WebClient`, `COMConnection` или `null`),
   `application_title`, `started`, `user`, `id`; `null`, если список не получен или текст
-  платформы не разобран целиком, — `from_this_machine`, `terminable` и `lock: {state: none|own|foreign|unknown,
-  message}`. `next` — тот же вызов, с `--sessions force`, если сеансы можно завершить.
+  платформы не разобран целиком, — `from_this_machine`, `terminable`, `lock: {state: none|own|foreign|unknown,
+  message}` и `evidence`: `executor` — улика исполнителя или состояния базы, отказ точно из-за
+  сеансов; `server_list` — улики исполнителя нет, а список сервера называет чужие живые сеансы:
+  база занята, но причина отказа может быть другой, и `executor_error` несёт отказ исполнителя
+  (у `executor` — `null`). `next` — тот же вызов, с `--sessions force`, если сеансы можно завершить.
   Чужой Конфигуратор файловой базы — отдельный отказ `infobase_designer_busy` (`push`
   отказывает уже на загрузке; `list: null`, `terminable: false`, `next` — тот же вызов).
   **Файловая база:** сеансы не завершает ни один ключ платформы (замер #211), раннер
@@ -1123,7 +1126,8 @@ v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [
   отказа. Ключ завершения агента кластера работает с 8.3.24; ключа сообщения агент до 8.3.27 не
   знает, и раннер не передаёт его агенту никогда — `--sessions-message` доходит только через
   `ibcmd`. На `ibsrv` 8.5.4.2028 над файловой базой после завершения сеанса обновление падает
-  ошибкой платформы до `standalone restart` (замер #613). Без `force` `ibcmd config
+  ошибкой платформы до `standalone restart` (замер #613): у своего `ibsrv` над файловой базой
+  неудачный повтор после `force` приходит с `next: standalone restart`. Без `force` `ibcmd config
   apply` получает `--session-terminate=disable`. `make` и `push --no-apply` ключа не
   принимают; у MCP его нет, отказ там — `runtime_failure`.
 - Замер 8.3.27.2074: поколение основной конфигурации меняет загрузка, а применение — нет; у
