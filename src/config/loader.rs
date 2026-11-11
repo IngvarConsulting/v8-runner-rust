@@ -398,6 +398,9 @@ fn build_config(
             crate::domain::capability::Operation::parse(&key).map(|operation| (operation, file))
         })
         .collect();
+    if let Some(name) = path.file_name() {
+        config.project_file = name.to_owned();
+    }
     normalize_config_paths(&mut config, config_dir);
 
     if let Some(wd) = workdir_override {
@@ -737,7 +740,9 @@ fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidati
 }
 
 /// Базы, которые объявляет проект в каталоге `project_dir`: карта `infobases` его местного
-/// слоя и прежний ключ `infobase:` в обоих файлах, с путями от этого каталога.
+/// слоя и прежний ключ `infobase:` в обоих файлах, с путями от этого каталога. Проектный
+/// файл называет `project_file` — имя файла, которым загружен конфиг команды (`--config` /
+/// `V8TR_CONFIG`, по умолчанию `v8project.yaml`); имя с каталогом — ошибка.
 ///
 /// Так владельца базы спрашивают, держит ли он её ещё. Местный слой проходит ту же границу,
 /// что у загрузки проекта, а от проектного файла берётся только прежний ключ: остальное
@@ -746,15 +751,23 @@ fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidati
 /// можно только у неизменившейся пары файлов с прямым маршрутом к каталогу проекта.
 pub fn load_declared_infobases(
     project_dir: &Path,
+    project_file: &std::ffi::OsStr,
 ) -> Result<std::collections::BTreeMap<String, InfobaseConfig>, ConfigLoadError> {
+    // Местный слой читается отдельно: проектным файлом он не бывает.
+    if project_file == std::ffi::OsStr::new(LOCAL_CONFIG_FILE_NAME) {
+        return Err(ConfigLoadError::ReadError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the project file of the ownership check names the local layer",
+        )));
+    }
     let project_dir = std::path::absolute(project_dir)?;
     let route = CapturedConfigRoute::capture(&project_dir)?;
     let mut declared = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
-    let mut project_file = CapturedYamlFile::capture(&route, DEFAULT_CONFIG_FILE_NAME)?;
+    let project_path = project_dir.join(project_file);
+    let mut project_file = CapturedYamlFile::capture(&route, project_file)?;
     #[cfg(test)]
     run_declared_read_hook(DeclaredReadPoint::ProjectCaptured);
-    let mut local_file = CapturedYamlFile::capture(&route, LOCAL_CONFIG_FILE_NAME)?;
+    let mut local_file = CapturedYamlFile::capture(&route, LOCAL_CONFIG_FILE_NAME.as_ref())?;
     #[cfg(test)]
     run_declared_read_hook(DeclaredReadPoint::LocalCaptured);
     if let Some(mut project) = project_file.parse()? {
@@ -839,7 +852,7 @@ fn run_declared_read_hook(point: DeclaredReadPoint) {
 
 struct CapturedYamlFile<'a> {
     route: &'a CapturedConfigRoute,
-    name: &'static str,
+    name: &'a std::ffi::OsStr,
     content: Option<CapturedYamlContent>,
 }
 
@@ -939,13 +952,23 @@ impl CapturedConfigRoute {
             .expect("an absolute project path has a root")
     }
 
-    fn open_yaml(&self, name: &'static str) -> std::io::Result<std::fs::File> {
+    fn open_yaml(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
+        // The file is opened inside the held project directory: a name with any other
+        // component (`..`, a separator) would leave the captured route, and
+        // `O_NOFOLLOW` guards only the last component.
+        if Path::new(name).file_name() != Some(name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the project file of the ownership check is not a plain file name",
+            ));
+        }
         #[cfg(unix)]
         {
             use std::os::fd::{AsRawFd, FromRawFd};
-            let name = std::ffi::CString::new(name)?;
-            // SAFETY: the project keeps its directory fd alive, and the name is
-            // one fixed YAML basename with no intermediate path components.
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::CString::new(name.as_bytes())?;
+            // SAFETY: the project keeps its directory fd alive for the call, and the
+            // name is a NUL-terminated C string that `openat` only reads.
             let fd = unsafe {
                 libc::openat(
                     self.project().file.as_raw_fd(),
@@ -1300,7 +1323,7 @@ fn open_config_entry(path: &Path, directory: bool) -> std::io::Result<std::fs::F
 impl<'a> CapturedYamlFile<'a> {
     fn capture(
         route: &'a CapturedConfigRoute,
-        name: &'static str,
+        name: &'a std::ffi::OsStr,
     ) -> Result<Self, ConfigLoadError> {
         use std::io::Read;
         let mut file = match route.open_yaml(name) {
@@ -1819,6 +1842,11 @@ fn mapping_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
 }
 
 fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
+    // Строку с управляющим символом разбор не трогает: обрезка частей убрала бы его с края
+    // строки, а отказ ему даёт проверка формы (#638).
+    if crate::platform::connection::control_character(connection).is_some() {
+        return connection.to_owned();
+    }
     let trimmed = connection.trim();
     if trimmed.starts_with('/') || trimmed.starts_with('-') {
         return normalize_raw_connection_args(trimmed, config_dir);
@@ -1966,6 +1994,42 @@ mod tests {
             config.infobase.connection,
             format!("File={}", config.base_path.join("build/ib").display())
         );
+    }
+
+    /// Управляющий символ строки соединения из местного слоя доходит до проверки формы и на
+    /// краю относительного пути, который нормализация путей обрезала бы: загрузка
+    /// отказывает, не называя значения (#638).
+    #[test]
+    fn load_config_refuses_a_connection_with_a_control_character() {
+        for escaped in ["\\n", "\\0", "\\r"] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+            );
+            std::fs::write(
+                config_dir.join(LOCAL_CONFIG_FILE_NAME),
+                format!(
+                    "infobases:\n  origin:\n    connection: \"File=build/secret-ib{escaped}\"\n"
+                ),
+            )
+            .expect("local layer");
+
+            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .expect_err(escaped);
+
+            assert!(
+                matches!(
+                    error,
+                    ConfigLoadError::ValidationError(
+                        ConfigValidationError::ConnectionHasControlCharacter { .. }
+                    )
+                ),
+                "{escaped}: {error}"
+            );
+            assert!(!error.to_string().contains("secret-ib"), "{error}");
+        }
     }
 
     #[test]
@@ -3473,6 +3537,7 @@ source-set:
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: Vec::new(),
             tools: Default::default(),
             mcp: Default::default(),
@@ -3903,9 +3968,11 @@ source-set:
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).expect("project");
         let project = canonical(&project);
-        assert!(super::load_declared_infobases(&project)
-            .expect("no files")
-            .is_empty());
+        assert!(
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .expect("no files")
+                .is_empty()
+        );
 
         std::fs::write(
             project.join("v8project.yaml"),
@@ -3917,7 +3984,9 @@ source-set:
             "infobases:\n  test:\n    connection: 'File=other/ib'\n",
         )
         .expect("local layer");
-        let declared = super::load_declared_infobases(&project).expect("declared");
+        let declared =
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .expect("declared");
         assert_eq!(
             declared.keys().map(String::as_str).collect::<Vec<_>>(),
             ["origin", "test"]
@@ -3928,7 +3997,58 @@ source-set:
         );
 
         std::fs::write(project.join(LOCAL_CONFIG_FILE_NAME), "infobases: [\n").expect("broken");
-        assert!(super::load_declared_infobases(&project).is_err());
+        assert!(
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .is_err()
+        );
+    }
+
+    /// Проектный файл объявлений — тот, которым загружен конфиг (`--config other.yaml`), а не
+    /// только `v8project.yaml`; имя, которое не один компонент пути, или имя местного слоя —
+    /// ошибка (#638).
+    #[test]
+    fn declared_infobases_read_the_project_file_named_by_the_config() {
+        let dir = tempdir().expect("tempdir");
+        let project = canonical(dir.path());
+        std::fs::write(
+            project.join("other.yaml"),
+            "workPath: build\ninfobase:\n  connection: 'File=build/ib'\n",
+        )
+        .expect("project file");
+
+        let declared =
+            super::load_declared_infobases(&project, "other.yaml".as_ref()).expect("declared");
+        assert_eq!(
+            declared["origin"].connection,
+            format!("File={}", project.join("build").join("ib").display())
+        );
+        assert!(
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .expect("no v8project.yaml")
+                .is_empty()
+        );
+        for name in ["nested/other.yaml", "..", LOCAL_CONFIG_FILE_NAME] {
+            assert!(
+                super::load_declared_infobases(&project, name.as_ref()).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Загрузчик запоминает имя проектного файла `--config`: под ним проверка владельца
+    /// читает объявления копий (#638).
+    #[test]
+    fn the_loaded_config_names_its_project_file() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("other.yaml");
+        std::fs::write(&config_path, minimal_config_without_base_path("")).expect("config");
+        std::fs::create_dir_all(dir.path().join("src")).expect("sources");
+
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect("load config")
+            .config;
+
+        assert_eq!(config.project_file, "other.yaml");
     }
 
     #[cfg(unix)]
@@ -3963,7 +4083,7 @@ source-set:
                 }
                 DeclaredReadPoint::BeforeRecheck | DeclaredReadPoint::AfterProjectRecheck => {}
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -3992,7 +4112,7 @@ source-set:
                 }
                 DeclaredReadPoint::BeforeRecheck | DeclaredReadPoint::AfterProjectRecheck => {}
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -4013,7 +4133,7 @@ source-set:
                     std::fs::write(&local, "infobases: {}\n").unwrap();
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
     }
@@ -4033,7 +4153,7 @@ source-set:
                     std::fs::write(&primary, bytes).unwrap();
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -4064,7 +4184,7 @@ source-set:
                     file.set_modified(modified).unwrap();
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -4083,7 +4203,7 @@ source-set:
                     std::fs::write(&primary, "format: DESIGNER\n").unwrap();
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
     }
@@ -4094,9 +4214,18 @@ source-set:
         let project = canonical(directory.path());
         let local = project.join(LOCAL_CONFIG_FILE_NAME);
         std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
-        assert_eq!(super::load_declared_infobases(&project).unwrap().len(), 1);
+        assert_eq!(
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_file(local).unwrap();
-        assert!(super::load_declared_infobases(&project).unwrap().is_empty());
+        assert!(
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4113,7 +4242,9 @@ source-set:
             "infobases:\n  second:\n    connection: File=local-ib\n",
         )
         .unwrap();
-        let declarations = super::load_declared_infobases(&project).unwrap();
+        let declarations =
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref())
+                .unwrap();
         assert_eq!(declarations.len(), 2);
         assert_eq!(
             declarations["origin"].connection,
@@ -4171,7 +4302,7 @@ source-set:
                     );
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         )
         .expect("unrelated ancestor-child work must preserve a readable stable declaration pair");
         assert_eq!(declared.len(), 2);
@@ -4206,7 +4337,7 @@ source-set:
                 }
                 DeclaredReadPoint::BeforeRecheck => {}
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -4251,7 +4382,7 @@ source-set:
                 }
                 DeclaredReadPoint::BeforeRecheck => {}
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
@@ -4272,7 +4403,7 @@ source-set:
         let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
         symlink(&empty, &primary).unwrap();
         assert!(matches!(
-            super::load_declared_infobases(&project),
+            super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
             Err(ConfigLoadError::ReadError(_))
         ));
         std::fs::remove_file(primary).unwrap();
@@ -4291,7 +4422,7 @@ source-set:
             project
         );
         assert!(matches!(
-            super::load_declared_infobases(&alias),
+            super::load_declared_infobases(&alias, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
             Err(ConfigLoadError::ReadError(_))
         ));
     }
@@ -4317,7 +4448,7 @@ source-set:
                     std::fs::rename(&held, &during).unwrap();
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
     }
@@ -4512,7 +4643,7 @@ source-set:
                     "only an ancestor is exchanged; the held project directory stamp is unchanged"
                 );
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         match result {
             Err(ConfigLoadError::ReadError(_)) => {}
@@ -4549,7 +4680,7 @@ source-set:
                     assert!(std::fs::rename(&during, &held).is_err());
                 }
             },
-            || super::load_declared_infobases(&project),
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
         );
         assert_eq!(result.unwrap().len(), 1);
         std::fs::remove_file(local_after_read).expect("the read releases its sharing restriction");

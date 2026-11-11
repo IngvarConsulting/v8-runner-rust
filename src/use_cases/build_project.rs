@@ -1390,6 +1390,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1432,6 +1433,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
