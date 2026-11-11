@@ -596,3 +596,61 @@ fn two_commands_sharing_the_limit_both_work() {
     }
     assert!(state.keepers().len() <= 1, "the limit holds");
 }
+
+/// `pull`, которому сторож отказал, отвечает тем же отказом и кодом, что и без живого агента,
+/// хотя агент поднимался, пока команда готовилась: рабочей команды платформе не отправлено
+/// (`INV.USE-CASES.REPLACING-A-USER-DIRECTORY-ASKS-FIRST`,
+/// `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
+#[test]
+fn a_pull_the_guard_refuses_answers_alike_and_sends_the_platform_no_work() {
+    let state = State::new();
+    let harness = harness(&state, None, "", None);
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(
+        &harness.config_path,
+        config.replacen(
+            "providers:
+",
+            "providers:
+  dump: agent
+",
+            1,
+        ),
+    )
+    .expect("pull through the agent");
+    let pull = || {
+        let ran = harness
+            .command(&["pull", "main"])
+            .output()
+            .expect("run pull");
+        let payload: Value = serde_json::from_slice(&ran.stdout).expect("json envelope");
+        (ran.status.code().unwrap_or(-1), payload)
+    };
+
+    let (code, early) = pull();
+    assert_eq!(code, 2, "{early}");
+    assert!(
+        early["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("refusing to overwrite")),
+        "{early}"
+    );
+    let commands = harness.commands();
+    assert!(
+        commands.iter().all(|line| !line.starts_with("config ")),
+        "no work command reached the platform: {commands:?}"
+    );
+
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(
+        &harness.config_path,
+        format!(
+            "{config}    live: false
+"
+        ),
+    )
+    .expect("live off");
+    let (code, one_shot) = pull();
+    assert_eq!(code, 2, "{one_shot}");
+    assert_eq!(early["error"], one_shot["error"]);
+}

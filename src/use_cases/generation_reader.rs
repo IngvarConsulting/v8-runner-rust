@@ -231,6 +231,7 @@ pub(crate) fn read_with_record_tool(
                         v8.as_deref(),
                         log,
                         &wait,
+                        None,
                     )
                 });
             let mut handle = match connected {

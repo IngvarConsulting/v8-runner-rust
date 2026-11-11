@@ -51,9 +51,9 @@ enum Restoration {
     /// Файла в каталоге нет, и он не подкладывается.
     Absent,
     /// Файл каталога остаётся: он совпадает с копией или копии той же пары нет.
-    Kept(Fingerprint),
+    Kept,
     /// Подменённый файл уступает копии раннера.
-    FromCopy(Fingerprint),
+    FromCopy,
 }
 
 impl RunnerVersionFile {
@@ -72,21 +72,23 @@ impl RunnerVersionFile {
     }
 
     /// Перед работой от файла версий: подменённый файл в каталоге заменяется копией
-    /// раннера. Возвращает отпечаток того, что лежит в каталоге после сверки.
-    pub(crate) fn restore(&self) -> Result<Option<Fingerprint>, AppError> {
-        Ok(match self.restoration()? {
-            Restoration::Absent => None,
-            Restoration::Kept(present) => Some(present),
-            Restoration::FromCopy(copy) => {
-                copy_atomically(&self.copy, &self.in_directory)?;
-                debug!(
-                    source_set = self.source_set.as_str(),
-                    path = %self.in_directory.display(),
-                    "replaced a foreign version file with the runner's copy"
-                );
-                Some(copy)
-            }
-        })
+    /// раннера. Отпечатка сверка не считает: выгрузке он не нужен, а опись бывает в десятки
+    /// мегабайт (#574); кому нужен, спрашивает [`Self::fingerprint_in_directory`].
+    pub(crate) fn restore(&self) -> Result<(), AppError> {
+        if let Restoration::FromCopy = self.restoration()? {
+            copy_atomically(&self.copy, &self.in_directory)?;
+            debug!(
+                source_set = self.source_set.as_str(),
+                path = %self.in_directory.display(),
+                "replaced a foreign version file with the runner's copy"
+            );
+        }
+        Ok(())
+    }
+
+    /// Отпечаток файла версий в каталоге набора; `None` — файла нет.
+    pub(crate) fn fingerprint_in_directory(&self) -> Result<Option<Fingerprint>, AppError> {
+        fingerprint(&self.in_directory)
     }
 
     /// Какой файл версий окажется в каталоге после [`Self::restore`], ничего не меняя:
@@ -94,24 +96,31 @@ impl RunnerVersionFile {
     pub(crate) fn file_after_restore(&self) -> Result<Option<&Path>, AppError> {
         Ok(match self.restoration()? {
             Restoration::Absent => None,
-            Restoration::Kept(_) => Some(&self.in_directory),
-            Restoration::FromCopy(_) => Some(&self.copy),
+            Restoration::Kept => Some(&self.in_directory),
+            Restoration::FromCopy => Some(&self.copy),
         })
     }
 
     /// Решение сверки: отсутствующий файл не подкладывается, свой остаётся, подменённый
-    /// уступает копии той же пары.
+    /// уступает копии той же пары. Файлы сравниваются байт в байт: отпечатки двух описей в
+    /// десятки мегабайт стоили выгрузке по изменившемуся больше секунды (#574).
     fn restoration(&self) -> Result<Restoration, AppError> {
-        let Some(present) = fingerprint(&self.in_directory)? else {
+        let Some(present) = open_optional(&self.in_directory)? else {
             return Ok(Restoration::Absent);
         };
         if !self.copy_is_ours()? {
-            return Ok(Restoration::Kept(present));
+            return Ok(Restoration::Kept);
         }
-        Ok(match fingerprint(&self.copy)? {
-            Some(copy) if copy != present => Restoration::FromCopy(copy),
-            Some(_) | None => Restoration::Kept(present),
-        })
+        let Some(copy) = open_optional(&self.copy)? else {
+            return Ok(Restoration::Kept);
+        };
+        Ok(
+            if same_bytes((present, &self.in_directory), (copy, &self.copy))? {
+                Restoration::Kept
+            } else {
+                Restoration::FromCopy
+            },
+        )
     }
 
     /// Capture the version file before handing the stage to its publisher.
@@ -336,14 +345,60 @@ fn write_identity(path: &Path, identity: &str) -> io::Result<()> {
 
 /// Отпечаток файла без чтения его в память целиком; `None`, если файла нет.
 fn fingerprint(path: &Path) -> Result<Option<Fingerprint>, AppError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("open", path, &error)),
+    let Some(mut file) = open_optional(path)? else {
+        return Ok(None);
     };
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).map_err(|error| io_error("read", path, &error))?;
     Ok(Some(hasher.finalize().into()))
+}
+
+/// Открытый файл или `None`, если его нет.
+fn open_optional(path: &Path) -> Result<Option<File>, AppError> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error("open", path, &error)),
+    }
+}
+
+/// Одно ли содержимое у двух открытых файлов: разная длина отвечает без чтения, иначе файлы
+/// читаются вместе до первого расхождения.
+fn same_bytes(left: (File, &Path), right: (File, &Path)) -> Result<bool, AppError> {
+    use std::io::Read as _;
+    let length = |(file, path): &(File, &Path)| {
+        file.metadata()
+            .map(|meta| meta.len())
+            .map_err(|error| io_error("read", path, &error))
+    };
+    if length(&left)? != length(&right)? {
+        return Ok(false);
+    }
+    let fill = |(file, path): &mut (File, &Path), buffer: &mut [u8]| {
+        let mut filled = 0;
+        while filled < buffer.len() {
+            match file.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(io_error("read", path, &error)),
+            }
+        }
+        Ok(filled)
+    };
+    let (mut left, mut right) = (left, right);
+    let mut left_block = vec![0_u8; 1 << 16];
+    let mut right_block = vec![0_u8; 1 << 16];
+    loop {
+        let read = fill(&mut left, &mut left_block)?;
+        if read != fill(&mut right, &mut right_block)? || left_block[..read] != right_block[..read]
+        {
+            return Ok(false);
+        }
+        if read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 fn copy_atomically(from: &Path, to: &Path) -> Result<(), AppError> {
@@ -405,8 +460,39 @@ mod tests {
         let ours = print_of(&file.in_directory);
 
         fs::write(&file.in_directory, "foreign").expect("foreign write");
-        assert_eq!(file.restore().expect("restore"), ours);
+        assert_eq!(
+            {
+                file.restore().expect("restore");
+                file.fingerprint_in_directory().expect("print")
+            },
+            ours
+        );
         assert_eq!(fs::read(&file.in_directory).expect("file"), b"ours");
+    }
+
+    /// Сверка сравнивает описи байт в байт, а не отпечатками (#574): подмена той же длины,
+    /// отличная только в конце большой описи, тоже уступает копии, а та же опись остаётся.
+    #[test]
+    fn a_replacement_of_the_same_length_is_told_from_the_copy_byte_by_byte() {
+        let root = tempfile::tempdir().expect("root");
+        let file = version_file(root.path(), "base-a");
+        let ours: Vec<u8> = (0..200_000_u32).map(|byte| (byte % 251) as u8).collect();
+        fs::write(&file.in_directory, &ours).expect("platform wrote");
+        assert_eq!(file.record(), None);
+        assert_eq!(
+            file.file_after_restore().expect("same"),
+            Some(file.in_directory.as_path())
+        );
+
+        let mut foreign = ours.clone();
+        *foreign.last_mut().expect("last byte") ^= 1;
+        fs::write(&file.in_directory, &foreign).expect("foreign write");
+        assert_eq!(
+            file.file_after_restore().expect("replaced"),
+            Some(file.copy.as_path())
+        );
+        file.restore().expect("restore");
+        assert_eq!(fs::read(&file.in_directory).expect("file"), ours);
     }
 
     #[test]
@@ -441,7 +527,13 @@ mod tests {
         assert_eq!(file.record(), None);
 
         fs::remove_file(&file.in_directory).expect("remove");
-        assert_eq!(file.restore().expect("restore"), None);
+        assert_eq!(
+            {
+                file.restore().expect("restore");
+                file.fingerprint_in_directory().expect("print")
+            },
+            None
+        );
         assert!(!file.in_directory.exists());
     }
 
@@ -455,7 +547,13 @@ mod tests {
         let second = version_file(root.path(), "base-b");
         fs::write(&second.in_directory, "of base b").expect("manual dump");
         let manual = print_of(&second.in_directory);
-        assert_eq!(second.restore().expect("restore"), manual);
+        assert_eq!(
+            {
+                second.restore().expect("restore");
+                second.fingerprint_in_directory().expect("print")
+            },
+            manual
+        );
         assert_eq!(fs::read(&second.in_directory).expect("file"), b"of base b");
     }
 

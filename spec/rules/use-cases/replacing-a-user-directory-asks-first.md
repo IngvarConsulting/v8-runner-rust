@@ -10,15 +10,18 @@ check:
   - tests/cli_pull_memory.rs::a_full_dump_over_the_directory_asks_the_replacement_guard
   - tests/cli_dump.rs::an_incremental_pull_refuses_over_work_version_control_cannot_give_back
   - tests/cli_dump.rs::a_partial_pull_refuses_over_an_uncommitted_edit
+  - tests/cli_live_agent.rs::a_pull_the_guard_refuses_answers_alike_and_sends_the_platform_no_work
 ---
 
 # Замена каталога человека спрашивает заранее
 
 Перед тем как заменить каталог, который назвал человек, или переписать его выгрузкой поверх
 каталога, раннер спрашивает систему контроля версий, что в нём не восстановить. Выгрузка
-`pull` спрашивает до запуска платформы при любом режиме: по изменившемуся, выборкой
+`pull` спрашивает до первой рабочей команды платформе при любом режиме: по изменившемуся, выборкой
 объектов, полной поверх каталога без годного файла версий, заменой каталога или проекта EDT;
-замена спрашивает ещё раз перед самой публикацией. Отказ называет действие: `refusing to
+замена спрашивает ещё раз перед самой публикацией. Живой агент к этому времени может уже
+подниматься и подключаться к базе (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`); отказ сторожа отвечает тем же, что и без него, а
+поднятый агент живёт по обычным правилам живого агента. Отказ называет действие: `refusing to
 replace` или `refusing to overwrite`. Кроме ответов «терять нечего» и «есть безвозвратное»,
 бывает «ответа нет»; что он значит, держит
 `INV.USE-CASES.AN-UNTRACKED-DIRECTORY-IS-REFUSED-NOT-REPLACED`, а как читается ответ гита —

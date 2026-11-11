@@ -246,24 +246,40 @@ pub(crate) fn prepare_source_snapshot(
     }
 }
 
-/// Хеширует git'ом файлы, которые выгрузка записала в набор `set`, — для памяти хешами git;
-/// `f` получает корень набора от корня рабочей копии и сам хешер, или `None` вне git.
-pub(crate) fn with_dump_hasher<T>(
-    set: &SourceSetContext,
-    f: impl FnOnce(Option<(&str, &mut BlobHasher<'_>)>) -> T,
-) -> T {
-    let placed = toplevel_of(set.path()).and_then(|toplevel| {
-        let root = relative_root(set.path(), &toplevel)?;
-        let index =
-            git::index_entries_under(&toplevel, std::slice::from_ref(&root), &mut || false).ok()?;
-        Some((toplevel, root, index))
-    });
-    match placed {
-        Some((toplevel, root, index)) => {
-            let mut hasher = blob_hasher(&toplevel, &index);
-            f(Some((&root, &mut hasher)))
+/// Хешер git'ом файлов, которые выгрузка записала в набор, — для памяти хешами git. Что ему
+/// нужно: место набора в рабочей копии git и записи индекса под ним, или ничего вне git.
+/// Выгрузка индекс не трогает, поэтому его читают, пока она идёт (#574); правку индекса за эти
+/// секунды хешер не увидит — как не видел и правку после чтения.
+pub(crate) struct DumpHashing {
+    placed: Option<(PathBuf, String, Vec<GitIndexEntry>)>,
+}
+
+impl DumpHashing {
+    pub(crate) fn of(set: &SourceSetContext) -> Self {
+        let placed = toplevel_of(set.path()).and_then(|toplevel| {
+            let root = relative_root(set.path(), &toplevel)?;
+            let index =
+                git::index_entries_under(&toplevel, std::slice::from_ref(&root), &mut || false)
+                    .ok()?;
+            Some((toplevel, root, index))
+        });
+        tracing::debug!(
+            source_set = %set.name(),
+            entries = placed.as_ref().map_or(0, |(_, _, index)| index.len()),
+            "the git index was read for the dump hasher"
+        );
+        Self { placed }
+    }
+
+    /// `f` получает корень набора от корня рабочей копии и хешер, или `None` вне git.
+    pub(crate) fn with<T>(&self, f: impl FnOnce(Option<(&str, &mut BlobHasher<'_>)>) -> T) -> T {
+        match &self.placed {
+            Some((toplevel, root, index)) => {
+                let mut hasher = blob_hasher(toplevel, index);
+                f(Some((root, &mut hasher)))
+            }
+            None => f(None),
         }
-        None => f(None),
     }
 }
 
@@ -1058,13 +1074,14 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         project.write("Module.bsl", "one\r\ntwo\r\nthree\r\n");
         let listed = list_after_dump(&set, &work, &|| false).expect("listed");
-        super::with_dump_hasher(&set, |blobs| {
-            assert!(blobs.is_some(), "the set lies in git");
-            observe_dump_writes(&set, &work, &watch, None, listed, blobs, &|| false)
-        })
-        .expect("observed")
-        .commit(&set, &work)
-        .expect("remembered");
+        super::DumpHashing::of(&set)
+            .with(|blobs| {
+                assert!(blobs.is_some(), "the set lies in git");
+                observe_dump_writes(&set, &work, &watch, None, listed, blobs, &|| false)
+            })
+            .expect("observed")
+            .commit(&set, &work)
+            .expect("remembered");
 
         let execution = ExecutionContext::cli(CommandName::Status);
         let analysis = analyze(&execution, std::slice::from_ref(&set), &work, false, true)

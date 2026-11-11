@@ -3,6 +3,7 @@ use super::*;
 use crate::domain::capability::{Operation, OperationSize, Provider};
 use crate::domain::progress::ProgressPhase;
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
+use crate::use_cases::agent_session::EarlyAgent;
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
     Losses, WaysOut,
@@ -27,6 +28,23 @@ pub(super) fn run_dump_with_context(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "starting dump"
     );
+    // Живой агент поднимается сразу, пока выгрузка готовится (#574): все отказы и сторож
+    // идут до первой рабочей команды платформе, а не до её запуска.
+    let mut early = super::agent::start_early(context, config, args, &mode);
+    let outcome = prepare_and_dump(context, config, args, mode, started, &mut early);
+    // Агент, которого выгрузка не взяла, снимается здесь, до возврата из сценария.
+    drop(early);
+    outcome
+}
+
+fn prepare_and_dump(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &DumpArgs,
+    mode: DumpMode,
+    started: Instant,
+    early: &mut Option<EarlyAgent>,
+) -> UseCaseResult<DumpResult> {
     // Отказ несёт форму ответа: без неё конверт `--json-message` не печатается.
     if let Err(error) = super::refuse_hidden_sets(config, args) {
         let message = error.to_string();
@@ -194,6 +212,7 @@ pub(super) fn run_dump_with_context(
         resolved,
         utilities,
         selected,
+        early,
     );
     crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
@@ -210,9 +229,17 @@ fn run_dump_selected(
     resolved: ResolvedDumpTarget,
     mut utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
+    early: &mut Option<EarlyAgent>,
 ) -> Result<DumpResult, DumpExecutionFailure> {
     let provider = selected.provider;
     let location = selected.location;
+    // Выбран не агент: поднятый заранее агент отпускается до работы другого исполнителя —
+    // его сессия не держит базу, пока работает `ibcmd` или Конфигуратор.
+    if provider != Provider::Agent || config.format != SourceFormat::Designer {
+        if let Some(early) = early.take() {
+            early.release_before_another_executor();
+        }
+    }
     // Исполнителю без утилиты (чужой агент) путь не нужен; остальным его даёт выбор,
     // и пустой путь ниже недостижим — арка-страж перед матчем отказывает раньше.
     let binary = location
@@ -574,6 +601,10 @@ fn run_dump_selected(
             partial_objects,
             location.as_ref(),
             &mut utilities,
+            version_file
+                .as_ref()
+                .filter(|_| context.external_full_pull().is_none()),
+            early.take(),
         ) {
             Ok((platform_result, message, up_to_date)) => {
                 (Ok((platform_result.platform_log_path, message)), up_to_date)
@@ -829,6 +860,7 @@ fn run_dump_selected(
                     &config.work_path,
                     fact_mark,
                     watch.as_ref(),
+                    None,
                     &|| crate::use_cases::interruption::interruption_pending(context),
                     || {
                         if context.external_full_pull().is_some() {
@@ -874,10 +906,14 @@ fn run_dump_selected(
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
     let result = result.map(|(platform_log_path, notes)| {
-        let copy_warning = if context.external_full_pull().is_none() {
-            version_file.as_ref().and_then(RunnerVersionFile::record)
-        } else {
-            None
+        let copy_warning = match notes.version_copy {
+            Some(copied) => copied.warning,
+            None if context.external_full_pull().is_none() => {
+                let warning = version_file.as_ref().and_then(RunnerVersionFile::record);
+                debug!("the runner copy of the version file was recorded");
+                warning
+            }
+            None => None,
         };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
@@ -1002,7 +1038,7 @@ fn whole_consequences(
 }
 
 /// Версия платформы выбранной утилиты, если раннер её знает.
-fn platform_of(location: Option<&UtilityLocation>) -> Option<&PlatformVersion> {
+pub(super) fn platform_of(location: Option<&UtilityLocation>) -> Option<&PlatformVersion> {
     location.and_then(|found| match &found.version {
         Some(UtilityVersion::Platform(version)) => Some(version),
         Some(UtilityVersion::Edt(_)) | None => None,

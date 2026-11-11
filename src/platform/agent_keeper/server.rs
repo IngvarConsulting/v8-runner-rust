@@ -32,7 +32,7 @@ use super::protocol::{
 };
 use super::{credentials_digest, idle_limit, KeeperHome};
 use crate::platform::agent::{
-    AgentError, AgentLaunch, AgentMessage, HostKeyExpectation, ManagedAgent, WaitPolicy,
+    AgentError, AgentLaunch, AgentMessage, AtOpen, HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::live_registry::lock_agent_registry;
 use crate::platform::process::ProcessExecutor;
@@ -130,6 +130,10 @@ struct State {
     /// До какого мгновения свежий агент, которого ещё не взяли ни `begin`, ни `hold`, не
     /// снимается условным `stop`.
     fresh_until: Option<Instant>,
+    /// Подключался ли агент к базе хоть раз: при подъёме или сессией команды. Агент, поднятый
+    /// без подключения (#574), чьё первое подключение не удалось, не годится и снимается, как
+    /// агент, который не поднялся: сеанс лицензии он зря не держит.
+    ever_connected: bool,
 }
 
 /// Работа потоку агента.
@@ -248,6 +252,7 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
             stop_requested: false,
             failed_at: None,
             fresh_until: None,
+            ever_connected: false,
         }),
         readiness,
         jobs: Mutex::new(jobs),
@@ -315,6 +320,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         .work_path
         .as_ref()
         .map(|path| path.display().to_string());
+    let at_open = start.at_open;
     let mut agent = match launch(&shared.home, start) {
         Ok(launched) => launched,
         Err(error) => {
@@ -346,14 +352,17 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
             return;
         }
     };
-    // Сессия открылась с подключением к базе; простаивающий агент базу не держит.
-    if let Err(error) = agent
-        .session()
-        .disconnect_infobase(&WaitPolicy::for_keeper_release())
-    {
-        warn!(%error, "the live agent did not confirm common disconnect-ib after its launch");
-        if breaks_the_session(&error) {
-            shared.request_close("the agent session broke off");
+    // Сессия открылась с подключением к базе; простаивающий агент базу не держит. Агент,
+    // поднятый без подключения (#574), отключать не от чего.
+    if at_open == AtOpen::Connect {
+        if let Err(error) = agent
+            .session()
+            .disconnect_infobase(&WaitPolicy::for_keeper_release())
+        {
+            warn!(%error, "the live agent did not confirm common disconnect-ib after its launch");
+            if breaks_the_session(&error) {
+                shared.request_close("the agent session broke off");
+            }
         }
     }
     let fingerprint = match agent.host_key_expectation() {
@@ -377,6 +386,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         let mut state = shared.lock();
         state.idle_since = Instant::now();
         state.fresh_until = Some(Instant::now() + FRESH_GRACE);
+        state.ever_connected = at_open == AtOpen::Connect;
     }
     let _ = shared.readiness.send(Readiness::Ready {
         agent_pid,
@@ -452,15 +462,21 @@ fn begin_session(
         .session()
         .connect_infobase_reporting(&policy, &mut |batch| said.extend_from_slice(batch))
     {
-        Ok(()) => Ok(said),
+        Ok(()) => {
+            shared.lock().ever_connected = true;
+            Ok(said)
+        }
         Err(error) => {
-            {
+            let never_connected = {
                 let mut state = shared.lock();
                 state.session = None;
                 state.idle_since = Instant::now();
-            }
+                !state.ever_connected
+            };
             if breaks_the_session(&error) {
                 shared.request_close("the agent session broke off");
+            } else if never_connected {
+                shared.request_close("the agent raised without a connection could not connect");
             }
             Err(KeeperError::from_agent(error))
         }
@@ -570,6 +586,7 @@ fn launch(home: &KeeperHome, start: KeeperStart) -> Result<ManagedAgent, AgentEr
     let KeeperStart {
         launch,
         credentials,
+        at_open,
     } = start;
     let root = home.paths().root();
     let agent = AgentLaunch {
@@ -591,6 +608,7 @@ fn launch(home: &KeeperHome, start: KeeperStart) -> Result<ManagedAgent, AgentEr
         agent,
         Duration::from_millis(launch.startup_timeout_ms.max(1)),
         &WaitPolicy::for_keeper(CancellationToken::new(), false),
+        at_open,
     )
 }
 

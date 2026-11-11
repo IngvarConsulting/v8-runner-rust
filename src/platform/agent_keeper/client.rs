@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::channel::{connect, Stream};
 use super::protocol::{read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request};
 use super::{credentials_digest, KeeperHome};
-use crate::platform::agent::{AgentError, AgentMessage, AgentReply, WaitPolicy};
+use crate::platform::agent::{AgentError, AgentMessage, AgentReply, AtOpen, WaitPolicy};
 use crate::platform::live_registry::lock_agent_registry;
 use crate::platform::process::ProcessInterruptionReason;
 use crate::platform::service::{process_facts, ServiceRequest, ServiceSpawnError};
@@ -59,6 +59,14 @@ impl std::fmt::Debug for Credentials {
 pub struct KeeperStart {
     pub launch: KeeperLaunch,
     pub credentials: Credentials,
+    /// Подключать ли агента к базе при подъёме: агент, поднятый заранее для `push`, базы не
+    /// касается, пока разбор не нашёл работы (#574). Строка без поля — подключать, как прежде.
+    #[serde(default = "connect_at_open")]
+    pub at_open: AtOpen,
+}
+
+fn connect_at_open() -> AtOpen {
+    AtOpen::Connect
 }
 
 /// Сторож не поднят или агент не взят.
@@ -220,6 +228,28 @@ enum Take<'a> {
     Session,
     /// Поставить держателя.
     Hold(&'a Holder),
+    /// Только взять поднятого агента: сессию команда откроет позже, [`KeeperClient::begin_session`].
+    Ready,
+}
+
+/// Чего ждёт клиент, поднимая агента (#574): `cancel` — отмена команды, при которой сторож,
+/// поднятый ею и ещё не ответивший, снимается, как прежде; `stop` — дочерний знак `cancel`, по
+/// которому команда больше не ждёт (отказала до работы или выбрала другого исполнителя):
+/// ожидание кончается, а поднятый сторож остаётся жить по обычным правилам. Оба смотрят все
+/// ожидания подъёма и начала сессии.
+pub struct EarlyWait<'w> {
+    pub cancel: &'w CancellationToken,
+    pub stop: &'w CancellationToken,
+}
+
+/// Что команда делает с агентом, которого поднимает заранее.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlySession {
+    /// `pull`: сессия с подключением к базе открывается сразу, пока команда готовится.
+    Now,
+    /// `push`: агент только поднимается и к базе не подключается, пока разбор не найдёт
+    /// работы (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`).
+    Later,
 }
 
 /// Чем кончилось ожидание поднятого сторожа.
@@ -293,11 +323,58 @@ impl KeeperClient {
             launch,
             credentials,
             limit,
-            cancel,
+            &EarlyWait {
+                cancel,
+                stop: &cancel.child_token(),
+            },
+            AtOpen::Connect,
             &Take::Session,
             &mut |_| {},
         )?;
         Ok(client)
+    }
+
+    /// Живой агент ключа `key`, поднятый в начале команды, пока она готовится (#574), — без
+    /// подключения к базе при подъёме: [`EarlySession::Now`] — сразу с сессией команды (`pull`),
+    /// [`EarlySession::Later`] — без неё (`push` подключит агента сам, [`Self::begin_session`],
+    /// когда разбор найдёт работу).
+    /// Ожидание кончают оба сигнала `wait`; подъём работой команды не считается.
+    pub fn start_early(
+        key: &str,
+        launch: &KeeperLaunch,
+        credentials: &Credentials,
+        limit: u8,
+        wait: &EarlyWait<'_>,
+        session: EarlySession,
+    ) -> Result<Self, KeeperStartError> {
+        let mut client = Self::prepare(key, credentials)?;
+        // Агента поднимают без подключения к базе в обоих случаях: подъём не подключает и не
+        // отключает его зря, а к базе он подключается один раз — сессией команды.
+        let take = match session {
+            EarlySession::Now => Take::Session,
+            EarlySession::Later => Take::Ready,
+        };
+        client.obtain(
+            launch,
+            credentials,
+            limit,
+            wait,
+            AtOpen::Idle,
+            &take,
+            &mut |_| {},
+        )?;
+        Ok(client)
+    }
+
+    /// Открывает сессию команды у агента, взятого без неё ([`Self::start_early`]). Отмена
+    /// команды `cancel` прекращает ожидание, как у [`Self::connect_or_start`].
+    pub fn begin_session(&mut self, cancel: &CancellationToken) -> Result<(), KeeperStartError> {
+        self.begin(&cancel.child_token())
+    }
+
+    /// Есть ли у клиента сессия команды.
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
     }
 
     /// Живой агент ключа `key` с держателем `holder`: берётся или поднимается, как у
@@ -319,7 +396,11 @@ impl KeeperClient {
             launch,
             credentials,
             limit,
-            cancel,
+            &EarlyWait {
+                cancel,
+                stop: &cancel.child_token(),
+            },
+            AtOpen::Connect,
             &Take::Hold(holder),
             on_wait,
         )?;
@@ -338,15 +419,18 @@ impl KeeperClient {
     /// Берёт или поднимает агента и делает с ним `take`. Сторож, который закрывается, отказал
     /// учётным данным или ещё не принимает подключений, ожидается до ответа или ухода; ушёл —
     /// поднимается новый. Ответ — держатели после отметки ([`Take::Hold`]).
+    #[allow(clippy::too_many_arguments)]
     fn obtain(
         &mut self,
         launch: &KeeperLaunch,
         credentials: &Credentials,
         limit: u8,
-        cancel: &CancellationToken,
+        wait: &EarlyWait<'_>,
+        at_open: AtOpen,
         take: &Take<'_>,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Vec<Holder>, KeeperStartError> {
+        let cancel = wait.cancel;
         let key = self.home.key().to_owned();
         // `agent hold` на пределе ждёт агентов, которые освободятся сами; команда не ждёт, а
         // работает с разовым агентом.
@@ -359,14 +443,14 @@ impl KeeperClient {
         let mut respawns = 0;
         let mut evictions = 0;
         loop {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || wait.stop.is_cancelled() {
                 return Err(cancelled_waiting());
             }
             match self.find(limit)? {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    match make_room(self.home.state(), &key, cancel, &mut silent) {
+                    match make_room(self.home.state(), &key, wait.stop, &mut silent) {
                         Room::Freed if waits || evictions <= usize::from(limit) => {
                             evictions += 1;
                             continue;
@@ -402,7 +486,7 @@ impl KeeperClient {
                 }
                 Found::Live(keeper) => {
                     self.keeper = keeper;
-                    match self.take(take) {
+                    match self.take(take, wait.stop) {
                         Ok(holders) => return Ok(holders),
                         // Сторож закрывается, отказал учётным данным, его канал уже закрыт или
                         // он ещё поднимает агента: ждём, пока он ответит или уйдёт.
@@ -415,7 +499,7 @@ impl KeeperClient {
                 Found::Starting => {}
                 Found::Absent => {
                     self.reused = false;
-                    let pid = match self.spawn(launch, credentials) {
+                    let pid = match self.spawn(launch, credentials, at_open) {
                         Ok(pid) => pid,
                         Err(error) => {
                             self.forget_start();
@@ -423,8 +507,8 @@ impl KeeperClient {
                         }
                     };
                     self.keeper = pid;
-                    match self.await_start(pid, deadline, cancel)? {
-                        Started::Answered => match self.take(take) {
+                    match self.await_start(pid, deadline, wait)? {
+                        Started::Answered => match self.take(take, wait.stop) {
                             Ok(holders) => return Ok(holders),
                             // Поднятого агента сняли, не дав взять (простой, предел): ключ
                             // ищется заново, и при нужде поднимается новый сторож.
@@ -512,13 +596,18 @@ impl KeeperClient {
 
     /// Найденный живой сторож годится: отвечает, называет ключ хоста из записи, и сессия
     /// команды открыта или держатель поставлен. Ответ — держатели после отметки.
-    fn take(&mut self, take: &Take<'_>) -> Result<Vec<Holder>, KeeperStartError> {
+    fn take(
+        &mut self,
+        take: &Take<'_>,
+        stop: &CancellationToken,
+    ) -> Result<Vec<Holder>, KeeperStartError> {
         self.check_fingerprint()?;
         match take {
             Take::Session => {
-                self.begin()?;
+                self.begin(stop)?;
                 Ok(Vec::new())
             }
+            Take::Ready => Ok(Vec::new()),
             Take::Hold(holder) => {
                 let request = Request::Hold {
                     holder: (*holder).clone(),
@@ -595,12 +684,14 @@ impl KeeperClient {
         &self,
         launch: &KeeperLaunch,
         credentials: &Credentials,
+        at_open: AtOpen,
     ) -> Result<u32, KeeperStartError> {
         let program = keeper_exe(self.home.state())
             .map_err(|error| unavailable_by("no copy of the runner for the keeper", error))?;
         let start = KeeperStart {
             launch: launch.clone(),
             credentials: credentials.clone(),
+            at_open,
         };
         let request = ServiceRequest {
             program,
@@ -622,17 +713,21 @@ impl KeeperClient {
         })
     }
 
-    /// Ждёт, пока поднятый сторож поднимет агента и ответит. Отмена прекращает ожидание, а
-    /// поднятый сторож остаётся: он переживает команду и уйдёт по простою.
+    /// Ждёт, пока поднятый сторож поднимет агента и ответит. Отмена команды снимает сторожа,
+    /// который ещё не ответил ([`Self::abandon_start`]); `stop` только прекращает ожидание:
+    /// сторож поднимает агента дальше, и тот живёт по обычным правилам (#574).
     fn await_start(
         &self,
         pid: u32,
         deadline: Instant,
-        cancel: &CancellationToken,
+        wait: &EarlyWait<'_>,
     ) -> Result<Started, KeeperStartError> {
         loop {
-            if cancel.is_cancelled() {
+            if wait.cancel.is_cancelled() {
                 self.abandon_start(pid);
+                return Err(cancelled_waiting());
+            }
+            if wait.stop.is_cancelled() {
                 return Err(cancelled_waiting());
             }
             match self.status() {
@@ -685,8 +780,10 @@ impl KeeperClient {
         Ok(())
     }
 
-    /// Открывает сессию команды: сторож подключает агента к базе.
-    fn begin(&mut self) -> Result<(), KeeperStartError> {
+    /// Открывает сессию команды: сторож подключает агента к базе. `stop` прекращает ожидание
+    /// ответа: подключение к сторожу закрывается, и сторож, подключив агента, сам отключает
+    /// его, раз команда ушла (#574).
+    fn begin(&mut self, stop: &CancellationToken) -> Result<(), KeeperStartError> {
         let request = Request::Begin {
             credentials: self.digest.clone(),
         };
@@ -700,7 +797,11 @@ impl KeeperClient {
             write_line(stream.get_mut(), &request)
                 .await
                 .map_err(|source| unreachable_at(&channel, source))?;
-            match read_line::<_, Frame>(&mut stream).await {
+            let answer = tokio::select! {
+                answer = read_line::<_, Frame>(&mut stream) => answer,
+                () = stop.cancelled() => return Err(cancelled_waiting()),
+            };
+            match answer {
                 Ok(Some(Frame::Begun { session, messages })) => Ok(OpenSession {
                     id: session,
                     stream,
@@ -1790,7 +1891,14 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let started = Instant::now();
-        let outcome = client.await_start(keeper.id(), started + Duration::from_secs(60), &cancel);
+        let outcome = client.await_start(
+            keeper.id(),
+            started + Duration::from_secs(60),
+            &EarlyWait {
+                cancel: &cancel,
+                stop: &CancellationToken::new(),
+            },
+        );
         assert!(
             matches!(
                 outcome,
@@ -1808,6 +1916,144 @@ mod tests {
             keeper.try_wait().ok().flatten().is_some()
         });
         assert!(exited, "the keeper the command started is terminated");
+    }
+
+    /// Команда, которая перестала ждать агента, поднятого заранее (отказ до работы, другой
+    /// исполнитель), возвращается сразу, но сторожа не снимает: агент живёт по обычным правилам
+    /// живого агента (#574).
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn a_start_the_command_stopped_waiting_for_keeps_the_keeper() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let home = KeeperHome::open(state.path(), &"0d".repeat(16)).unwrap();
+        let mut keeper = a_live_process();
+        let client = KeeperClient::detached(home, keeper.id()).unwrap();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let started = Instant::now();
+        let outcome = client.await_start(
+            keeper.id(),
+            started + Duration::from_secs(60),
+            &EarlyWait {
+                cancel: &CancellationToken::new(),
+                stop: &stop,
+            },
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(KeeperStartError::Agent(AgentError::NotSent { .. }))
+            ),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            keeper.try_wait().ok().flatten().is_none(),
+            "the keeper outlives a command that stopped waiting for it"
+        );
+        let _ = keeper.kill();
+        let _ = keeper.wait();
+    }
+
+    /// Начало сессии, которого команда больше не ждёт, кончается по `stop`, даже если сторож
+    /// молчит (подключение к базе он не прерывает): ожидание ограничено, и сторож видит уход
+    /// клиента (#574).
+    #[test]
+    fn a_begin_the_command_stopped_waiting_for_returns_at_once() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let home = KeeperHome::open(state.path(), &"0e".repeat(16)).unwrap();
+        let channel = if cfg!(windows) {
+            format!(
+                r"\\.\pipe\v8-runner-agent-test-{}",
+                uuid::Uuid::new_v4().simple()
+            )
+        } else {
+            home.channel()
+        };
+        let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let (left_tx, left_rx) = std::sync::mpsc::channel();
+        let server_channel = channel.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut listener = super::super::channel::Listener::bind(&server_channel).unwrap();
+                bound_tx.send(()).unwrap();
+                let stream = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let request: Request = read_line(&mut reader).await.unwrap().unwrap();
+                assert!(matches!(request, Request::Begin { .. }), "{request:?}");
+                // Сторож подключает агента и не отвечает; клиент уходит по `stop`.
+                let after = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    read_line::<_, Request>(&mut reader),
+                )
+                .await;
+                left_tx
+                    .send(matches!(after, Ok(Ok(None)) | Ok(Err(_))))
+                    .unwrap();
+                listener.remove();
+            });
+        });
+        bound_rx.recv().unwrap();
+        let mut client = KeeperClient::detached(home, std::process::id()).unwrap();
+        client.channel = channel;
+        client.digest = "digest".to_owned();
+        let stop = CancellationToken::new();
+        let stopper = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            stopper.cancel();
+        });
+        let started = Instant::now();
+        let outcome = client.begin(&stop);
+        assert!(
+            matches!(
+                outcome,
+                Err(KeeperStartError::Agent(AgentError::NotSent { .. }))
+            ),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the begin waited past its stop: {:?}",
+            started.elapsed()
+        );
+        assert!(!client.has_session());
+        drop(client);
+        assert!(
+            left_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "the keeper sees the client leave"
+        );
+    }
+
+    /// Строка подъёма от прежней версии раннера, без `at_open`, подключает агента, как прежде.
+    #[test]
+    fn a_start_line_without_at_open_connects_the_agent() {
+        let start: KeeperStart = serde_json::from_value(serde_json::json!({
+            "launch": {
+                "v8": "1cv8",
+                "infobase_args": [],
+                "port": null,
+                "host_key": null,
+                "startup_timeout_ms": 1,
+                "infobase": "",
+            },
+            "credentials": { "user": "", "password": "" },
+        }))
+        .unwrap();
+        assert_eq!(start.at_open, AtOpen::Connect);
     }
 
     /// Запись «запускается» без процесса сторожа предел уже занимает: на пределе её ждут, а не
@@ -2044,6 +2290,7 @@ mod tests {
                 user: "Администратор".to_owned(),
                 password: "secret".to_owned(),
             },
+            at_open: AtOpen::Connect,
         };
         let shown = format!("{start:?}");
         assert!(
