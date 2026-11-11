@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -10,8 +10,11 @@ use axum::http::{
     Method, Request, Response, StatusCode,
 };
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ServerCapabilities, ServerInfo},
+    handler::server::{common::RequestId as CallId, router::tool::ToolRouter, wrapper::Parameters},
+    model::{
+        CallToolResult, CancelledNotificationParam, RequestId, ServerCapabilities, ServerInfo,
+    },
+    service::{NotificationContext, RoleServer},
     tool, tool_handler, tool_router,
     transport::{
         streamable_http_server::{
@@ -252,7 +255,102 @@ pub struct McpToolServer {
     concurrency_limit: Arc<Semaphore>,
     telemetry: Arc<McpTelemetry>,
     call_context: McpCallContext,
+    /// Отмены вызовов этой сессии MCP: повторная отмена бросает ожидание чужого агента.
+    repeated_cancels: Arc<RepeatedCancels>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Отмены идущих вызовов одной сессии MCP по номеру запроса.
+///
+/// Первую `notifications/cancelled` rmcp сам превращает в отмену токена вызова и забывает
+/// запрос, но каждую — и повторную — отдаёт обработчику `on_cancelled`. Здесь они
+/// считаются: вторая для того же запроса — второй сигнал, по которому раннер перестаёт
+/// ждать команду чужого агента. Номера запросов у каждой сессии свои, поэтому таблица —
+/// на сессию ([`McpToolServer::for_session`]).
+#[derive(Default)]
+struct RepeatedCancels {
+    calls: Mutex<HashMap<RequestId, RepeatedCancel>>,
+}
+
+struct RepeatedCancel {
+    seen: u8,
+    abandonment: CancellationToken,
+}
+
+impl RepeatedCancels {
+    /// Начинает считать отмены вызова `id`; отпущенный страж вызов забывает.
+    fn watch(self: &Arc<Self>, id: RequestId) -> WatchedCall {
+        let abandonment = CancellationToken::new();
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id.clone(),
+                RepeatedCancel {
+                    seen: 0,
+                    abandonment: abandonment.clone(),
+                },
+            );
+        WatchedCall {
+            table: Arc::clone(self),
+            id,
+            abandonment,
+        }
+    }
+
+    /// Отмена вызова `id`: вторая и следующие выставляют его второй сигнал. Отмена
+    /// неизвестного или уже завершённого вызова ничего не меняет.
+    fn cancelled(&self, id: &RequestId) {
+        if let Some(call) = self
+            .calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(id)
+        {
+            call.seen = call.seen.saturating_add(1);
+            if call.seen >= 2 && !call.abandonment.is_cancelled() {
+                tracing::warn!(%id, "repeated MCP cancellation: the call stops waiting for work it cannot stop");
+                call.abandonment.cancel();
+            }
+        }
+    }
+}
+
+/// Вызов, чьи отмены считает таблица сессии, пока он идёт.
+struct WatchedCall {
+    table: Arc<RepeatedCancels>,
+    id: RequestId,
+    abandonment: CancellationToken,
+}
+
+impl Drop for WatchedCall {
+    fn drop(&mut self) {
+        self.table
+            .calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+/// Сигналы одного вызова: отмена и второй сигнал — повторная отмена того же запроса.
+struct CallSignals {
+    cancellation: CancellationToken,
+    abandonment: CancellationToken,
+    /// Держит счёт отмен вызова, пока тот идёт.
+    _watch: Option<WatchedCall>,
+}
+
+/// Вызов без второго сигнала, как его зовут тесты: отмену он слушает, повторную — нет.
+#[cfg(test)]
+impl From<CancellationToken> for CallSignals {
+    fn from(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            abandonment: CancellationToken::new(),
+            _watch: None,
+        }
+    }
 }
 
 impl McpToolServer {
@@ -301,15 +399,35 @@ impl McpToolServer {
             config,
             port,
             call_context,
+            repeated_cancels: Arc::default(),
             tool_router: Self::tool_router(),
         })
+    }
+
+    /// Тот же сервер для новой сессии MCP: общее всё, кроме счёта отмен — номера запросов
+    /// у каждой сессии свои.
+    fn for_session(&self) -> Self {
+        Self {
+            repeated_cancels: Arc::default(),
+            ..self.clone()
+        }
+    }
+
+    /// Сигналы вызова `id`: отмена от rmcp и второй сигнал из счёта отмен сессии.
+    fn signals(&self, id: RequestId, cancellation: CancellationToken) -> CallSignals {
+        let watch = self.repeated_cancels.watch(id);
+        CallSignals {
+            cancellation,
+            abandonment: watch.abandonment.clone(),
+            _watch: Some(watch),
+        }
     }
 
     async fn execute_tool<TRequest, TResponse>(
         &self,
         tool: McpTool,
         request: TRequest,
-        cancellation: CancellationToken,
+        signals: CallSignals,
         method: impl FnOnce(
                 Arc<AppConfig>,
                 SharedMcpUseCasePort,
@@ -323,6 +441,7 @@ impl McpToolServer {
         TRequest: Send + 'static,
         TResponse: serde::Serialize + Send + 'static,
     {
+        let cancellation = signals.cancellation.clone();
         let admission_timeout = tool.admission_timeout(self.config.as_ref());
         let permit = self
             .acquire_execution_slot(tool, cancellation.clone(), admission_timeout)
@@ -342,6 +461,7 @@ impl McpToolServer {
             .call_context
             .clone()
             .with_cancellation(cancellation.clone())
+            .with_abandonment(signals.abandonment.clone())
             .with_edt_timeout(Some(edt_timeout));
         let mut handle =
             tokio::task::spawn_blocking(move || method(config, port, call_context, request));
@@ -417,14 +537,14 @@ impl McpToolServer {
     async fn execute_edt_syntax_tool(
         &self,
         request: McpCheckSyntaxEdtRequest,
-        cancellation: CancellationToken,
+        signals: CallSignals,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.config.tools.edt_cli.interactive_mode {
             return self
                 .execute_tool(
                     McpTool::CheckSyntaxEdt,
                     request,
-                    cancellation,
+                    signals,
                     |config, port, call_context, request| {
                         let service = McpService::with_port(config.as_ref(), port);
                         service.check_syntax_edt(call_context, &request)
@@ -433,6 +553,8 @@ impl McpToolServer {
                 .await;
         }
 
+        // Общая сессия EDT — своя: второй сигнал ей не нужен.
+        let cancellation = signals.cancellation;
         let admission_timeout = McpTool::CheckSyntaxEdt.admission_timeout(self.config.as_ref());
         let mut permit = Some(
             self.acquire_execution_slot(
@@ -649,7 +771,7 @@ impl HttpMcpService {
         let admission =
             HttpSessionAdmission::new(config.mcp.http.max_sessions, session_manager.clone());
         let inner = StreamableHttpService::new(
-            move || Ok(server.clone()),
+            move || Ok(server.for_session()),
             session_manager,
             StreamableHttpServerConfig {
                 stateful_mode: config.mcp.http.stateful_sessions,
@@ -721,11 +843,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpRunAllTestsRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::RunAllTests,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.run_all_tests(call_context, &request)
@@ -739,11 +862,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpRunModuleTestsRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::RunModuleTests,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.run_module_tests(call_context, &request)
@@ -757,11 +881,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpBuildProjectRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::BuildProject,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.build_project(call_context, &request)
@@ -775,11 +900,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpDumpConfigRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::DumpConfig,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.dump_config(call_context, &request)
@@ -793,11 +919,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpLaunchAppRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::LaunchApp,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.launch_app(call_context, &request)
@@ -811,8 +938,10 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpCheckSyntaxEdtRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
-        self.execute_edt_syntax_tool(request, cancellation).await
+        self.execute_edt_syntax_tool(request, self.signals(id, cancellation))
+            .await
     }
 
     #[tool(description = "Run Designer configuration syntax check")]
@@ -820,11 +949,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpCheckSyntaxDesignerConfigRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::CheckSyntaxDesignerConfig,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.check_syntax_designer_config(call_context, &request)
@@ -838,11 +968,12 @@ impl McpToolServer {
         &self,
         Parameters(request): Parameters<McpCheckSyntaxDesignerModulesRequest>,
         cancellation: CancellationToken,
+        CallId(id): CallId,
     ) -> Result<CallToolResult, ErrorData> {
         self.execute_tool(
             McpTool::CheckSyntaxDesignerModules,
             request,
-            cancellation,
+            self.signals(id, cancellation),
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.check_syntax_designer_modules(call_context, &request)
@@ -856,6 +987,14 @@ impl McpToolServer {
 impl ServerHandler for McpToolServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    async fn on_cancelled(
+        &self,
+        notification: CancelledNotificationParam,
+        _context: NotificationContext<RoleServer>,
+    ) {
+        self.repeated_cancels.cancelled(&notification.request_id);
     }
 }
 
@@ -1308,7 +1447,7 @@ mod tests {
                 .execute_tool(
                     McpTool::RunAllTests,
                     (),
-                    queued_cancellation,
+                    queued_cancellation.into(),
                     move |_, _, _, ()| {
                         started_clone.fetch_add(1, Ordering::SeqCst);
                         Ok(String::from("unexpected"))
@@ -1361,7 +1500,7 @@ mod tests {
             .execute_tool(
                 McpTool::CheckSyntaxEdt,
                 (),
-                CancellationToken::new(),
+                CancellationToken::new().into(),
                 move |_, _, _, ()| {
                     started_clone.fetch_add(1, Ordering::SeqCst);
                     Ok(String::from("unexpected"))
@@ -1412,7 +1551,7 @@ mod tests {
                 .execute_tool(
                     McpTool::CheckSyntaxEdt,
                     (),
-                    queued_cancellation,
+                    queued_cancellation.into(),
                     move |_, _, _, ()| {
                         started_clone.fetch_add(1, Ordering::SeqCst);
                         Ok(String::from("unexpected"))
@@ -1454,7 +1593,7 @@ mod tests {
             .execute_tool(
                 McpTool::RunAllTests,
                 (),
-                CancellationToken::new(),
+                CancellationToken::new().into(),
                 move |_, _, _, ()| {
                     std::thread::sleep(Duration::from_millis(40));
                     Ok(String::from("ok"))
@@ -1489,7 +1628,7 @@ mod tests {
                 .execute_tool(
                     McpTool::RunAllTests,
                     (),
-                    first_cancel,
+                    first_cancel.into(),
                     move |_, _, _, ()| {
                         let current = first_active.fetch_add(1, Ordering::SeqCst) + 1;
                         first_max.fetch_max(current, Ordering::SeqCst);
@@ -1542,7 +1681,7 @@ mod tests {
                 .execute_tool(
                     McpTool::CheckSyntaxEdt,
                     (),
-                    first_cancel,
+                    first_cancel.into(),
                     move |_, _, _, ()| {
                         let current = first_active.fetch_add(1, Ordering::SeqCst) + 1;
                         first_max.fetch_max(current, Ordering::SeqCst);
@@ -1588,7 +1727,7 @@ mod tests {
                 .execute_tool(
                     McpTool::CheckSyntaxEdt,
                     (),
-                    CancellationToken::new(),
+                    CancellationToken::new().into(),
                     move |_, _, _, ()| {
                         std::thread::sleep(Duration::from_millis(60));
                         Ok(String::from("ok"))
@@ -1651,7 +1790,7 @@ mod tests {
         cancellation: CancellationToken,
     ) -> Result<(), rmcp::ErrorData> {
         server
-            .execute_tool(tool, (), cancellation, move |_, _, _, ()| {
+            .execute_tool(tool, (), cancellation.into(), move |_, _, _, ()| {
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_active.fetch_max(current, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(50));
@@ -1914,6 +2053,77 @@ mod tests {
             .expect_err("internal error")
             .message,
             ordinary
+        );
+    }
+
+    /// Первая отмена вызова — отмена, вторая для того же запроса — второй сигнал: он
+    /// доходит до контекста вызова, по нему раннер бросает ожидание чужого агента
+    /// (`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
+    /// Счёт у каждой сессии свой, а завершённый вызов таблица забывает.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_cancellation_of_a_call_reaches_it_as_the_second_signal() {
+        let server = McpToolServer::with_port(
+            Arc::new(test_config(1, 9)),
+            Arc::new(DefaultMcpUseCasePort),
+            McpCallContext::stdio(),
+        )
+        .expect("server");
+        let id = rmcp::model::RequestId::Number(7);
+        let cancellation = CancellationToken::new();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let call = tokio::spawn({
+            let server = server.clone();
+            let signals = server.signals(id.clone(), cancellation.clone());
+            async move {
+                server
+                    .execute_tool(McpTool::DumpConfig, (), signals, move |_, _, call, ()| {
+                        started_tx.send(()).expect("started");
+                        let abandonment = call.abandonment();
+                        let cancellation = call.cancellation();
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while !abandonment.is_cancelled() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        seen_tx
+                            .send((cancellation.is_cancelled(), abandonment.is_cancelled()))
+                            .expect("report");
+                        Ok(String::from("abandoned"))
+                    })
+                    .await
+            }
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the call started");
+        // Чужая сессия с тем же номером запроса этот вызов не трогает.
+        let other = server.for_session();
+        other.repeated_cancels.cancelled(&id);
+        other.repeated_cancels.cancelled(&id);
+
+        // rmcp отменяет токен вызова по первой отмене и отдаёт её обработчику.
+        cancellation.cancel();
+        server.repeated_cancels.cancelled(&id);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            seen_rx.try_recv().is_err(),
+            "one cancellation must not abandon the call"
+        );
+        server.repeated_cancels.cancelled(&id);
+
+        let (cancelled, abandoned) = seen_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the call saw its signals");
+        assert!(cancelled && abandoned, "{cancelled} {abandoned}");
+        call.await.expect("join").expect("call");
+        assert!(
+            server
+                .repeated_cancels
+                .calls
+                .lock()
+                .expect("table")
+                .is_empty(),
+            "a finished call is forgotten"
         );
     }
 }

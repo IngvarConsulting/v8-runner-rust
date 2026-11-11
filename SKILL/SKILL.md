@@ -209,8 +209,14 @@ v8-runner infobase create
   When the command was stopped (`status: cancelled`), `test`, `upload`, `make`, `download`,
   `infobase dump` and `infobase restore` also put `{code: "cancelled"}` in `execution.errors[]`
   next to that record; a `deferred: true` record carries no such error.
-- After sending a command to an attached agent or SSH gate, the runner waits for its terminal
-  reply before reporting cancellation. A lost connection or incomplete reply keeps its own error.
+- Interrupting a command already sent to an attached agent or SSH gate does not stop it on the
+  agent side: the runner logs that it waits and reads the terminal reply first (`success` or the
+  agent's `canceled` -> `cancelled`; a refusal, question or lost channel keeps its own error).
+  A second Ctrl+C/SIGTERM (MCP: a repeated `notifications/cancelled` for the same request)
+  stops waiting and answers `agent_command_abandoned` (kind `platform`, exit 4; MCP
+  `platform_failure`): the agent may still run the command and keep the base locked for the
+  Designer even after it ends; on a runner standalone server `standalone restart` clears it.
+  Ordinary MCP clients cancel once, so over MCP the call usually waits for the agent's reply.
 - A `providers.*` key naming an executor outside the matrix is refused at config load with
   `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
   retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`

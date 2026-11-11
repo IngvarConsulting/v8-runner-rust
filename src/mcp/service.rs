@@ -754,7 +754,8 @@ pub(crate) fn execution_context(
             Ok(ExecutionContext::new(command, transport)
                 .with_command_line(call_context.command_line().clone())
                 .with_edt_timeout(call_context.edt_timeout())
-                .with_cancellation(call_context.cancellation()))
+                .with_cancellation(call_context.cancellation())
+                .with_abandonment(call_context.abandonment()))
         }
         ExecutionTransport::Cli => Err(McpInternalError::new(format!(
             "mcp service received non-MCP transport for {}",

@@ -325,6 +325,76 @@ pub fn interrupt_at_hold(
     interrupt_at_hold_waiting_for_any(command, action_log, started, release, &[logged])
 }
 
+/// Прерывает раннер дважды на удержанной работе двойника: первый SIGTERM — когда работа
+/// началась (`started`), второй — когда в журнале появилась строка `waiting`. Работу
+/// двойник не отпускает, пока раннер не вышел: так видно, что раннер её бросил, а не
+/// дождался. Возвращает код выхода и конверт.
+#[cfg(unix)]
+pub fn interrupt_twice_at_hold(
+    mut command: Command,
+    action_log: &Path,
+    started: &Path,
+    release: &Path,
+    waiting: &str,
+) -> (i32, serde_json::Value) {
+    use std::io::Read;
+
+    /// Отпускает двойника и тогда, когда тест упал раньше: иначе тот ждал бы полминуты.
+    struct ReleaseOnDrop<'a>(&'a Path);
+    impl Drop for ReleaseOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0, "");
+        }
+    }
+
+    let _release = ReleaseOnDrop(release);
+    let mut runner = RunnerGuard(
+        command
+            .env("V8TR_ACTION_LOG_FILE", action_log)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn runner"),
+    );
+    let mut stdout = runner.0.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    let timeout = Duration::from_secs(30);
+    assert!(
+        wait_for_file(started, timeout),
+        "the held work never started"
+    );
+    send_sigterm(&runner.0);
+    let waited = wait_until(timeout, Duration::from_millis(20), || {
+        fs::read_to_string(action_log).is_ok_and(|log| log.contains(waiting))
+    });
+    assert!(
+        waited,
+        "the runner never logged {waiting:?}: {}",
+        fs::read_to_string(action_log).unwrap_or_default()
+    );
+    // Второй сигнал — после строки ожидания: два сигнала подряд могли бы слиться в один.
+    send_sigterm(&runner.0);
+    let exited = wait_until(timeout, Duration::from_millis(20), || {
+        runner.0.try_wait().expect("wait runner").is_some()
+    });
+    assert!(
+        exited,
+        "the runner kept waiting for the held work after the second interrupt: {}",
+        fs::read_to_string(action_log).unwrap_or_default()
+    );
+    let stdout = reader
+        .join()
+        .expect("stdout reader")
+        .expect("runner stdout");
+    let code = runner.0.wait().expect("exit status").code().unwrap_or(-1);
+    let payload = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+    (code, payload)
+}
+
 #[cfg(unix)]
 pub fn interrupt_at_hold_waiting_for_any(
     mut command: Command,

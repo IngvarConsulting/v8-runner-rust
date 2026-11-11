@@ -46,7 +46,7 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
                 Self::Validation
             }
             UseCaseErrorKind::Runtime => Self::Runtime,
-            UseCaseErrorKind::Platform => Self::Platform,
+            UseCaseErrorKind::Platform | UseCaseErrorKind::AgentCommandAbandoned => Self::Platform,
         }
     }
 }
@@ -90,7 +90,10 @@ impl McpBusinessError {
                 McpErrorCode::InvalidArgument
             }
             UseCaseErrorKind::Runtime => McpErrorCode::RuntimeFailure,
-            UseCaseErrorKind::Platform => McpErrorCode::PlatformFailure,
+            // Словарь MCP уже: брошенную команду агента называет текст отказа.
+            UseCaseErrorKind::Platform | UseCaseErrorKind::AgentCommandAbandoned => {
+                McpErrorCode::PlatformFailure
+            }
         };
         Self {
             code,

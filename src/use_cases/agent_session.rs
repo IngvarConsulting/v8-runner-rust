@@ -230,6 +230,15 @@ impl AgentHandle {
         }
     }
 
+    /// Бросил ли второй сигнал команду чужого агента: свой агент и живой агент сторожа
+    /// ожидания не бросают.
+    pub(crate) fn abandoned(&self) -> bool {
+        match self {
+            Self::Live(_) | Self::Managed(..) => false,
+            Self::Attached { session, .. } | Self::Gate { session, .. } => session.abandoned(),
+        }
+    }
+
     /// Прерывание, которое отложила последняя команда.
     pub(crate) fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
         match self {
@@ -328,12 +337,15 @@ fn open_gate_session(
 ///
 /// Класс по умолчанию — для команд без побочного эффекта; меняющие команды называют
 /// свой класс через `run_critical`. У своего агента можно прервать чтение и снять процесс,
-/// у чужого после отправки команды раннер ждёт итогового ответа.
+/// у чужого после отправки команды раннер ждёт итогового ответа, пока второй сигнал
+/// (`ExecutionContext::abandonment`) не велит бросить ожидание.
 /// Срока у агентской команды нет: команда его не имеет
 /// (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), а транспорту брать его неоткуда — замер
-/// 15.09.2026 дал тишине занятого агента нижнюю границу и не дал верхней.
+/// 15.09.2026 дал тишине занятого агента нижнюю границу и не дал верхней. Ожидание
+/// заканчивает оператор, а мёртвый шлюз — таймаут записи TCP на keepalive-пакетах.
 pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
     WaitPolicy::from_step(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None))
+        .with_abandonment(context.abandonment())
 }
 
 /// Журнал сессии рядом с журналами платформы, свежий на каждую команду.
@@ -1375,6 +1387,9 @@ pub(crate) fn collect_file(
 }
 
 /// Убирает выставленный каталог со стороны точки входа (ссылку — как ссылку).
+///
+/// Ссылку снимает и после брошенной команды: это отрезает агента от чужого каталога, а не
+/// убирает за ним.
 pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
     match exchange {
         Exchange::Dir(user_dir) => withdraw_dir(user_dir, relative),
@@ -1383,7 +1398,17 @@ pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &
 }
 
 /// Убирает след прогона со стороны точки входа: путь и опустевшие родители.
+///
+/// След брошенной команды остаётся: агент, возможно, ещё пишет туда, и удаление шло бы
+/// наперегонки с ним — через SFTP это десятки секунд и всё равно отказ (живой прогон #296).
 pub(crate) fn tidy(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
+    if handle.abandoned() {
+        tracing::debug!(
+            path = relative,
+            "the abandoned agent command keeps its exchange path"
+        );
+        return;
+    }
     match exchange {
         Exchange::Dir(user_dir) => tidy_run_path(user_dir, relative),
         Exchange::Sftp => {
