@@ -488,7 +488,7 @@ mod tests {
             tool.storage_path(&config.work_path),
             Some(
                 config
-                    .work_path
+                    .local_path
                     .join("infobases/main/hashes/tools/client_mcp.redb")
             )
         );
@@ -506,6 +506,67 @@ mod tests {
             other.storage_path(&config.work_path),
             tool.storage_path(&config.work_path)
         );
+    }
+
+    /// Исходники расширения-инструмента, которые `tools download client-mcp --sources` кладёт в
+    /// `workPath/tools`, разбираются как раньше, хотя `workPath` прячет себя от git
+    /// `.gitignore` со строкой `*`: их изменения ищет чтение файлов, а не git, каталоги раннера
+    /// под их корнем не лежат, и отказа `source_set_ignored_by_git` нет
+    /// (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`).
+    #[test]
+    fn tool_sources_under_the_work_path_are_analyzed_like_any_other() {
+        use crate::change_detection::analyzer::{analyze_context, commit_success, AnalysisOutcome};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join(".build").join("v8-runner");
+        config.local_path = dir.path().join(".local");
+        crate::support::local_dir::prepare_work_dir(&config.work_path).expect("workPath");
+        let root = config
+            .work_path
+            .join("tools/onec-client-mcp-devkit/exts/client-mcp");
+        std::fs::create_dir_all(root.join("src/CommonModules/Tool")).expect("tool sources");
+        std::fs::write(root.join("src/CommonModules/Tool/Module.bsl"), "a").expect("module");
+        let ignored = git(&["check-ignore", "-q", root.to_str().expect("utf-8")]);
+        assert!(ignored.status.success(), "workPath hides the tool from git");
+
+        let context =
+            SourceSetsService::new(&config).tool_extension_context("client_mcp", root.clone());
+        assert!(crate::change_detection::runner_dirs::runner_dirs_inside(
+            &root,
+            crate::change_detection::runner_dirs::RunnerDirs::of(&config)
+        )
+        .is_empty());
+        crate::use_cases::source_changes::refuse_hidden_sets(
+            std::slice::from_ref(&context),
+            &config.work_path,
+        )
+        .expect("no source_set_ignored_by_git");
+        let Ok(AnalysisOutcome::Changes { changes, prepared }) =
+            analyze_context(&context, &config.work_path, &mut || false).outcome
+        else {
+            panic!("the first analysis sees the tool sources");
+        };
+        assert_eq!(changes.len(), 1);
+        commit_success(&context, &config.work_path, &prepared).expect("remembered");
+        assert!(matches!(
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        std::fs::write(root.join("src/CommonModules/Tool/Module.bsl"), "b").expect("edit");
+        assert!(matches!(
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
     }
 
     /// Строка, чей адрес раннер не распознаёт, сравнить не с чем: памяти у неё нет.

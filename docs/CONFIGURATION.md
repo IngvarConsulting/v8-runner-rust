@@ -333,6 +333,8 @@ command-specific validation, а не ослабление `push`, source `pull`,
   Конфигуратора по ключу базы; без неё следующая выгрузка EDT идёт полной
 - `workPath/tool-extensions/<имя>` — выгрузка расширения-инструмента с исходниками EDT
 - `workPath/agent/host-keys` — ключи узла своего агента
+- `workPath/tools` — загрузки `tools download`: `.cfe`, EPF Vanessa и исходники
+  onec-client-mcp-devkit; после удаления их скачивает заново `tools download`
 
 Память о базе лежит не здесь, а в [`localPath`](#localpath) (`localPath/infobases/<база>/`):
 удаление `workPath` её не задевает, и следующий `push` идёт по изменившемуся.
@@ -1139,7 +1141,7 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 
 `v8-runner tools download client-mcp` может заполнить этот блок в `v8project.local.yaml`:
 с `--sources` он указывает `source.path` на
-`build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
+`workPath/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
 доступен, только когда сборку исполняет Конфигуратор: при объявленном расширении агент из
 цепочки `push` выпадает; при `providers.push: ibcmd` или `agent` используйте `--sources`.
@@ -1151,7 +1153,8 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 - `epf_path`, путь к внешней обработке Vanessa Automation.
 
 `v8-runner tools download vanessa` заполняет `tools.va.epf_path` в `v8project.local.yaml` путём
-`build/tools/vanessa-automation-single.epf`.
+`workPath/tools/vanessa-automation-single.epf` (по умолчанию
+`.build/v8-runner/tools/vanessa-automation-single.epf`).
 
 ## `tools.platform`
 

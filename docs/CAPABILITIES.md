@@ -835,13 +835,18 @@ v8-runner tools download client-mcp [--sources] [--force]
   читается со всех страниц, черновики пропускаются, теги сравниваются покомпонентно как
   числа (`1.2.043.42` > `1.2.043.9`). Ключ есть только у `vanessa`.
 - Выбранная версия — поле `tag` в `destinations`.
+- Загрузки — пересчитываемый кеш и лежат в `workPath/tools` (по умолчанию
+  `.build/v8-runner/tools`). Прежний `build/tools` раннер не читает и не удаляет; пути в
+  `v8project.local.yaml` следующая загрузка переписывает на новое место.
 - `yaxunit --sources` распаковывает source subtree в `tests` и добавляет в primary
   `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
-  `build/tools`.
+  `workPath/tools`.
 - `client-mcp --sources` распаковывает source subtree в
-  `build/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` требует, чтобы
-  сборку исполнял Конфигуратор, и скачивает `.cfe` в `build/tools`.
-- `vanessa` всегда скачивает `build/tools/vanessa-automation-single.epf`.
+  `workPath/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` требует, чтобы
+  сборку исполнял Конфигуратор, и скачивает `.cfe` в `workPath/tools`. Исходники
+  расширения-инструмента под `workPath` разбираются чтением файлов, как прежде: то, что
+  `workPath` спрятан от git, на них не влияет.
+- `vanessa` всегда скачивает `workPath/tools/vanessa-automation-single.epf`.
 - `v8project.local.yaml` обновляется только для команд, которым нужны machine-local пути:
   `vanessa` заполняет `tools.va.epf_path`, `client-mcp` заполняет
   `tools.client_mcp.extension`; повторный запуск переиспользует уже скачанные файлы, а

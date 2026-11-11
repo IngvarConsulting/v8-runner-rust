@@ -54,7 +54,9 @@ fn tools_download(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let local_config_path = config_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let tools_dir = config.base_path.join("build").join("tools");
+    // Загрузки — пересчитываемый кеш: их место в `workPath`, а не в дереве проекта
+    // (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`). Прежний `build/tools` не трогается.
+    let tools_dir = tools_dir(config);
 
     ensure_dir(&tools_dir).map_err(|error| {
         AppError::Runtime(format!(
@@ -102,6 +104,11 @@ fn tools_download(
         local_config_path,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// Каталог загрузок `tools download`: `workPath/tools`.
+fn tools_dir(config: &AppConfig) -> PathBuf {
+    config.work_path.join("tools")
 }
 
 fn download_yaxunit(

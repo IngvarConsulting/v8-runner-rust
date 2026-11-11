@@ -507,7 +507,6 @@ mod tests {
         let file = version_file(root.path(), "base-a");
         let context = SourceSetContext::new("main", root.path().join("sources"), "designer-main")
             .with_infobase_memory(&root.path().join(".local"), "origin", "base-a".to_owned());
-        let work = root.path().join("work");
         let platform = platform_8_3_27();
         let check =
             || super::check_load_format_against(&context, &platform, FormatVersion::new(2, 20));

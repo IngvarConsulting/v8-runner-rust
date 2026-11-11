@@ -3277,6 +3277,7 @@ exit 0"#,
                 "publish",
                 &DestructionConsent::RunnerOwned,
                 &[],
+                crate::use_cases::staged_publication::BackupRemoval::Inline,
             )
             .expect("published");
         assert_eq!(

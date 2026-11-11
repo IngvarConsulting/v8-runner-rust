@@ -75,7 +75,7 @@ fn project(format: &str) -> Project {
     )
     .expect("config");
     support::memory::remember_base(
-        &root,
+        root,
         "origin",
         support::memory::Base::File(&root.join("ib")),
         &[support::memory::Set::configuration("main", &sources)],
@@ -214,7 +214,7 @@ fn a_foreign_generation_record_answers_the_release_refusal_not_non_fast_forward(
     )
     .expect("standalone config");
     support::memory::remember_base(
-        &root,
+        root,
         "origin",
         support::memory::Base::Standalone {
             host: "127.0.0.1",
