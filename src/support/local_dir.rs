@@ -79,6 +79,11 @@ pub fn prepare_ignored_dir(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// `.gitignore`, какой кладёт [`prepare_ignored_dir`]: строка `*` и ничего больше.
+pub fn is_ignore_everything(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| text == LOCAL_DIR_GITIGNORE_CONTENT)
+}
+
 /// Имя общего каталога порождённого рабочей копии: в нём `workPath` по умолчанию.
 const BUILD_DIR_NAME: &str = ".build";
 

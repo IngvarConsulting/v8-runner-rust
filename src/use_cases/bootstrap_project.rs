@@ -390,7 +390,7 @@ fn refuse_a_non_empty_project_dir(
 /// целиком и свой `.gitignore`; `localPath` — то, что заводит подготовка каталога (`.gitignore`
 /// и файлы замков), и память о базах, в которой граница записала только признак нового
 /// владельца и замок памяти. Каталоги на пути к ним не держат ничего другого; на пути к
-/// `workPath` лежит и `.gitignore` родителя `.build`, которого раннер завёл сам.
+/// `workPath` лежит и `.gitignore` со строкой `*` родителя `.build`, которого раннер завёл сам.
 fn foreign_in(
     path: &Path,
     work_path: &Path,
@@ -422,7 +422,7 @@ fn foreign_in(
         } else {
             work_path.starts_with(path)
                 && name == crate::support::local_dir::LOCAL_DIR_GITIGNORE
-                && inner_path.is_file()
+                && crate::support::local_dir::is_ignore_everything(&inner_path)
         };
         if prepared {
             continue;

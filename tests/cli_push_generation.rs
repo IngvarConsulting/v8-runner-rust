@@ -292,7 +292,9 @@ fn the_first_command_leaves_no_untracked_runner_files_for_git() {
 
     succeeded(&project.run(&["push", "--force"]));
 
-    assert!(project.root().join(".build/v8-runner").is_dir());
+    assert!(project.root().join(".build/v8-runner/.gitignore").is_file());
+    assert!(project.root().join(".build/.gitignore").is_file());
+    assert!(project.root().join(".local/.gitignore").is_file());
     assert!(project.ledger_file().is_file());
     assert!(!project.root().join(".gitignore").exists());
     let status = std::process::Command::new("git")

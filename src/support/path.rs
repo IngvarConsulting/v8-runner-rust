@@ -188,17 +188,19 @@ impl VolumeId {
 /// Том пути или, если его ещё нет, ближайшего существующего предка: каталог, который раннер
 /// только создаст, ляжет на том своего родителя.
 pub fn volume_of(path: &Path) -> std::io::Result<VolumeId> {
-    let existing = nearest_existing_canonical_path(path)?;
-    let mut probe = existing.as_path();
-    while std::fs::symlink_metadata(probe).is_err() {
-        probe = probe.parent().ok_or_else(|| {
+    // Канонический путь несёт и несуществующий остаток: том спрашивается у его
+    // ближайшего существующего предка.
+    let canonical = nearest_existing_canonical_path(path)?;
+    let existing = canonical
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("no existing ancestor for path '{}'", path.display()),
             )
         })?;
-    }
-    match filesystem_object_identity(probe)? {
+    match filesystem_object_identity(existing)? {
         #[cfg(unix)]
         FilesystemObjectIdentity::Unix { device, .. } => Ok(VolumeId(device)),
         #[cfg(windows)]

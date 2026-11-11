@@ -818,9 +818,11 @@ fn validate_base_path(path: &Path) -> Result<(), ConfigValidationError> {
     Ok(())
 }
 
+/// Проверка заводит `workPath`, если его нет, — как первый писатель, со своим `.gitignore`
+/// (`INV.USE-CASES.THE-WORK-PATH-IGNORES-ITSELF`).
 fn validate_work_path(path: &Path) -> Result<(), ConfigValidationError> {
     if !path.exists() {
-        std::fs::create_dir_all(path).map_err(|e| {
+        crate::support::local_dir::prepare_work_dir(path).map_err(|e| {
             ConfigValidationError::WorkPathInvalid(format!("{}: {e}", path.display()))
         })?;
     }

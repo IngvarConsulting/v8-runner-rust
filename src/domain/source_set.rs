@@ -219,16 +219,12 @@ impl SourceSetContext {
 
     /// Память базы этого набора: `localPath/infobases/<база>`; `None` у набора без памяти базы.
     pub fn base_memory_dir(&self) -> Option<PathBuf> {
-        self.source_set_base().map(Path::to_path_buf)
-    }
-
-    fn source_set_base(&self) -> Option<&Path> {
         match &self.memory {
             SnapshotMemory::Infobase {
                 dir,
                 subject: MemorySubject::SourceSet,
                 ..
-            } => Some(dir),
+            } => Some(dir.clone()),
             SnapshotMemory::Infobase { .. }
             | SnapshotMemory::Shared
             | SnapshotMemory::Disabled
