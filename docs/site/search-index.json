@@ -1892,14 +1892,14 @@
   {
     "url": "cli-upload.html#op-upload",
     "page": "upload",
-    "section": "upload --path build/main.cf",
-    "text": "upload --path build/main.cf v8-runner upload --path build/main.cf загружает пакет .cf или .cfe в основную конфигурацию, целиком заменяя её ( 11 )"
+    "section": "upload build/main.cf",
+    "text": "upload build/main.cf v8-runner upload build/main.cf целиком заменяет основную конфигурацию пакетом .cf или загружает расширение пакетом .cfe с --ref <имя> ( 11 ) Имя в --ref — имя расширения в базе. Набор EXTENSION называет расширение своим именем, как у push ."
   },
   {
     "url": "cli-upload.html#response-classes",
     "page": "upload",
     "section": "Классы ответов",
-    "text": "Классы ответов Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек. Класс Когда возникает и что означает Пакет загружен execution.payload.applied: true . update_db_cfg_ran отдельно сообщает о применении к конфигурации БД. План подготовлен applied: false ; совместимость может оставаться not_probed . Пакет или режим не подходят Неверный CF/CFE/файл настроек, нет имени расширения; несовместимый режим при supported/absent или состояние совместимости not_established . Загрузка не завершилась execution.status — failed; пакет мог быть загружен до ошибки следующего шага. applied отражает выполненную загрузку, update_db_cfg_ran — выполнение обновления конфигурации базы данных. Ошибка следующего шага не отменяет уже выполненные изменения. Выполнение прервано execution.status — cancelled / timed_out. В критической фазе прерывание может быть отложено до безопасного завершения. Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в словаре ответов ."
+    "text": "Классы ответов Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек. Класс Когда возникает и что означает Пакет загружен execution.payload.applied: true . update_db_cfg_ran отдельно сообщает о применении к конфигурации БД. План подготовлен applied: false ; совместимость может оставаться not_probed . Пакет или режим не подходят Неверный CF/CFE/файл настроек, нет имени расширения; несовместимый режим при supported/absent или состояние совместимости not_established . Загрузка не завершилась execution.status — failed; пакет мог быть загружен до ошибки следующего шага. applied отражает выполненную загрузку, update_db_cfg_ran — выполнение обновления конфигурации базы данных. Ошибка следующего шага не отменяет уже выполненные изменения. Если /UpdateCfg вернул 0, а рабочая версия осталась прежней, результат остаётся неподтверждённым, applied и update_db_cfg_ran равны false . Выполнение прервано execution.status — cancelled / timed_out. В критической фазе прерывание может быть отложено до безопасного завершения. Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в словаре ответов ."
   },
   {
     "url": "cli-upload.html#response-classes",
@@ -1922,8 +1922,8 @@
   {
     "url": "cli-upload.html#upload-variant-2",
     "page": "upload",
-    "section": "upload --mode combine / update",
-    "text": "upload --mode combine / update v8-runner upload --path build/main.cf --mode combine --settings combine.xml --vendor-name Vendor объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика ( 49 )"
+    "section": "upload --mode combine",
+    "text": "upload --mode combine v8-runner upload build/main.cf --mode combine --settings combine.xml --vendor-name Vendor объединяет конфигурацию с пакетом по файлу настроек ( 49 )"
   },
   {
     "url": "cli-upload.html#upload-variant-2-outcome",
@@ -1932,10 +1932,16 @@
     "text": "Операция завершилась успешно Фрагмент успешного текстового ответа: target: configuration action: combine cf artifact: build/main.cf"
   },
   {
+    "url": "cli-upload.html#upload-vendor-update",
+    "page": "upload",
+    "section": "upload --mode update",
+    "text": "upload --mode update v8-runner upload dist/vendor.cfu --mode update --settings update.xml Обновляет основную конфигурацию на поддержке файлом поставки .cf или обновлением .cfu . Раннер проверяет XML настроек и вызывает /UpdateDBCfg после подтверждённой смены версии рабочей конфигурации. Для расширения используйте upload <файл.cfe> --mode combine --settings <файл> --ref <имя> ."
+  },
+  {
     "url": "cli-upload.html#upload-preview",
     "page": "upload",
-    "section": "upload --path build/main.cf --dry-run",
-    "text": "upload --path build/main.cf --dry-run v8-runner upload --path build/main.cf --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция."
+    "section": "upload build/main.cf --dry-run",
+    "text": "upload build/main.cf --dry-run v8-runner upload build/main.cf --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция."
   },
   {
     "url": "cli-upload.html#upload-example-outcome",

@@ -780,6 +780,41 @@ v1_dist.cf -EnableSupport`) и локальной процедурой в `Об�
 нельзя. После `/UpdateCfg` конфигурация БД не обновлена: нужен `/UpdateDBCfg`, его можно
 дописать в тот же запуск Конфигуратора.
 
+**Подтверждение версии на Windows (06.11.2026, 8.3.27.2074, #196).** На отдельной
+файловой копии с тестовой конфигурацией на поддержке и локальной правкой
+`/DumpConfigToFiles <новый каталог> -partial -listFile <список>` со строкой
+`Configuration` выгрузил корневой `Configuration.xml`. Версия рабочей конфигурации
+лежит в `MetaDataObject/Configuration/Properties/Version`. Атрибут `version` корня
+относится к формату выгрузки.
+
+- `/UpdateCfg v2.cfu -Settings do-not-merge.xml` вернул 0. Выборочная выгрузка до и
+  после показала `1.0.0.1`. Раннер вернул 4 и пропустил `/UpdateDBCfg`.
+- С `MergePrioritizingMainConfiguration` и `v2.cfu` или `v2-dist.cf` версия стала
+  `1.0.0.2`. После вызова `/UpdateDBCfg` раннером для `.cfu` хеши `/DumpCfg` и
+  `/DumpDBCfg` совпали.
+- Обычный `.cf` от `/DumpCfg` вернул 1 на исходной базе на поддержке, версия осталась
+  `1.0.0.1`.
+
+**Поставка БСП на файловой базе (11.11.2026, 8.5.1.1529, #196).** Поставка `1Cv8.cf`
+БСП 3.2.1.569 и 3.2.2.159 из каталога шаблонов. На 8.3.27.2342 `/LoadCfg` поставки 3.2.1
+вернул 1: «Для работы с конфигурацией необходима версия платформы не меньше, чем 8.5.1».
+Дальше всё на 8.5.1.1529.
+
+- `CREATEINFOBASE File=<ib>`, затем `/LoadCfg <3.2.1.569>.cf /UpdateDBCfg -Dynamic-` — `rc=0`,
+  ~20 с. Выборочная выгрузка `Configuration` дала `Ext/ParentConfigurations.bin` и
+  `Version` `3.2.1.569`: поставка, загруженная в пустую базу, ставит её на поддержку.
+- `upload <3.2.2.159>.cf --mode update --settings prefer-main.xml --dry-run` — 0,
+  `provider_dispatched: false`, `artifact_type: configuration_cf`; в превью `/N ***`,
+  `/P ***`, путь `--settings` и каталог приватной копии `build/temp`.
+- Тот же `upload` без `--dry-run` — 0, ~25 с, `3.2.1.569 → 3.2.2.159`, `applied: true`,
+  `update_db_cfg_ran: true`. Командные строки процессов: `/UpdateCfg … -Settings
+  build/temp/upload-settings-<uuid>/settings.xml`, выгрузка версии `-partial -listFile`,
+  `/UpdateDBCfg -Dynamic-`. Временные каталоги после команды удалены.
+- Повтор той же поставки на обновлённой базе: `/UpdateCfg` вернул 1, «Файл не содержит
+  доступных обновлений»; раннер — 4, `artifact_load_failed`, `applied: false`,
+  `update_db_cfg_ran: false`, ~4 с. Ветку «версия прежняя» повтор не даёт: платформа
+  отказывает раньше.
+
 ## Прямой шлюз автономного сервера
 
 Замер 06.10.2026. Задача: [#178](https://github.com/IngvarConsulting/v8-runner-rust/issues/178). Платформа 8.3.27.2074, macOS.
