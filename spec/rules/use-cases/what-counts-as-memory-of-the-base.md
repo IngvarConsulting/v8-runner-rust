@@ -11,6 +11,7 @@ check:
   - tests/cli_reset.rs::reset_creates_no_memory_of_the_base
   - tests/cli_reset.rs::reset_leaves_the_memory_of_another_pair
   - src/change_detection/analyzer.rs::memory_written_before_git_ids_is_no_memory_of_the_base
+  - tests/cli_infobase_recreate.rs::a_failed_recreation_puts_the_old_base_back
 ---
 
 # Что считается памятью о базе
@@ -32,5 +33,11 @@ check:
 инструмент ответил поколением, и удачный `push`. `reset` память не создаёт, а заменяет: свою
 непустую хеш-память набора — пустой, перед откатом; чужую и нечитаемую не трогает
 (`INV.CLI.RESET-DISCARDS-THE-UNAPPLIED`).
+
+`infobase create --recreate` память о прежней базе стирает на точке невозврата — хеш-память,
+файлы версий, журнал поколений, признаки нового владельца и копии, — а новую пишет создание.
+Если создание не удалось и прежняя база вернулась, её память остаётся стёртой: обмен с ней
+начинается с `pull <SET> --force` или `push --force`
+(`INV.USE-CASES.RECREATE-ROLLS-BACK-A-FAILED-CREATION`).
 
 Решение владельца от 06.10.2026: чужая и нечитаемая память — отсутствие памяти.

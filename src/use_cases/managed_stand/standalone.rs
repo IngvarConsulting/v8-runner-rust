@@ -659,7 +659,7 @@ pub(super) fn create_base(
         }
         if stand.database_exists(port, &bin, name)? {
             return Err(validation(format!(
-                "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, or drop it with PostgreSQL tools using the password file `dbms status` names"
+                "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, run infobase create --recreate to replace the infobase, or drop it with PostgreSQL tools using the password file `dbms status` names"
             )));
         }
     }

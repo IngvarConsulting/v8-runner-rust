@@ -44,7 +44,7 @@ MCP DTO в одном слое.
   Память хранит хеш blob git каждого файла и один на всю память вид хеша; память без вида
   (раннер до #575, SHA-256) памятью не считается, её заменяет полный `pull --force`.
 - Откуда изменения (#575): `use_cases::source_changes` выбирает путь набора. Набор
-  `DESIGNER` в рабочей копии git (не подмодуль, не под `workPath`) — git: `platform::git`
+  `DESIGNER` в рабочей копии git (не подмодуль, не под `workPath` и `localPath`) — git: `platform::git`
   спрашивает `rev-parse`, `config`, `ls-files` и `git -c core.checkStat=default
   -c core.trustctime=true status --porcelain=v2 -z --untracked-files=all --no-renames` по
   корням наборов один раз на рабочую копию, `change_detection::git_tree` берёт хеш индекса
@@ -62,8 +62,9 @@ MCP DTO в одном слое.
 - Правила игнорирования: `change_detection::git_ignore` читает отслеживаемые `.gitignore`,
   `.git/info/exclude` и `core.excludesFile` и проверяет их, как git, на путях из памяти
   набора или, без памяти, на образцах выгрузки; задетый файл платформы — отказ
-  `source_set_ignored_by_git` у `status`, `push`, `pull` и `make`.
-  Чужая память для `push` — отсутствие памяти, и у `--full` тоже: отказ `untracked_base` называет
+  `source_set_ignored_by_git` у `status`, `push`, `pull` и `make`; каталоги раннера
+  (`workPath`, `localPath`) не проверяются.
+- Чужая память для `push` — отсутствие памяти, и у `--full` тоже: отказ `untracked_base` называет
   её чужой; новую память создают полный `pull` (`pull <SET> --force`) или перезапись
   `push --force`.
 - Анализ читает содержимое каждого выбранного обычного файла потоком: одинаковый размер

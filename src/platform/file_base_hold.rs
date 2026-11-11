@@ -168,6 +168,47 @@ pub fn lock_holder(file: &File) -> io::Result<Hold> {
     })
 }
 
+/// Отказ ОС, потому что файл держит другой процесс: на Windows — `ERROR_SHARING_VIOLATION`
+/// у открытия и у переноса (замер #597). На POSIX такого отказа нет.
+pub fn is_sharing_violation(error: &io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    cfg!(windows) && error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+}
+
+/// Записи платформы верхнего уровня каталога базы ([`is_platform_name`]). Ссылки не
+/// разворачиваются, вложенные каталоги не обходятся: запись берётся целиком. Каталога нет —
+/// записей нет.
+pub fn platform_entries(dir: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if is_platform_name(&entry.file_name().to_string_lossy()) {
+            found.push(entry.path());
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Имя записи, которую заводит платформа в каталоге файловой базы: начинается на `1Cv8`
+/// (замер #597). На Windows регистр не различается — имена файлов там к нему нечувствительны;
+/// на POSIX сравнение точное, и чужой `1CV8notes` записью платформы не считается.
+pub fn is_platform_name(name: &str) -> bool {
+    const PREFIX: &str = "1Cv8";
+    name.get(..PREFIX.len()).is_some_and(|head| {
+        if cfg!(windows) {
+            head.eq_ignore_ascii_case(PREFIX)
+        } else {
+            head == PREFIX
+        }
+    })
+}
+
 #[cfg(not(any(unix, windows)))]
 fn probe(_path: &Path, _access: Access) -> io::Result<Hold> {
     Err(io::Error::new(
@@ -179,6 +220,34 @@ fn probe(_path: &Path, _access: Access) -> io::Result<Hold> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_top_level_1cv8_names_are_platform_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in [
+            "1Cv8.1CD",
+            "1Cv8.1CL",
+            "1Cv8Log",
+            "notes.txt",
+            "x1Cv8.1CD",
+            "1Cv",
+        ] {
+            std::fs::write(dir.path().join(name), "").expect("write");
+        }
+        std::fs::create_dir(dir.path().join("sub")).expect("sub");
+        std::fs::write(dir.path().join("sub").join("1Cv8.1CD"), "").expect("nested");
+        let names: Vec<String> = platform_entries(dir.path())
+            .expect("entries")
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["1Cv8.1CD", "1Cv8.1CL", "1Cv8Log"]);
+        assert!(is_platform_name("1Cv8FTxt"));
+        assert_eq!(is_platform_name("1CV8notes"), cfg!(windows));
+        assert!(platform_entries(&dir.path().join("missing"))
+            .expect("missing")
+            .is_empty());
+    }
 
     #[test]
     fn a_base_without_files_is_absent_and_unlocked() {

@@ -48,6 +48,20 @@ const APPLICATIONS: [(&str, ApplicationCode); 12] = [
     ("COM connection", ApplicationCode::ComConnection),
 ];
 
+/// Код приложения по полю `app-id` ответа `rac session list` (замер #597: `1CV8C` у тонкого
+/// клиента). Значения `rac` совпадают с кодами провода; незнакомое — `None`.
+pub fn application_of_rac(app_id: &str) -> Option<ApplicationCode> {
+    match app_id {
+        "Designer" => Some(ApplicationCode::Designer),
+        "1CV8C" => Some(ApplicationCode::ThinClient),
+        "1CV8" => Some(ApplicationCode::ThickClient),
+        "BackgroundJob" => Some(ApplicationCode::BackgroundJob),
+        "WebClient" => Some(ApplicationCode::WebClient),
+        "COMConnection" => Some(ApplicationCode::ComConnection),
+        _ => None,
+    }
+}
+
 /// Сеансы, названные текстом отказа; `None` — заголовка нет, сеансов нет или хоть одна
 /// строка не разобрана.
 pub fn parse_session_list(text: &str) -> Option<Vec<SessionEntry>> {

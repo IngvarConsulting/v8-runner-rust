@@ -259,9 +259,6 @@ pub(crate) fn refusal(
     holder: Holder,
     cause: &AppError,
 ) -> AppError {
-    let password = config.infobase.password.as_deref().unwrap_or_default();
-    let base = mask_text(&config.infobase.connection, &[password]);
-    let lock = session_lock(config);
     let (kind, list, terminable, headline) = match holder {
         Holder::Designer => (
             UseCaseErrorKind::InfobaseDesignerBusy,
@@ -290,24 +287,36 @@ pub(crate) fn refusal(
             )
         }
     };
+    let mut refusal = UseCaseError::new(kind, format!("{headline}; {cause}"))
+        .with_sessions(infobase_sessions(config, list, terminable));
+    if let Some(next) = gate.next(terminable) {
+        refusal = refusal.with_next(next);
+    }
+    AppError::Refused(Box::new(refusal))
+}
+
+/// Поле `error.sessions` — единственный построитель у всех отказов `infobase_sessions`:
+/// база без учётных данных, сеансы, с этой ли машины, можно ли их завершить, блокировка
+/// начала сеансов.
+pub(crate) fn infobase_sessions(
+    config: &AppConfig,
+    list: Option<Vec<SessionEntry>>,
+    terminable: bool,
+) -> InfobaseSessions {
+    let password = config.infobase.password.as_deref().unwrap_or_default();
     let from_this_machine = match (&list, crate::support::machine::host_name()) {
         (Some(list), Some(host)) => list
             .iter()
             .any(|entry| same_machine(&entry.computer, &host)),
         _ => false,
     };
-    let mut refusal =
-        UseCaseError::new(kind, format!("{headline}; {cause}")).with_sessions(InfobaseSessions {
-            base,
-            list,
-            from_this_machine,
-            terminable,
-            lock,
-        });
-    if let Some(next) = gate.next(terminable) {
-        refusal = refusal.with_next(next);
+    InfobaseSessions {
+        base: mask_text(&config.infobase.connection, &[password]),
+        list,
+        from_this_machine,
+        terminable,
+        lock: session_lock(config),
     }
-    AppError::Refused(Box::new(refusal))
 }
 
 fn name_sessions(list: &[SessionEntry]) -> String {
