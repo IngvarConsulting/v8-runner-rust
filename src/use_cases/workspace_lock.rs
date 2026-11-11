@@ -14,6 +14,14 @@ pub(crate) fn acquire_workspace_lock(
     config: &AppConfig,
     command_name: &str,
 ) -> Result<CommandLockGuard, AppError> {
+    // Замок — первый писатель в `workPath`: каталог появляется вместе с `.gitignore`
+    // (`INV.USE-CASES.THE-WORK-PATH-IGNORES-ITSELF`).
+    crate::support::local_dir::prepare_work_dir(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to prepare workPath '{}': {error}",
+            config.work_path.display()
+        ))
+    })?;
     let canonical_work_path =
         nearest_existing_canonical_path(&config.work_path).map_err(|error| {
             AppError::Runtime(format!(
@@ -81,6 +89,66 @@ pub(crate) fn acquire_local_lock(
     })
 }
 
+/// Замок памяти выбранной базы `<localPath>/infobases/<ключ>/.lock` у команды, которая пишет
+/// базу. Память лежит под `localPath` и общая для запусков с разными `workPath` (`--workdir`,
+/// проекция Unica), поэтому её охраняет свой замок, а не замок `workPath`
+/// (`INV.CLI.THE-MEMORY-LOCK-FOLLOWS-THE-WORKPATH-LOCK`). Берётся после замков `workPath` и
+/// `localPath`; занятый — отказ `WorkspaceBusy`. Замок — первый писатель памяти: `localPath`
+/// заводится вместе со своим `.gitignore`. База, адрес которой не распознан, памяти не имеет, и
+/// замка нет.
+pub(crate) fn acquire_memory_lock(
+    config: &AppConfig,
+    command_name: &str,
+) -> Result<Option<CommandLockGuard>, AppError> {
+    let Some(memory) =
+        crate::change_detection::source_sets::SourceSetsService::new(config).base_memory_dir()
+    else {
+        return Ok(None);
+    };
+    let lock_path = memory_lock_path(&memory);
+    config
+        .local_dir()
+        .prepare_for(&lock_path)
+        .and_then(|()| std::fs::create_dir_all(&memory))
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare the memory of the infobase '{}': {error}",
+                memory.display()
+            ))
+        })?;
+    let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
+        .unwrap_or_else(|_| config.work_path.clone());
+    take_command_lock(&lock_path, command_name, &canonical_work_path)
+        .map(Some)
+        .map_err(|error| match error.kind() {
+            ErrorKind::WouldBlock | ErrorKind::AlreadyExists => {
+                let holder = match command_lock_holder(&lock_path) {
+                    Some(holder) => format!(
+                        "is already locked by '{}' of workspace '{}' (pid {}, started at {})",
+                        holder.command,
+                        holder.canonical_work_path.display(),
+                        holder.pid,
+                        holder.started_at.to_rfc3339(),
+                    ),
+                    None => "is already in use by another command".to_owned(),
+                };
+                AppError::WorkspaceBusy(format!(
+                    "cannot start {command_name}: the memory of the infobase '{}' {holder}; retry when it finishes; {error}",
+                    memory.display()
+                ))
+            }
+            _ => AppError::Runtime(format!(
+                "failed to acquire {command_name} memory lock '{}': {error}",
+                lock_path.display()
+            )),
+        })
+}
+
+/// Файл замка памяти базы: тот же `.lock`, что у `localPath`, но в каталоге памяти.
+pub(crate) fn memory_lock_path(memory: &Path) -> PathBuf {
+    memory.join(crate::support::local_dir::LOCAL_LOCK_FILE_NAME)
+}
+
 pub(crate) fn workspace_lock_path(work_path: &Path) -> PathBuf {
     work_path.join(WORKSPACE_LOCK_FILE_NAME)
 }
@@ -121,6 +189,22 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    /// Замок — первый писатель в `workPath`: каталог и родитель `.build`, которого не было,
+    /// появляются вместе с `.gitignore` со строкой `*` (`INV.USE-CASES.THE-WORK-PATH-IGNORES-ITSELF`).
+    #[test]
+    fn the_workspace_lock_creates_the_work_path_with_its_gitignore() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(&dir.path().join(".build").join("v8-runner"));
+        let guard = acquire_workspace_lock(&config, "build").expect("workspace lock");
+        for ignored in [config.work_path.clone(), dir.path().join(".build")] {
+            assert_eq!(
+                fs::read_to_string(ignored.join(".gitignore")).expect("gitignore"),
+                "*\n"
+            );
+        }
+        drop(guard);
+    }
 
     fn sample_config(work_path: &Path) -> AppConfig {
         AppConfig {

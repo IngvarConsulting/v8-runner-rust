@@ -78,6 +78,15 @@ const PARTIAL_OBJECTS_REQUIRED_ERROR: &str = "partial dump requires at least one
 const NON_PARTIAL_OBJECTS_ERROR: &str = "dump objects are supported only for mode 'partial'";
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DUMP_BACKUP_PREFIX: &str = ".dump-backup";
+/// Приставка промежуточного каталога выгрузки под `workPath/stage`.
+const DUMP_STAGE_PREFIX: &str = ".dump-stage";
+
+/// Корень промежуточных каталогов выгрузки: `workPath/stage`.
+fn dump_stage_root(config: &AppConfig) -> PathBuf {
+    crate::support::path::absolute_from_current_dir(&config.work_path)
+        .unwrap_or_else(|_| config.work_path.clone())
+        .join("stage")
+}
 
 pub fn execute(
     context: &ExecutionContext,
@@ -137,6 +146,9 @@ struct ResolvedDumpTarget {
     canonical_platform_target_path: PathBuf,
     canonical_base_path: PathBuf,
     canonical_work_path: PathBuf,
+    /// Где лежат промежуточные каталоги выгрузки: `workPath/stage`
+    /// (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+    stage_root: PathBuf,
     target_identity: String,
     platform_target_identity: String,
     lock_path: PathBuf,
@@ -472,10 +484,11 @@ fn prepare_full_dump(
             &resolved.platform_target_identity,
         )
     } else {
-        StagedPublication::prepare_dir(
+        StagedPublication::prepare_dir_in(
+            &resolved.stage_root,
             &resolved.platform_target_path,
             &resolved.platform_target_identity,
-            ".dump-stage",
+            DUMP_STAGE_PREFIX,
         )
     }
 }
@@ -528,8 +541,7 @@ fn publish_full_dump(
     if let Some(external) = context.external_full_pull() {
         let inventory = SourceSetInventory::new(config);
         let source = inventory.designer_context(&resolved.source_set_name);
-        let version =
-            source.and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
+        let version = source.and_then(super::version_file::RunnerVersionFile::of);
         let version_snapshot = version
             .as_ref()
             .map(|version| version.prepare_from(publication.staging_path()));
@@ -603,8 +615,8 @@ fn publish_full_dump(
                 warnings.push(warning);
             }
         }
-        let published_version = published_source
-            .and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
+        let published_version =
+            published_source.and_then(super::version_file::RunnerVersionFile::of);
         if let (Some(version), Some(prepared)) = (published_version, version_snapshot) {
             match prepared.and_then(|prepared| version.record_prepared(prepared)) {
                 Ok(()) => {}
@@ -1061,7 +1073,7 @@ fn run_dump_over_directory_ibcmd(
 
 /// Полная выгрузка `ibcmd` поверх каталога набора. В непустой каталог `config export`
 /// отказывает («Каталог … не пуст», замер #403), поэтому выгрузка идёт в пустой
-/// промежуточный каталог рядом, а результат ложится поверх: файлы выгрузки переписаны,
+/// промежуточный каталог в `workPath/stage`, а результат ложится поверх: файлы выгрузки переписаны,
 /// лишнее и посторонние файлы остаются, как у Конфигуратора
 /// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
 fn run_whole_dump_through_stage_ibcmd(
@@ -1069,10 +1081,11 @@ fn run_whole_dump_through_stage_ibcmd(
     resolved: &ResolvedDumpTarget,
     dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
 ) -> DumpRun {
-    let publication = StagedPublication::prepare_dir(
+    let publication = StagedPublication::prepare_dir_in(
+        &resolved.stage_root,
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
-        ".dump-stage",
+        DUMP_STAGE_PREFIX,
     )?;
     log_live_stage("dump: full", "[ibcmd] exporting configuration files");
     let dump_result = match dsl
@@ -1460,10 +1473,11 @@ fn finalize_edt_dump(
         context,
         "before starting EDT reverse-sync import after designer snapshot publication",
     )?;
-    let publication = StagedPublication::prepare_dir(
+    let publication = StagedPublication::prepare_dir_in(
+        &resolved.stage_root,
         &resolved.target_path,
         &resolved.target_identity,
-        ".dump-stage",
+        DUMP_STAGE_PREFIX,
     )?;
     let staging_dir = publication.staging_path().to_path_buf();
 
@@ -1840,6 +1854,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         canonical_platform_target_path,
         canonical_base_path,
         canonical_work_path,
+        stage_root: dump_stage_root(config),
         target_identity,
         platform_target_identity,
         lock_path,
@@ -2028,7 +2043,7 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
         let generation =
-            fs::read_to_string(config.work_path.join("infobases/origin/generation.json"))
+            fs::read_to_string(config.local_path.join("infobases/origin/generation.json"))
                 .expect("generation record");
         let generation: serde_json::Value =
             serde_json::from_str(&generation).expect("generation JSON");
@@ -2039,7 +2054,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(
                 config
-                    .work_path
+                    .local_path
                     .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml")
             )
             .expect("prepared version copy"),
@@ -2111,7 +2126,7 @@ mod tests {
             analyze_context(source, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
-        let memory = config.work_path.join("infobases/origin");
+        let memory = config.local_path.join("infobases/origin");
         let generation: serde_json::Value =
             serde_json::from_slice(&fs::read(memory.join("generation.json")).unwrap()).unwrap();
         assert_eq!(
@@ -2210,7 +2225,7 @@ mod tests {
             snapshot_memory(source_b, &config.work_path),
             SnapshotMemory::Foreign
         ));
-        let memory = config.work_path.join("infobases/origin");
+        let memory = config.local_path.join("infobases/origin");
         let generation: serde_json::Value =
             serde_json::from_slice(&fs::read(memory.join("generation.json")).unwrap()).unwrap();
         assert_eq!(
@@ -3296,6 +3311,7 @@ exit 0"#,
             canonical_base_path: std::fs::canonicalize(dir.path()).expect("canonical"),
             canonical_work_path: std::fs::canonicalize(dir.path().join("work").as_path())
                 .unwrap_or_else(|_| dir.path().join("work")),
+            stage_root: dir.path().join("work").join("stage"),
             target_identity: "id".to_owned(),
             platform_target_identity: "id".to_owned(),
             lock_path: dir.path().join(".lock"),
@@ -3324,6 +3340,7 @@ exit 0"#,
             canonical_platform_target_path: snapshot,
             canonical_base_path: dir.path().to_path_buf(),
             canonical_work_path: dir.path().join("work"),
+            stage_root: dir.path().join("work").join("stage"),
             target_identity: "id".to_owned(),
             platform_target_identity: "snapshot".to_owned(),
             lock_path: dir.path().join(".lock"),
@@ -3366,6 +3383,96 @@ exit 0"#,
         );
     }
 
+    /// Промежуточный каталог полной выгрузки лежит в `workPath/stage`, а не рядом с набором:
+    /// в каталоге-родителе набора во время выгрузки нет `.dump-stage-*`, а публикация кладёт
+    /// стадию на место набора переименованием
+    /// (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+    #[test]
+    fn the_full_dump_stage_lies_in_the_work_path_and_lands_on_the_set() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let publication = super::prepare_full_dump(&context, &resolved).expect("stage");
+
+        assert!(publication.staging_path().starts_with(&resolved.stage_root));
+        assert!(publication.staging_path().is_dir());
+        let beside_the_set = fs::read_dir(dir.path())
+            .expect("parent")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".dump-"))
+            .count();
+        assert_eq!(beside_the_set, 0, "no stage beside the set");
+
+        fs::write(publication.staging_path().join("Configuration.xml"), "new").expect("dumped");
+        publication
+            .publish_dir(
+                &context,
+                super::DUMP_BACKUP_PREFIX,
+                "publish",
+                &DestructionConsent::RunnerOwned,
+                &[],
+                crate::use_cases::staged_publication::BackupRemoval::Inline,
+            )
+            .expect("published");
+        assert_eq!(
+            fs::read_to_string(resolved.target_path.join("Configuration.xml")).expect("landed"),
+            "new"
+        );
+        assert_eq!(
+            fs::read_dir(&resolved.stage_root)
+                .expect("stage root")
+                .count(),
+            0,
+            "the stage became the set"
+        );
+    }
+
+    /// Каталог набора и `workPath` на разных томах — отказ `work_path_on_another_volume` до
+    /// выгрузки: проверка ничего не пишет. На одном томе отказа нет. Два тома в одном прогоне
+    /// не завести, поэтому определитель тома подменён.
+    #[test]
+    fn a_set_on_another_volume_than_the_work_path_is_refused_before_anything_is_written() {
+        use crate::support::path::VolumeId;
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let before: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+
+        super::helpers::refuse_on_another_volume(&resolved, |_| Ok(VolumeId::new(1)))
+            .expect("one volume");
+
+        let stage_root = resolved.stage_root.clone();
+        let refused = super::helpers::refuse_on_another_volume(&resolved, |path| {
+            Ok(VolumeId::new(if path == stage_root { 2 } else { 1 }))
+        })
+        .expect_err("another volume");
+        assert_eq!(
+            UseCaseErrorKind::of(&refused),
+            UseCaseErrorKind::WorkPathOnAnotherVolume
+        );
+        assert_eq!(UseCaseErrorKind::of(&refused).exit_code(), 2);
+        assert!(
+            refused.to_string().contains("different volumes"),
+            "{refused}"
+        );
+        let after: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(before, after, "the check writes nothing");
+        assert!(!resolved.stage_root.exists());
+
+        // Том, который не определить, отказом не служит.
+        super::helpers::refuse_on_another_volume(&resolved, |_| {
+            Err(std::io::Error::other("unknown"))
+        })
+        .expect("an unknown volume is no refusal");
+    }
+
     /// Цель `main` в `dir` такой, какой её видит уборка: те же канонический путь и
     /// опознание, что своя выгрузка пишет в метаданные следа.
     fn resolved_dump_target(dir: &Path) -> super::ResolvedDumpTarget {
@@ -3384,6 +3491,7 @@ exit 0"#,
             canonical_platform_target_path: canonical,
             canonical_base_path: canonical_dir.clone(),
             canonical_work_path: canonical_dir,
+            stage_root: dir.join("work").join("stage"),
             target_identity: identity.clone(),
             platform_target_identity: identity,
             lock_path: dir.join(".lock"),
@@ -4499,12 +4607,7 @@ exit 0"#,
             fs::read_to_string(target.join(".idea/workspace.xml")).expect("hidden"),
             "ide"
         );
-        let leftovers = fs::read_dir(&base)
-            .expect("base")
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".dump-stage"))
-            .count();
-        assert_eq!(leftovers, 0, "the stage is removed");
+        assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(!calls.contains("--sync"), "{calls}");
     }
@@ -4522,10 +4625,14 @@ exit 0"#,
         );
     }
 
+    /// Промежуточные каталоги выгрузки рядом с набором и в `workPath/stage` проекта `base`:
+    /// рабочий каталог тестов — `work` рядом с `base`.
     fn stage_leftovers(base: &Path) -> usize {
-        fs::read_dir(base)
-            .expect("base")
-            .flatten()
+        let stage = base.parent().expect("parent").join("work").join("stage");
+        [base.to_path_buf(), stage]
+            .iter()
+            .filter(|dir| dir.exists())
+            .flat_map(|dir| fs::read_dir(dir).expect("dir").flatten())
             .filter(|entry| entry.file_name().to_string_lossy().contains(".dump-stage"))
             .count()
     }
@@ -4921,7 +5028,11 @@ exit 0"#,
         let work = dir.path().join("work");
         a_tree_before_the_dump(&root, &["A.bsl", "Late.bsl"]);
         let set = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "base-identity".to_owned(),
+            );
         rescan_and_commit_full(&set, &work).expect("prime");
         let start = mark_dump_start(&root).expect("start");
         let watch = super::dump_watch(
@@ -4977,7 +5088,11 @@ exit 0"#,
         let work = dir.path().join("work");
         a_tree_before_the_dump(&root, &["A.bsl", "B.bsl", "ConfigDumpInfo.xml"]);
         let set = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "base-identity".to_owned(),
+            );
         rescan_and_commit_full(&set, &work).expect("prime");
         let start = mark_dump_start(&root).expect("start");
         let watch = super::dump_watch(
@@ -5085,7 +5200,17 @@ exit 0"#,
             .expect("forecast call");
         assert!(!forecast.contains("--threads"), "{forecast}");
         assert!(!calls.contains("--sync"), "{calls}");
-        assert!(calls.contains(".dump-stage-"), "{calls}");
+        assert!(
+            calls.contains(
+                &dir.path()
+                    .join("work")
+                    .join("stage")
+                    .join(".dump-stage-")
+                    .display()
+                    .to_string()
+            ),
+            "the stage lies in workPath/stage: {calls}"
+        );
         assert_eq!(
             fs::read_to_string(base.join("main/Configuration.xml")).expect("dumped"),
             "new\n"
@@ -5300,14 +5425,18 @@ exit 0"#,
 
         let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-        assert!(designer_calls.contains(
-            designer_snapshot(&config, "main")
-                .parent()
-                .expect("snapshot parent")
-                .display()
-                .to_string()
-                .as_str()
-        ));
+        // Полная выгрузка снимка идёт в промежуточный каталог `workPath/stage`
+        // (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+        assert!(
+            designer_calls.contains(
+                work.join("stage")
+                    .join(".dump-stage-")
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "{designer_calls}"
+        );
         assert!(edt_calls.contains(
             designer_snapshot(&config, "main")
                 .display()
@@ -5589,14 +5718,18 @@ exit 0"#,
         let ibcmd_calls = fs::read_to_string(ibcmd_calls).expect("ibcmd calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert!(ibcmd_calls.contains("--force"));
-        assert!(ibcmd_calls.contains(
-            designer_snapshot(&config, "main")
-                .parent()
-                .expect("snapshot parent")
-                .display()
-                .to_string()
-                .as_str()
-        ));
+        // Полная выгрузка снимка идёт в промежуточный каталог `workPath/stage`
+        // (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+        assert!(
+            ibcmd_calls.contains(
+                work.join("stage")
+                    .join(".dump-stage-")
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "{ibcmd_calls}"
+        );
         assert!(edt_calls.contains(
             designer_snapshot(&config, "main")
                 .display()
@@ -5890,13 +6023,7 @@ exit 0"#,
             .file_type()
             .is_symlink());
         assert!(!drift.join(".project").exists());
-        let leftover_stage_dirs = fs::read_dir(&base)
-            .expect("base dir")
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(".dump-stage-"))
-            .count();
+        let leftover_stage_dirs = stage_leftovers(&base);
         assert_eq!(leftover_stage_dirs, 0);
     }
 
@@ -6022,13 +6149,7 @@ exit 0"#,
         .expect_err("expected EDT DSL initialization failure");
 
         assert!(matches!(error, AppError::PlatformEdt(_)));
-        let leftover_stage_dirs = fs::read_dir(&base)
-            .expect("base dir")
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(".dump-stage-"))
-            .count();
+        let leftover_stage_dirs = stage_leftovers(&base);
         assert_eq!(leftover_stage_dirs, 0);
     }
 
@@ -6311,7 +6432,7 @@ exit 0"#,
         fs::write(root.join("Kept.bsl"), "before").expect("kept");
         let set =
             crate::domain::source_set::SourceSetContext::new("main", root.clone(), "designer-main")
-                .with_infobase_memory("origin", "base-identity".to_owned());
+                .with_infobase_memory(&dir.join(".local"), "origin", "base-identity".to_owned());
         crate::change_detection::analyzer::rescan_and_commit_full(&set, &work).expect("prime");
         (set, root, work)
     }
@@ -6398,7 +6519,11 @@ exit 0"#,
             fs::create_dir_all(&root).expect("root");
             fs::write(root.join("Kept.bsl"), "before").expect("kept");
             let set = SourceSetContext::new("main", root.clone(), "designer-main")
-                .with_infobase_memory("origin", "base-identity".to_owned());
+                .with_infobase_memory(
+                    &dir.path().join(".local"),
+                    "origin",
+                    "base-identity".to_owned(),
+                );
             rescan_and_commit_full(&set, &work).expect("prime");
             let storage = HashStorage::new(set.storage_path(&work).expect("memory path"));
             let primed = storage.current_generation().expect("generation");

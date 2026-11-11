@@ -6,8 +6,6 @@
 //! что записал её, и запись переносится на ответ
 //! (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`).
 
-use std::path::Path;
-
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::GenerationRecordFate;
 use crate::support::error::AppError;
@@ -48,11 +46,10 @@ impl std::fmt::Display for RecordStep {
 pub(crate) fn carry_record(
     step: RecordStep,
     set: &SourceSetContext,
-    work_path: &Path,
     record: &GenerationRecord,
     after: Result<Option<String>, AppError>,
 ) -> Result<(GenerationRecordFate, Option<String>), AppError> {
-    let Some(ledger) = GenerationLedger::of(set, work_path) else {
+    let Some(ledger) = GenerationLedger::of(set) else {
         return Ok((GenerationRecordFate::Unchecked, None));
     };
     let after = match after {
@@ -99,10 +96,9 @@ pub(crate) fn carry_record(
 pub(crate) fn erase_record(
     step: RecordStep,
     set: &SourceSetContext,
-    work_path: &Path,
     why: &str,
 ) -> (GenerationRecordFate, Option<String>) {
-    match GenerationLedger::of(set, work_path) {
+    match GenerationLedger::of(set) {
         Some(ledger) => erase(step, set, &ledger, why),
         None => (GenerationRecordFate::Unchecked, None),
     }

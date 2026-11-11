@@ -48,7 +48,52 @@ pub(super) fn validate_publish_target(resolved: &ResolvedDumpTarget) -> Result<(
 }
 
 pub(super) fn cleanup_orphan_dirs(resolved: &ResolvedDumpTarget) -> Result<(), AppError> {
-    cleanup_orphan_dirs_for(&resolved.target_path, &resolved.target_identity)
+    cleanup_orphan_dirs_for(
+        &resolved.target_path,
+        &resolved.target_identity,
+        &resolved.stage_root,
+    )
+}
+
+/// Каталог набора и `workPath` на разных томах — отказ до выгрузки: промежуточный каталог
+/// лежит в `workPath/stage`, и публикация переименованием через границу тома не прошла бы.
+/// Проверка ничего не пишет; у EDT сверяется и снимок Конфигуратора
+/// (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+pub(super) fn refuse_a_work_path_on_another_volume(
+    resolved: &ResolvedDumpTarget,
+) -> Result<(), AppError> {
+    refuse_on_another_volume(resolved, crate::support::path::volume_of)
+}
+
+/// То же с определителем тома, который подменяет тест: два тома в одном прогоне не завести.
+pub(super) fn refuse_on_another_volume(
+    resolved: &ResolvedDumpTarget,
+    volume_of: impl Fn(&Path) -> std::io::Result<crate::support::path::VolumeId>,
+) -> Result<(), AppError> {
+    // Том, который не определить, отказом не служит: публикация назовёт свою ошибку сама.
+    let Ok(stage) = volume_of(&resolved.stage_root) else {
+        return Ok(());
+    };
+    for target in [&resolved.target_path, &resolved.platform_target_path] {
+        if volume_of(target).is_ok_and(|volume| volume != stage) {
+            return Err(AppError::Refused(Box::new(
+                crate::use_cases::result::UseCaseError::new(
+                    crate::use_cases::result::UseCaseErrorKind::WorkPathOnAnotherVolume,
+                    format!(
+                        "source-set '{}' at '{}' and workPath '{}' are on different volumes: the dump stage lies in workPath and is published by a rename; move the source set or workPath onto one volume",
+                        resolved.source_set_name,
+                        target.display(),
+                        resolved
+                            .stage_root
+                            .parent()
+                            .unwrap_or(&resolved.stage_root)
+                            .display()
+                    ),
+                ),
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_platform_target(resolved: &ResolvedDumpTarget) -> Result<(), AppError> {
@@ -99,6 +144,7 @@ pub(super) fn cleanup_platform_orphan_dirs(resolved: &ResolvedDumpTarget) -> Res
     cleanup_orphan_dirs_for(
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
+        &resolved.stage_root,
     )
 }
 
@@ -168,19 +214,32 @@ fn return_backup_to_a_missing_target(
     Ok(())
 }
 
-fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<(), AppError> {
+/// Убирает устаревшие промежуточные каталоги и копии выгрузки цели: копии лежат рядом с
+/// целью, промежуточные каталоги — в `stage_root`, а прежние, до #624, — тоже рядом с целью.
+fn cleanup_orphan_dirs_for(
+    target_path: &Path,
+    target_identity: &str,
+    stage_root: &Path,
+) -> Result<(), AppError> {
     let target_parent = target_path.parent().ok_or_else(|| {
         AppError::Runtime(format!(
             "target path has no parent: {}",
             target_path.display()
         ))
     })?;
-    if !target_parent.exists() {
-        return Ok(());
+    if target_parent.exists() {
+        return_backup_to_a_missing_target(target_path, target_parent, target_identity)?;
+        remove_stale_temp_dirs(target_parent, target_identity)?;
     }
-    return_backup_to_a_missing_target(target_path, target_parent, target_identity)?;
+    if stage_root.exists() {
+        remove_stale_temp_dirs(stage_root, target_identity)?;
+    }
+    Ok(())
+}
 
-    for entry in std::fs::read_dir(target_parent)
+/// Устаревшие `.dump-stage-*` и `.dump-backup-*` цели `target_identity` в каталоге `dir`.
+fn remove_stale_temp_dirs(dir: &Path, target_identity: &str) -> Result<(), AppError> {
+    for entry in std::fs::read_dir(dir)
         .map_err(|error| AppError::Runtime(format!("failed to read target parent: {error}")))?
     {
         let entry = entry

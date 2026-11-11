@@ -240,7 +240,7 @@ impl Project {
     }
 
     fn memory(&self) -> PathBuf {
-        self.root().join("work").join("infobases").join("origin")
+        self.root().join(".local").join("infobases").join("origin")
     }
 
     fn ledger(&self) -> Value {

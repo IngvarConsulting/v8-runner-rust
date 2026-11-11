@@ -477,7 +477,7 @@ pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState
         // Копия базы до первой отправки: память — признак копии
         // (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
         None if set
-            .base_memory_dir(work_path)
+            .base_memory_dir()
             .and_then(|dir| read_copy_mark(&copy_mark_in(&dir)))
             .is_some() =>
         {
@@ -494,7 +494,7 @@ fn own_memory_of(set: &SourceSetContext, work_path: &Path) -> Option<MemoryState
         SnapshotMemory::Own => Some(MemoryState::Remembered),
         SnapshotMemory::Foreign => Some(MemoryState::Foreign),
         SnapshotMemory::Unreadable => Some(MemoryState::Unreadable),
-        SnapshotMemory::Nothing => match GenerationLedger::of(set, work_path).map(|l| l.read()) {
+        SnapshotMemory::Nothing => match GenerationLedger::of(set).map(|l| l.read()) {
             Some(Recorded::Ours(_)) => Some(MemoryState::Remembered),
             Some(Recorded::Foreign { .. }) => Some(MemoryState::Foreign),
             Some(Recorded::Nothing) | None => None,
@@ -505,7 +505,7 @@ fn own_memory_of(set: &SourceSetContext, work_path: &Path) -> Option<MemoryState
 /// Лежит ли под именем базы память набора, которая не его: записанная для другой пары или
 /// нечитаемая. Её отказ называет, чтобы отсутствие памяти не выглядело чистым листом.
 fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
-    let foreign_record = GenerationLedger::of(set, work_path)
+    let foreign_record = GenerationLedger::of(set)
         .is_some_and(|ledger| matches!(ledger.read(), Recorded::Foreign { .. }));
     foreign_record
         || matches!(
@@ -515,11 +515,8 @@ fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
 }
 
 /// Запись журнала поколений этой пары «база ↔ каталог»: чужая и неразборчивая — не запись.
-pub(crate) fn recorded_generation(
-    set: &SourceSetContext,
-    work_path: &Path,
-) -> Option<GenerationRecord> {
-    match GenerationLedger::of(set, work_path)?.read() {
+pub(crate) fn recorded_generation(set: &SourceSetContext) -> Option<GenerationRecord> {
+    match GenerationLedger::of(set)?.read() {
         Recorded::Ours(record) => Some(record),
         Recorded::Nothing | Recorded::Foreign { .. } => None,
     }
@@ -710,7 +707,7 @@ impl<'a> GenerationGate<'a> {
         {
             return Ok(BeforeLoad::Unchecked);
         }
-        let Some(record) = recorded_generation(set, &self.config.work_path) else {
+        let Some(record) = recorded_generation(set) else {
             return Ok(BeforeLoad::Unchecked);
         };
         let scope = token_scope(self.config, set);
@@ -760,7 +757,7 @@ impl<'a> GenerationGate<'a> {
         }
         let mut utilities = None;
         for set in sets {
-            let Some(record) = recorded_generation(set, &self.config.work_path) else {
+            let Some(record) = recorded_generation(set) else {
                 continue;
             };
             if !self.foreign(&record, tool, token_scope(self.config, set)) {
@@ -920,7 +917,7 @@ impl<'a> GenerationGate<'a> {
         token: Option<&str>,
         mark: ApplyMark,
     ) -> LoadRecord {
-        let Some(ledger) = GenerationLedger::of(set, &self.config.work_path) else {
+        let Some(ledger) = GenerationLedger::of(set) else {
             return LoadRecord::NoLedger;
         };
         let name = set.name();
@@ -964,8 +961,8 @@ impl<'a> GenerationGate<'a> {
             "the configuration generation of source-set '{name}' is not recorded after the failed load"
         );
         // Запись помечается с её инструментом: токен записи — его, а не загрузчика.
-        let marked = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
-            recorded_generation(set, &self.config.work_path).map(|record| {
+        let marked = GenerationLedger::of(set).and_then(|ledger| {
+            recorded_generation(set).map(|record| {
                 ledger.record_as(
                     record.tool,
                     &record.token,
@@ -1100,7 +1097,7 @@ pub(crate) fn unchanged_since_the_record(
     tool: Provider,
     token: &str,
 ) -> Option<String> {
-    let Recorded::Ours(record) = GenerationLedger::of(set, &config.work_path)?.read() else {
+    let Recorded::Ours(record) = GenerationLedger::of(set)?.read() else {
         return None;
     };
     (record.compare(tool, token, token_scope(config, set)) == GenerationComparison::Unchanged).then(
@@ -1128,7 +1125,7 @@ pub(crate) fn record_after_dump(
     let (Some(before), Some(after)) = (before, after) else {
         return None;
     };
-    let ledger = GenerationLedger::of(set, &config.work_path)?;
+    let ledger = GenerationLedger::of(set)?;
     // Выгрузка берёт основную конфигурацию и непринятого не снимает: запись сравнимого
     // инструмента ([`token_scope`]) и того же поколения, загруженная без применения, остаётся
     // непринятой — и тогда, когда выгружает другой инструмент, чем загружал.
@@ -1300,7 +1297,7 @@ fn remember_edt_source(config: &AppConfig, memory: &AssembledMemory) -> Option<S
 #[cfg(test)]
 pub(crate) fn remember_unknown_sets(config: &AppConfig) {
     for set in SourceSetsService::new(config).designer_contexts() {
-        if let Some(ledger) = GenerationLedger::of(&set, &config.work_path) {
+        if let Some(ledger) = GenerationLedger::of(&set) {
             if !remembers(&set, &config.work_path) {
                 ledger
                     .record(Provider::IbcmdRs, &"0".repeat(40), GenerationAfter::Build)
@@ -1310,18 +1307,21 @@ pub(crate) fn remember_unknown_sets(config: &AppConfig) {
     }
 }
 
-/// Каталог памяти о базах `workPath/infobases`, в котором нет ничего, кроме признаков нового
-/// владельца. Так его оставляет граница `clone` до записи проекта: проверка пустоты каталога
-/// клона его не считает.
+/// Каталог памяти о базах `localPath/infobases`, в котором нет ничего, кроме признаков нового
+/// владельца и файлов замка памяти. Так его оставляет граница `clone` до записи проекта:
+/// проверка пустоты каталога клона его не считает.
 pub(crate) fn holds_only_new_owner_marks(infobases: &Path) -> bool {
     let Ok(bases) = std::fs::read_dir(infobases) else {
         return false;
     };
     bases.flatten().all(|base| {
         std::fs::read_dir(base.path()).is_ok_and(|entries| {
-            entries
-                .flatten()
-                .all(|entry| entry.file_name() == NEW_OWNER_FILE_NAME)
+            entries.flatten().all(|entry| {
+                let name = entry.file_name();
+                name == NEW_OWNER_FILE_NAME
+                    || (name != crate::support::local_dir::LOCAL_DIR_GITIGNORE
+                        && crate::support::local_dir::is_own_file(&name))
+            })
         })
     })
 }
@@ -1373,7 +1373,7 @@ mod tests {
         let config = project(root.path());
         let contexts = SourceSetsService::new(&config).designer_contexts();
         let main = &contexts[0];
-        let ledger = GenerationLedger::of(main, &config.work_path).expect("ledger");
+        let ledger = GenerationLedger::of(main).expect("ledger");
         let token = "1".repeat(40);
         let context = ExecutionContext::cli(CommandName::Build);
         let gate = GenerationGate::new(&context, &config, PushMode::Changes);
@@ -1549,11 +1549,11 @@ mod tests {
         remember_new_owner(&config).expect("new owner mark");
 
         assert!(holds_only_new_owner_marks(
-            &root.path().join("work/infobases")
+            &root.path().join(".local/infobases")
         ));
         remember_created_base(&config, None);
         assert!(!holds_only_new_owner_marks(
-            &root.path().join("work/infobases")
+            &root.path().join(".local/infobases")
         ));
     }
 }

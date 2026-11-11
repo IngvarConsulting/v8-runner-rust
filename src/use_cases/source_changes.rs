@@ -511,6 +511,10 @@ mod tests {
             self.dir.path().join("src").join("cf")
         }
 
+        fn local(&self) -> PathBuf {
+            self.dir.path().join(".local")
+        }
+
         fn work(&self) -> PathBuf {
             let work = self.dir.path().join(".work");
             fs::create_dir_all(&work).expect("work");
@@ -1057,9 +1061,11 @@ mod tests {
 
         // Закоммичен с CRLF до `core.autocrlf=true`: `git add` его не нормализует.
         let project = crlf_committed_project();
-        let set = project
-            .set()
-            .with_infobase_memory("ib", "file:/ib; source=src/cf".to_owned());
+        let set = project.set().with_infobase_memory(
+            &project.local(),
+            "ib",
+            "file:/ib; source=src/cf".to_owned(),
+        );
         let work = project.work();
         rescan_and_commit_full(&set, &work).expect("memory");
 

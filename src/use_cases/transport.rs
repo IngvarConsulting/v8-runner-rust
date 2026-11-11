@@ -9,7 +9,9 @@ use crate::use_cases::infobase_owner::{check_infobase_owner, OwnerCheck};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::{acquire_local_lock, acquire_workspace_lock};
+use crate::use_cases::workspace_lock::{
+    acquire_local_lock, acquire_memory_lock, acquire_workspace_lock,
+};
 
 /// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///
@@ -119,9 +121,10 @@ pub fn preview_boundary(
         })
 }
 
-/// Замки каталогов команды: `localPath` снимается раньше `workPath`, порядок полей — порядок
-/// сброса.
+/// Замки каталогов команды: память базы снимается раньше `localPath`, `localPath` — раньше
+/// `workPath`; порядок полей — порядок сброса.
 pub(crate) struct CommandLocks {
+    _memory: Option<CommandLockGuard>,
     _local: Option<CommandLockGuard>,
     _workspace: CommandLockGuard,
 }
@@ -176,7 +179,18 @@ fn acquire(
     } else {
         None
     };
+    // Память базы пишет только команда, которая пишет базу; чтение замка не берёт
+    // (`INV.CLI.THE-MEMORY-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
+    let memory_lock = if base == BaseAccess::Writes {
+        acquire_memory_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::WorkspaceLock,
+            error: error.into(),
+        })?
+    } else {
+        None
+    };
     let workspace_lock = CommandLocks {
+        _memory: memory_lock,
         _local: local_lock,
         _workspace: workspace_lock,
     };
@@ -428,6 +442,77 @@ mod tests {
             "*
 "
         );
+    }
+
+    /// Память о базе лежит под `localPath` и общая для запусков с разными `workPath`: команда,
+    /// которая пишет базу, берёт замок памяти после замка `workPath`, занятый — `WorkspaceBusy`.
+    /// Занятый `workPath` отказывает раньше и памяти не заводит; команда чтения замка памяти не
+    /// берёт. Замок — первый писатель памяти: `localPath` появляется со своим `.gitignore`.
+    #[test]
+    fn a_write_command_takes_the_memory_lock_after_the_work_path_lock() {
+        let dir = tempdir().expect("tempdir");
+        let mut first = sample_config(&dir.path().join("first"));
+        first.infobase = crate::config::model::InfobaseConfig::file("Srvr=srv;Ref=demo");
+        first.infobase_name = Some("origin".to_owned());
+        let mut second = sample_config(&dir.path().join("second"));
+        second.base_path = first.base_path.clone();
+        second.local_path = first.local_path.clone();
+        second.infobase = first.infobase.clone();
+        second.infobase_name = first.infobase_name.clone();
+        fs::create_dir_all(&first.work_path).expect("first work");
+
+        let canonical_work = fs::canonicalize(&first.work_path).expect("canonical work");
+        let workspace =
+            acquire_advisory_lock(&workspace_lock_path(&canonical_work)).expect("workspace lock");
+        let refusal = dispatch_with_workspace_lock(
+            &first,
+            CommandName::Build,
+            BaseAccess::Writes,
+            |_| Ok(()),
+            || (),
+        )
+        .expect_err("busy workspace");
+        assert_eq!(refusal.phase, InfobaseTransferPhase::WorkspaceLock);
+        assert!(!first.local_path.exists(), "the memory lock comes later");
+        drop(workspace);
+
+        dispatch_with_workspace_lock(
+            &first,
+            CommandName::Build,
+            BaseAccess::Writes,
+            |_| Ok(()),
+            || {
+                let refusal = dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::Dump,
+                    BaseAccess::Writes,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect_err("the memory is being written");
+                assert_eq!(refusal.phase, InfobaseTransferPhase::WorkspaceLock);
+                assert_eq!(refusal.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+                assert!(
+                    refusal.error.message().contains("memory of the infobase"),
+                    "{}",
+                    refusal.error.message()
+                );
+                dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::Status,
+                    BaseAccess::Reads,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect("a read takes no memory lock");
+            },
+        )
+        .expect("the first command holds the memory lock");
+        assert_eq!(
+            fs::read_to_string(first.local_path.join(".gitignore")).expect("gitignore"),
+            "*\n"
+        );
+        assert!(first.local_path.join("infobases").join("origin").is_dir());
     }
 
     #[test]

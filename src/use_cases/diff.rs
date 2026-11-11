@@ -87,7 +87,7 @@ fn version_file(config: &AppConfig) -> Result<PathBuf, AppError> {
     })?;
     let file = inventory
         .designer_context(&main.name)
-        .and_then(|context| RunnerVersionFile::of(config, context));
+        .and_then(RunnerVersionFile::of);
     if let Some(file) = file
         .as_ref()
         .map(RunnerVersionFile::file_after_restore)

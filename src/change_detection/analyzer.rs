@@ -1455,8 +1455,11 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::create_dir_all(&root).expect("root");
         std::fs::write(root.join("Module.bsl"), "module").expect("module");
-        let context = SourceSetContext::new("main", root, "designer-main")
-            .with_infobase_memory("ib", "file:/ib; source=src".to_owned());
+        let context = SourceSetContext::new("main", root, "designer-main").with_infobase_memory(
+            &dir.path().join(".local"),
+            "ib",
+            "file:/ib; source=src".to_owned(),
+        );
         rescan_and_commit_full(&context, &work).expect("memory");
         assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
 
@@ -1660,7 +1663,11 @@ mod tests {
         std::fs::create_dir(&staging).expect("staging");
         std::fs::write(staging.join("Module.bsl"), "exported").expect("export");
         let context = SourceSetContext::new("main", target.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         let prepared = super::prepare_full_snapshot(&context, &staging).expect("prepare");
         assert!(!work.exists(), "preparation never opens memory");
         std::fs::rename(&staging, &target).expect("publish");
@@ -1691,8 +1698,11 @@ mod tests {
             .expect("old mtime");
         let before = std::fs::metadata(&module).expect("before metadata");
         let remembered = before.modified().expect("before mtime");
-        let context = SourceSetContext::new("main", root, "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        let context = SourceSetContext::new("main", root, "designer-main").with_infobase_memory(
+            &dir.path().join(".local"),
+            "origin",
+            "safe-base-identity".to_owned(),
+        );
         rescan_and_commit_full(&context, &work).expect("prime A with old mtime");
         let storage = crate::change_detection::hash_storage::HashStorage::new(
             context.storage_path(&work).expect("storage path"),
@@ -1760,7 +1770,11 @@ mod tests {
             std::fs::write(root.join(name), "before").expect(name);
         }
         let context = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         rescan_and_commit_full(&context, &work).expect("prime");
         let start = mark_dump_start(&root).expect("dump start");
         let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
@@ -1813,7 +1827,11 @@ mod tests {
             std::fs::write(root.join(name), "before").expect(name);
         }
         let context = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         rescan_and_commit_full(&context, &work).expect("prime");
 
         // The user's edit lands before the dump starts.
@@ -1961,7 +1979,11 @@ mod tests {
             std::fs::write(root.join(format!("M{n}.bsl")), "before").expect("module");
         }
         let context = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         rescan_and_commit_full(&context, &work).expect("prime");
         let one_file = row_audit::Rows {
             read: 2,
@@ -2012,7 +2034,11 @@ mod tests {
             std::fs::write(root.join(name), "before").expect(name);
         }
         let context = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         rescan_and_commit_full(&context, &work).expect("prime");
         let path = context.storage_path(&work).expect("memory path");
         {
@@ -2086,8 +2112,11 @@ mod tests {
         std::fs::create_dir(&root).expect("root");
         std::fs::write(root.join("A.bsl"), "a").expect("A");
         let start = mark_dump_start(&root).expect("dump start");
-        let context = SourceSetContext::new("main", root, "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        let context = SourceSetContext::new("main", root, "designer-main").with_infobase_memory(
+            &dir.path().join(".local"),
+            "origin",
+            "safe-base-identity".to_owned(),
+        );
         assert!(watch_before_dump(&context, &dir.path().join("work"), start).is_none());
     }
 
@@ -2101,7 +2130,11 @@ mod tests {
         std::fs::write(root.join("A.bsl"), "before").expect("A");
         std::fs::write(root.join("B.bsl"), "before").expect("B");
         let context = SourceSetContext::new("main", root.clone(), "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+            .with_infobase_memory(
+                &dir.path().join(".local"),
+                "origin",
+                "safe-base-identity".to_owned(),
+            );
         rescan_and_commit_full(&context, &work).expect("prime");
         let storage = crate::change_detection::hash_storage::HashStorage::new(
             context.storage_path(&work).expect("path"),
@@ -2140,8 +2173,11 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::create_dir(&root).expect("root");
         std::fs::write(root.join("Module.bsl"), "source").expect("source");
-        let context = SourceSetContext::new("main", root, "designer-main")
-            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        let context = SourceSetContext::new("main", root, "designer-main").with_infobase_memory(
+            &dir.path().join(".local"),
+            "origin",
+            "safe-base-identity".to_owned(),
+        );
         let path = context.storage_path(&work).expect("storage");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
         std::fs::write(&path, b"corrupt memory").expect("corrupt fixture");

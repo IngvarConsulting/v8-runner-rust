@@ -21,7 +21,8 @@ check:
 **Что изменила версия 15.** Схемы проектного файла и местного слоя больше не содержат
 ключи `providers.syntax` и `providers.publish`. Загрузчик отклоняет их как неизвестные поля.
 Схемы проектного файла и местного слоя получили ключ верхнего уровня `localPath` — каталог личного состояния рабочей копии,
-по умолчанию `.local` (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
+по умолчанию `.local` (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`). Ключ `workPath` в схеме проектного
+файла стал необязательным: по умолчанию `.build/v8-runner` (`INV.CONFIG.WORKPATH-DEFAULTS-TO-THE-BUILD-DIRECTORY`).
 
 **Что изменила версия 14.** Ключ `providers.reset` назначает исполнителя команды `reset`:
 Конфигуратор или `ibcmd` ([правило](../cli/reset-discards-the-unapplied.md)).

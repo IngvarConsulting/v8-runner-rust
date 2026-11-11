@@ -824,7 +824,6 @@ fn execute_source_set_step(
     // безопасная точка, следующая команда, фиксация состояния.
     // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
     let format_notice = crate::use_cases::version_file::check_load_format(
-        &config.work_path,
         load_context,
         crate::platform::locator::platform_version_of(UtilityType::V8, binary).as_ref(),
     )?;
@@ -1007,7 +1006,6 @@ fn execute_source_set_step_ibcmd(
 ) -> Result<Loaded, AppError> {
     // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
     let format_notice = crate::use_cases::version_file::check_load_format(
-        &config.work_path,
         load_context,
         crate::platform::locator::platform_version_of(UtilityType::Ibcmd, binary).as_ref(),
     )?;
@@ -1140,7 +1138,7 @@ mod tests {
             .into_iter()
             .find(|set| set.name() == "main")
             .expect("main");
-        let ledger = GenerationLedger::of(&set, &config.work_path).expect("ledger");
+        let ledger = GenerationLedger::of(&set).expect("ledger");
         ledger
             .record(Provider::Ibcmd, &"1".repeat(40), GenerationAfter::Build)
             .expect("record");
@@ -3722,6 +3720,8 @@ mod tests {
             "procedure Test()\n  // changed\nendprocedure",
         )
         .expect("modify main");
+        // Память о базе лежит под `localPath`: `workPath` после первой отправки может ещё не быть.
+        fs::create_dir_all(&work).expect("work");
         fs::write(work.join("logs"), "not a directory").expect("block platform logs dir");
 
         let failure = run_build(&config, &build_args(false)).expect_err("partial load setup fails");
@@ -4303,7 +4303,7 @@ mod tests {
             .into_iter()
             .find(|set| set.name() == "main")
             .expect("main");
-        GenerationLedger::of(&set, &config.work_path)
+        GenerationLedger::of(&set)
             .expect("ledger")
             .record_as(
                 Provider::Designer,

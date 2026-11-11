@@ -174,6 +174,47 @@ fn windows_handle_identity(
     })
 }
 
+/// Том, на котором лежит путь: устройство на Unix, серийный номер тома на Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeId(u64);
+
+impl VolumeId {
+    #[cfg(test)]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Том пути или, если его ещё нет, ближайшего существующего предка: каталог, который раннер
+/// только создаст, ляжет на том своего родителя.
+pub fn volume_of(path: &Path) -> std::io::Result<VolumeId> {
+    // Канонический путь несёт и несуществующий остаток: том спрашивается у его
+    // ближайшего существующего предка.
+    let canonical = nearest_existing_canonical_path(path)?;
+    let existing = canonical
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no existing ancestor for path '{}'", path.display()),
+            )
+        })?;
+    match filesystem_object_identity(existing)? {
+        #[cfg(unix)]
+        FilesystemObjectIdentity::Unix { device, .. } => Ok(VolumeId(device)),
+        #[cfg(windows)]
+        FilesystemObjectIdentity::Windows { volume_serial, .. } => {
+            Ok(VolumeId(u64::from(volume_serial)))
+        }
+        #[cfg(not(any(unix, windows)))]
+        FilesystemObjectIdentity::Portable { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the volume of a path is not known on this platform",
+        )),
+    }
+}
+
 /// Returns true when `value` can be safely used as a single file/path segment.
 pub fn is_safe_path_segment(value: &str) -> bool {
     if value.is_empty() {

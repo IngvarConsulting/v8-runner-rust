@@ -176,7 +176,7 @@ impl Project {
 
     fn ledger_file(&self) -> PathBuf {
         self.root()
-            .join("work")
+            .join(".local")
             .join("infobases")
             .join("origin")
             .join("generation.json")
@@ -247,6 +247,76 @@ fn a_push_force_loads_without_memory_and_remembers_the_generation() {
     succeeded(&project.run(&["push"]));
 }
 
+/// Удаление `workPath` целиком не теряет памяти о базе: она лежит под `localPath`. Следующий
+/// `push` идёт по изменившемуся — грузит один изменённый файл — без отказа `untracked_base`
+/// (`INV.USE-CASES.DELETING-THE-WORKPATH-KEEPS-STANDS-AND-BASES`).
+#[test]
+fn deleting_the_work_path_keeps_the_memory_and_the_next_push_loads_only_the_change() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    fs::remove_dir_all(project.root().join("work")).expect("delete the whole workPath");
+
+    project.edit();
+    let pushed = succeeded(&project.run(&["push"]));
+
+    assert_eq!(
+        pushed["data"]["steps"][0]["mode"]["partial"]["file_count"], 1,
+        "{pushed}"
+    );
+    assert!(
+        project.ledger_file().is_file(),
+        "the memory stayed under localPath"
+    );
+}
+
+/// Каталоги раннера прячут себя от git: после первой команды в пустом проекте с `workPath` по
+/// умолчанию `git status` не видит неотслеживаемых файлов `.build` и `.local`, а корневой
+/// `.gitignore` раннер не заводит (`INV.USE-CASES.THE-WORK-PATH-IGNORES-ITSELF`).
+#[test]
+fn the_first_command_leaves_no_untracked_runner_files_for_git() {
+    let project = Project::new("File=ib");
+    fs::write(
+        &project.config,
+        fs::read_to_string(&project.config)
+            .expect("config")
+            .replace(
+                "workPath: work
+",
+                "",
+            ),
+    )
+    .expect("default workPath");
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+
+    succeeded(&project.run(&["push", "--force"]));
+
+    assert!(project.root().join(".build/v8-runner/.gitignore").is_file());
+    assert!(project.root().join(".build/.gitignore").is_file());
+    assert!(project.root().join(".local/.gitignore").is_file());
+    assert!(project.ledger_file().is_file());
+    assert!(!project.root().join(".gitignore").exists());
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project.root())
+        .args([
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ])
+        .output()
+        .expect("git status");
+    let status = String::from_utf8_lossy(&status.stdout);
+    let untracked: Vec<_> = status
+        .lines()
+        .filter(|line| line.starts_with("??"))
+        .filter(|line| line.contains(".build") || line.contains(".local"))
+        .collect();
+    assert!(untracked.is_empty(), "{status}");
+}
+
 /// База ушла вперёд записанного поколения: отказ `non_fast_forward` до загрузки, с обоими
 /// поколениями и `pull` следующим шагом; `push --force` её перезаписывает.
 #[test]
@@ -308,7 +378,7 @@ fn a_new_owner_is_offered_no_pull_until_its_first_push() {
     fs::create_dir_all(&base).expect("base");
     fs::write(base.join("1Cv8.1CD"), "database").expect("base file");
     support::memory::remember_base(
-        &project.root().join("work"),
+        project.root(),
         "origin",
         support::memory::Base::File(&base),
         &[support::memory::Set::configuration(
@@ -345,9 +415,13 @@ fn a_copied_base_offers_no_pull_before_its_first_push() {
     let base = project.root().join("ib");
     fs::create_dir_all(&base).expect("base");
     fs::write(base.join("1Cv8.1CD"), "database").expect("base file");
-    let memory = project.root().join("work").join("infobases").join("origin");
+    let memory = project
+        .root()
+        .join(".local")
+        .join("infobases")
+        .join("origin");
     support::memory::remember_base(
-        &project.root().join("work"),
+        project.root(),
         "origin",
         support::memory::Base::File(&base),
         &[support::memory::Set::configuration(
@@ -745,7 +819,7 @@ fn a_full_ibcmd_push_writes_the_version_file_and_the_next_pull_goes_by_it() {
         fs::read_to_string(
             project
                 .root()
-                .join("work/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+                .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
         )
         .expect("runner copy"),
         written
@@ -775,7 +849,7 @@ fn a_version_file_the_base_moved_under_is_removed_after_an_ibcmd_push() {
     project.base_generation(FIRST);
     let runner_copy = project
         .root()
-        .join("work/infobases/origin/dump-info/main/ConfigDumpInfo.xml");
+        .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml");
     fs::create_dir_all(runner_copy.parent().expect("copy dir")).expect("copy dir");
     fs::write(
         &runner_copy,
@@ -1164,7 +1238,7 @@ fn a_generation_record_does_not_make_memory_of_another_pair_own() {
     succeeded(&project.run(&["push", "--force"]));
     let hashes = project
         .root()
-        .join("work")
+        .join(".local")
         .join("infobases")
         .join("origin")
         .join("hashes")
@@ -1221,7 +1295,9 @@ fn without_a_generation_answer_a_no_memory_refusal_offers_pull_force() {
 /// Запись памяти о базе — от Конфигуратора с нулевым токеном: его ответ поколением с ней
 /// сравним, и отказ проверяет именно расхождение токенов.
 fn recorded_by_designer(project: &Project) {
-    let ledger = project.root().join("work/infobases/origin/generation.json");
+    let ledger = project
+        .root()
+        .join(".local/infobases/origin/generation.json");
     let text = fs::read_to_string(&ledger).expect("generation ledger");
     fs::write(&ledger, text.replace("\"ibcmd-rs\"", "\"designer\"")).expect("ledger");
 }
