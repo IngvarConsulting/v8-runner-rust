@@ -1,0 +1,41 @@
+# Сценарии: вид (код в bench.py), набор модулей стенда и исполнители, которые его умеют.
+# Новый сценарий — новая таблица здесь; новый набор модулей — ключ в [modules] у стенда.
+#
+# Виды:
+#   push   — в модули добавляется строка-метка; исполнитель загружает их в базу и обновляет
+#            конфигурацию БД. Проверка: метка видна в базе (у раннера — выгрузка изменённого
+#            пакетным Конфигуратором, у остальных — `v8-runner pull` возвращает метку в исходники).
+#   pull   — метка попадает в базу отдельным пакетным Конфигуратором (не в замере); исполнитель
+#            выгружает изменённое. Проверка: метка в выгруженном файле.
+#   status — без изменений; исполнитель отвечает, что изменилось. Проверка: ответ «ничего».
+# Исполнители: runner (агент снят перед каждой командой), runner-live (живой агент, первый
+# прогон — прогрев, в медианы не идёт), agent (голый агент), batch (пакетный Конфигуратор), ibcmd.
+
+[push-common2]
+title = "push двух общих модулей"
+kind = "push"
+modules = "common2"
+executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
+
+[pull-common1]
+title = "pull после правки модуля в базе"
+kind = "pull"
+modules = "common1"
+executors = ["runner", "runner-live", "agent", "batch"]
+
+[status]
+title = "status без изменений"
+kind = "status"
+executors = ["runner", "agent", "batch", "ibcmd"]
+
+[push-form]
+title = "push модулей формы объекта и общей формы"
+kind = "push"
+modules = "form"
+executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
+
+[push-object]
+title = "push модуля объекта"
+kind = "push"
+modules = "object"
+executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
