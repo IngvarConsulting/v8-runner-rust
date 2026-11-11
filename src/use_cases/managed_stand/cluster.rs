@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, environment, forget_record, io_failure, occupant_name, occupant_of,
+    await_gone, being_started, environment, first_taken, forget_record, io_failure, occupant_of,
     other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record, Database,
-    ServiceHost, Stand,
+    ServiceHost, Stand, Taken,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -62,13 +62,6 @@ enum Busy {
     Refused(UseCaseError),
     /// Порт держит чужой процесс: выход — новый реестр.
     Port(Taken),
-}
-
-/// Занятый закреплённый порт и кто его держит (`0` — система процесс не назвала).
-#[derive(Debug, Clone, Copy)]
-struct Taken {
-    port: u16,
-    pid: u32,
 }
 
 /// То, что сценарий узнаёт о цели из настроек.
@@ -680,18 +673,19 @@ impl Cluster<'_> {
             Some(stand) => stand.start(false)?.action == ServiceAction::Started,
             None => false,
         };
-        let outcome = match pins {
-            Some(old) if taken.is_some() => self.move_registry(&machine, stand.as_ref(), old),
-            pins => self.start_on_pins(&machine, stand.as_ref(), pins),
+        let outcome = match (pins, taken) {
+            // По `--new-regport` перенос просили явно: предупреждать не о чем.
+            (Some(old), Some(taken)) => self.move_registry(
+                &machine,
+                stand.as_ref(),
+                old,
+                (!new_regport).then_some(taken),
+            ),
+            (pins, _) => self.start_on_pins(&machine, stand.as_ref(), pins),
         };
         match outcome {
             Ok(mut result) => {
                 result.stale_record |= stale;
-                // По `--new-regport` перенос просили явно: предупреждать не о чем.
-                if let Some(taken) = taken.filter(|_| !new_regport) {
-                    let warning = self.moved_warning(taken, &result);
-                    result.warnings.push(warning);
-                }
                 Ok(result)
             }
             Err(error) => match stand.as_ref().filter(|_| raised).map(Stand::stop_if_step) {
@@ -704,20 +698,15 @@ impl Cluster<'_> {
     }
 
     /// Предупреждение о новом реестре, который запуск завёл сам: закреплённый порт занят.
-    fn moved_warning(&self, taken: Taken, result: &ClusterResult) -> String {
-        let Taken { port, pid } = taken;
-        let who = occupant_name(pid);
-        // Перенос только что записал закреплённое нового реестра.
-        let regport = self.pins().map_or_else(String::new, |pins| {
-            format!(" on regport {}", pins.ports.regport)
-        });
-        let base = if result.registered {
+    fn moved_warning(&self, taken: Taken, regport: u16, registered: bool) -> String {
+        let (port, who) = (taken.port, taken.who());
+        let base = if registered {
             ", the infobase is registered there again over its database (its id in the registry is new)"
         } else {
             ""
         };
         format!(
-            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: the cluster moved to a new registry{regport}{base}; take the address from this answer, v8project*.yaml is not changed",
+            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: the cluster moved to a new registry on regport {regport}{base}; take the address from this answer, v8project*.yaml is not changed",
             self.declared.infobase
         )
     }
@@ -806,25 +795,21 @@ impl Cluster<'_> {
                 )))
             })
         };
-        let Some((port, pid)) = pins
-            .ports
-            .all()
-            .find_map(|port| occupant_of(self.host, port).map(|pid| (port, pid)))
-        else {
+        let Some(taken) = first_taken(self.host, pins.ports.all()) else {
             // Порты свободны, но чужой агент может работать над нашим реестром на других портах:
             // второй агент над тем же реестром его испортит. Без перечня запуск идёт как есть.
             return self.agents().and_then(|agents| foreign(&agents));
         };
         let Some(agents) = self.agents() else {
             return Some(Busy::Refused(refusal(format!(
-                "port {port} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
-                self.declared.infobase
+                "port {} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
+                taken.port, self.declared.infobase
             ))));
         };
         if let Some(busy) = foreign(&agents) {
             return Some(busy);
         }
-        Some(Busy::Port(Taken { port, pid }))
+        Some(Busy::Port(taken))
     }
 
     /// Каталоги реестров, которых не называют закреплённые порты: остатки прерванного `--new-regport`.
@@ -892,6 +877,7 @@ impl Cluster<'_> {
         machine: &str,
         stand: Option<&Stand<'_>>,
         old: ClusterPins,
+        announce: Option<Taken>,
     ) -> Result<ClusterResult, UseCaseError> {
         let old_registry = self.registry(&old);
         let declared = self.database()?;
@@ -971,7 +957,12 @@ impl Cluster<'_> {
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
         result.previous_regport = Some(old.ports.regport);
-        Ok(self.describe(result, Some(&agent)))
+        let mut result = self.describe(result, Some(&agent));
+        if let Some(taken) = announce {
+            let warning = self.moved_warning(taken, pins.ports.regport, result.registered);
+            result.warnings.push(warning);
+        }
+        Ok(result)
     }
 
     /// База над прежней БД в новом реестре: `rac infobase create` без `--create-database`.
@@ -2528,11 +2519,7 @@ mod tests {
         // PostgreSQL закреплён на порту блока, который перебор взял бы первым.
         let next = super::super::port_offsets(setup.agent().root())
             .map(ClusterPorts::from_first)
-            .find(|ports| {
-                !ports
-                    .all()
-                    .any(|port| old.ports.all().any(|was| was == port))
-            })
+            .find(|ports| !ports.overlaps(old.ports))
             .unwrap();
         let dbms_port = next.range_start + 3;
         let dbms = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);

@@ -10,6 +10,9 @@ check:
   - src/use_cases/managed_stand/standalone.rs::no_free_block_is_refused_and_the_ports_stay
   - src/use_cases/managed_stand/standalone.rs::restart_moves_a_running_server_off_a_taken_port
   - src/use_cases/managed_stand/standalone.rs::a_failed_start_on_a_new_block_keeps_the_previous_block
+  - src/use_cases/managed_stand/standalone.rs::a_failed_start_over_a_stale_record_keeps_the_previous_block
+  - src/use_cases/managed_stand/standalone.rs::a_pinned_block_over_the_port_of_the_runners_postgres_moves
+  - src/use_cases/managed_stand/standalone.rs::the_refusals_of_a_taken_block_come_before_the_postgres_starts
 ---
 
 # Ключ автономного сервера закреплён, а занятый блок портов сменяется
@@ -17,10 +20,11 @@ check:
 Блок портов и ключ хоста SSH-шлюза создаются при первом запуске и остаются от запуска к запуску. Ключ лежит в
 каталоге службы и не меняется никогда: закреплённый отпечаток остаётся верным.
 
-Если порт закреплённого блока занят чужим процессом, `standalone start` и `restart` берут новый свободный блок тем же
-перебором, что и первый запуск: он не задевает прежний блок и порт PostgreSQL раннера. Новый блок закрепляется, когда
+Если порт закреплённого блока занят чужим процессом или в блок попал закреплённый порт PostgreSQL раннера,
+`standalone start` и `restart` берут новый свободный блок тем же перебором, что и первый запуск: он не задевает прежний
+блок и порт PostgreSQL раннера. Новый блок закрепляется, когда
 сервер на нём поднялся; неудавшийся запуск возвращает прежний блок. Чужой процесс остаётся работать. Ответ называет новые `connection`, `gate` и `http`, прямой порт прежнего блока в
-`previous_port` и предупреждение с портом и pid того, кто его занял.
+`previous_port` и предупреждение с портом и pid того, кто его занял, или с портом PostgreSQL раннера.
 
 Адрес стенда живёт только в его состоянии под `localPath`. Файлы `v8project*.yaml` раннер при смене блока не правит, и
 адрес у `origin` не пишется: адрес берут из ответа `start` или `status`, а не кешируют.

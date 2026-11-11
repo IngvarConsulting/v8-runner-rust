@@ -204,6 +204,28 @@ fn occupant_of(host: &dyn ServiceHost, port: u16) -> Option<u32> {
         .or_else(|| host.port_answers(port).then_some(0))
 }
 
+/// Закреплённый порт, занятый чужим процессом: что сказать в предупреждении о переносе.
+#[derive(Debug, Clone, Copy)]
+struct Taken {
+    port: u16,
+    /// `0` — система не назвала процесс (как у [`occupant_of`]).
+    pid: u32,
+}
+
+impl Taken {
+    fn who(self) -> String {
+        occupant_name(self.pid)
+    }
+}
+
+/// Первый занятый порт блока — единственный перебор занятости закреплённых портов для сервера и
+/// кластера.
+fn first_taken(host: &dyn ServiceHost, ports: impl IntoIterator<Item = u16>) -> Option<Taken> {
+    ports
+        .into_iter()
+        .find_map(|port| occupant_of(host, port).map(|pid| Taken { port, pid }))
+}
+
 /// Кто держит порт, словами отказа или предупреждения: `0` — система процесс не назвала.
 fn occupant_name(pid: u32) -> String {
     if pid == 0 {

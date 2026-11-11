@@ -45,7 +45,7 @@ impl ClusterPorts {
 
     /// Блоки делят хотя бы один порт.
     pub fn overlaps(self, other: Self) -> bool {
-        self.all().any(|port| other.all().any(|own| own == port))
+        crate::platform::service::ports_overlap(self.all(), other.all())
     }
 
     /// Строка соединения: клиент идёт на `regport` (замер #534).
