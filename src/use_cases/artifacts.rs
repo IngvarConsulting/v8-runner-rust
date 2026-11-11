@@ -1637,6 +1637,7 @@ fi"#;
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "configuration".to_owned(),

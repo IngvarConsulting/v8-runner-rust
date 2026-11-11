@@ -67,6 +67,13 @@ pub struct AppConfig {
     #[serde(rename = "working-copy", default)]
     pub working_copy: Option<PathBuf>,
 
+    /// Имя проектного файла, из которого загружен конфиг: файл `--config` / `V8TR_CONFIG`,
+    /// по умолчанию `v8project.yaml`. Ставит загрузчик, из YAML не читается. Под этим именем
+    /// проверка владельца файловой базы читает объявления копий
+    /// (`INV.USE-CASES.A-GONE-OWNER-IS-REPLACED-AND-NAMED`).
+    #[serde(skip, default = "default_project_file")]
+    pub project_file: std::ffi::OsString,
+
     /// Source sets (configuration + extensions)
     #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
@@ -1010,6 +1017,11 @@ impl AppConfig {
 /// рабочей копии, у раннера в нём свой подкаталог.
 pub const DEFAULT_WORK_PATH: &str = ".build/v8-runner";
 
+/// Имя проектного файла по умолчанию.
+pub fn default_project_file() -> std::ffi::OsString {
+    crate::config::loader::DEFAULT_CONFIG_FILE_NAME.into()
+}
+
 fn default_work_path() -> PathBuf {
     PathBuf::from(DEFAULT_WORK_PATH)
 }
@@ -1691,6 +1703,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: Vec::new(),
             tools: super::ToolsConfig::default(),
             mcp: Default::default(),

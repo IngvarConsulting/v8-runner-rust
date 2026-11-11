@@ -661,6 +661,7 @@ mod tests {
         fs::create_dir_all(base.join("epf")).expect("epf");
         AppConfig {
             local_path: base.join(".local"),
+            project_file: crate::config::model::default_project_file(),
             base_path: base,
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

@@ -453,6 +453,53 @@ fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server(
     );
 }
 
+/// Управляющий символ в строке соединения — отказ до запуска платформы: `invalid_argument`,
+/// род `validation`, выход 2; отказ называет ключ, но не значение (#638). `\0` идёт из
+/// местного слоя (в аргументе процесса его не передать), `\n` — и оттуда, и ключом
+/// `--infobase`.
+#[test]
+fn a_connection_with_a_control_character_is_refused_without_its_value() {
+    let bases = temp_workspace();
+    let tmp = bases.path().display().to_string();
+    for (escaped, raw) in [("\\n", "\n"), ("\\0", "\0")] {
+        let project = project();
+        project.write_local(&format!(
+            "infobases:\n  origin:\n    connection: \"File={tmp}/secret-ib{escaped}\"\n"
+        ));
+        assert_refused_without_the_value(&project, &project.run_json(&[], LAUNCH_PREVIEW), raw);
+    }
+    let project = project();
+    let connection = format!("File={tmp}/secret-ib\nib");
+    let output = project.run_json(&["--infobase", &connection], LAUNCH_PREVIEW);
+    assert_refused_without_the_value(&project, &output, "\n");
+}
+
+fn assert_refused_without_the_value(project: &Project, output: &Output, control: &str) {
+    let message = refusal_message(output);
+    let payload = json(output);
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(message.contains("infobase.connection"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "U+{:04X}",
+            u32::from(control.chars().next().unwrap())
+        )),
+        "{message}"
+    );
+    for (stream, text) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        let text = String::from_utf8_lossy(text);
+        assert!(
+            !text.contains("secret-ib"),
+            "the refusal must not echo the connection string in {stream}: {text}"
+        );
+    }
+    assert!(
+        !project.platform_calls.exists(),
+        "the platform must not start"
+    );
+}
+
 #[test]
 fn the_map_is_refused_in_the_project_file() {
     let bases = support::temp_workspace();
