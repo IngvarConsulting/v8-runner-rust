@@ -21,6 +21,7 @@ case "$CI_SCOPE" in
         cargo test --locked --bin v8-runner 'config::loader::tests::declared_infobases_'
         cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'
         windows_contract_tests=(
+          "a_closed_job_keeps_the_agent_one_shot"
           "platform::designer::tests::cf_exports_pass_windows_drive_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_pass_windows_unc_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_preserve_regular_windows_targets"
