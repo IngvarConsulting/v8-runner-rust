@@ -177,7 +177,11 @@ fn file_sessions_refusal(config: &AppConfig, dir: &Path, pid: Option<i32>) -> Us
         ),
     )
     .with_sessions(crate::use_cases::apply::sessions::infobase_sessions(
-        config, None, false,
+        config,
+        None,
+        false,
+        crate::domain::sessions::SessionsEvidence::Executor,
+        None,
     ))
 }
 

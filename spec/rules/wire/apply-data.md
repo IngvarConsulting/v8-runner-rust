@@ -7,7 +7,7 @@ check:
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
   - tests/cli_apply.rs::an_apply_into_a_base_that_moved_keeps_the_record
-  - tests/cli_apply_sessions.rs::force_on_a_cluster_ends_the_sessions_and_names_them
+  - tests/cli_apply_sessions.rs::force_nobody_held_names_no_terminated_sessions
 ---
 
 # `data` команды `apply`
