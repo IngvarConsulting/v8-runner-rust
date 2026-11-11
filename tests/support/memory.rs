@@ -71,8 +71,9 @@ fn address(base: &Base<'_>) -> String {
     }
 }
 
-/// Пишет память о базе `key` (имя базы из местного слоя или [`ad_hoc_key`]) под `work`.
-pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
+/// Пишет память о базе `key` (имя базы из местного слоя или [`ad_hoc_key`]) под `localPath`
+/// по умолчанию проекта, чей `v8project.yaml` лежит в `project`: `<project>/.local/infobases`.
+pub fn remember_base(project: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
     let address = address(&base);
     let records: serde_json::Map<String, serde_json::Value> = sets
         .iter()
@@ -95,7 +96,7 @@ pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
             )
         })
         .collect();
-    let dir = work.join("infobases").join(key);
+    let dir = project.join(".local").join("infobases").join(key);
     std::fs::create_dir_all(&dir).expect("memory dir");
     std::fs::write(
         dir.join("generation.json"),
@@ -138,10 +139,11 @@ fn path_hash(path: &Path) -> String {
 
 /// Память о базе образца контрактных тестов, как после её создания раннером: база `infobase:`
 /// (`origin`) — файловая `<dir>/ib`, набор `main` — `<dir>/project/configuration`,
-/// `workPath` — `<dir>/work`. Без неё `push` и его превью отказывают `untracked_base`.
+/// `workPath` — `<dir>/work`, проектный файл — в `<dir>`. Без неё `push` и его превью
+/// отказывают `untracked_base`.
 pub fn remember_sample(dir: &Path) {
     remember_base(
-        &dir.join("work"),
+        dir,
         "origin",
         Base::File(&dir.join("ib")),
         &[Set::configuration(

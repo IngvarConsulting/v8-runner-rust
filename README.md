@@ -24,8 +24,9 @@ AI-агентам безопасную, уже ограниченную MCP-по
 - Исполнителя каждой операции выбирает матрица возможностей — Конфигуратор или `ibcmd` там, где это разрешает контракт 1С; вручную назначается ключом `providers.<операция>`.
 - Machine-readable output (машиночитаемый вывод) через `--json-message` для CI и агентов; с `--events -` ход долгой команды идёт событиями NDJSON до итогового конверта.
 - MCP tools (MCP-инструменты) для управляемой работы AI-агентов без выдачи всей CLI-поверхности.
-- Изолированный `workPath` для hash storages (хранилищ хэшей), логов, временных файлов и
-  промежуточных артефактов.
+- Пересчитываемый `workPath` (по умолчанию `.build/v8-runner`) для логов, кешей, временных файлов и
+  промежуточных артефактов; память о базе — в `localPath` (по умолчанию `.local`) и переживает
+  удаление `workPath`.
 
 ![test-yaxunit](docs/assets/test-yaxunit.png)
 
@@ -136,8 +137,9 @@ v8-runner tools download client-mcp --sources
 Команды берут latest release выбранного инструмента; pre-release туда не попадает.
 `tools download vanessa --prerelease` берёт самый новый выпуск Vanessa с учётом pre-release:
 наибольшую версию из списка выпусков, без черновиков. Для YAxUnit и onec-client-mcp-devkit
-`--sources` выбирает source install; без него скачивается `.cfe` artifact в `build/tools`.
-Vanessa Automation single всегда скачивается как EPF в `build/tools` и прописывается в
+`--sources` выбирает source install; без него скачивается `.cfe` artifact в `workPath/tools`
+(по умолчанию `.build/v8-runner/tools`). Vanessa Automation single всегда скачивается как EPF в
+`workPath/tools` и прописывается в
 `v8project.local.yaml`.
 
 ### Подготовьте рабочую информационную базу:

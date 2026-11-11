@@ -89,6 +89,11 @@ struct Project {
 }
 
 impl Project {
+    /// `localPath` по умолчанию: память о базе лежит под ним.
+    fn local(&self) -> PathBuf {
+        self.config.with_file_name(".local")
+    }
+
     fn new(provider: &'static str, extension: bool) -> Self {
         let directory = tempfile::tempdir().expect("project directory");
         let root = fs::canonicalize(directory.path()).expect("canonical project");
@@ -187,14 +192,14 @@ impl Project {
     fn seed_baseline(&self) {
         self.native(&["pull", "main", "--force"]);
         assert!(self
-            .work
+            .local()
             .join("infobases/origin/hashes/main.redb")
             .is_file());
         fs::write(&self.calls, "").expect("clear calls after baseline");
     }
 
     fn baseline(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-        snapshot(&self.work.join("infobases/origin"))
+        snapshot(&self.local().join("infobases/origin"))
     }
 
     fn calls(&self) -> Vec<u8> {
@@ -388,6 +393,10 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         for entry in fs::read_dir(directory).expect("snapshot directory") {
             let entry = entry.expect("snapshot entry");
             let path = entry.path();
+            // Замок памяти базы держит идущая команда: он не память.
+            if entry.file_name().to_string_lossy().starts_with(".lock") {
+                continue;
+            }
             if entry.file_type().expect("entry kind").is_dir() {
                 collect(root, &path, files);
             } else {
@@ -1305,7 +1314,7 @@ fn nested_target_project() -> Project {
 }
 
 fn assert_no_sync_baseline(project: &Project) {
-    let memory = project.work.join("infobases/origin");
+    let memory = project.local().join("infobases/origin");
     for name in ["hashes", "generation.json", "dump-info"] {
         assert!(
             !memory.join(name).exists(),
@@ -1496,7 +1505,7 @@ fn an_edit_after_publication_is_not_absorbed_into_the_prepared_baseline() {
     assert_eq!(
         fs::read(
             project
-                .work
+                .local()
                 .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml")
         )
         .unwrap(),
@@ -1520,7 +1529,7 @@ fn a_memory_write_failure_keeps_the_published_sources_and_names_the_unsaved_base
     fs::write(project.sources.join("local.bsl"), "previous target").unwrap();
     let mut session = project.start();
     let ready = project.ready(&mut session);
-    let memory = project.work.join("infobases/origin/hashes/main.redb");
+    let memory = project.local().join("infobases/origin/hashes/main.redb");
     fs::rename(&memory, memory.with_file_name("retained-main.redb")).unwrap();
     fs::create_dir(&memory).unwrap();
     project.publish();

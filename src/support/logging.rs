@@ -84,12 +84,13 @@ fn init_action_logging_impl(
         file: if defer_file_open {
             None
         } else {
-            open_log_file(log_path.as_deref())?
+            open_log_file(log_path.as_deref(), work_path)?
         },
         deferred_file: if defer_file_open {
             log_path.as_ref().map(|path| {
                 Arc::new(DeferredActionLog {
                     path: path.clone(),
+                    work_path: work_path.to_path_buf(),
                     file: Mutex::new(None),
                 })
             })
@@ -196,17 +197,30 @@ fn resolve_action_log_path(
     None
 }
 
-fn open_log_file(path: Option<&Path>) -> Result<Option<Arc<Mutex<File>>>, LoggingInitError> {
+/// Заводит каталог журнала. Журнал под `workPath` — первый писатель в него: `workPath`
+/// появляется со своим `.gitignore` (`INV.USE-CASES.THE-WORK-PATH-IGNORES-ITSELF`).
+fn prepare_log_parent(path: &Path, work_path: &Path) -> io::Result<()> {
+    if path.starts_with(work_path) {
+        crate::support::local_dir::prepare_work_dir(work_path)?;
+    }
+    match path.parent() {
+        Some(parent) => std::fs::create_dir_all(parent),
+        None => Ok(()),
+    }
+}
+
+fn open_log_file(
+    path: Option<&Path>,
+    work_path: &Path,
+) -> Result<Option<Arc<Mutex<File>>>, LoggingInitError> {
     let Some(path) = path else {
         return Ok(None);
     };
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| LoggingInitError::OpenFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
+    prepare_log_parent(path, work_path).map_err(|source| LoggingInitError::OpenFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     let file = OpenOptions::new()
         .create(true)
@@ -235,6 +249,7 @@ struct ActionLogWriter {
 
 struct DeferredActionLog {
     path: PathBuf,
+    work_path: PathBuf,
     file: Mutex<Option<File>>,
 }
 
@@ -669,9 +684,7 @@ impl DeferredActionLog {
             .lock()
             .map_err(|_| io::Error::other("deferred action log mutex poisoned"))?;
         if file.is_none() {
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+            prepare_log_parent(&self.path, &self.work_path)?;
             *file = Some(
                 OpenOptions::new()
                     .create(true)

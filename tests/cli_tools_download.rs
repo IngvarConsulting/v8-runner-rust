@@ -450,31 +450,38 @@ fn tools_download_sources_writes_source_set_and_local_tool_settings() {
         .exists());
     assert!(dir
         .path()
-        .join("build/.tests.v8-runner-tools-download.json")
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
+        .exists());
+    assert!(dir.path().join(".local/.gitignore").is_file());
+    assert!(
+        !dir.path().join("build").exists(),
+        "no build/ in the project"
+    );
+    assert!(dir
+        .path()
+        .join("work/tools/vanessa-automation-single.epf")
         .exists());
     assert!(dir
         .path()
-        .join("build/tools/vanessa-automation-single.epf")
-        .exists());
-    assert!(dir
-        .path()
-        .join("build/tools/onec-client-mcp-devkit/exts/client-mcp/src/Configuration/Configuration.mdo")
+        .join(
+            "work/tools/onec-client-mcp-devkit/exts/client-mcp/src/Configuration/Configuration.mdo"
+        )
         .exists());
     assert!(!dir
         .path()
-        .join("build/tools/onec-client-mcp-devkit/exts/client-mcp/.v8-runner-tools-download.json")
+        .join("work/tools/onec-client-mcp-devkit/exts/client-mcp/.v8-runner-tools-download.json")
         .exists());
     assert!(dir
         .path()
-        .join("build/tools/onec-client-mcp-devkit/exts/.client-mcp.v8-runner-tools-download.json")
+        .join("work/tools/onec-client-mcp-devkit/exts/.client-mcp.v8-runner-tools-download.json")
         .exists());
 
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
     assert!(local.contains("epf_path:"));
-    assert!(local.contains("epf_path: build/tools/vanessa-automation-single.epf"));
+    assert!(local.contains("epf_path: work/tools/vanessa-automation-single.epf"));
     assert!(local.contains("client_mcp:"));
     assert!(local.contains("source:"));
-    assert!(local.contains("path: build/tools/onec-client-mcp-devkit/exts/client-mcp"));
+    assert!(local.contains("path: work/tools/onec-client-mcp-devkit/exts/client-mcp"));
     assert!(local.contains("format: EDT"));
     assert!(!local.contains(&dir.path().display().to_string()));
 }
@@ -529,8 +536,81 @@ fn tools_download_sources_rejects_legacy_tests_markers_outside_build() {
     assert!(combined.contains("download target already exists and is not managed by v8-runner"));
     assert!(!dir
         .path()
-        .join("build/.tests.v8-runner-tools-download.json")
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
         .exists());
+    assert!(!dir.path().join("build").exists());
+}
+
+/// Метка прежних версий в `build/` признаётся: уже скачанный `tests` повтор без `--force`
+/// оставляет как есть и не отказывает, а `--force` пишет новую метку под `localPath`, не трогая
+/// старую (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`).
+#[test]
+fn tools_download_sources_recognizes_the_legacy_tests_marker_in_build() {
+    let dir = temp_workspace();
+    let config_path = write_minimal_config(dir.path());
+    let user_file = dir.path().join("tests/custom.feature");
+    fs::create_dir_all(user_file.parent().expect("tests parent")).expect("tests dir");
+    fs::write(&user_file, "downloaded earlier").expect("tests file");
+    let legacy = dir
+        .path()
+        .join("build/.tests.v8-runner-tools-download.json");
+    fs::create_dir_all(legacy.parent().expect("build")).expect("build");
+    fs::write(
+        &legacy, "{}
+",
+    )
+    .expect("legacy marker");
+
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+    let run = |force: bool| {
+        let mut command = v8_runner_command();
+        command
+            .env(
+                "V8TR_GITHUB_API_BASE_URL",
+                format!("http://127.0.0.1:{port}"),
+            )
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "tools",
+                "download",
+                "yaxunit",
+                "--sources",
+            ]);
+        if force {
+            command.arg("--force");
+        }
+        command.output().expect("run command")
+    };
+
+    let repeat = run(false);
+    assert!(
+        repeat.status.success(),
+        "stdout={}
+stderr={}",
+        String::from_utf8_lossy(&repeat.stdout),
+        String::from_utf8_lossy(&repeat.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&user_file).expect("kept"),
+        "downloaded earlier"
+    );
+
+    let forced = run(true);
+    assert!(
+        forced.status.success(),
+        "stdout={}
+stderr={}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(dir
+        .path()
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
+        .is_file());
+    assert!(legacy.is_file(), "the legacy marker is left alone");
 }
 
 #[test]
@@ -565,7 +645,7 @@ fn tools_download_repairs_pending_vanessa_configuration() {
     );
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
     assert!(local.contains("epf_path:"));
-    assert!(local.contains("epf_path: build/tools/vanessa-automation-single.epf"));
+    assert!(local.contains("epf_path: work/tools/vanessa-automation-single.epf"));
     assert!(!local.contains(&dir.path().display().to_string()));
 }
 
@@ -658,7 +738,7 @@ fn download_vanessa_from_release_list(extra_args: &[&str]) -> (String, String) {
         .as_str()
         .unwrap_or_else(|| panic!("destination tag in {payload}"))
         .to_owned();
-    let epf = fs::read_to_string(dir.path().join("build/tools/vanessa-automation-single.epf"))
+    let epf = fs::read_to_string(dir.path().join("work/tools/vanessa-automation-single.epf"))
         .expect("downloaded epf");
     (tag, epf)
 }
@@ -709,7 +789,7 @@ fn tools_download_rejects_prerelease_for_other_tools() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unexpected argument"), "{stderr}");
-    assert!(!dir.path().join("build/tools").exists());
+    assert!(!dir.path().join("work/tools").exists());
 }
 
 #[test]
@@ -742,7 +822,7 @@ fn tools_download_follows_latest_release_and_asset_redirects() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(dir.path().join("build/tools/client_mcp.cfe").exists());
+    assert!(dir.path().join("work/tools/client_mcp.cfe").exists());
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
     assert!(local.contains("artifact:"));
     assert!(local.contains("client_mcp.cfe"));
@@ -816,7 +896,7 @@ fn tools_download_follows_302_redirects() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(dir.path().join("build/tools/client_mcp.cfe").exists());
+    assert!(dir.path().join("work/tools/client_mcp.cfe").exists());
 }
 
 #[test]
@@ -851,7 +931,7 @@ fn tools_download_artifacts_keeps_yaxunit_out_of_source_sets() {
     );
     let config = fs::read_to_string(&config_path).expect("config");
     assert!(!config.contains("name: tests"));
-    assert!(dir.path().join("build/tools/YAxUnit-25.12.cfe").exists());
+    assert!(dir.path().join("work/tools/YAxUnit-25.12.cfe").exists());
     assert!(!dir.path().join("v8project.local.yaml").exists());
 }
 
@@ -891,7 +971,7 @@ fn tools_download_artifacts_handles_large_assets_without_pipe_deadlock() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        fs::metadata(dir.path().join("build/tools/YAxUnit-25.12.cfe"))
+        fs::metadata(dir.path().join("work/tools/YAxUnit-25.12.cfe"))
             .expect("large asset")
             .len(),
         8 * 1024 * 1024
@@ -973,7 +1053,7 @@ fn tools_download_artifacts_requires_designer_builder() {
 fn tools_download_force_refuses_to_replace_unmanaged_tool_file() {
     let dir = temp_workspace();
     let config_path = write_minimal_config(dir.path());
-    let user_file = dir.path().join("build/tools/vanessa-automation-single.epf");
+    let user_file = dir.path().join("work/tools/vanessa-automation-single.epf");
     fs::create_dir_all(user_file.parent().expect("tools parent")).expect("tools dir");
     fs::write(&user_file, "user epf").expect("user epf");
 

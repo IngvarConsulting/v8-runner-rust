@@ -1612,7 +1612,7 @@ pub(crate) enum Recorded {
     },
 }
 
-/// Журнал поколений базы: `workPath/infobases/<база>/generation.json`, запись на набор.
+/// Журнал поколений базы: `localPath/infobases/<база>/generation.json`, запись на набор.
 ///
 /// Запись годится только для той пары «база ↔ каталог», для которой сделана: запись с
 /// другой привязкой чужая и основанием не выгружать не служит. У набора без памяти о
@@ -1624,9 +1624,9 @@ pub(crate) struct GenerationLedger {
 }
 
 impl GenerationLedger {
-    pub(crate) fn of(context: &SourceSetContext, work_path: &Path) -> Option<Self> {
+    pub(crate) fn of(context: &SourceSetContext) -> Option<Self> {
         Some(Self {
-            file: context.generation_file(work_path)?,
+            file: context.generation_file()?,
             source_set: context.name().to_owned(),
             identity: context.storage_identity()?.to_owned(),
         })
@@ -2059,8 +2059,8 @@ mod tests {
 
     fn ledger(root: &Path, set: &str, identity: &str) -> GenerationLedger {
         let context = SourceSetContext::new(set, root.join(set), "designer-x")
-            .with_infobase_memory("origin", identity.to_owned());
-        GenerationLedger::of(&context, &root.join("work")).expect("a remembered base")
+            .with_infobase_memory(&root.join(".local"), "origin", identity.to_owned());
+        GenerationLedger::of(&context).expect("a remembered base")
     }
 
     #[test]
@@ -2081,7 +2081,7 @@ mod tests {
         assert!(matches!(ext.read(), Recorded::Ours(record) if record.token == "def"));
         assert!(root
             .path()
-            .join("work/infobases/origin/generation.json")
+            .join(".local/infobases/origin/generation.json")
             .is_file());
     }
 
@@ -2095,7 +2095,7 @@ mod tests {
         main.record(Provider::Designer, "abc", GenerationAfter::Build)
             .expect("record");
         let text =
-            std::fs::read_to_string(root.path().join("work/infobases/origin/generation.json"))
+            std::fs::read_to_string(root.path().join(".local/infobases/origin/generation.json"))
                 .expect("ledger");
         assert!(!text.contains("applied"), "{text}");
         assert!(recorded(&main).applied);
@@ -2108,7 +2108,7 @@ mod tests {
         )
         .expect("record");
         let text =
-            std::fs::read_to_string(root.path().join("work/infobases/origin/generation.json"))
+            std::fs::read_to_string(root.path().join(".local/infobases/origin/generation.json"))
                 .expect("ledger");
         let value: serde_json::Value = serde_json::from_str(&text).expect("json");
         assert_eq!(value["main"]["applied"], false, "{text}");
@@ -2226,7 +2226,7 @@ mod tests {
     #[test]
     fn a_foreign_record_without_a_tool_is_still_named_foreign() {
         let root = tempfile::tempdir().expect("tempdir");
-        let file = root.path().join("work/infobases/origin/generation.json");
+        let file = root.path().join(".local/infobases/origin/generation.json");
         std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
         std::fs::write(
             &file,
@@ -2261,7 +2261,7 @@ mod tests {
         let ext = ledger(root.path(), "ext", "base-a ext");
         ext.record(Provider::Agent, "def", GenerationAfter::Dump)
             .expect("record");
-        let file = root.path().join("work/infobases/origin/generation.json");
+        let file = root.path().join(".local/infobases/origin/generation.json");
         let mut journal: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&file).expect("ledger"))
                 .expect("ledger json");
@@ -2299,7 +2299,7 @@ mod tests {
         );
         let unbound = SourceSetContext::new("main", root.path().join("main"), "designer-main")
             .without_memory();
-        assert!(GenerationLedger::of(&unbound, &root.path().join("work")).is_none());
+        assert!(GenerationLedger::of(&unbound).is_none());
     }
 
     /// Отложенное прерывание едет тем же полем, что и у процессов платформы: иначе о нём

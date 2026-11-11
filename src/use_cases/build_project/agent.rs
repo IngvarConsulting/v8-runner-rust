@@ -123,11 +123,8 @@ impl SourceSetLoader for AgentLoader {
         let platform = self.location.as_ref().and_then(|location| {
             crate::platform::locator::platform_version_of(location.utility, &location.path)
         });
-        let format_notice = crate::use_cases::version_file::check_load_format(
-            &config.work_path,
-            source_context,
-            platform.as_ref(),
-        )?;
+        let format_notice =
+            crate::use_cases::version_file::check_load_format(source_context, platform.as_ref())?;
         collecting_deferrals(|deferrals| {
             if let Some(error) = interruption_before_safe_point(
                 context,

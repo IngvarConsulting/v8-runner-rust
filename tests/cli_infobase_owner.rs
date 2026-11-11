@@ -105,7 +105,7 @@ impl Copy {
     /// первого знакомства.
     fn remember(&self, base: &Path) {
         support::memory::remember_base(
-            &self.root.join("work"),
+            &self.root,
             "origin",
             support::memory::Base::File(base),
             &[support::memory::Set::configuration(

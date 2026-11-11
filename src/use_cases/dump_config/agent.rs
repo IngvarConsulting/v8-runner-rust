@@ -82,7 +82,7 @@ fn dump_through(
     let extension = resolved.extension.as_deref();
     let inventory = SourceSetInventory::new(config);
     let set = inventory.designer_context(&resolved.source_set_name);
-    let ledger = set.and_then(|source| GenerationLedger::of(source, &config.work_path));
+    let ledger = set.and_then(GenerationLedger::of);
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
@@ -491,10 +491,11 @@ fn publish_full(
         let publication = super::prepare_full_dump(context, resolved)?;
         return publish_full_dump(context, config, resolved, &publication);
     }
-    let publication = StagedPublication::prepare_dir(
+    let publication = StagedPublication::prepare_dir_in(
+        &resolved.stage_root,
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
-        ".dump-stage",
+        super::DUMP_STAGE_PREFIX,
     )?;
     let staging_dir = publication.staging_path().to_path_buf();
     // `prepare_dir` создаёт пустой каталог стадии; результат агента занимает его место.

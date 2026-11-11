@@ -304,7 +304,11 @@ tests:
 ### `workPath`
 
 - Тип: путь
-- Обязателен: да
+- Обязателен: нет, по умолчанию `.build/v8-runner` от каталога `v8project.yaml`
+- Где: проектный файл и местный слой; `--workdir` заменяет его на один запуск.
+
+`init` и `clone` ключ не пишут — работает умолчание. Явный `workPath` проекта, например
+`workPath: build` прежних проектов, раннер не меняет.
 
 Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
 `download`, `infobase dump` и `launch`: они используют только ИБ и принимают
@@ -315,43 +319,37 @@ command-specific validation, а не ослабление `push`, source `pull`,
 Каталог `workPath` внутри набора исходников, например при наборе в корне проекта, исходником
 не считается: определение изменений его не читает. То же верно для [`localPath`](#localpath).
 
-Корень runtime state:
+Корень runtime state — только то, что раннер пересчитает сам; каталог можно удалить:
 
-- `workPath/infobases/<база>/` — память о базе: `<база>` — имя объявленной базы или, у базы,
-  названной строкой соединения, ключ `@<хеш>` из её адреса без учётных данных
-  - `hashes/<набор>.redb` — хеши исходников набора; `hashes/tools/<имя>.redb` — хеши
-    исходников расширения-инструмента
-  - `dump-info/<набор>/` — копия файла версий `ConfigDumpInfo.xml` набора; файл в каталоге
-    набора раннер сверяет с ней перед работой по изменившемуся
-  - `designer/<набор>` — у формата EDT выгрузка набора в формат Конфигуратора
-  - `generation.json` — журнал поколений по наборам: токен, инструмент, которым он получен
-    (`designer`, `ibcmd`, `agent`), и операция, после которой записан; запись без имени
-    инструмента считается отсутствием ответа, и выгрузка по ней не пропускается
-  - `new-owner.json` — признак, что копия взяла базу без метки или сменила ушедшего
-    владельца; до первой удачной отправки отказы обмена выгрузку не предлагают
-- `workPath/hash-storages` — общий кеш EDT и внешних артефактов
 - `workPath/logs`
 - `workPath/reports/diff` — отчёты `diff --against`; раннер их не удаляет, каталог можно очистить
-- `workPath/temp`
+- `workPath/temp` — в том числе база сборки `temp/build-infobase` и временные базы
+  `temp/throwaway-infobases`
+- `workPath/stage` — промежуточные каталоги выгрузки `pull` (`.dump-stage-<запуск>`)
+- `workPath/hash-storages` — общий кеш EDT и внешних артефактов
 - `workPath/edt-workspace`
-- `workPath/designer` — выгрузки внешних обработок и отчётов формата EDT
+- `workPath/designer/<набор>` — выгрузки внешних обработок и отчётов формата EDT
+- `workPath/infobases/<база>/designer/<набор>` — у формата EDT выгрузка набора в формат
+  Конфигуратора по ключу базы; без неё следующая выгрузка EDT идёт полной
 - `workPath/tool-extensions/<имя>` — выгрузка расширения-инструмента с исходниками EDT
+- `workPath/agent/host-keys` — ключи узла своего агента
+- `workPath/tools` — загрузки `tools download`: `.cfe`, EPF Vanessa и исходники
+  onec-client-mcp-devkit; после удаления их скачивает заново `tools download`
 
-Память привязана к адресу базы без учётных данных, каталогу и назначению набора;
-исполнитель в привязку не входит. У каждой базы своя память: и у объявленной, и у названной
-строкой соединения — следующая команда с той же строкой продолжает с её памятью. Память,
-записанная для другой привязки, не используется.
+Память о базе лежит не здесь, а в [`localPath`](#localpath) (`localPath/infobases/<база>/`):
+удаление `workPath` её не задевает, и следующий `push` идёт по изменившемуся.
 
-Прежняя общая память не переносится и не удаляется: `workPath/hash-storages/designer-*.redb`
-и `tool-*.redb`, снимки `workPath/designer/<набор>` формата EDT и журнал
-`workPath/agent/generation/`. Первый обычный `push` после обновления загружает всё дерево,
-поэтому при невыгруженных правках в базе начните с полного `pull`; первая выгрузка агентом
-не пропускается по поколению. Вручную можно удалить `workPath/hash-storages/designer-*.redb`
-и `tool-*.redb`, `workPath/agent/generation/` и `workPath/designer/<набор>` наборов EDT; весь
-`workPath/designer` не удаляйте — там живут выгрузки внешних обработок и отчётов.
+Каталог выгрузки набора и `workPath` должны лежать на одном томе: промежуточный каталог
+`pull` публикуется переименованием. На разных томах `pull` отказывает до выгрузки
+(`work_path_on_another_volume`, `validation`, выход 2) и ничего не пишет ни в каталог набора, ни
+в `workPath/stage`; перенесите набор или `workPath` на один том. Внешняя стадия
+`--publication-stdio <STAGE>` не проверяется. Замок выгрузки `.dump-<hash>.lock*` по-прежнему лежит рядом с
+целью, резервная копия `.dump-backup-*` — там же и только на время замены.
 
-Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
-selection для infobase export не создаёт `workPath` и runtime-файлы.
+Если каталога нет, он создаётся автоматически при захвате workspace lock, с `.gitignore` со
+строкой `*`; если раннер сам заводит и родительский `.build/`, такой же `.gitignore` ложится и
+туда. Существующий `.gitignore` не переписывается, `.gitignore` проекта раннер не трогает.
+Pure provider selection для infobase export не создаёт `workPath` и runtime-файлы.
 
 ### `localPath`
 
@@ -360,21 +358,53 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 - Где: проектный файл и местный слой; местный слой главнее. `--workdir` его не меняет,
   своего ключа командной строки у него нет.
 
-Личное состояние рабочей копии — то, что нельзя пересобрать. `workPath` пересобирается и его
-можно удалить; `localPath` удаление `workPath` не задевает. Относительный путь — от каталога
-`v8project.yaml`, как у `workPath`.
+Личное состояние рабочей копии — то, что нельзя пересобрать без базы. `workPath`
+пересобирается и его можно удалить; `localPath` удаление `workPath` не задевает. Относительный
+путь — от каталога `v8project.yaml`, как у `workPath`.
 
 ```
 .local/
   db/                                  файловая база по умолчанию у `init`
-  infobases/<база>/managed/
-    postgres/   data/ password record.json ports.json postgres.log
-    standalone/ data/ record.json ports.json
-    cluster/    registry-<regport>/ record.json ports.json cluster.log
-    ras/        record.json
+  infobases/<база>/
+    hashes/<набор>.redb                хеши исходников набора
+    hashes/tools/<имя>.redb            хеши исходников расширения-инструмента
+    dump-info/<набор>/ConfigDumpInfo.xml  копия файла версий набора
+    generation.json                    журнал поколений по наборам
+    new-owner.json                     признак нового владельца
+    copied-from.json                   откуда скопирована база
+    .lock                              замок памяти базы
+    managed/
+      postgres/   data/ password record.json ports.json postgres.log
+      standalone/ data/ record.json ports.json
+      cluster/    registry-<regport>/ record.json ports.json cluster.log
+      ras/        record.json
+  tools/.tests.v8-runner-tools-download.json  метка: набор `tests` скачан `tools download yaxunit --sources`
   .lock                                замок команд, меняющих стенд
   .gitignore                           строка `*`
 ```
+
+Память о базе — `localPath/infobases/<база>/`: `<база>` — имя объявленной базы или, у базы,
+названной строкой соединения, ключ `@<хеш>` из её адреса без учётных данных.
+
+- `hashes/` — хеши исходников наборов и расширений-инструментов;
+- `dump-info/<набор>/` — копия файла версий `ConfigDumpInfo.xml` набора; файл в каталоге
+  набора раннер сверяет с ней перед работой по изменившемуся;
+- `generation.json` — журнал поколений по наборам: токен, инструмент, которым он получен
+  (`designer`, `ibcmd`, `agent`), и операция, после которой записан; запись без имени
+  инструмента считается отсутствием ответа, и выгрузка по ней не пропускается;
+- `new-owner.json` — признак, что копия взяла базу без метки или сменила ушедшего
+  владельца; до первой удачной отправки отказы обмена выгрузку не предлагают.
+
+Память привязана к адресу базы без учётных данных, каталогу и назначению набора;
+исполнитель в привязку не входит. У каждой базы своя память: и у объявленной, и у названной
+строкой соединения — следующая команда с той же строкой продолжает с её памятью. Память,
+записанная для другой привязки, не используется.
+
+**Переход.** Прежнюю память — `workPath/infobases/<база>/`, а до неё общие
+`workPath/hash-storages/designer-*.redb`, `tool-*.redb` и `workPath/agent/generation/` —
+раннер не читает, не переносит и не удаляет. После обновления выполните один раз
+`pull <SET> --force` на набор: до него `push` отказывает `untracked_base`. Старый каталог
+(`build/` прежнего умолчания) раннер не трогает, его можно удалить вручную.
 
 - Каталог создаёт первый писатель в него — команда стенда (`dbms`, `cluster`, `standalone`),
   замок или метка файловой базы внутри него — и кладёт `.gitignore` со строкой `*`; чужой
@@ -391,6 +421,11 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 - Команды, меняющие стенд (`dbms`, `cluster`, `standalone` кроме `status`; `infobase create`
   базы управляемого стенда), берут замок `<localPath>/.lock` после замка `workPath`: запуски
   одного проекта с разными `workPath` (`--workdir`) не меняют один стенд разом.
+- Команды, которые пишут базу и её память (`push`, `pull`, `apply`, `reset`, `test`,
+  `infobase create` и другие), берут замок памяти `<localPath>/infobases/<база>/.lock` после
+  замков `workPath` и `localPath`, до замка файловой базы: два запуска с разными `workPath`
+  (`--workdir`, проекция Unica) не пишут одну память разом. Занят — `workspace_busy`
+  (выход 3). Чтение (`status --deep`, `diff --against`) его не берёт.
 - `localPath`, общий у двух проектов, стенд не делит: стенд базы принадлежит проекту, который
   первым его поднял (метка `managed/owner.json` переживает `stop` и перезагрузку). Команды стенда
   второго проекта — `status`, `start`, `stop`, `restart`, `infobase create` — и его рабочие
@@ -403,9 +438,9 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 - Повторный `clone` не считает каталог непустым, пока в `localPath` лежат лишь `.gitignore` и
   файлы замков.
 
-**Удаление `workPath`.** Стенды и база целы, но память о базе
-(`workPath/infobases/<база>/`) пропала: следующий `push` отказывает `untracked_base`.
-Связь восстанавливает `pull --force` — он выгружает базу целиком и записывает память заново.
+**Удаление `workPath`.** Стенды, база и память о ней (`localPath/infobases/<база>/`) целы:
+следующий `push` идёт по изменившемуся, без `untracked_base`. Пропадают только пересчитываемые
+данные; без снимка Конфигуратора набора EDT следующая выгрузка EDT идёт полной.
 
 ### `execution_timeout` — изъят
 
@@ -547,7 +582,7 @@ providers:
 базу проекта не выбирает, работает без `origin` и `--infobase` отвергает.
 
 Имя базы — идентификатор `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. Для объявленной базы раннер
-использует это имя в пути к её памяти: `workPath/infobases/<имя>/` (см. [`workPath`](#workpath)).
+использует это имя в пути к её памяти: `localPath/infobases/<имя>/` (см. [`localPath`](#localpath)).
 
 ```yaml
 # v8project.local.yaml
@@ -908,8 +943,8 @@ infobases:
 предупреждения о другой копии и записывают в метку её, а не проекцию. Названная копия обязана
 существовать и объявлять ту же базу, иначе команда записи или чтения базы отказывает
 (`validation`, выход 2) до запуска платформы. Запись самой проекции в метке, сделанная до
-ключа, уступает названной копии. Исходники, `workPath` и память, в том числе о взятии базы,
-остаются за проекцией. У серверной базы метки нет, и ключ не действует. В `v8project.yaml`
+ключа, уступает названной копии. Исходники, `workPath`, `localPath` и память, в том числе о
+взятии базы, остаются за проекцией. У серверной базы метки нет, и ключ не действует. В `v8project.yaml`
 ключ — ошибка конфигурации.
 ([правило](../spec/rules/use-cases/a-projection-acts-as-the-working-copy-it-names.md))
 
@@ -1101,13 +1136,13 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 после project source-set, а `launch mcp` и `launch mcp va` расширение не устанавливают и
 не обновляют.
 Для `source` `push` хранит отдельный snapshot под памятью базы
-(`workPath/infobases/<база>/hashes/tools/<имя>.redb`): повторный запуск с
+(`localPath/infobases/<база>/hashes/tools/<имя>.redb`): повторный запуск с
 неизменёнными исходниками пропускает export/load, а `push --full` принудительно
 обновляет расширение.
 
 `v8-runner tools download client-mcp` может заполнить этот блок в `v8project.local.yaml`:
 с `--sources` он указывает `source.path` на
-`build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
+`workPath/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
 доступен, только когда сборку исполняет Конфигуратор: при объявленном расширении агент из
 цепочки `push` выпадает; при `providers.push: ibcmd` или `agent` используйте `--sources`.
@@ -1119,7 +1154,8 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 - `epf_path`, путь к внешней обработке Vanessa Automation.
 
 `v8-runner tools download vanessa` заполняет `tools.va.epf_path` в `v8project.local.yaml` путём
-`build/tools/vanessa-automation-single.epf`.
+`workPath/tools/vanessa-automation-single.epf` (по умолчанию
+`.build/v8-runner/tools/vanessa-automation-single.epf`).
 
 ## `tools.platform`
 
@@ -1340,7 +1376,7 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 изменившемуся и `pull --object` отказывают родом `environment`: в копию агент записал бы выгрузку
 впустую. Журналы сессий — `workPath/logs/platform/build-agent.log`
 и `workPath/logs/platform/dump-<набор>-agent.log`; учёт поколений конфигурации —
-`workPath/infobases/<база>/generation.json`, запись на набор.
+`localPath/infobases/<база>/generation.json`, запись на набор.
 
 Секция целиком допустима в `v8project.local.yaml`: адрес чужого агента — свойство
 машины.

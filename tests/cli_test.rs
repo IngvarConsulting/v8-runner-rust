@@ -174,9 +174,9 @@ fn write_config(
 
 /// Память о базе `origin` проекта, как после её создания раннером: сборка перед тестами идёт
 /// не с первого знакомства.
-fn remember_origin(project: &Path, work: &Path) {
+fn remember_origin(project: &Path) {
     support::memory::remember_base(
-        work,
+        project,
         "origin",
         support::memory::Base::File(&project.join("ib")),
         &[support::memory::Set::configuration(
@@ -291,7 +291,7 @@ fn setup_project_with_additional_launch_keys(
         timeout_seconds,
         additional_launch_keys,
     );
-    remember_origin(&base_path, &work_path);
+    remember_origin(&base_path);
 
     (dir, config_path, build_calls, test_calls, captured_config)
 }
@@ -366,7 +366,7 @@ fn setup_va_project_with_work_name(
 );
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, "File=ib", Some("secret"));
-    remember_origin(&base_path, &work_path);
+    remember_origin(&base_path);
 
     (dir, config_path, build_calls, test_calls, captured_params)
 }
@@ -485,7 +485,8 @@ fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
         5,
         None,
     );
-    fs::remove_dir_all(dir.path().join("work").join("infobases")).expect("forget the base");
+    fs::remove_dir_all(dir.path().join("project").join(".local").join("infobases"))
+        .expect("forget the base");
 
     let output = v8_runner_command()
         .args([
@@ -1658,7 +1659,7 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
     support::memory::remember_base(
-        &work_path,
+        &base_path,
         "origin",
         support::memory::Base::File(&bases.path().join("ib")),
         &[support::memory::Set::configuration(
@@ -1891,7 +1892,7 @@ fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
     .expect("config");
     write_local_origin(&config_path, "File=./ib", None);
     support::memory::remember_base(
-        &profile_dir.join("work"),
+        &profile_dir,
         "origin",
         support::memory::Base::File(&profile_dir.join("ib")),
         &[support::memory::Set::configuration(

@@ -392,7 +392,7 @@ fn a_copied_base_starts_with_a_full_push() {
     let worktree = stand.worktree(&neighbour_base);
     let wt = worktree.parent().expect("worktree").to_path_buf();
     init_own_base(&worktree);
-    let memory = wt.join("work").join("infobases").join("origin");
+    let memory = wt.join(".local").join("infobases").join("origin");
     fs::create_dir_all(memory.join("dump-info").join("main")).expect("stale memory");
     fs::write(memory.join("generation.json"), "{}").expect("stale ledger");
 
@@ -661,7 +661,7 @@ fn a_cluster_copy_is_created_by_the_designer_and_loaded_from_the_image() {
             && step.contains("its data is now replaced by the image of 'upstream'"),
         "{step}"
     );
-    let memory = wt.join("work").join("infobases").join("origin");
+    let memory = wt.join(".local").join("infobases").join("origin");
     assert!(memory.join("copied-from.json").exists());
 }
 
@@ -931,7 +931,7 @@ fn a_base_assembled_from_the_sources_removes_the_copy_mark() {
         &["infobase", "create", "--from", "upstream"],
     ));
     let mark = wt
-        .join("work")
+        .join(".local")
         .join("infobases")
         .join("origin")
         .join("copied-from.json");
@@ -972,7 +972,7 @@ fn a_push_of_one_set_keeps_the_copy_mark_until_every_set_is_remembered() {
         &["infobase", "create", "--from", "upstream"],
     ));
     let mark = wt
-        .join("work")
+        .join(".local")
         .join("infobases")
         .join("origin")
         .join("copied-from.json");
