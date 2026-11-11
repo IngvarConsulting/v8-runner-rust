@@ -536,6 +536,7 @@ class Bench:
                         if executor == "runner-016":
                             self.used_016 = True
                             self.sync_016()  # what the stand's runner and others put into the base
+                            self.runner.stop_agents()  # the sync must not leave a warm agent for the measure
                         row.update(measure(scn, executor, rels, originals, marker))
                         row["ok"] = True
                     except Exception as error:  # noqa: BLE001 - a failed step is a result row
@@ -585,7 +586,9 @@ def run(stand, scenarios, executors_wanted, reps, runner_exe, out, trace, verify
     if uses_016:
         if not os.path.exists(runner_016):
             raise SystemExit(f"not found: {runner_016}")
-        if not os.path.isdir(os.path.join(stand.project_016, ".git")):
+        ready = (os.path.isdir(os.path.join(stand.project_016, ".git"))
+                 and git(stand.project_016, "rev-parse", "HEAD", check=False).returncode == 0)
+        if not ready:
             raise SystemExit(f"no {stand.project_016}: run `bench.py setup --stand {stand.name} --runner-016 <exe>` first")
     if git(stand.project, "status", "--porcelain", "--", ".").stdout.strip():
         raise SystemExit(f"{stand.project} has uncommitted changes: the bench starts from a clean project")

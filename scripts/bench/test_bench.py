@@ -337,6 +337,20 @@ class Runner016Test(unittest.TestCase):
         self.assertEqual([c.args[1] for c in b.runner_016.must.call_args_list], ["pull"])
         self.assertFalse(b.used_016)
 
+    def test_runner_016_is_measured_after_its_sync_with_no_agent_left(self):
+        """The untimed sync pull must not leave a warm agent for the timed command."""
+        stand, b = self.bench()
+        order = []
+        b.runner = mock.Mock()
+        b.runner.stop_agents.side_effect = lambda: order.append("stop")
+        b.sync_016 = lambda: order.append("sync")
+        b.restore = lambda *a: None
+        b.status_runner = lambda *a: order.append("measure") or {"seconds": 1.0, "verified": True}
+        scn = describe.load_scenarios()["status"]
+        with mock.patch("builtins.print"):
+            b.run_scenario(scn, ["runner-016"], 1)
+        self.assertEqual(order[:4], ["stop", "sync", "stop", "measure"])
+
     def test_every_kind_has_its_measure(self):
         for kind in describe.KINDS:
             for executor in describe.EXECUTORS:

@@ -125,7 +125,7 @@ python scripts/bench/bench.py run --stand ka --flag-text "..." `
 Новый сценарий — таблица в `scenarios.toml`: `kind` (`push`, `pull`, `status`, `pull-none`,
 `push-after-pull`, `pull-full`), `modules`
 (набор стенда), `executors`, при необходимости `runner_args` (например `["--deep"]` у
-`status`). Новый вид работы — код: метод `<вид>_runner` и `<вид>_other` в `bench.py`, командные
+`status`). Новый вид работы — код: метод `<вид>_runner` и `<вид>_other` в `bench.py` (`-` в имени вида — `_`), командные
 строки в `executors.py`, вид в `describe.KINDS` и `describe.CAN`.
 
 ## Результаты

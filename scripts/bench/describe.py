@@ -25,7 +25,8 @@ RUNNERS = ("runner", "runner-live", "runner-016")
 # own sequence (its memory after a pull); without memory there is nothing to compare.
 CAN = {
     "runner": set(KINDS),
-    "runner-live": set(KINDS),
+    # status asks no agent, a full pull of a file base goes through ibcmd (#559): nothing to keep alive.
+    "runner-live": {"push", "pull", "pull-none", "push-after-pull"},
     "runner-016": set(KINDS),
     "agent": {"push", "pull", "status", "pull-none", "pull-full"},
     "batch": {"push", "pull", "status", "pull-none", "pull-full"},
