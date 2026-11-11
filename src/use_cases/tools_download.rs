@@ -760,6 +760,10 @@ fn sidecar_download_marker_path(path: &Path) -> PathBuf {
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
+    // Оба пути сводятся к одному виду: каталог конфига и `workPath` могут прийти один как
+    // написан, другой раскрытым по ссылкам (на macOS `/var` — это `/private/var`).
+    let root = &resolved_path(root);
+    let path = &resolved_path(path);
     if let Some(relative) = path
         .strip_prefix(root)
         .ok()
@@ -789,6 +793,14 @@ fn relative_path(root: &Path, path: &Path) -> String {
     } else {
         relative.display().to_string()
     }
+}
+
+/// Путь с разрешёнными ссылками по ближайшему существующему предку и без префикса `\?\`.
+fn resolved_path(path: &Path) -> PathBuf {
+    let normal = crate::support::path::lexically_normal_absolute(path);
+    crate::support::path::normalize_windows_verbatim_path(
+        &crate::support::path::nearest_existing_canonical_path(&normal).unwrap_or(normal),
+    )
 }
 
 fn normalized_components(path: &Path) -> Vec<OsString> {
