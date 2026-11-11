@@ -20,8 +20,10 @@ check:
 местный слой; местный слой главнее. `--workdir` на него не влияет, своего ключа командной строки
 у него нет.
 
-Под `localPath` лежит то, что нельзя пересобрать: данные стендов в
-`<localPath>/infobases/<база>/managed/{postgres,standalone,cluster,ras}/` и файловая база,
+Под `localPath` лежит то, что нельзя пересобрать: память о базе в
+`<localPath>/infobases/<база>/` (`INV.USE-CASES.MEMORY-LIVES-UNDER-THE-BASE-IT-DESCRIBES`),
+данные стендов в `<localPath>/infobases/<база>/managed/{postgres,standalone,cluster,ras}/` и
+файловая база,
 которую `init` без `--infobase` объявляет по умолчанию, — `File=<localPath>/db`. Путь базы
 пишется относительным, если он внутри каталога конфигурации, иначе абсолютным. Объявленный
 `origin`, например `File=build/ib` прежнего проекта, не меняется.

@@ -6,7 +6,7 @@ check:
   - src/use_cases/build_project.rs::a_completed_full_step_records_hashes_after_deferred_cancellation
   - src/use_cases/build_project.rs::changed_extension_only_loads_extension_and_preserves_other_storage
   - src/use_cases/build_project.rs::source_set_build_analyzes_and_loads_only_requested_source_set
-  - src/change_detection/source_sets.rs::analysis_state_lies_under_the_work_path_by_logical_context
+  - src/change_detection/source_sets.rs::analysis_state_lies_under_the_local_path_and_the_cache_under_the_work_path
   - src/change_detection/scanner.rs::every_selected_file_is_hashed_regardless_of_mtime
   - src/change_detection/scanner.rs::a_restored_copy_with_an_old_mtime_is_hashed
   - src/change_detection/scanner.rs::changed_bytes_with_the_exact_remembered_old_mtime_are_hashed

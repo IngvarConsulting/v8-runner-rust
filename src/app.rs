@@ -510,7 +510,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
             return error.exit_code();
         }
     };
-    let work_path = project_dir.join("build");
+    let work_path = project_dir.join(crate::config::model::DEFAULT_WORK_PATH);
     let level = cli.log_level.as_deref().unwrap_or("info");
     if let Err(error) = crate::support::logging::init_action_logging(
         level,

@@ -1237,13 +1237,10 @@
       "description": "External tool discovery and launch settings."
     },
     "workPath": {
-      "description": "Working directory for generated state, logs, temporary files, and hash storages.",
+      "description": "Working directory for what the runner can compute again: logs, temporary files, the\ndump stage, caches. Relative to the directory of v8project.yaml; `.build/v8-runner` by\ndefault. The memory of the infobase lives under localPath, not here.",
       "type": "string"
     }
   },
-  "required": [
-    "workPath"
-  ],
   "title": "MainConfigSchema",
   "type": "object"
 }

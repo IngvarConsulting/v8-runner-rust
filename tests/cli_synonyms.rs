@@ -75,6 +75,7 @@ fn project() -> Project {
     let out = dir.path().join("out");
     fs::create_dir_all(&out).expect("out");
     fs::write(out.join("main.cf"), "cf").expect("package");
+    fs::write(out.join("upload.cfe"), "cfe").expect("extension package");
     fs::write(out.join("settings.xml"), "<Settings/>").expect("settings");
     Project { dir, root, calls }
 }
@@ -171,6 +172,7 @@ fn envelope(args: &[String], output: &Output) -> Value {
 fn cases(project: &Project) -> Vec<(Vec<String>, Vec<String>)> {
     let cf = project.path("out/main.cf");
     let cfe = project.path("out/sales.cfe");
+    let upload_cfe = project.path("out/upload.cfe");
     let settings = project.path("out/settings.xml");
     let ib = format!("File={}", project.path("ib"));
     let clone_dir = project.path("clone");
@@ -332,6 +334,10 @@ fn cases(project: &Project) -> Vec<(Vec<String>, Vec<String>)> {
         (
             vec!["upload", "--path", &cf, "--dry-run"],
             vec!["upload", &cf, "--dry-run"],
+        ),
+        (
+            vec!["upload", &upload_cfe, "--extension", "sales", "--dry-run"],
+            vec!["upload", &upload_cfe, "--ref", "sales", "--dry-run"],
         ),
         // Значения.
         (

@@ -45,10 +45,15 @@ workPath/temp/<runner-id>/runs/<run-id>/
 
 ## Runtime Directories
 
-Useful `workPath` locations:
+Memory of the base lives in `localPath` (default `.local`) and survives deleting `workPath`:
 
-- `workPath/infobases/<base>/hashes/<source-set>.redb`: source hashes per base (`<base>` is a declared name or `@<hash>` of an ad hoc connection string); foreign memory is refused.
-- `workPath/infobases/<base>/dump-info/<source-set>/`, `designer/<source-set>/`, `generation.json`: version-file copy, EDT Designer snapshot, agent generation ledger of that base.
+- `localPath/infobases/<base>/hashes/<source-set>.redb`: source hashes per base (`<base>` is a declared name or `@<hash>` of an ad hoc connection string); foreign memory is refused.
+- `localPath/infobases/<base>/dump-info/<source-set>/`, `generation.json`, `new-owner.json`, `copied-from.json`, `.lock`: version-file copy, generation ledger, ownership and copy marks, memory lock of that base.
+
+Useful `workPath` locations (default `.build/v8-runner`, recomputable):
+
+- `workPath/infobases/<base>/designer/<source-set>/`: EDT Designer snapshot of that base; without it the next EDT pull is full.
+- `workPath/stage/`: dump stages of `pull` (`.dump-stage-<run>`).
 - `workPath/hash-storages/`: shared EDT export and external-artifact caches.
 - `workPath/edt-workspace/`: shared EDT workspace for `infobase create`.
 - `workPath/convert/edt-workspace/`: separate EDT workspace for `convert`.

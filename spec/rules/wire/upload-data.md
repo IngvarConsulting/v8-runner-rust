@@ -8,6 +8,8 @@ check:
   - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_load.rs::upload_update_failure_preserves_the_completed_load_receipt
+  - tests/cli_load.rs::upload_ref_names_an_extension_set_by_the_set_name_like_push
+  - tests/cli_load.rs::vendor_update_requires_a_version_change_before_updating_the_database
   - src/use_cases/load_artifact.rs::a_configuration_probe_cancelled_after_its_start_reports_the_work
   - src/use_cases/load_artifact.rs::an_extension_probe_cancelled_after_its_start_reports_the_work
   - src/use_cases/load_artifact.rs::a_failed_load_after_a_deferred_cancellation_still_names_it
@@ -21,6 +23,10 @@ check:
 [общее правило](provider-dispatched-says-whether-an-executor-got-work.md)).
 Разделять их обязательно: непроверенная совместимость и проверенная несовместимость —
 разные состояния, и вызывающий обязан их различать.
+
+Поле `extension` называет расширение в базе. Набор `EXTENSION`, имя которого совпало с
+`--ref`, называет расширение своим именем, как у `push`; `Name` из его `Configuration.xml`
+не читается. Без такого набора значение `--ref` передаётся платформе как есть.
 
 Вложенный `execution` несёт машинную часть исхода: статус, ошибки с кодами и полезную
 нагрузку сценария.
@@ -44,6 +50,13 @@ check:
 первыми.
 
 **Что изменила версия 8.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+
+Та же версия 8 добавила обновление поставщика (`upload --mode update`). Для файла
+обновления `.cfu` поле `artifact_type` принимает значение `vendor_update_cfu`. Файл поставки `.cf`
+по-прежнему имеет тип `configuration_cf`. Режим `update` оставляет
+`compatibility_state: not_probed`: версию читают для подтверждения результата.
+Нулевой код `/UpdateCfg` сам по себе оставляет `applied: false`. Если версию после
+запуска не удалось прочитать или она прежняя, `/UpdateDBCfg` пропускается.
 
 **Что изменила версия 7.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 

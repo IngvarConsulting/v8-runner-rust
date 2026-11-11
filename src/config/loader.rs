@@ -2063,6 +2063,37 @@ mod tests {
         assert_eq!(config.work_path, canonical(&config_dir).join("cli-work"));
     }
 
+    /// `workPath` по умолчанию — `.build/v8-runner` от каталога проектного файла: ключ
+    /// необязателен. Явный ключ и `--workdir` его заменяют
+    /// (`INV.CONFIG.WORKPATH-DEFAULTS-TO-THE-BUILD-DIRECTORY`).
+    #[test]
+    fn work_path_defaults_to_the_build_directory_beside_the_project_file() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let without_key = minimal_config_without_base_path("").replace(
+            "workPath: work
+",
+            "",
+        );
+        let config_path = write_minimal_project_config(&config_dir, &without_key);
+        let load_work = |workdir: Option<&str>| {
+            load_config(config_path.to_str(), workdir, &InfobaseSelector::Default)
+                .map(|loaded| loaded.config.work_path)
+                .expect("load config")
+        };
+        assert_eq!(
+            load_work(None),
+            canonical(&config_dir).join(".build").join("v8-runner")
+        );
+        assert_eq!(
+            load_work(Some("cli-work")),
+            canonical(&config_dir).join("cli-work")
+        );
+
+        write_minimal_project_config(&config_dir, &minimal_config_without_base_path(""));
+        assert_eq!(load_work(None), canonical(&config_dir).join("work"));
+    }
+
     /// `localPath` по умолчанию — `.local` рядом с проектным файлом; ключ проектного файла
     /// уступает местному слою, а `--workdir` его не трогает
     /// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).

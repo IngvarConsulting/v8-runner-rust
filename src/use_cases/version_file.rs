@@ -5,7 +5,7 @@
 //! ручная выгрузка, `checkout`. Платформа не проверяет, её ли это опись, и выгрузка по
 //! изменившемуся молча считает разницу от чужой точки отсчёта.
 //!
-//! Поэтому раннер держит копию у себя — `workPath/infobases/<база>/dump-info/<набор>/` —
+//! Поэтому раннер держит копию у себя — `localPath/infobases/<база>/dump-info/<набор>/` —
 //! и перед работой от файла версий сверяет с ней файл в каталоге. Подменённый файл
 //! уступает место копии; отсутствующий не подкладывается: о каталоге, из которого опись
 //! пропала, копия ничего не доказывает. После удачной команды копией становится то, что
@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-use crate::config::model::AppConfig;
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::dump_format::{known_format, read_recorded, FormatVersion, RecordedFormat};
 use crate::platform::locator::PlatformVersion;
@@ -60,12 +59,8 @@ enum Restoration {
 impl RunnerVersionFile {
     /// Копия есть у набора с памятью базы. У формата EDT файл версий лежит в снимке
     /// Конфигуратора, который тоже лежит под памятью базы.
-    pub(crate) fn of(config: &AppConfig, context: &SourceSetContext) -> Option<Self> {
-        Self::for_context(context, &config.work_path)
-    }
-
-    fn for_context(context: &SourceSetContext, work_path: &Path) -> Option<Self> {
-        let dir = context.version_file_copy_dir(work_path)?;
+    pub(crate) fn of(context: &SourceSetContext) -> Option<Self> {
+        let dir = context.version_file_copy_dir()?;
         let identity = context.storage_identity()?.to_owned();
         Some(Self {
             source_set: context.name().to_owned(),
@@ -251,14 +246,13 @@ impl RunnerVersionFile {
 /// Версию, которую пишет платформа, раннер берёт из таблицы замеров
 /// ([`known_format`]); для платформы вне таблицы сверки нет и примечания тоже.
 pub(crate) fn check_load_format(
-    work_path: &Path,
     context: &SourceSetContext,
     platform: Option<&PlatformVersion>,
 ) -> Result<Option<String>, AppError> {
     let Some((platform, written)) = known_format(platform) else {
         return Ok(None);
     };
-    check_load_format_against(work_path, context, platform, written)
+    check_load_format_against(context, platform, written)
 }
 
 /// Сверка с известной версией формата платформы. Версия читается из файла в каталоге
@@ -266,7 +260,6 @@ pub(crate) fn check_load_format(
 /// платформы, называющий обе версии. Файла нет ни там, ни там или версия в нём не
 /// распознана — сверки нет, и возвращается примечание о пропуске для ответа.
 fn check_load_format_against(
-    work_path: &Path,
     context: &SourceSetContext,
     platform: &PlatformVersion,
     written: FormatVersion,
@@ -275,7 +268,7 @@ fn check_load_format_against(
     let mut source = in_directory.clone();
     let mut recorded = read_format(&in_directory)?;
     if recorded == RecordedFormat::Missing {
-        if let Some(copy) = RunnerVersionFile::for_context(context, work_path) {
+        if let Some(copy) = RunnerVersionFile::of(context) {
             if copy.copy_is_ours()? {
                 recorded = read_format(&copy.copy)?;
                 source = copy.copy;
@@ -380,10 +373,12 @@ mod tests {
     fn version_file(root: &Path, identity: &str) -> RunnerVersionFile {
         let sources = root.join("sources");
         fs::create_dir_all(&sources).expect("sources");
-        let context = SourceSetContext::new("main", sources, "designer-main")
-            .with_infobase_memory("origin", identity.to_owned());
-        RunnerVersionFile::for_context(&context, &root.join("work"))
-            .expect("named base keeps a copy")
+        let context = SourceSetContext::new("main", sources, "designer-main").with_infobase_memory(
+            &root.join(".local"),
+            "origin",
+            identity.to_owned(),
+        );
+        RunnerVersionFile::of(&context).expect("named base keeps a copy")
     }
 
     fn print_of(path: &Path) -> Option<super::Fingerprint> {
@@ -397,7 +392,7 @@ mod tests {
         assert_eq!(
             file.copy,
             root.path()
-                .join("work/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+                .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
         );
     }
 
@@ -511,12 +506,10 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
         let context = SourceSetContext::new("main", root.path().join("sources"), "designer-main")
-            .with_infobase_memory("origin", "base-a".to_owned());
-        let work = root.path().join("work");
+            .with_infobase_memory(&root.path().join(".local"), "origin", "base-a".to_owned());
         let platform = platform_8_3_27();
-        let check = || {
-            super::check_load_format_against(&work, &context, &platform, FormatVersion::new(2, 20))
-        };
+        let check =
+            || super::check_load_format_against(&context, &platform, FormatVersion::new(2, 20));
 
         let skipped = check().expect("no file").expect("the skip is named");
         assert!(skipped.contains("not checked"), "{skipped}");
@@ -530,7 +523,7 @@ mod tests {
             refusal.contains("2.20 that platform 8.3.27.2074 writes"),
             "{refusal}"
         );
-        let measured = super::check_load_format(&work, &context, Some(&platform))
+        let measured = super::check_load_format(&context, Some(&platform))
             .expect_err("8.3.27 writes 2.20 by measurement")
             .to_string();
         assert!(measured.contains("format 2.21"), "{measured}");
@@ -540,7 +533,7 @@ mod tests {
             ..platform.clone()
         };
         assert_eq!(
-            super::check_load_format(&work, &context, Some(&unmeasured))
+            super::check_load_format(&context, Some(&unmeasured))
                 .expect("a platform outside the table is not checked"),
             None
         );
@@ -551,7 +544,7 @@ mod tests {
         let unrecognized = check().expect("unrecognized").expect("the skip is named");
         assert!(unrecognized.contains("not recognized"), "{unrecognized}");
         assert_eq!(
-            super::check_load_format(&work, &context, None).expect("unknown platform"),
+            super::check_load_format(&context, None).expect("unknown platform"),
             None
         );
     }
