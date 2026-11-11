@@ -2000,25 +2000,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queue_full_counts_running_and_queued_admission() {
+        let release = Arc::new(AtomicBool::new(false));
         let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
-            CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(40),
+            CommandBehavior::CompleteWhenReleased {
+                release: release.clone(),
                 stdout: "ok".to_owned(),
-                stderr: String::new(),
             },
         ])]);
         let manager = manager(factory.clone(), 1, Duration::from_millis(50));
 
         let first = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.execute(request("cmd-1", 200)).await }
+            async move { manager.execute(request("cmd-1", 10_000)).await }
         });
         wait_for_commands(&factory, 1).await;
 
-        let second = manager.execute(request("cmd-2", 200)).await;
+        let second = manager.execute(request("cmd-2", 10_000)).await;
+        release.store(true, Ordering::SeqCst);
 
         assert_eq!(second, Err(EdtSessionError::QueueFull));
         assert!(first.await.expect("first join").is_ok());
+        assert_eq!(factory.commands(), ["cmd-1"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
