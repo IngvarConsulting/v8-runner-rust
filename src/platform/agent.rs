@@ -1644,14 +1644,18 @@ fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
 
 /// Запуск Конфигуратора в агентском режиме. Из ключей базы берётся только адрес:
 /// `/N` и `/P` в этом режиме игнорируются, учётные данные идут через SSH.
-#[derive(Debug)]
 pub struct AgentLaunch {
     pub v8: PathBuf,
     pub infobase_args: Vec<String>,
-    pub port: u16,
-    /// Ключ хоста, который агент получит в `/AgentSSHHostKey`. Ключа платформы
-    /// (`/AgentSSHHostKeyAuto`) раннер не берёт: сессия закрепляется на отданном ключе.
-    pub host_key: LaunchHostKey,
+    /// Объявленный порт. Без него каждый запуск получает новый свободный порт.
+    pub port: Option<u16>,
+    /// Объявленный ключ для `/AgentSSHHostKey`. Иначе каждая попытка получает одноразовый.
+    pub host_key: Option<PathBuf>,
+    /// Корень для одноразовых ключей до применения ASCII fallback.
+    pub key_work_path: PathBuf,
+    pub user: String,
+    pub password: String,
+    pub transcript_log: Option<PathBuf>,
     pub base_dir: PathBuf,
     /// Текущий каталог процесса агента. Агент пишет туда файл настроек пользователя
     /// (`1cv8u.pfl`) при первой сессии, поэтому он свой, внутри `workPath`, а не каталог,
@@ -1664,16 +1668,16 @@ pub struct AgentLaunch {
 }
 
 impl AgentLaunch {
-    pub fn args(&self) -> Vec<String> {
+    fn args(&self, port: u16, host_key: &Path) -> Vec<String> {
         let mut args = vec!["DESIGNER".to_owned()];
         args.extend(self.infobase_args.iter().cloned());
         args.push("/AgentMode".to_owned());
         args.push("/AgentPort".to_owned());
-        args.push(self.port.to_string());
+        args.push(port.to_string());
         args.push("/AgentListenAddress".to_owned());
         args.push(MANAGED_LISTEN_HOST.to_string());
         args.push("/AgentSSHHostKey".to_owned());
-        args.push(self.host_key.path().display().to_string());
+        args.push(host_key.display().to_string());
         args.push("/AgentBaseDir".to_owned());
         args.push(self.base_dir.display().to_string());
         args.push("/Out".to_owned());
@@ -1682,10 +1686,10 @@ impl AgentLaunch {
     }
 
     /// Запрос процесса агента: программа, ключи, свой текущий каталог и журналы.
-    pub fn request(&self) -> ProcessRequest {
+    fn request(&self, port: u16, host_key: &Path) -> ProcessRequest {
         ProcessRequest {
             program: self.v8.clone(),
-            args: self.args(),
+            args: self.args(port, host_key),
             workdir: Some(self.workdir.clone()),
             stdout_log_path: Some(self.process_log.with_extension("stdout.log")),
             stderr_log_path: Some(self.process_log.with_extension("stderr.log")),
@@ -1695,14 +1699,15 @@ impl AgentLaunch {
     }
 
     /// Файл `/Out` агента.
-    pub fn out_file(&self) -> PathBuf {
+    fn out_file(&self) -> PathBuf {
         self.process_log.with_extension("out.log")
     }
 
-    pub fn endpoint(&self) -> AgentEndpoint {
-        AgentEndpoint {
-            host: Host::Address(MANAGED_LISTEN_HOST),
-            port: self.port,
+    fn host_key_for_attempt(&self) -> Result<LaunchHostKey, AgentError> {
+        match &self.host_key {
+            Some(path) => Ok(LaunchHostKey::Declared(path.clone())),
+            None => EphemeralHostKey::create_for(&self.key_work_path, &host_key_fallback_roots())
+                .map(LaunchHostKey::OneTime),
         }
     }
 }
@@ -1717,20 +1722,17 @@ pub struct ManagedAgent {
 }
 
 impl ManagedAgent {
-    /// Поднимает процесс и ждёт, пока он примет аутентифицированную сессию. Пока порт
-    /// не принимает соединений, агент ещё поднимается; любой другой отказ повтором
-    /// не лечится и останавливает ожидание сразу.
+    /// Поднимает процесс и ждёт аутентифицированную сессию. При коллизии на
+    /// автоматически выбранном порту один раз поднимает процесс на другом порту.
     pub fn launch(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
     ) -> Result<Self, AgentError> {
         Self::launch_in(
             runner,
             launch,
-            session,
             startup_timeout,
             policy,
             ManagedSpawnMode::Wait,
@@ -1743,14 +1745,12 @@ impl ManagedAgent {
     pub fn launch_for_keeper(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
     ) -> Result<Self, AgentError> {
         Self::launch_in(
             runner,
             launch,
-            session,
             startup_timeout,
             policy,
             ManagedSpawnMode::Tied,
@@ -1760,11 +1760,68 @@ impl ManagedAgent {
     fn launch_in(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
         mode: ManagedSpawnMode,
     ) -> Result<Self, AgentError> {
+        let port = match launch.port {
+            Some(port) => port,
+            None => free_managed_port(None)?,
+        };
+        let started = Instant::now();
+        match Self::launch_once(
+            runner,
+            &launch,
+            port,
+            started,
+            startup_timeout,
+            policy,
+            mode,
+        ) {
+            Err(AgentError::ForeignAgentOnPort { .. } | AgentError::PortTaken { .. })
+                if launch.port.is_none()
+                    && started.elapsed() < startup_timeout
+                    && policy
+                        .deadline
+                        .is_none_or(|deadline| Instant::now() < deadline) =>
+            {
+                policy.refuse_if_cancelled("open")?;
+                debug!(port, "managed agent port collision; retrying on a new port");
+                let next_port = free_managed_port(Some(port))?;
+                Self::launch_once(
+                    runner,
+                    &launch,
+                    next_port,
+                    started,
+                    startup_timeout,
+                    policy,
+                    mode,
+                )
+            }
+            result => result,
+        }
+    }
+
+    fn launch_once(
+        runner: &dyn ProcessRunner,
+        launch: &AgentLaunch,
+        port: u16,
+        started: Instant,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+        mode: ManagedSpawnMode,
+    ) -> Result<Self, AgentError> {
+        let host_key = launch.host_key_for_attempt()?;
+        let session = AgentSessionRequest {
+            endpoint: AgentEndpoint {
+                host: Host::Address(MANAGED_LISTEN_HOST),
+                port,
+            },
+            user: launch.user.clone(),
+            password: launch.password.clone(),
+            transcript_log: launch.transcript_log.clone(),
+            host_key: host_key.expectation(),
+        };
         for dir in [&launch.base_dir, &launch.workdir] {
             std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
                 path: dir.clone(),
@@ -1778,24 +1835,16 @@ impl ManagedAgent {
                 source,
             }
         })?;
-        let request = launch.request();
+        let request = launch.request(port, host_key.path());
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
             .spawn_managed(&request, mode, None)
-            .map_err(|error| match port_taken(launch.port) {
-                Some(detail) => AgentError::PortTaken {
-                    port: launch.port,
-                    detail,
-                },
+            .map_err(|error| match port_taken(port) {
+                Some(detail) => AgentError::PortTaken { port, detail },
                 None => AgentError::Launch(error),
             })?;
-        debug!(
-            pid = process.pid(),
-            port = launch.port,
-            "designer agent launched"
-        );
+        debug!(pid = process.pid(), port, "designer agent launched");
 
-        let started = Instant::now();
         let opened = loop {
             let last = match AgentSession::open_within(&session, policy, Some(HANDSHAKE_PROBE)) {
                 Ok(opened) => break opened,
@@ -1829,9 +1878,9 @@ impl ManagedAgent {
             // называет `/Out` агента.
             if let Some(status) = process.exited() {
                 let out = out_evidence(&launch.out_file());
-                return Err(match port_taken(launch.port) {
+                return Err(match port_taken(port) {
                     Some(detail) => AgentError::PortTaken {
-                        port: launch.port,
+                        port,
                         detail: format!("{detail}; /Out: {out}"),
                     },
                     None => AgentError::ExitedBeforeSession {
@@ -1852,8 +1901,8 @@ impl ManagedAgent {
         Ok(Self {
             process: Some(process),
             session: Some(opened),
-            base_dir: launch.base_dir,
-            host_key: launch.host_key,
+            base_dir: launch.base_dir.clone(),
+            host_key,
         })
     }
 
@@ -1937,11 +1986,19 @@ fn port_taken(port: u16) -> Option<String> {
 
 /// Свободный порт на адресе управляемого агента: система назначает его привязке к
 /// порту `0`, привязка тут же закрывается, и номер уходит агенту в `/AgentPort`.
-pub fn free_managed_port() -> Result<u16, AgentError> {
-    std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))
-        .and_then(|listener| listener.local_addr())
-        .map(|address| address.port())
-        .map_err(|source| AgentError::NoFreePort { source })
+fn free_managed_port(exclude: Option<u16>) -> Result<u16, AgentError> {
+    let pick = || -> std::io::Result<_> {
+        let listener = std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))?;
+        let port = listener.local_addr()?.port();
+        if Some(port) == exclude {
+            // Держим исключённый порт, пока ОС выбирает другой.
+            return Ok(std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))?
+                .local_addr()?
+                .port());
+        }
+        Ok(port)
+    };
+    pick().map_err(|source| AgentError::NoFreePort { source })
 }
 
 /// Одноразовый ключ хоста управляемого агента.
@@ -1961,7 +2018,7 @@ pub struct EphemeralHostKey {
 
 /// Ключ хоста, который получает управляемый агент.
 #[derive(Debug)]
-pub enum LaunchHostKey {
+enum LaunchHostKey {
     /// `tools.designer_agent.host-key`: файл владельца, раннер его не трогает.
     Declared(PathBuf),
     /// Одноразовый ключ этого запуска.
@@ -2859,14 +2916,18 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
         assert_eq!(
-            launch.args(),
+            launch.args(1543, Path::new("/work/host_key")),
             vec![
                 "DESIGNER",
                 "/F",
@@ -2894,13 +2955,17 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent/base"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
-        let request = launch.request();
+        let request = launch.request(1543, Path::new("/work/host_key"));
         assert_eq!(
             request.workdir.as_deref(),
             Some(Path::new("/work/agent/workdir"))
@@ -2918,13 +2983,17 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: connection.infobase_args(),
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
-        let args = launch.args();
+        let args = launch.args(1543, Path::new("/work/host_key"));
         assert_eq!(&args[..3], ["DESIGNER", "/S", "srv:1541\\demo"], "{args:?}");
         assert!(
             !args.iter().any(|arg| arg == "/IBConnectionString"),

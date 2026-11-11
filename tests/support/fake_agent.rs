@@ -1210,6 +1210,51 @@ pub fn launch_request_file(base_dir_file: &Path) -> PathBuf {
 /// SSH-сервер на том порту с тем ключом — как настоящий агент. `presented` подменяет ключ:
 /// так проверяется отказ чужому ключу. Поток живёт, пока жив каталог файла запроса.
 pub fn serve_managed_launches(agent: FakeAgent, presented: Option<russh::keys::PrivateKey>) {
+    serve_managed_launches_with(agent, presented, |_, _, _| {});
+}
+
+/// На первом порту успевает привязаться чужой SSH-сервер. Он остаётся привязанным,
+/// пока существует каталог теста, поэтому обычный двойник должен пережить ошибку bind.
+pub fn collide_with_first_managed_launch(agent: FakeAgent) -> std::sync::mpsc::Receiver<u16> {
+    let (ports_tx, ports_rx) = std::sync::mpsc::channel();
+    let mut first: Option<(PathBuf, u32, _)> = None;
+    let foreign_log = agent.commands_log.with_extension("foreign.log");
+    serve_managed_launches_with(agent, None, move |agent, port, text| {
+        if let Some((key_path, pid, _listener)) = &first {
+            assert!(
+                !key_path.exists(),
+                "the failed attempt left its key: {key_path:?}"
+            );
+            assert!(
+                !process_is_alive(*pid),
+                "the failed attempt left its process: {pid}"
+            );
+            assert!(
+                !foreign_log.exists(),
+                "the foreign server received a command"
+            );
+        } else {
+            let key_path = PathBuf::from(text.lines().nth(1).expect("first host key"));
+            let pid = read_or_empty(&agent.designer_pid_file)
+                .trim()
+                .parse()
+                .expect("first fake 1cv8 pid");
+            let mut foreign = agent.clone();
+            foreign.commands_log = foreign_log.clone();
+            let (_, stop) = start_stoppable_fake_agent_on(foreign, random_host_key(), port)
+                .expect("bind foreign SSH server before the first fake agent");
+            first = Some((key_path, pid, stop));
+        }
+        let _ = ports_tx.send(port);
+    });
+    ports_rx
+}
+
+fn serve_managed_launches_with(
+    agent: FakeAgent,
+    presented: Option<russh::keys::PrivateKey>,
+    mut before_bind: impl FnMut(&FakeAgent, u16, &str) + Send + 'static,
+) {
     let request = launch_request_file(&agent.base_dir_file);
     std::thread::spawn(move || {
         // Сервер прежнего запуска на том же порту останавливается: у нового запуска свой ключ.
@@ -1217,23 +1262,26 @@ pub fn serve_managed_launches(agent: FakeAgent, presented: Option<russh::keys::P
         while request.parent().is_some_and(Path::exists) {
             if let Ok(text) = fs::read_to_string(&request) {
                 let _ = fs::remove_file(&request);
-                let mut lines = text.lines();
-                let port: u16 = lines
+                let port: u16 = text
+                    .lines()
                     .next()
                     .and_then(|line| line.trim().parse().ok())
                     .expect("fake 1cv8 names /AgentPort");
-                let key = presented.clone().unwrap_or_else(|| {
-                    match lines.next().map(str::trim).filter(|line| !line.is_empty()) {
-                        Some(path) => russh::keys::load_secret_key(path, None)
-                            .expect("host key handed to the agent"),
-                        None => random_host_key(),
-                    }
-                });
+                let key = presented.clone().unwrap_or_else(|| launch_key(&text));
                 if let Some(stop) = running.remove(&port) {
                     let _ = stop.send(());
                 }
-                let (port, stop) = start_stoppable_fake_agent_on(agent.clone(), key, port);
-                running.insert(port, stop);
+                before_bind(&agent, port, &text);
+                match start_stoppable_fake_agent_on(agent.clone(), key, port) {
+                    Ok((port, stop)) => {
+                        running.insert(port, stop);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        // Другой двойник мог занять свободный порт. Продолжаем читать запросы:
+                        // раннер отвергнет чужой ключ и пришлёт порт следующего запуска.
+                    }
+                    Err(error) => panic!("bind fake agent: {error}"),
+                }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -1356,7 +1404,7 @@ pub fn managed_agent_double() -> ManagedAgentDouble {
 
 /// Поднимает двойника на данном порту (`0` — на свободном) и возвращает порт.
 fn start_fake_agent_on(agent: FakeAgent, key: russh::keys::PrivateKey, port: u16) -> u16 {
-    let (port, stop) = start_stoppable_fake_agent_on(agent, key, port);
+    let (port, stop) = start_stoppable_fake_agent_on(agent, key, port).expect("bind fake agent");
     // Двойник живёт до конца процесса теста: сброшенный отправитель остановил бы сервер.
     std::mem::forget(stop);
     port
@@ -1368,8 +1416,8 @@ fn start_stoppable_fake_agent_on(
     agent: FakeAgent,
     key: russh::keys::PrivateKey,
     port: u16,
-) -> (u16, tokio::sync::oneshot::Sender<()>) {
-    let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
+) -> std::io::Result<(u16, tokio::sync::oneshot::Sender<()>)> {
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1387,11 +1435,14 @@ fn start_stoppable_fake_agent_on(
                         let _ = error;
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    Err(error) => panic!("bind fake agent: {error}"),
+                    Err(error) => {
+                        let _ = port_tx.send(Err(error));
+                        return;
+                    }
                 }
             };
             port_tx
-                .send(listener.local_addr().expect("addr").port())
+                .send(listener.local_addr().map(|address| address.port()))
                 .expect("port");
             let config = Arc::new(server::Config {
                 auth_rejection_time: Duration::from_millis(50),
@@ -1407,7 +1458,10 @@ fn start_stoppable_fake_agent_on(
             }
         });
     });
-    (port_rx.recv().expect("fake agent port"), stop_tx)
+    port_rx
+        .recv()
+        .expect("fake agent port")
+        .map(|port| (port, stop_tx))
 }
 
 /// Поддельный `1cv8` в агентском режиме: записывает ключи, создаёт раскладку
@@ -1467,4 +1521,22 @@ pub fn process_is_alive(pid: u32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+pub fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    // SAFETY: plain values; the handle is checked and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+        CloseHandle(handle);
+        running
+    }
 }
