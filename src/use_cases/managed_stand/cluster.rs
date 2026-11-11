@@ -1395,6 +1395,37 @@ pub(super) fn registration_for_recreate(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Result<Registered, UseCaseError> {
+    let registered = registration(context, config, runner, host)?;
+    if let Some(sessions) = registered.open_sessions(context, runner)? {
+        return Err(registered.sessions_refusal(config, sessions));
+    }
+    Ok(registered)
+}
+
+/// Сеансы базы в кластере раннера по `rac session list`: источник признака «базу держат
+/// сеансы» у применения (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). `None` — кластер
+/// не раннера или не работает, база не зарегистрирована, `rac` не ответил.
+pub(super) fn sessions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Option<Vec<rac::Session>> {
+    registration(context, config, runner, host)
+        .ok()?
+        .open_sessions(context, runner)
+        .ok()
+        .map(Option::unwrap_or_default)
+}
+
+/// Регистрация базы у работающего кластера раннера: `rac`, адрес `ras`, кластер и
+/// идентификатор базы, если кластер её знает.
+fn registration(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<Registered, UseCaseError> {
     let no_locate = || Err(validation("a running cluster names its own utilities"));
     let cluster = cluster(config, context, runner, host, &no_locate)?;
     let not_running = || {
@@ -1432,7 +1463,7 @@ pub(super) fn registration_for_recreate(
             summary.stderr.trim()
         )));
     }
-    let registered = Registered {
+    Ok(Registered {
         infobase: rac::infobase_id(&summary.stdout, &cluster.declared.name),
         rac: rac_bin,
         ras: address,
@@ -1445,11 +1476,7 @@ pub(super) fn registration_for_recreate(
             .password
             .clone()
             .filter(|password| !password.is_empty()),
-    };
-    if let Some(sessions) = registered.open_sessions(context, runner)? {
-        return Err(registered.sessions_refusal(config, sessions));
-    }
-    Ok(registered)
+    })
 }
 
 impl Registered {
@@ -1491,21 +1518,7 @@ impl Registered {
                 sessions.len(),
                 self.name
             ),
-            Some(
-                sessions
-                    .into_iter()
-                    .map(|session| crate::domain::sessions::SessionEntry {
-                        computer: session.host,
-                        application: crate::platform::session_list::application_of_rac(
-                            &session.application,
-                        ),
-                        application_title: session.application,
-                        started: session.started,
-                        user: (!session.user.is_empty()).then_some(session.user),
-                        id: Some(session.id),
-                    })
-                    .collect(),
-            ),
+            Some(super::session_entries(sessions)),
         )
     }
 

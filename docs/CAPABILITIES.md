@@ -1058,7 +1058,12 @@ v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [
   `disable`; [правило](../spec/rules/cli/apply-sessions-governs-foreign-sessions.md)). Что
   базу держат, раннер решает по состоянию: `error-type` агента
   `InfoBaseExclusiveLockRequired`, у файловой базы — блокировка `1Cv8.1CD` (сеанс) и
-  `1Cv8.cgr` (Конфигуратор). Отказ `infobase_sessions` (род `workspace`, выход 3) несёт
+  `1Cv8.cgr` (Конфигуратор). Без улики исполнителя у сервера раннер спрашивает его список
+  сеансов — `rac session list` у кластера раннера (`cluster.managed`), `ibcmd session list` у
+  автономного сервера (свой `ibsrv` по pid, чужой — через `standalone.gate`) — и признак тогда
+  чужие живые сеансы оттуда: без спящих (`hibernate: yes`) и без сеансов Конфигуратора (это сам
+  раннер); список отказа — оттуда же. Кластер не раннера, не ответивший источник или итог
+  `canceled` агента SSH-шлюза признаком не служат: отказ остаётся отказом платформы. Отказ `infobase_sessions` (род `workspace`, выход 3) несёт
   `error.sessions`: `base` без пароля, `list` — компьютер, `application` (`1CV8C`, `1CV8`,
   `Designer`, `BackgroundJob`, `WebClient`, `COMConnection` или `null`),
   `application_title`, `started`, `user`, `id`; `null`, если текст платформы не разобран
@@ -1068,13 +1073,16 @@ v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [
   отказывает уже на загрузке; `list: null`, `terminable: false`, `next` — тот же вызов).
   **Файловая база:** сеансы не завершает ни один ключ платформы (замер #211), раннер
   процессы не снимает — `terminable: false`, `--sessions force` отказывает так же, выход —
-  закрыть сеансы и повторить. **Автономный сервер и кластер:** `--sessions force` после
-  отказа повторяет применение ключом исполнителя (`-SessionTerminate force`,
-  `ibcmd --session-terminate=force --session-terminate-message`, агент
-  `--session-terminate=force`) без блокировки начала сеансов, `lock.state: unknown`; у
-  Конфигуратора и `ibcmd` сервера признака «держат сеансы» нет, поэтому без `force` там
-  остаётся отказ платформы. Ответ после `force` — `data.sessions: {terminated, lock,
-  message_delivered}`, завершённые — из списка первого отказа. Без `force` `ibcmd config
+  закрыть сеансы и повторить. **Автономный сервер и кластер:** `--sessions force` повторяет
+  применение ключом исполнителя (`-SessionTerminate force`, агент `--session-terminate=force`,
+  `ibcmd --session-terminate=force --session-terminate-message`) без блокировки начала
+  сеансов, `lock.state: unknown`, — только когда признак говорит, что базу держат сеансы; отказ
+  по другой причине возвращается как есть, сеансы не трогаются. Ответ после `force` —
+  `data.sessions: {terminated, lock, message_delivered}`, завершённые — из списка первого
+  отказа. Ключ завершения агента кластера работает с 8.3.24; ключа сообщения агент до 8.3.27 не
+  знает, и раннер не передаёт его агенту никогда — `--sessions-message` доходит только через
+  `ibcmd`. На `ibsrv` 8.5.4.2028 над файловой базой после завершения сеанса обновление падает
+  ошибкой платформы до `standalone restart` (замер #613). Без `force` `ibcmd config
   apply` получает `--session-terminate=disable`. `make` и `push --no-apply` ключа не
   принимают; у MCP его нет, отказ там — `runtime_failure`.
 - Замер 8.3.27.2074: поколение основной конфигурации меняет загрузка, а применение — нет; у

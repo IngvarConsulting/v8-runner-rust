@@ -17,7 +17,8 @@
 //! Политику чужих сеансов (`push`/`apply --sessions`, #211) владелец берёт из контекста
 //! команды ([`super::sessions`]), и все пути получают её разом: отказ, при котором базу держат,
 //! становится `infobase_sessions` или `infobase_designer_busy`, а `--sessions force` у сервера
-//! повторяет применение с ключом завершения сеансов исполнителя.
+//! повторяет применение с ключом завершения сеансов исполнителя — только когда признак говорит,
+//! что держат сеансы. Отказ по другой причине возвращается как есть, и сеансы никто не трогает.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -25,11 +26,11 @@ use std::path::{Path, PathBuf};
 use super::sessions::{self, SessionsPolicy};
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
-use crate::domain::sessions::SessionsOutcome;
+use crate::domain::sessions::{SessionEntry, SessionsOutcome};
 use crate::platform::agent::{AgentError, AgentErrorType, WaitPolicy};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::process::ProcessRunner;
-use crate::platform::session_list::{parse_session_list, SessionTerminate};
+use crate::platform::session_list::SessionTerminate;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
     argument, critical_failure, run_critical_typed, AgentHandle,
@@ -106,14 +107,31 @@ pub(crate) struct Subject<'a> {
 ///
 /// Отказ, при котором базу держат, решается по состоянию ([`super::sessions`]): без
 /// `--sessions force` — отказ со списком сеансов; с ним у сервера — второе применение с ключом
-/// завершения сеансов, и исход называет завершённые из списка первого отказа. Файловой базе
-/// ключ не помогает (замер #211), и туда он не идёт: отказ тот же, что без `force`.
+/// завершения сеансов, и исход называет завершённые из списка первого отказа. Без признака
+/// отказ возвращается как есть и с `force`: ключ завершения не отдаётся, и сеансы не трогаются.
+/// Файловой базе ключ не помогает (замер #211), и туда он не идёт: отказ тот же, что без
+/// `force`. Признак сервера без улики исполнителя — чужие живые сеансы из его собственного
+/// списка ([`crate::use_cases::managed_stand::awake_server_sessions`]).
 pub(crate) fn apply(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    applier: Applier<'_>,
+    subject: &Subject<'_>,
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
+    apply_with(context, config, applier, subject, deferrals, &|| {
+        crate::use_cases::managed_stand::awake_server_sessions(context, config)
+    })
+}
+
+/// [`apply`] с данным источником сеансов кластера.
+fn apply_with(
     context: &ExecutionContext,
     config: &AppConfig,
     mut applier: Applier<'_>,
     subject: &Subject<'_>,
     deferrals: &mut Deferrals,
+    cluster_sessions: &dyn Fn() -> Option<Vec<SessionEntry>>,
 ) -> Result<(), AppError> {
     let (verb, executor) = match &applier {
         Applier::Designer { .. } => ("update_db_cfg", "Конфигуратор"),
@@ -170,22 +188,24 @@ pub(crate) fn apply(
     if refused.error.cancellation().is_some() {
         return Err(refused.error);
     }
-    let executor = refused.executor;
-    let holder = sessions::holder(config, executor, &refused.evidence());
+    let holder = sessions::holder(
+        config,
+        refused.executor,
+        &refused.evidence(),
+        cluster_sessions,
+    );
     let Some(message) = force else {
         return Err(refuse(gate, config, holder, refused.error));
     };
-    // Сервер: сеансы завершает ключ исполнителя. У агента признак «держат сеансы» —
-    // `error-type`; у Конфигуратора и `ibcmd` сервера признака нет, и второе применение идёт
-    // после любого их отказа: с `--sessions force` платформа завершает сеансы, если монопольный
-    // доступ нужен, а отказ по другой причине повторится и дойдёт до команды.
+    // Сервер: сеансы завершает ключ исполнителя, и только когда признак говорит, что базу держат
+    // сеансы. Без признака — список сервера не получен или пуст, отказ по другой причине —
+    // ключ не отдаётся: отказ доходит до команды как есть.
     let terminated = match holder {
         Some(sessions::Holder::Sessions(list)) => list,
         Some(sessions::Holder::Designer) => {
             return Err(refuse(gate, config, holder, refused.error));
         }
-        None if executor == sessions::Executor::Agent => return Err(refused.error),
-        None => refused.text.as_deref().and_then(parse_session_list),
+        None => return Err(refused.error),
     };
     if let Some(error) = interruption::interruption_before_safe_point(context, safe_point) {
         return Err(error);
@@ -209,7 +229,12 @@ pub(crate) fn apply(
         if refused.error.cancellation().is_some() {
             return refused.error;
         }
-        let holder = sessions::holder(config, refused.executor, &refused.evidence());
+        let holder = sessions::holder(
+            config,
+            refused.executor,
+            &refused.evidence(),
+            cluster_sessions,
+        );
         refuse(gate, config, holder, refused.error)
     })
 }
@@ -370,10 +395,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{agent_update_command, apply, Applier, Subject, SubjectKind};
+    use super::{agent_update_command, apply, apply_with, Applier, Subject, SubjectKind};
     use crate::config::model::{AppConfig, InfobaseConfig, SourceFormat, TestsConfig, ToolsConfig};
     use crate::domain::next_step::NextStep;
-    use crate::domain::sessions::SessionLockState;
+    use crate::domain::sessions::{SessionEntry, SessionLockState};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest,
         ProcessResult, ProcessRunner, SpawnResult, WorkGiven,
@@ -566,9 +591,20 @@ mod tests {
         runner: &Scripted,
         dir: &Path,
     ) -> Result<(), crate::support::error::AppError> {
+        designer_apply_seeing(context, config, runner, dir, None)
+    }
+
+    /// Применение Конфигуратором, когда `rac` кластера раннера называет эти неспящие сеансы.
+    fn designer_apply_seeing(
+        context: &ExecutionContext,
+        config: &AppConfig,
+        runner: &Scripted,
+        dir: &Path,
+        awake: Option<Vec<SessionEntry>>,
+    ) -> Result<(), crate::support::error::AppError> {
         std::fs::create_dir_all(dir.join("logs")).expect("logs");
         collecting_deferrals(|deferrals| {
-            apply(
+            apply_with(
                 context,
                 config,
                 Applier::Designer {
@@ -583,10 +619,26 @@ mod tests {
                     timeline: "main",
                 },
                 deferrals,
+                &|| awake.clone(),
             )
         })
         .map(|_| ())
     }
+
+    /// Неспящий сеанс тонкого клиента, как его называет `rac session list` (замер #613).
+    fn rac_session() -> SessionEntry {
+        SessionEntry {
+            computer: "w11p-igor".to_owned(),
+            application: Some(crate::domain::sessions::ApplicationCode::ThinClient),
+            application_title: "1CV8C".to_owned(),
+            started: "2026-11-11T13:00:40".to_owned(),
+            user: Some("DefUser".to_owned()),
+            id: Some("a6c102fc-0000-0000-0000-000000000000".to_owned()),
+        }
+    }
+
+    /// Текст `/Out` пакетного Конфигуратора, которому мешало не то, что держат сеансы.
+    const OTHER_FAILURE: &str = "Расширение конфигурации не найдено.";
 
     fn forced(command: &str) -> ExecutionContext {
         ExecutionContext::cli(CommandName::Apply).with_sessions(SessionsGate::new(
@@ -597,8 +649,9 @@ mod tests {
         ))
     }
 
-    /// Сервер, `--sessions force`: первый отказ даёт список, второе применение идёт с
-    /// `-SessionTerminate force`, а исход называет завершённые сеансы из списка до завершения
+    /// Кластер раннера, `--sessions force`: Конфигуратор отказал, `rac` называет неспящий сеанс —
+    /// улика есть, второе применение идёт с `-SessionTerminate force`, а исход называет
+    /// завершённые сеансы из списка `rac` до завершения
     /// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
     #[test]
     fn a_server_apply_with_force_ends_the_sessions_and_names_them() {
@@ -607,7 +660,14 @@ mod tests {
         let runner = Scripted::new(vec![(1, MEASURED_LIST_RU), (0, "")]);
         let context = forced("apply");
 
-        designer_apply(&context, &config, &runner, dir.path()).expect("applied");
+        designer_apply_seeing(
+            &context,
+            &config,
+            &runner,
+            dir.path(),
+            Some(vec![rac_session()]),
+        )
+        .expect("applied");
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 2, "{calls:?}");
@@ -615,8 +675,11 @@ mod tests {
         assert!(calls[1].ends_with(&["-SessionTerminate".to_owned(), "force".to_owned()]));
         let outcome = context.sessions().outcome().expect("outcome");
         let terminated = outcome.terminated.expect("terminated");
-        assert_eq!(terminated.len(), 2);
-        assert_eq!(terminated[0].application_title, "Тонкий клиент");
+        assert_eq!(
+            terminated,
+            vec![rac_session()],
+            "the list of rac, not of the text"
+        );
         assert_eq!(outcome.lock.state, SessionLockState::Unknown);
         assert!(
             !outcome.message_delivered,
@@ -624,8 +687,72 @@ mod tests {
         );
     }
 
-    /// Без `force` отказ сервера у Конфигуратора признака «держат сеансы» не несёт: решать по
-    /// тексту нельзя, и отказ доходит до команды как отказ платформы, без второго запуска.
+    /// Кластер раннера без улики исполнителя: Конфигуратор отказал общим кодом, а `rac` называет
+    /// неспящий сеанс — отказ `infobase_sessions` с этим списком, `terminable: true` и `next` с
+    /// `--sessions force`; второго запуска без `force` нет.
+    #[test]
+    fn a_cluster_refusal_without_executor_evidence_names_the_awake_rac_sessions() {
+        let dir = tempdir().expect("tempdir");
+        let config = server_config(dir.path());
+        let runner = Scripted::new(vec![(1, MEASURED_LIST_RU)]);
+        let context = ExecutionContext::cli(CommandName::Apply).with_sessions(SessionsGate::new(
+            SessionsPolicy::Disable,
+            NextStep::command("apply"),
+        ));
+
+        let error = designer_apply_seeing(
+            &context,
+            &config,
+            &runner,
+            dir.path(),
+            Some(vec![rac_session()]),
+        )
+        .expect_err("refused");
+
+        assert_eq!(runner.calls().len(), 1);
+        let refusal = crate::use_cases::result::UseCaseError::from(error);
+        assert_eq!(
+            refusal.kind(),
+            crate::use_cases::result::UseCaseErrorKind::InfobaseSessions
+        );
+        let sessions = refusal.sessions().expect("sessions");
+        assert_eq!(sessions.list, Some(vec![rac_session()]));
+        assert!(sessions.terminable);
+        assert_eq!(sessions.lock.state, SessionLockState::Unknown);
+        let next = refusal.next().expect("next");
+        assert_eq!(
+            next.keys.get("--sessions").map(String::as_str),
+            Some("force")
+        );
+        assert!(context.sessions().outcome().is_none());
+    }
+
+    /// `--sessions force` после отказа не из-за сеансов — улики нет ни у исполнителя, ни у
+    /// `rac`: применение не повторяется, ключ завершения платформе не отдаётся, исхода
+    /// `sessions` нет, и отказ доходит до команды как есть.
+    #[test]
+    fn a_forced_apply_refused_for_another_reason_neither_repeats_nor_terminates() {
+        let dir = tempdir().expect("tempdir");
+        let config = server_config(dir.path());
+        let runner = Scripted::new(vec![(1, OTHER_FAILURE)]);
+        let context = forced("apply");
+
+        let error = designer_apply_seeing(&context, &config, &runner, dir.path(), None)
+            .expect_err("refused");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "no second run: {calls:?}");
+        assert!(!calls[0].iter().any(|arg| arg == "-SessionTerminate"));
+        assert!(
+            matches!(error, crate::support::error::AppError::Platform(_)),
+            "{error:?}"
+        );
+        assert!(context.sessions().outcome().is_none(), "nothing terminated");
+    }
+
+    /// Без `force` отказ сервера у Конфигуратора без улики `rac` признака «держат сеансы» не
+    /// несёт: решать по тексту нельзя, и отказ доходит до команды как отказ платформы, без
+    /// второго запуска.
     #[test]
     fn a_server_apply_without_force_keeps_the_platform_refusal() {
         let dir = tempdir().expect("tempdir");

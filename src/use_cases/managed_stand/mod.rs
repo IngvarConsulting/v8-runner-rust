@@ -1043,6 +1043,67 @@ pub(crate) fn cluster_base(
     cluster::cluster_base(context, config, dry_run, &ProcessExecutor, &RealHost)
 }
 
+/// Чужие живые сеансы серверной базы — признак «базу держат сеансы» у применения, когда
+/// исполнитель его не дал (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`, замер #613):
+/// у кластера раннера — `rac session list`, у автономного сервера — `ibcmd session list` (свой
+/// `ibsrv` по pid, чужой — через объявленный шлюз). Не в счёт спящие сеансы (`hibernate : yes`,
+/// обновлению они не мешают) и сеансы Конфигуратора: это сам раннер — агент, ещё подключённый
+/// к базе, — а чужой Конфигуратор держит блокировку конфигурирования, и загрузка отказывает
+/// раньше применения. `None` — цель файловая, кластер не раннера, источник не ответил или
+/// живых сеансов нет.
+pub(crate) fn awake_server_sessions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
+    awake_server_sessions_with(context, config, &ProcessExecutor, &RealHost)
+}
+
+fn awake_server_sessions_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
+    use crate::domain::capability::TargetKind;
+    let sessions = match config.target_kind() {
+        TargetKind::Cluster => cluster::sessions(context, config, runner, host)?,
+        TargetKind::Standalone => standalone::sessions(context, config, runner, host)?,
+        TargetKind::File => return None,
+    };
+    foreign_awake(sessions)
+}
+
+/// Чужие живые сеансы из списка сервера: без спящих и без сеансов Конфигуратора; пусто — `None`.
+fn foreign_awake(
+    sessions: Vec<crate::platform::rac::Session>,
+) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
+    let awake: Vec<_> = sessions
+        .into_iter()
+        .filter(|session| !session.asleep && session.application != DESIGNER_APP_ID)
+        .collect();
+    (!awake.is_empty()).then(|| session_entries(awake))
+}
+
+/// `app-id` Конфигуратора в списке сеансов сервера.
+const DESIGNER_APP_ID: &str = "Designer";
+
+/// Сеансы сервера в форме списка `error.sessions`: код приложения даёт `app-id`.
+fn session_entries(
+    sessions: Vec<crate::platform::rac::Session>,
+) -> Vec<crate::domain::sessions::SessionEntry> {
+    sessions
+        .into_iter()
+        .map(|session| crate::domain::sessions::SessionEntry {
+            computer: session.host,
+            application: crate::platform::session_list::application_of_rac(&session.application),
+            application_title: session.application,
+            started: session.started,
+            user: (!session.user.is_empty()).then_some(session.user),
+            id: Some(session.id),
+        })
+        .collect()
+}
+
 /// База создана в реестре кластера раннера: рабочие команды её откроют.
 pub(crate) fn remember_cluster_base(config: &AppConfig) -> Result<(), UseCaseError> {
     cluster::remember_registered(config)
@@ -1140,6 +1201,41 @@ fn run_dbms(
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
+
+    /// Признак сервера — только чужие живые сеансы: спящий сеанс (убитого клиента у кластера)
+    /// обновлению не мешает, а сеанс Конфигуратора — сам раннер или уже не причина отказа
+    /// обновления (замер #613). Список приходит с кодом приложения из `app-id`.
+    #[test]
+    fn only_foreign_awake_sessions_of_a_server_hold_it() {
+        let session = |id: &str, app: &str, asleep: bool| crate::platform::rac::Session {
+            id: id.to_owned(),
+            application: app.to_owned(),
+            host: "w11p-igor".to_owned(),
+            user: String::new(),
+            started: "2026-11-11T14:01:46".to_owned(),
+            asleep,
+        };
+        let held = super::foreign_awake(vec![
+            session("client", "1CV8C", false),
+            session("killed", "1CV8C", true),
+            session("agent", "Designer", false),
+        ])
+        .expect("held");
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].id.as_deref(), Some("client"));
+        assert_eq!(
+            held[0].application,
+            Some(crate::domain::sessions::ApplicationCode::ThinClient)
+        );
+        assert_eq!(held[0].user, None);
+        assert_eq!(
+            super::foreign_awake(vec![
+                session("killed", "1CV8C", true),
+                session("agent", "Designer", false)
+            ]),
+            None
+        );
+    }
 
     use super::*;
     use crate::config::model::{

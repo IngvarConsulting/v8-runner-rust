@@ -5,12 +5,15 @@
 //! Признак «базу держат» берётся из состояния, а не из текста платформы
 //! (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`): у агента — `error-type`
 //! `InfoBaseExclusiveLockRequired`, у файловой базы — блокировка файлов `1Cv8.1CD` (сеансы) и
-//! `1Cv8.cgr` (Конфигуратор). Текст отказа даёт только список сеансов, и тот разобран целиком
-//! или не дан вовсе.
+//! `1Cv8.cgr` (Конфигуратор), у сервера без улики исполнителя — чужие живые сеансы в его
+//! собственном списке: `rac session list` кластера раннера, `ibcmd session list` автономного
+//! сервера (замер #613). Текст отказа даёт только список сеансов, и тот разобран целиком или не
+//! дан вовсе.
 //!
-//! Завершать сеансы раннер умеет только у сервера — автономного и кластера — ключом самого
-//! исполнителя. У файловой базы их не завершает ни один ключ (замер #211), а процессы людей
-//! раннер не снимает: отказ называет сеансы, и выход из него — тот же вызов, когда их закроют.
+//! Завершать сеансы раннер умеет только у сервера ключом самого исполнителя, и только когда
+//! признак говорит, что базу держат сеансы. У файловой базы их не завершает ни один ключ (замер
+//! #211, #613), а процессы людей раннер не снимает: отказ называет сеансы, и выход из него —
+//! тот же вызов, когда их закроют.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -168,21 +171,37 @@ pub(crate) struct Evidence<'a> {
     pub(crate) agent_asked: bool,
 }
 
-/// Кто держит базу после отказа. У агента — `error-type` `InfoBaseExclusiveLockRequired` или его
-/// вопрос; Конфигуратор при агенте по файлу не узнаётся — файл держит он сам. У процесса — блокировка
-/// файлов файловой базы; при любом её сеансе обновление с запретом динамического не проходит
-/// (замер #211), и отказ — из-за сеансов. Проба, которая не ответила, признаком не служит, а у
-/// сервера проб нет: отказ остаётся отказом исполнителя.
+/// Кто держит базу после отказа. Сначала улика исполнителя: у агента — `error-type`
+/// `InfoBaseExclusiveLockRequired` или его вопрос (список — из текста, а если тот не разобран, —
+/// из списка сервера); Конфигуратор при агенте по файлу не узнаётся — файл держит он сам. У
+/// процесса файловой базы — блокировка файлов; при любом её сеансе обновление с запретом
+/// динамического не проходит (замер #211), и отказ — из-за сеансов. Без улики исполнителя у
+/// сервера — чужие живые сеансы из его собственного списка (`server_sessions`: `rac` кластера
+/// раннера, `ibcmd session list` автономного сервера; замер #613), и список тогда оттуда. Проба
+/// или источник, которые не ответили, признаком не служат: отказ остаётся отказом исполнителя.
 pub(crate) fn holder(
     config: &AppConfig,
     executor: Executor,
     evidence: &Evidence<'_>,
+    server_sessions: &dyn Fn() -> Option<Vec<SessionEntry>>,
 ) -> Option<Holder> {
-    let listed = || Holder::Sessions(evidence.text.and_then(parse_session_list));
+    let server = config.target_kind() != TargetKind::File;
     if executor == Executor::Agent {
         let held = evidence.agent_asked
             || evidence.agent_error == Some(&AgentErrorType::InfoBaseExclusiveLockRequired);
-        return held.then(listed);
+        if held {
+            let list = evidence
+                .text
+                .and_then(parse_session_list)
+                .or_else(|| server.then(server_sessions).flatten());
+            return Some(Holder::Sessions(list));
+        }
+    }
+    if server {
+        return server_sessions().map(|list| Holder::Sessions(Some(list)));
+    }
+    if executor == Executor::Agent {
+        return None;
     }
     let base = file_base_dir(config)?;
     if file_base_hold::designer_hold(&base).ok()?.is_held() {
@@ -191,7 +210,7 @@ pub(crate) fn holder(
     file_base_hold::sessions_hold(&base)
         .ok()?
         .is_held()
-        .then(listed)
+        .then(|| Holder::Sessions(evidence.text.and_then(parse_session_list)))
 }
 
 /// Каталог файловой базы, как его понимает платформа: без кавычек и от каталога проекта.
@@ -405,6 +424,7 @@ mod tests {
                 agent_error: Some(&exclusive),
                 agent_asked: false,
             },
+            &|| None,
         );
         let Some(Holder::Sessions(Some(list))) = held else {
             panic!("held by sessions: {held:?}");
@@ -417,7 +437,8 @@ mod tests {
                 &Evidence {
                     agent_asked: true,
                     ..Evidence::default()
-                }
+                },
+                &|| None,
             ),
             Some(Holder::Sessions(None))
         ));
@@ -430,10 +451,91 @@ mod tests {
                     text: Some(message),
                     agent_error: Some(&other),
                     agent_asked: false,
-                }
+                },
+                &|| None,
             ),
             None,
             "the words of the message decide nothing"
+        );
+    }
+
+    /// Сервер без улики исполнителя: признак — живые сеансы из его собственного списка, и
+    /// список берётся оттуда, а не из текста. Так у кластера и у автономного сервера, после
+    /// пакетного Конфигуратора и после агента, чья ошибка не о сеансах (агент SSH-шлюза
+    /// отказывает из-за сеансов итогом `canceled`, замер #613). Улика агента списка сервера не
+    /// требует; его спрашивают, только если текст агента не разобран.
+    #[test]
+    fn a_server_is_held_by_the_awake_sessions_of_its_own_list() {
+        let dir = tempfile::tempdir().expect("dir");
+        let cluster = AppConfig {
+            infobase: crate::config::model::InfobaseConfig::file("Srvr=host;Ref=ib"),
+            ..file_config(dir.path())
+        };
+        let mut standalone = cluster.clone();
+        standalone.infobase.standalone = Some(crate::config::model::StandaloneConfig {
+            managed: None,
+            gate: None,
+            host_fingerprint: None,
+            exchange: None,
+        });
+        let text = crate::platform::session_list::tests::MEASURED_LIST_RU;
+        let process = Evidence {
+            text: Some(text),
+            ..Evidence::default()
+        };
+        let other = AgentErrorType::Other("Canceled".to_owned());
+        let agent_without_evidence = Evidence {
+            text: Some(text),
+            agent_error: Some(&other),
+            agent_asked: false,
+        };
+        let listed = || Some(vec![entry("server-host")]);
+        for config in [&cluster, &standalone] {
+            for (executor, evidence) in [
+                (Executor::Process, &process),
+                (Executor::Agent, &agent_without_evidence),
+            ] {
+                assert_eq!(
+                    holder(config, executor, evidence, &listed),
+                    Some(Holder::Sessions(Some(vec![entry("server-host")]))),
+                    "{executor:?}"
+                );
+                assert_eq!(
+                    holder(config, executor, evidence, &|| None),
+                    None,
+                    "the text alone decides nothing: {executor:?}"
+                );
+            }
+        }
+        let exclusive = AgentErrorType::InfoBaseExclusiveLockRequired;
+        let asked = std::cell::Cell::new(0);
+        let counted = || {
+            asked.set(asked.get() + 1);
+            listed()
+        };
+        let held = holder(
+            &cluster,
+            Executor::Agent,
+            &Evidence {
+                text: Some(text),
+                agent_error: Some(&exclusive),
+                agent_asked: false,
+            },
+            &counted,
+        );
+        assert!(matches!(held, Some(Holder::Sessions(Some(ref list))) if list.len() == 2));
+        assert_eq!(asked.get(), 0, "the agent's own text names the sessions");
+        assert_eq!(
+            holder(
+                &cluster,
+                Executor::Agent,
+                &Evidence {
+                    agent_asked: true,
+                    ..Evidence::default()
+                },
+                &counted,
+            ),
+            Some(Holder::Sessions(Some(vec![entry("server-host")])))
         );
     }
 

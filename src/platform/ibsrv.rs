@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::process::ProcessRequest;
 use crate::platform::service::ServiceRequest;
 
 /// Сколько портов в диапазоне прямого шлюза.
@@ -127,9 +128,47 @@ pub fn start_server(
     }
 }
 
+/// Чей список сеансов спрашивает `ibcmd session list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSource<'a> {
+    /// `ibsrv` на этой машине по его pid: так раннер спрашивает свой сервер.
+    Pid(u32),
+    /// Объявленный SSH-шлюз `host:port`: подсистема `scop` шлюза (замер #188).
+    Gate(&'a str),
+}
+
+/// `ibcmd session list`: сеансы автономного сервера блоками `ключ : значение`, как у `rac`
+/// (`session`, `app-id`, `hibernate`, `host`, `user-name`, `started-at`; замер #188, #613).
+pub fn session_list(utility: &Path, source: SessionSource<'_>) -> ProcessRequest {
+    let source = match source {
+        SessionSource::Pid(pid) => format!("--pid={pid}"),
+        SessionSource::Gate(gate) => format!("--remote=ssh://{gate}"),
+    };
+    ProcessRequest {
+        program: utility.to_path_buf(),
+        args: vec!["session".to_owned(), "list".to_owned(), source],
+        workdir: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        startup_probe: None,
+        windows_verbatim_args: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sessions_of_a_server_are_asked_by_its_pid_or_its_gate() {
+        let by_pid = session_list(Path::new("ibcmd"), SessionSource::Pid(42));
+        assert_eq!(by_pid.args, ["session", "list", "--pid=42"]);
+        let by_gate = session_list(Path::new("ibcmd"), SessionSource::Gate("host:1543"));
+        assert_eq!(
+            by_gate.args,
+            ["session", "list", "--remote=ssh://host:1543"]
+        );
+    }
 
     #[test]
     fn the_ports_of_a_block_do_not_overlap_and_name_the_addresses() {
