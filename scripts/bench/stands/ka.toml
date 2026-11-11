@@ -1,0 +1,17 @@
+# КА 8.3.27: существующий стенд bench (113 тыс. файлов выгрузки, файловая база без пользователей).
+# Скрипт его не создаёт и не удаляет: правит только модули из наборов ниже и возвращает их.
+# Рабочие файлы (staging, результаты, трассы) — в <stands_root>/bench-ka.
+title = "КА 8.3.27, стенд bench"
+platform = "8.3.27.2342"
+
+[existing]
+project = 'E:\stands\v8-runner\bench\p-new'
+infobase = 'E:\stands\v8-runner\bench\ib'
+
+[modules]
+common1 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl"]
+common2 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+           "CommonModules/СтроковыеФункцииКлиентСервер/Ext/Module.bsl"]
+form = ["Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl",
+        "CommonForms/АЛКОВыборМасштаба/Ext/Form/Module.bsl"]
+object = ["Catalogs/Номенклатура/Ext/ObjectModule.bsl"]

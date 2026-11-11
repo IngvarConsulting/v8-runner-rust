@@ -1,0 +1,17 @@
+# БСП 3.2.1.569 на 8.5.1: база из шаблона cf, поддержка снята. `bench.py setup` создаёт стенд
+# в <stands_root>/bench-ssl321: база ib, проект project (git, полная выгрузка раннера).
+title = "БСП 3.2.1.569, 8.5.1"
+platform = "8.5.1.1529"
+
+[create]
+cf = 'E:\1c\tmplts\1c\SSL\3_2_1_569\1Cv8.cf'
+disable_support = true
+
+# Наборы модулей, на которые ссылаются сценарии (scenarios.toml, ключ `modules`).
+[modules]
+common1 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl"]
+common2 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+           "CommonModules/СтроковыеФункцииКлиентСервер/Ext/Module.bsl"]
+form = ["Catalogs/Пользователи/Forms/ФормаЭлемента/Ext/Form/Module.bsl",
+        "CommonForms/АдреснаяКнига/Ext/Form/Module.bsl"]
+object = ["Catalogs/Валюты/Ext/ObjectModule.bsl"]
