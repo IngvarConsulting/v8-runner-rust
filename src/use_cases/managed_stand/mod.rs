@@ -204,6 +204,15 @@ fn occupant_of(host: &dyn ServiceHost, port: u16) -> Option<u32> {
         .or_else(|| host.port_answers(port).then_some(0))
 }
 
+/// Кто держит порт, словами отказа или предупреждения: `0` — система процесс не назвала.
+fn occupant_name(pid: u32) -> String {
+    if pid == 0 {
+        "another process".to_owned()
+    } else {
+        format!("process {pid}")
+    }
+}
+
 /// Смещения первого порта от пути копии: копии не мешают друг другу.
 fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
@@ -555,11 +564,7 @@ impl<'a> Stand<'a> {
     }
 
     fn occupied(&self, port: u16, pid: u32) -> UseCaseError {
-        let who = if pid == 0 {
-            "another process".to_owned()
-        } else {
-            format!("process {pid}")
-        };
+        let who = occupant_name(pid);
         UseCaseError::new(
             UseCaseErrorKind::WorkspaceBusy,
             format!(

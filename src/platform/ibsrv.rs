@@ -37,6 +37,11 @@ impl ServerPorts {
             .chain(self.range_start..self.range_start + DIRECT_RANGE_WIDTH)
     }
 
+    /// Блоки делят хотя бы один порт.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.all().any(|port| other.all().any(|own| own == port))
+    }
+
     /// Строка соединения прямого шлюза.
     pub fn connection(self, name: &str) -> String {
         format!("Srvr=127.0.0.1:{};Ref={name}", self.direct)
