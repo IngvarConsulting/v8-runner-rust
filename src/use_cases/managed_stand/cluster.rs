@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, environment, first_taken, forget_record, io_failure, occupant_of,
-    other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record, Database,
-    ServiceHost, Stand, Taken,
+    await_gone, being_started, block_conflict, environment, first_taken, forget_record, io_failure,
+    occupant_of, other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record,
+    Database, MoveCause, ServiceHost, Stand,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -60,8 +60,8 @@ enum Busy {
     /// Отказ: чужой `ragent` работает над реестром этой копии — реестр живой, — или порт занят,
     /// а перечня процессов нет, и кто его держит, не сказать.
     Refused(UseCaseError),
-    /// Порт держит чужой процесс: выход — новый реестр.
-    Port(Taken),
+    /// Порт держит чужой процесс или в блок попал порт PostgreSQL раннера: выход — новый реестр.
+    Port(MoveCause),
 }
 
 /// То, что сценарий узнаёт о цели из настроек.
@@ -697,17 +697,17 @@ impl Cluster<'_> {
         }
     }
 
-    /// Предупреждение о новом реестре, который запуск завёл сам: закреплённый порт занят.
-    fn moved_warning(&self, taken: Taken, regport: u16, registered: bool) -> String {
-        let (port, who) = (taken.port, taken.who());
+    /// Предупреждение о новом реестре, который запуск завёл сам: закреплённый порт занят или
+    /// совпал с портом PostgreSQL раннера.
+    fn moved_warning(&self, cause: MoveCause, regport: u16, registered: bool) -> String {
+        let reason = cause.reason(&format!("the cluster of '{}'", self.declared.infobase));
         let base = if registered {
             ", the infobase is registered there again over its database (its id in the registry is new)"
         } else {
             ""
         };
         format!(
-            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: the cluster moved to a new registry on regport {regport}{base}; take the address from this answer, v8project*.yaml is not changed",
-            self.declared.infobase
+            "{reason}: the cluster moved to a new registry on regport {regport}{base}; take the address from this answer, v8project*.yaml is not changed"
         )
     }
 
@@ -782,9 +782,10 @@ impl Cluster<'_> {
         })
     }
 
-    /// Закреплённые порты заняты: чужой агент над нашим реестром — отказ без выхода, иначе выход —
-    /// новый реестр (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`). Перечень процессов нужен,
-    /// только если порт занят.
+    /// Закреплённые порты заняты или в блок попал порт PostgreSQL раннера: чужой агент над нашим
+    /// реестром — отказ без выхода, иначе выход — новый реестр
+    /// (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`). Перечень процессов обязателен,
+    /// только если порт занят. Решается до запуска PostgreSQL: поднятый, он сам занял бы свой порт.
     fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
         let refusal = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
         let foreign = |agents: &[ProcessRow]| {
@@ -795,21 +796,30 @@ impl Cluster<'_> {
                 )))
             })
         };
-        let Some(taken) = first_taken(self.host, pins.ports.all()) else {
+        let dbms = Self::dbms_port(self.stand().as_ref());
+        let Some(cause) = block_conflict(self.host, pins.ports.all(), dbms) else {
             // Порты свободны, но чужой агент может работать над нашим реестром на других портах:
             // второй агент над тем же реестром его испортит. Без перечня запуск идёт как есть.
             return self.agents().and_then(|agents| foreign(&agents));
         };
         let Some(agents) = self.agents() else {
-            return Some(Busy::Refused(refusal(format!(
-                "port {} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
-                taken.port, self.declared.infobase
-            ))));
+            // Порт PostgreSQL раннера в блоке сам перечня не требует, а порт, занятый кем-то ещё, —
+            // требует: без перечня не сказать, не чужой ли это агент над нашим реестром.
+            let taken = match cause {
+                MoveCause::Taken(taken) => Some(taken),
+                MoveCause::Postgres(port) => {
+                    first_taken(self.host, pins.ports.all().filter(|own| *own != port))
+                }
+            };
+            return Some(match taken {
+                Some(taken) => Busy::Refused(refusal(format!(
+                    "port {} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
+                    taken.port, self.declared.infobase
+                ))),
+                None => Busy::Port(cause),
+            });
         };
-        if let Some(busy) = foreign(&agents) {
-            return Some(busy);
-        }
-        Some(Busy::Port(taken))
+        Some(foreign(&agents).unwrap_or(Busy::Port(cause)))
     }
 
     /// Каталоги реестров, которых не называют закреплённые порты: остатки прерванного `--new-regport`.
@@ -877,7 +887,7 @@ impl Cluster<'_> {
         machine: &str,
         stand: Option<&Stand<'_>>,
         old: ClusterPins,
-        announce: Option<Taken>,
+        announce: Option<MoveCause>,
     ) -> Result<ClusterResult, UseCaseError> {
         let old_registry = self.registry(&old);
         let declared = self.database()?;
@@ -958,8 +968,8 @@ impl Cluster<'_> {
         result.ready = true;
         result.previous_regport = Some(old.ports.regport);
         let mut result = self.describe(result, Some(&agent));
-        if let Some(taken) = announce {
-            let warning = self.moved_warning(taken, pins.ports.regport, result.registered);
+        if let Some(cause) = announce {
+            let warning = self.moved_warning(cause, pins.ports.regport, result.registered);
             result.warnings.push(warning);
         }
         Ok(result)
@@ -2552,6 +2562,142 @@ mod tests {
         assert_eq!(setup.dbms_record().port, dbms_port);
         let new = setup.pins();
         assert!(!new.ports.all().any(|port| port == dbms_port), "{new:?}");
+    }
+
+    /// Закрепить порт PostgreSQL раннера, как его закрепил бы перебор самого PostgreSQL.
+    fn pin_the_postgres(setup: &Setup, port: u16) {
+        let dbms = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);
+        write_json(
+            &dbms.pins(),
+            &crate::platform::service_record::PinnedPorts { port },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_pinned_block_over_the_port_of_the_runners_postgres_moves_to_a_new_registry() {
+        for restart in [false, true] {
+            let setup = setup();
+            let host = Host::default();
+            setup.run(ServiceCommand::Start, &host).unwrap();
+            super::remember_registered(&setup.config).unwrap();
+            if !restart {
+                setup.run(ServiceCommand::Stop, &host).unwrap();
+            }
+            let old = setup.pins();
+            // PostgreSQL закреплён внутри блока кластера: поднятый, он занял бы порт рабочих процессов.
+            let dbms_port = old.ports.range_start + 2;
+            pin_the_postgres(&setup, dbms_port);
+            if restart {
+                // `restart` PostgreSQL не трогает: он уже слушает закреплённый порт внутри блока, и
+                // это не чужой процесс.
+                host.listeners.borrow_mut().retain(|_, pid| *pid != PG_PID);
+                host.listeners.borrow_mut().insert(dbms_port, PG_PID);
+            }
+            let command = if restart {
+                ServiceCommand::Restart
+            } else {
+                ServiceCommand::Start
+            };
+            let moved = setup.run(command, &host).unwrap();
+            assert_eq!(moved.action, ServiceAction::Started);
+            assert_eq!(moved.previous_regport, Some(old.ports.regport));
+            if !restart {
+                // `restart` работающий PostgreSQL не трогает; запуск поднимает его на закреплённом.
+                assert_eq!(setup.dbms_record().port, dbms_port);
+            }
+            let new = setup.pins();
+            assert!(!new.ports.overlaps(old.ports), "{new:?}");
+            assert!(!new.ports.all().any(|port| port == dbms_port), "{new:?}");
+            assert!(new.registered);
+            assert!(new.previous.is_none());
+            assert!(!setup.agent().root().join(&old.registry).exists());
+            {
+                let calls = host.rac_calls.borrow();
+                let create = calls
+                    .iter()
+                    .find(|args| args[..2] == ["infobase", "create"])
+                    .expect("the base is registered again over its database");
+                assert!(!create.iter().any(|arg| arg == "--create-database"));
+                assert!(create.iter().any(|arg| arg == "--db-name=demo_data"));
+            }
+            let warning = moved.warnings.join(" ");
+            assert!(warning.contains("PostgreSQL"), "{warning}");
+            assert!(warning.contains(&format!("port {dbms_port}")), "{warning}");
+            assert!(warning.contains("its database"), "{warning}");
+            assert!(!warning.contains("taken by"), "{warning}");
+        }
+    }
+
+    #[test]
+    fn the_port_of_the_postgres_in_the_block_keeps_the_refusals_of_a_busy_port() {
+        for unlisted in [false, true] {
+            let setup = setup();
+            let host = Host::default();
+            setup.run(ServiceCommand::Start, &host).unwrap();
+            setup.run(ServiceCommand::Stop, &host).unwrap();
+            let pins = setup.pins();
+            pin_the_postgres(&setup, pins.ports.range_start + 2);
+            host.spawned.borrow_mut().clear();
+            if unlisted {
+                // Другой порт блока занят, а кто его держит, не сказать.
+                host.listeners.borrow_mut().insert(pins.ports.regport, 9101);
+                host.unlisted.set(true);
+            } else {
+                host.foreign_agents.borrow_mut().push((
+                    9100,
+                    format!(
+                        "ragent.exe /agent /d \"{}\"",
+                        setup.agent().root().join(&pins.registry).display()
+                    ),
+                ));
+            }
+            let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+            assert_eq!(setup.pins(), pins);
+            assert!(setup.agent().root().join(&pins.registry).is_dir());
+            assert!(
+                host.spawned.borrow().is_empty(),
+                "nothing starts, PostgreSQL neither"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ras_port_over_the_port_of_the_runners_postgres_takes_a_new_port() {
+        // `true` — `ras` поднимается к работающему агенту, пока PostgreSQL не слушает свой порт:
+        // занятость порта его не выдаёт, обойти его велит только закреплённое.
+        for fallen_ras in [false, true] {
+            let setup = setup();
+            let host = Host::default();
+            setup.run(ServiceCommand::Start, &host).unwrap();
+            let old: ServiceRecord = read_json(&setup.ras().record()).unwrap();
+            if fallen_ras {
+                host.kill(RAS_PID);
+                host.kill(PG_PID);
+            } else {
+                setup.run(ServiceCommand::Stop, &host).unwrap();
+            }
+            let pins = setup.pins();
+            pin_the_postgres(&setup, old.port);
+            let started = setup.run(ServiceCommand::Start, &host).unwrap();
+            let expected = if fallen_ras {
+                ServiceAction::AlreadyRunning
+            } else {
+                assert_eq!(setup.dbms_record().port, old.port);
+                ServiceAction::Started
+            };
+            assert_eq!(started.action, expected);
+            assert_eq!(
+                started.previous_regport, None,
+                "the block of the cluster stays"
+            );
+            assert_eq!(setup.pins(), pins);
+            let ras: ServiceRecord = read_json(&setup.ras().record()).unwrap();
+            assert_ne!(ras.port, old.port, "fallen ras: {fallen_ras}");
+            assert!(!pins.ports.all().any(|port| port == ras.port));
+            assert_eq!(started.ras, Some(super::ras_address(ras.port)));
+        }
     }
 
     #[test]

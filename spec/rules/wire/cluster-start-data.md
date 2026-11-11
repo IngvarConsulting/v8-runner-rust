@@ -16,9 +16,10 @@ check:
 `ragent`, `ras_pid` — сервер администрирования; `connection` — строка соединения с базой кластера (`Srvr=` на `regport`),
 `agent` и `ras` — их адреса, `worker_range` — диапазон рабочих процессов, `registry_dir` — каталог реестра. `ready`
 говорит, что ответил `rac cluster list`, `registered` — что база создана в этом реестре. Если запуск завёл новый
-реестр — по `--new-regport` или сам, потому что закреплённый порт занят чужим процессом
-(`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`), — `previous_regport` называет `regport` прежнего реестра, а `connection`,
-`agent` и `worker_range` — новые порты. Во втором случае `warnings` конверта называет порт и pid того, кто его занял.
+реестр — по `--new-regport` или сам, потому что закреплённый порт занят чужим процессом или совпал с портом PostgreSQL
+раннера (`INV.USE-CASES.A-BUSY-CLUSTER-PORT-MOVES-THE-REGISTRY`), — `previous_regport` называет `regport` прежнего реестра, а `connection`,
+`agent` и `worker_range` — новые порты. Во втором случае `warnings` конверта называет порт и pid того, кто его занял,
+или порт PostgreSQL раннера.
 `stale_record` говорит, что запись была, а процесса из неё уже нет.
 
 Адрес кластера живёт только в состоянии стенда: `v8project*.yaml` раннер не правит, адрес у `origin` не пишет. Берите

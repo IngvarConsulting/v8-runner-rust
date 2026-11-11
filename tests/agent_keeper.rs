@@ -15,7 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use support::fake_agent::{serve_managed_launches, FakeAgent, Hold, HoldReply, AGENT_PASSWORD};
+use support::fake_agent::{
+    collide_with_first_managed_launch, serve_managed_launches, FakeAgent, Hold, HoldReply,
+    AGENT_PASSWORD,
+};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -37,6 +40,10 @@ struct Bench {
 impl Bench {
     /// `held` — двойник держит `config dump-config-to-files`, пока тест его не отпустит.
     fn new(held: bool) -> Self {
+        Self::with_server(held, |agent| serve_managed_launches(agent, None)).0
+    }
+
+    fn with_server<T>(held: bool, serve: impl FnOnce(FakeAgent) -> T) -> (Self, T) {
         let dir = tempfile::tempdir().expect("bench dir");
         let root = dir.path().to_path_buf();
         let hold = held.then(|| held_dump(&root));
@@ -49,9 +56,9 @@ impl Bench {
         );
         agent.any_credentials = true;
         agent.hold = hold;
-        serve_managed_launches(agent, None);
+        let server = serve(agent);
         let designer = write_designer(&root);
-        Self {
+        let bench = Self {
             designer,
             args_log: root.join("designer.args"),
             pid_file: root.join("designer.pid"),
@@ -62,7 +69,8 @@ impl Bench {
             } else {
                 tempfile::tempdir().expect("state dir")
             },
-        }
+        };
+        (bench, server)
     }
 
     fn root(&self) -> &Path {
@@ -515,20 +523,7 @@ fn started_of(pid: u32) -> Option<u64> {
 
 #[cfg(windows)]
 fn alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-    // SAFETY: plain values; the handle is checked and closed once.
-    unsafe {
-        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
-        CloseHandle(handle);
-        running
-    }
+    support::fake_agent::process_is_alive(pid)
 }
 
 #[cfg(unix)]
@@ -552,6 +547,23 @@ fn ready(keeper: &Keeper) -> Value {
     let status = keeper.status();
     assert_eq!(status["frame"], "status", "{status}");
     status["status"].clone()
+}
+
+#[test]
+fn the_keeper_relaunches_after_a_foreign_agent_takes_its_automatic_port() {
+    let (bench, ports) = Bench::with_server(false, collide_with_first_managed_launch);
+    let keeper = Keeper::start(&bench, 60_000);
+    ready(&keeper);
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+
+    let ports: Vec<_> = ports.try_iter().collect();
+    let [first, second] = ports.as_slice() else {
+        panic!("expected two launches, got {ports:?}");
+    };
+    assert_ne!(first, second);
+    let record: Value = serde_json::from_slice(&fs::read(keeper.record()).unwrap()).unwrap();
+    assert_eq!(record["port"], *second, "{record}");
 }
 
 /// Вторая команда берёт живого агента: процесс `1cv8` поднят один раз, сессия та же
