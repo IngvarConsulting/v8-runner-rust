@@ -839,7 +839,9 @@ v8-runner tools download client-mcp [--sources] [--force]
   `.build/v8-runner/tools`). Прежний `build/tools` раннер не читает и не удаляет; пути в
   `v8project.local.yaml` следующая загрузка переписывает на новое место.
 - `yaxunit --sources` распаковывает source subtree в `tests` и добавляет в primary
-  `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
+  `v8project.yaml` `source-set` с именем `tests`; метку, что `tests` принадлежит раннеру, пишет в
+  `localPath/tools/.tests.v8-runner-tools-download.json` и признаёт метку прежних версий в
+  `build/` (её не трогает, `build/` не создаёт). Без `--sources` скачивает `.cfe` в
   `workPath/tools`.
 - `client-mcp --sources` распаковывает source subtree в
   `workPath/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` требует, чтобы

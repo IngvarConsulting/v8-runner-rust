@@ -378,6 +378,7 @@ Pure provider selection для infobase export не создаёт `workPath` и
       standalone/ data/ record.json ports.json
       cluster/    registry-<regport>/ record.json ports.json cluster.log
       ras/        record.json
+  tools/.tests.v8-runner-tools-download.json  метка: набор `tests` скачан `tools download yaxunit --sources`
   .lock                                замок команд, меняющих стенд
   .gitignore                           строка `*`
 ```

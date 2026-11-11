@@ -450,8 +450,13 @@ fn tools_download_sources_writes_source_set_and_local_tool_settings() {
         .exists());
     assert!(dir
         .path()
-        .join("build/.tests.v8-runner-tools-download.json")
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
         .exists());
+    assert!(dir.path().join(".local/.gitignore").is_file());
+    assert!(
+        !dir.path().join("build").exists(),
+        "no build/ in the project"
+    );
     assert!(dir
         .path()
         .join("work/tools/vanessa-automation-single.epf")
@@ -531,8 +536,81 @@ fn tools_download_sources_rejects_legacy_tests_markers_outside_build() {
     assert!(combined.contains("download target already exists and is not managed by v8-runner"));
     assert!(!dir
         .path()
-        .join("build/.tests.v8-runner-tools-download.json")
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
         .exists());
+    assert!(!dir.path().join("build").exists());
+}
+
+/// Метка прежних версий в `build/` признаётся: уже скачанный `tests` повтор без `--force`
+/// оставляет как есть и не отказывает, а `--force` пишет новую метку под `localPath`, не трогая
+/// старую (`INV.USE-CASES.DOWNLOADED-TOOLS-LIVE-IN-THE-WORK-PATH`).
+#[test]
+fn tools_download_sources_recognizes_the_legacy_tests_marker_in_build() {
+    let dir = temp_workspace();
+    let config_path = write_minimal_config(dir.path());
+    let user_file = dir.path().join("tests/custom.feature");
+    fs::create_dir_all(user_file.parent().expect("tests parent")).expect("tests dir");
+    fs::write(&user_file, "downloaded earlier").expect("tests file");
+    let legacy = dir
+        .path()
+        .join("build/.tests.v8-runner-tools-download.json");
+    fs::create_dir_all(legacy.parent().expect("build")).expect("build");
+    fs::write(
+        &legacy, "{}
+",
+    )
+    .expect("legacy marker");
+
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+    let run = |force: bool| {
+        let mut command = v8_runner_command();
+        command
+            .env(
+                "V8TR_GITHUB_API_BASE_URL",
+                format!("http://127.0.0.1:{port}"),
+            )
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "tools",
+                "download",
+                "yaxunit",
+                "--sources",
+            ]);
+        if force {
+            command.arg("--force");
+        }
+        command.output().expect("run command")
+    };
+
+    let repeat = run(false);
+    assert!(
+        repeat.status.success(),
+        "stdout={}
+stderr={}",
+        String::from_utf8_lossy(&repeat.stdout),
+        String::from_utf8_lossy(&repeat.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&user_file).expect("kept"),
+        "downloaded earlier"
+    );
+
+    let forced = run(true);
+    assert!(
+        forced.status.success(),
+        "stdout={}
+stderr={}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(dir
+        .path()
+        .join(".local/tools/.tests.v8-runner-tools-download.json")
+        .is_file());
+    assert!(legacy.is_file(), "the legacy marker is left alone");
 }
 
 #[test]
