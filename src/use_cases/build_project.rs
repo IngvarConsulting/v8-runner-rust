@@ -80,6 +80,17 @@ pub fn execute(
     )
 }
 
+/// Пути поиска изменений, которые отметил разбор этой команды (#575).
+fn stamp_detection(
+    mut outcome: UseCaseResult<BuildResult>,
+    context: &ExecutionContext,
+) -> UseCaseResult<BuildResult> {
+    if let Some(result) = crate::use_cases::result::payload_mut(&mut outcome) {
+        result.detection = context.detections();
+    }
+    outcome
+}
+
 pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
 #[cfg(test)]
@@ -113,6 +124,9 @@ fn run_build_branch(
     } else {
         args
     };
+    if let Err(error) = refuse_hidden_sets_of_a_full_push(config, args) {
+        return Err(refused_before_work(error));
+    }
     let memory = require_memory(context, config, args);
     // Объём отправки выбирает исполнителя (#559), поэтому разбор изменений идёт до выбора, а
     // не внутри исполнителя: исходники хешируются один раз. Память о базе проверена раньше —
@@ -120,7 +134,7 @@ fn run_build_branch(
     let analysis = match &memory {
         Ok(()) => match analysis_before_selection(context, config, args) {
             Ok(analysis) => analysis,
-            Err(error) => return Err(BuildExecutionFailure::without_payload(error)),
+            Err(error) => return Err(refused_before_work(error)),
         },
         Err(_) => None,
     };
@@ -151,6 +165,7 @@ fn run_build_branch(
         Err(error) => Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: false,
                 ok: false,
@@ -161,7 +176,10 @@ fn run_build_branch(
         )),
     };
     let outcome = forget_new_owner_after_a_push(config, args, outcome);
-    crate::use_cases::provider_selection::attach(outcome, &receipt)
+    stamp_detection(
+        crate::use_cases::provider_selection::attach(outcome, &receipt),
+        context,
+    )
 }
 
 /// Разбор изменений до выбора исполнителя — там, где объём выбирает исполнителя: у исходников
@@ -187,7 +205,40 @@ fn analysis_before_selection(
         return Ok(None);
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
-    analyze_contexts_by_name(context, &inventory, &contexts).map(Some)
+    analyze_contexts_by_name(context, &inventory, &contexts, args.dry_run).map(Some)
+}
+
+/// Отказ до работы исполнителя с пустой формой ответа: без формы конверт `--json-message`
+/// не печатается.
+fn refused_before_work(error: AppError) -> BuildExecutionFailure {
+    BuildExecutionFailure::with_payload(
+        error,
+        BuildResult {
+            detection: Default::default(),
+            provider: None,
+            provider_dispatched: false,
+            ok: false,
+            steps: vec![],
+            duration_ms: 0,
+            sessions: None,
+        },
+    )
+}
+
+/// Полная отправка изменений не разбирает, но и она отказывает, если правило игнорирования
+/// git прячет файл набора (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`):
+/// иначе следующая отправка по изменившемуся его не увидит. Разбор изменений проверяет это сам.
+fn refuse_hidden_sets_of_a_full_push(config: &AppConfig, args: &BuildArgs) -> Result<(), AppError> {
+    if config.format != SourceFormat::Designer || !args.load.is_whole() {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return Ok(());
+    };
+    let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
 }
 
 /// Объём отправки (#559): целиком, если каждый набор, который она загрузит, идёт целиком —
@@ -304,6 +355,7 @@ fn run_build_selected(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: false,
                 ok: false,
@@ -321,6 +373,7 @@ fn run_build_selected(
         other => Err(BuildExecutionFailure::with_payload(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: false,
                 ok: false,
@@ -535,14 +588,9 @@ fn analyze_contexts_by_name(
     context: &ExecutionContext,
     inventory: &SourceSetInventory<'_>,
     contexts: &[SourceSetContext],
+    preview: bool,
 ) -> Result<AnalysisByName, AppError> {
-    let analyses = inventory.analyze_contexts(contexts, &mut || {
-        crate::use_cases::interruption::pending_interruption_error(
-            context,
-            "during source analysis",
-        )
-        .is_some()
-    });
+    let analyses = inventory.analyze_contexts(context, contexts, preview)?;
     if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
         context,
         "during source analysis",
@@ -4433,6 +4481,7 @@ mod tests {
     #[test]
     fn build_result_stays_json_serializable() {
         let result = crate::domain::build::BuildResult {
+            detection: Default::default(),
             provider: None,
             provider_dispatched: true,
             ok: true,

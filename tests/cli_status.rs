@@ -619,3 +619,125 @@ fn status_deep_where_push_does_not_load_with_this_executor_answers_null_with_a_r
         project.calls()
     );
 }
+
+/// Запускает `git -C <root> <args>` и требует успеха.
+fn git(root: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Проект становится рабочей копией git: наборы зафиксированы, служебное раннера вне учёта.
+fn under_git(project: &Project, ignore: &str) {
+    let root = project.root();
+    git(root, &["init", "-q", "-b", "main", "."]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    fs::write(root.join(".gitignore"), ignore).expect("gitignore");
+    git(root, &["add", ".gitignore", "sources", "ext"]);
+    git(root, &["commit", "-qm", "sources"]);
+}
+
+/// `status` и `push` называют, каким путём найдены изменения набора: вне рабочей копии git —
+/// чтением файлов (`scan`, причина `no_repository`), в ней — у git (#575). Память, записанная
+/// чтением файлов, годится и для git: оба дают хеш blob git.
+#[test]
+fn status_and_push_name_how_the_changes_were_found() {
+    let project = Project::new();
+    project.remember(FIRST);
+    let status = succeeded(&project.run(&["status"]));
+    assert_data_matches_its_command_form(&status, "status");
+    let main = set(&status["data"]["infobases"][0], "main");
+    assert_eq!(
+        main["detection"],
+        serde_json::json!({"path": "scan", "reason": "no_repository"}),
+        "{status}"
+    );
+
+    under_git(&project, "/work/\n/bin/\n");
+    // Память хешей байтов, записанная вне git, сравнивается своим хешером.
+    let status = succeeded(&project.run(&["status"]));
+    assert_eq!(
+        set(&status["data"]["infobases"][0], "main")["detection"],
+        serde_json::json!({"path": "scan", "reason": "bytes_memory"}),
+        "{status}"
+    );
+    // Полная отправка под git пишет память хешами git.
+    project.remember(FIRST);
+    let status = succeeded(&project.run(&["status"]));
+    assert_data_matches_its_command_form(&status, "status");
+    let main = set(&status["data"]["infobases"][0], "main");
+    assert_eq!(
+        main["detection"],
+        serde_json::json!({"path": "git"}),
+        "{status}"
+    );
+    assert_eq!(main["changed_files"], 0, "{status}");
+
+    fs::write(
+        project.root().join("sources").join("Module.bsl"),
+        "Procedure A()\n// edited\nEndProcedure\n",
+    )
+    .expect("edit");
+    let status = succeeded(&project.run(&["status"]));
+    assert_eq!(
+        set(&status["data"]["infobases"][0], "main")["changed_files"],
+        1,
+        "{status}"
+    );
+
+    let push = envelope(&project.run(&["push", "main", "--dry-run"]));
+    assert_data_matches_its_command_form(&push, "push");
+    assert_eq!(
+        push["data"]["detection"]["main"],
+        serde_json::json!({"path": "git"}),
+        "{push}"
+    );
+}
+
+/// Правило `.gitignore`, которое прячет файл набора, — отказ `source_set_ignored_by_git` рода
+/// `validation` с кодом выхода 2 у `status`, полной отправки, полной выгрузки и `make`; правило с привязкой вне корня
+/// набора отказа не даёт (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+#[test]
+fn a_git_ignore_rule_hiding_a_set_file_refuses_the_command() {
+    let project = Project::new();
+    project.remember(FIRST);
+    under_git(&project, "/work/\n/bin/\n/docs/*.bsl\n");
+    succeeded(&project.run(&["status"]));
+
+    fs::write(project.root().join(".gitignore"), "/work/\n/bin/\n*.bsl\n").expect("rules");
+    for args in [
+        &["status"][..],
+        &["push", "--full", "--dry-run"][..],
+        &["pull", "main", "--force"][..],
+        &["make", "main", "--output", "main.cf"][..],
+    ] {
+        let output = project.run(args);
+        let answer = envelope(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {answer}");
+        assert_eq!(
+            answer["error"]["code"], "source_set_ignored_by_git",
+            "{answer}"
+        );
+        assert_eq!(answer["error"]["kind"], "validation", "{answer}");
+        let message = answer["error"]["message"].as_str().expect("message");
+        assert!(message.contains("'*.bsl'"), "{args:?}: {message}");
+        assert!(message.contains(".gitignore:3"), "{args:?}: {message}");
+        // `make` собирает в своей базе: память `origin` не его, и правило сверяется с
+        // образцами путей выгрузки; остальные команды сверяют его с запомненными файлами.
+        let hidden = if args[0] == "make" {
+            "Configuration.bsl"
+        } else {
+            "Module.bsl"
+        };
+        assert!(message.contains(hidden), "{args:?}: {message}");
+    }
+    assert!(project.calls().is_empty(), "{}", project.calls());
+}
