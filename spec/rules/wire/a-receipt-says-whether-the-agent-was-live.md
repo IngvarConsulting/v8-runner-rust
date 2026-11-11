@@ -10,6 +10,7 @@ check:
   - src/use_cases/agent_session.rs::a_busy_live_agent_makes_the_command_one_shot_with_reason_busy
   - src/use_cases/agent_session.rs::a_failed_request_names_its_own_reason
   - tests/cli_live_agent_portable.rs::a_receipt_says_removed_when_the_last_holder_left_during_the_command
+  - tests/cli_live_agent_portable.rs::status_deep_reports_reusing_the_generation_agent
 ---
 
 # Квитанция говорит, был ли агент живым
