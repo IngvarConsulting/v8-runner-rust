@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.AGENT-STATUS-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/agent-status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -14,10 +14,11 @@ check:
 виде (`file:…`, `server:…`; строка подключения иной формы — только отпечатком
 `connection:<sha256>`, без учётных данных); `this_project` — агент цели этого проекта (с `--all` без проекта — `false`);
 `keeper_pid` и `agent_pid`; `holders` — держатели в виде квитанции; `busy` — команда, которую
-агент выполняет или выполнял последней в открытой сессии; `connected` — подключён ли он к
-базе сессией команды; `idle_ms` — сколько простаивает (у занятого ноль); `closing` — сторож
+агент выполняет или выполнял последней в открытой сессии; `connected` — идёт ли сессия
+команды; `attached` — подключён ли агент к базе, в сессии команды или между командами
+(`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`); `idle_ms` — сколько простаивает (у занятого ноль); `closing` — сторож
 уже решил его снять. Сторож, не ответивший за несколько секунд, назван по записи: без
-держателей, `busy: null` и `connected: false`. Команда замка рабочего каталога не берёт и
+держателей, `busy: null`, `connected: false` и `attached: false`. Команда замка рабочего каталога не берёт и
 ничего не поднимает.
 
 ## Пример
@@ -36,6 +37,7 @@ check:
       ],
       "busy": "config dump-config-to-files --dir=dump/4120-1a",
       "connected": true,
+      "attached": true,
       "idle_ms": 0,
       "closing": false
     }

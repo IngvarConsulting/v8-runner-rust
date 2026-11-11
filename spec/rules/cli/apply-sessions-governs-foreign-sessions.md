@@ -13,6 +13,7 @@ check:
   - src/use_cases/apply/act.rs::a_file_base_open_in_the_designer_is_refused_as_designer_busy
   - src/use_cases/apply/act.rs::an_agent_update_always_forbids_dynamic_update
   - src/use_cases/apply/sessions.rs::the_agent_is_held_by_sessions_only_by_its_error_type_or_its_question
+  - src/use_cases/apply/sessions.rs::a_sessions_refusal_names_the_connected_live_agents_and_agent_release
   - src/use_cases/apply/sessions.rs::a_file_base_never_gets_the_key_that_ends_sessions
   - src/use_cases/apply/sessions.rs::a_relative_quoted_file_base_is_probed_where_the_platform_opens_it
   - src/use_cases/apply/sessions.rs::a_server_is_held_by_the_awake_sessions_of_its_own_list
@@ -61,8 +62,10 @@ pid из записи, чужой — через объявленный шлюз
 
 - спящие сеансы (`hibernate: yes`, например убитого клиента кластера): обновлению они не
   мешают, и платформа их в отказе не называет (замер #613);
-- сеансы Конфигуратора (`app-id: Designer`): это сам раннер — агент, ещё подключённый к базе;
-  сеанс вышедшего пакетного Конфигуратора к моменту вопроса уже снят, — а чужой Конфигуратор
+- сеансы Конфигуратора (`app-id: Designer`): это сам раннер — агент, подключённый к базе, в
+  том числе живой агент, оставшийся подключённым между командами: исполнитель, который не он,
+  сначала отключает его (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`); сеанс
+  вышедшего пакетного Конфигуратора к моменту вопроса уже снят, — а чужой Конфигуратор
   держит блокировку конфигурирования, и загрузка отказывает раньше применения (замер #613);
 - сеанс сервера администрирования (`app-id: RAS`): это вопрос самого раннера к кластеру.
 
@@ -100,7 +103,8 @@ SSH-шлюза автономного сервера, который отказ�
   есть (он же в конце `message`).
 
 `next` — тот же вызов: с `--sessions force`, если сеансы можно завершить, иначе без ключей —
-«закрыл, повторить».
+«закрыл, повторить». Если живые агенты раннера остаются подключёнными к этой базе, текст отказа
+называет их и выход `v8-runner agent release`.
 
 **Отказ `infobase_designer_busy`** (род `workspace`, выход 3): файловую базу держит чужой
 Конфигуратор. `push` отказывает уже на загрузке. Поле `sessions` той же формы: `list: null` —

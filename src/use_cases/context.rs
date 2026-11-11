@@ -101,6 +101,22 @@ impl CommandName {
         }
     }
 
+    /// Открывает ли команда базу, не выбирая исполнителя операции: клиентом 1С (`test`,
+    /// `launch`). Такая команда отключает от базы простаивающих живых агентов на границе; та, что
+    /// выбирает исполнителя, отключает их, выбрав не агента (#644).
+    pub const fn opens_the_infobase_without_an_executor(self) -> bool {
+        matches!(self, Self::Test | Self::Launch)
+    }
+
+    /// Останавливает ли команда сервер, к базам которого может быть подключён живой агент:
+    /// кластер раннера или его СУБД (#644).
+    pub const fn restarts_a_server(self) -> bool {
+        matches!(
+            self,
+            Self::ClusterStop | Self::ClusterRestart | Self::DbmsStop | Self::DbmsRestart
+        )
+    }
+
     /// Returns the stable command label used in logs and CLI envelopes.
     pub const fn as_str(self) -> &'static str {
         match self {

@@ -1792,12 +1792,13 @@ fn execute_agent(
         }
     }
     fn release_of(args: &AgentReleaseArgs) -> ReleaseRequest {
-        match args.holder_pid {
-            Some(pid) => ReleaseRequest::Process {
+        match (args.holder_pid, args.ttl) {
+            (Some(pid), _) => ReleaseRequest::Process {
                 pid,
                 started_at: args.holder_started_at,
             },
-            None => ReleaseRequest::Ttl,
+            (None, true) => ReleaseRequest::Ttl,
+            (None, false) => ReleaseRequest::Connection,
         }
     }
 
@@ -1980,6 +1981,9 @@ fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResul
             let state = match (&agent.busy, agent.connected) {
                 (Some(command), _) => format!("busy with '{command}'"),
                 (None, true) => "in a command session".to_owned(),
+                (None, false) if agent.attached => {
+                    format!("idle {} s, connected to the infobase", agent.idle_ms / 1000)
+                }
                 (None, false) => format!("idle {} s", agent.idle_ms / 1000),
             };
             format!(
