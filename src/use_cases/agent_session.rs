@@ -26,8 +26,9 @@ use crate::platform::agent::{
     self, agent_reads_host_key_at, AgentEndpoint, AgentError, AgentLaunch, AgentMessage,
     AgentReply, AgentSession, AgentSessionRequest, HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
+pub(crate) use crate::platform::agent_keeper::client::EarlySession;
 use crate::platform::agent_keeper::client::{
-    Credentials, KeeperClient, KeeperLaunch, KeeperStartError,
+    Credentials, EarlyWait, KeeperClient, KeeperLaunch, KeeperStartError,
 };
 use crate::platform::agent_keeper::protocol::Holder;
 use crate::platform::locator::UtilityType;
@@ -388,8 +389,125 @@ pub(crate) fn transcript_log(config: &AppConfig, name: &str) -> Result<PathBuf, 
     Ok(path)
 }
 
+/// Живой агент, которого `pull` или `push` поднимает в начале команды, пока сама готовится
+/// (#574, `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`). Им владеет сценарий:
+/// [`connect`] берёт его, а не взятый снимается до возврата из сценария — ожидание
+/// кончается, открытая сессия закрывается, а сам агент живёт по обычным правилам живого агента.
+/// Только живой агент: разовый (`live: false`, Job) поднимается, как прежде, когда нужен.
+pub(crate) struct EarlyAgent {
+    key: String,
+    stop: tokio_util::sync::CancellationToken,
+    started: Option<std::thread::JoinHandle<Result<KeeperClient, KeeperStartError>>>,
+}
+
+impl EarlyAgent {
+    /// Поднимает живого агента управляемой точки входа с `1cv8` по пути `v8`. `None` — агент
+    /// не живой или не управляемый, или ключа живого агента не составить: тогда его поднимет,
+    /// как прежде, [`connect`], и он же назовёт отказ.
+    pub(crate) fn start(
+        context: &ExecutionContext,
+        config: &AppConfig,
+        v8: &Path,
+        session: EarlySession,
+    ) -> Option<Self> {
+        let agent = &config.tools.designer_agent;
+        if config.infobase.standalone.is_some() || !agent.live_enabled() {
+            return None;
+        }
+        let DesignerAgentMode::Managed { port } = agent.mode().ok()? else {
+            return None;
+        };
+        let LiveTarget {
+            key,
+            launch,
+            credentials,
+        } = live_target(config, v8, port).ok()?;
+        let limit = agent.live_limit();
+        let cancel = context.cancellation();
+        // Отмена команды останавливает и ожидание: `stop` — её дочерний знак.
+        let stop = cancel.child_token();
+        let thread_key = key.clone();
+        let thread_stop = stop.clone();
+        let span = tracing::Span::current();
+        let started = std::thread::Builder::new()
+            .name("live-agent-start".to_owned())
+            .spawn(move || {
+                span.in_scope(|| {
+                    tracing::debug!(session = ?session, "starting the live agent while the command prepares");
+                    KeeperClient::start_early(
+                        &thread_key,
+                        &launch,
+                        &credentials,
+                        limit,
+                        &EarlyWait {
+                            cancel: &cancel,
+                            stop: &thread_stop,
+                        },
+                        session,
+                    )
+                })
+            })
+            .ok()?;
+        Some(Self {
+            key,
+            stop,
+            started: Some(started),
+        })
+    }
+
+    /// Итог подъёма для ключа `key`; агент другого ключа команде не годится и снимается, как
+    /// не взятый.
+    fn take(mut self, key: &str) -> Option<Result<KeeperClient, KeeperStartError>> {
+        if self.key != key {
+            return None;
+        }
+        let started = self.started.take()?;
+        Some(
+            started
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        )
+    }
+
+    /// Команда выбрала другого исполнителя: агент отпускается до его работы. Ожидание не
+    /// обрывается — начатое подключение к базе доводится и закрывается (`common disconnect-ib`),
+    /// чтобы `ibcmd` или Конфигуратор не застали базу подключённой к агенту. Ожидание
+    /// ограничено сроком подъёма и отменой команды.
+    pub(crate) fn release_before_another_executor(mut self) {
+        let Some(started) = self.started.take() else {
+            return;
+        };
+        if let Ok(Ok(mut client)) = started.join() {
+            if client.has_session() {
+                let _ = client.end();
+            }
+            tracing::debug!("the live agent started early gave way to another executor");
+        }
+    }
+}
+
+impl Drop for EarlyAgent {
+    /// Не взятый агент: ожидание кончается, открытая им сессия закрывается (`common
+    /// disconnect-ib`), а сам агент остаётся сторожу. Ожидание ограничено: и подъём, и начало
+    /// сессии смотрят на `stop`.
+    fn drop(&mut self) {
+        self.stop.cancel();
+        let Some(started) = self.started.take() else {
+            return;
+        };
+        if let Ok(Ok(mut client)) = started.join() {
+            if client.has_session() {
+                let _ = client.end();
+            }
+            tracing::debug!("the live agent started early was not needed by the command");
+        }
+    }
+}
+
 /// Открывает точку входа по конфигу: управляемую поднимает, к объявленной подключается.
 /// `v8` — путь к `1cv8` из выбора исполнителя у управляемого агента; у чужого его нет.
+/// `early` — живой агент, которого команда подняла заранее ([`EarlyAgent`]): он берётся, а
+/// не поднимается заново.
 ///
 /// Открытая точка входа отмечается в контексте команды: квитанция исполнителя называет
 /// её оттуда, и другого источника адреса у квитанции нет.
@@ -400,9 +518,10 @@ pub(crate) fn connect(
     v8: Option<&Path>,
     transcript_log: PathBuf,
     wait: &WaitPolicy,
+    early: Option<EarlyAgent>,
 ) -> Result<AgentHandle, AppError> {
     let handle = AgentHandle {
-        point: open_handle(context, config, utilities, v8, transcript_log, wait)?,
+        point: open_handle(context, config, utilities, v8, transcript_log, wait, early)?,
         secrets: progress_secrets(config),
     };
     context.note_session(handle.endpoint());
@@ -458,6 +577,7 @@ fn open_handle(
     v8: Option<&Path>,
     transcript_log: PathBuf,
     wait: &WaitPolicy,
+    early: Option<EarlyAgent>,
 ) -> Result<AgentPoint, AppError> {
     let agent = &config.tools.designer_agent;
     let connection = config.v8_connection();
@@ -518,7 +638,7 @@ fn open_handle(
                 )
             })?;
             let reason = if agent.live_enabled() {
-                match open_live(context, config, v8, port, &transcript_log)? {
+                match open_live(context, config, v8, port, &transcript_log, early)? {
                     Ok(live) => return Ok(AgentPoint::Live(Box::new(live))),
                     Err(reason) => reason,
                 }
@@ -678,6 +798,7 @@ fn open_live(
     v8: &Path,
     port: Option<u16>,
     transcript_log: &Path,
+    early: Option<EarlyAgent>,
 ) -> Result<Result<LiveHandle, LiveAgentReason>, AppError> {
     let agent = &config.tools.designer_agent;
     let LiveTarget {
@@ -685,28 +806,30 @@ fn open_live(
         launch,
         credentials,
     } = live_target(config, v8, port)?;
-    let mut client = match KeeperClient::connect_or_start(
-        &key,
-        &launch,
-        &credentials,
-        agent.live_limit(),
-        &context.cancellation(),
-    ) {
+    let connect_or_start = || {
+        KeeperClient::connect_or_start(
+            &key,
+            &launch,
+            &credentials,
+            agent.live_limit(),
+            &context.cancellation(),
+        )
+    };
+    // Агент, поднятый заранее, без сессии подключается к базе здесь, когда команде нужна
+    // работа. Ушедший сторож или снятый агент — как у взятого живого: берётся или поднимается
+    // заново. Остальные отказы называются так же, как отказ подъёма (#574).
+    let started = match early.and_then(|early| early.take(&key)) {
+        Some(Ok(client)) if !client.has_session() => begun_or_again(
+            client,
+            |client| client.begin_session(&context.cancellation()),
+            connect_or_start,
+        ),
+        Some(started) => started,
+        None => connect_or_start(),
+    };
+    let mut client = match started {
         Ok(client) => client,
-        Err(error) => {
-            return match one_shot_reason(&error) {
-                Some(reason) => {
-                    tracing::warn!(error = %crate::support::error::chain(&error), ?reason, "the command works with a one-shot agent");
-                    Ok(Err(reason))
-                }
-                None => match error {
-                    KeeperStartError::Agent(error) => Err(AppError::from(error)),
-                    other => Err(AppError::EnvironmentUnavailable(
-                        crate::support::error::chain(&other),
-                    )),
-                },
-            }
-        }
+        Err(error) => return live_start_failure(error),
     };
     let port = client.port().ok_or_else(|| {
         AppError::EnvironmentUnavailable("the live agent keeper names no agent port".to_owned())
@@ -746,6 +869,47 @@ fn open_live(
         secrets,
         client,
     }))
+}
+
+/// Сессия у агента, поднятого заранее без неё. Агент, которого сторож за это время снял
+/// (простой, место на пределе после `FRESH_GRACE`: сторож отвечает `Closing`), и ушедший сторож —
+/// как у взятого живого агента: он берётся или поднимается заново (`again`). Остальные отказы
+/// идут дальше тем же путём, что отказ подъёма.
+fn begun_or_again<C>(
+    mut client: C,
+    begin: impl FnOnce(&mut C) -> Result<(), KeeperStartError>,
+    again: impl FnOnce() -> Result<C, KeeperStartError>,
+) -> Result<C, KeeperStartError> {
+    match begin(&mut client) {
+        Ok(()) => Ok(client),
+        Err(KeeperStartError::Agent(
+            AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. },
+        )) => {
+            // Подключение ушедшего сторожа не держится, пока поднимается новый.
+            drop(client);
+            again()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Отказ подъёма или начала сессии живого агента — один для обоих путей: причина работать с
+/// разовым агентом или отказ команды.
+fn live_start_failure(
+    error: KeeperStartError,
+) -> Result<Result<LiveHandle, LiveAgentReason>, AppError> {
+    match one_shot_reason(&error) {
+        Some(reason) => {
+            tracing::warn!(error = %crate::support::error::chain(&error), ?reason, "the command works with a one-shot agent");
+            Ok(Err(reason))
+        }
+        None => match error {
+            KeeperStartError::Agent(error) => Err(AppError::from(error)),
+            other => Err(AppError::EnvironmentUnavailable(
+                crate::support::error::chain(&other),
+            )),
+        },
+    }
 }
 
 /// Снимает живого агента этой рабочей копии, если он есть: с `live: false` его не остаётся.
@@ -1042,8 +1206,16 @@ pub(crate) fn with_session(
 ) -> Result<PlatformCommandResult, CommandFailure> {
     let wait = wait_policy(context);
     let mut utilities = PlatformUtilities::from_config(config);
-    let mut handle = connect(context, config, &mut utilities, v8, log.clone(), &wait)
-        .map_err(CommandFailure::without_deferral)?;
+    let mut handle = connect(
+        context,
+        config,
+        &mut utilities,
+        v8,
+        log.clone(),
+        &wait,
+        None,
+    )
+    .map_err(CommandFailure::without_deferral)?;
     let outcome = handle
         .exchange(config)
         .and_then(|exchange| work(&mut handle, &wait, &exchange));
@@ -1750,6 +1922,105 @@ impl GenerationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Агент, поднятый заранее и не взятый командой, снимается за ограниченное время: снятие
+    /// говорит подъёму «не ждать» и дожидается его, а подъём на это смотрит (#574).
+    #[test]
+    fn an_early_agent_the_command_did_not_take_is_let_go_at_once() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let watched = stop.clone();
+        let started = std::thread::spawn(move || {
+            // Подъём, который ждал бы сторожа минуту, если бы его не остановили.
+            let until = std::time::Instant::now() + Duration::from_secs(60);
+            while !watched.is_cancelled() && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(KeeperStartError::Agent(AgentError::NotSent {
+                command: "start of the live agent".to_owned(),
+            }))
+        });
+        let early = EarlyAgent {
+            key: "key".to_owned(),
+            stop,
+            started: Some(started),
+        };
+        let clock = std::time::Instant::now();
+        drop(early);
+        assert!(
+            clock.elapsed() < Duration::from_secs(5),
+            "letting the early agent go waited for its start: {:?}",
+            clock.elapsed()
+        );
+    }
+
+    /// Агент, поднятый заранее и снятый сторожем до начала сессии (простой или место на пределе
+    /// после `FRESH_GRACE`: сторож отвечает `Closing`), берётся или поднимается заново; другой
+    /// отказ начала сессии идёт как отказ подъёма (#574).
+    #[test]
+    fn an_early_agent_removed_before_its_session_is_taken_again() {
+        use crate::platform::agent_keeper::protocol::KeeperError;
+        let gone = || Err(KeeperStartError::Agent(KeeperError::Closing.into_agent()));
+        let again = begun_or_again("early", |_| gone(), || Ok("again"));
+        assert_eq!(again.expect("taken again"), "again");
+        let begun = begun_or_again("early", |_| Ok(()), || Ok("again"));
+        assert_eq!(begun.expect("begun"), "early");
+        let refused = begun_or_again(
+            "early",
+            |_| {
+                Err(KeeperStartError::Agent(
+                    AgentError::AuthenticationRejected {
+                        endpoint: "127.0.0.1:1543".to_owned(),
+                        user: String::new(),
+                    },
+                ))
+            },
+            || Ok("again"),
+        );
+        assert!(matches!(
+            refused,
+            Err(KeeperStartError::Agent(
+                AgentError::AuthenticationRejected { .. }
+            ))
+        ));
+    }
+
+    /// Агент другого ключа команде не годится: его не берут, а отпускают.
+    #[test]
+    fn an_early_agent_of_another_key_is_not_taken() {
+        let started = std::thread::spawn(|| {
+            Err(KeeperStartError::Agent(AgentError::NotSent {
+                command: "start of the live agent".to_owned(),
+            }))
+        });
+        let early = EarlyAgent {
+            key: "one".to_owned(),
+            stop: tokio_util::sync::CancellationToken::new(),
+            started: Some(started),
+        };
+        assert!(early.take("another").is_none());
+    }
+
+    /// Отказ агента, поднятого заранее без подключения, приходит при начале сессии, а не при
+    /// подъёме; ответ и код у команды те же (#574): оба идут одним отображением.
+    #[test]
+    fn a_refusal_at_the_session_begin_answers_like_one_at_the_launch() {
+        use crate::platform::agent_keeper::protocol::{AgentFailure, KeeperError};
+        let refusal = || AgentError::AuthenticationRejected {
+            endpoint: "127.0.0.1:1543".to_owned(),
+            user: "Администратор".to_owned(),
+        };
+        let at_launch = KeeperError::Launch {
+            failure: AgentFailure::from_agent(refusal()),
+        };
+        let at_begin = KeeperError::from_agent(refusal());
+        let answer = |error: KeeperError| {
+            let answer = live_start_failure(KeeperStartError::Agent(error.into_agent()))
+                .err()
+                .expect("a refusal of the command");
+            format!("{answer:?}")
+        };
+        assert_eq!(answer(at_launch), answer(at_begin));
+    }
 
     fn keeper_status(closing: bool) -> crate::platform::agent_keeper::protocol::KeeperStatus {
         crate::platform::agent_keeper::protocol::KeeperStatus {

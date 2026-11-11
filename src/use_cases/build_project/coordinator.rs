@@ -211,8 +211,9 @@ pub(super) fn run_build_agent(
     config: &AppConfig,
     args: &BuildArgs,
     analysis: Option<AnalysisByName>,
+    early: Option<crate::use_cases::agent_session::EarlyAgent>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
-    let mut loader = super::agent::AgentLoader::new(config);
+    let mut loader = super::agent::AgentLoader::new(config, early);
     let outcome = run_build_with(context, config, args, analysis, &mut loader);
     loader.finish(context);
     outcome
@@ -459,7 +460,10 @@ fn run_build_with(
                 let prepared = remove_left_candidates(source_context.path()).and_then(|()| {
                     RunnerVersionFile::of(&source_context)
                         .map(|version_file| {
-                            version_file.restore().map(|before| (version_file, before))
+                            let before = version_file
+                                .restore()
+                                .and_then(|()| version_file.fingerprint_in_directory());
+                            before.map(|before| (version_file, before))
                         })
                         .transpose()
                 });

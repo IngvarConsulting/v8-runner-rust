@@ -977,6 +977,34 @@ pub fn watch_before_dump(
     work_path: &Path,
     start: DumpStart,
 ) -> Option<DumpWatch> {
+    list_before_dump(context, work_path, &|| false).map(|tree| tree.watch(start))
+}
+
+/// The tree as it was just before an incremental dump, not yet tied to the dump's start.
+pub struct TreeBeforeDump {
+    before: HashMap<String, u64>,
+}
+
+impl TreeBeforeDump {
+    /// The listing becomes the watch of the dump that begins at `start`. The listing is taken
+    /// before the start is marked, so a file a person edits between the two is stamped before
+    /// the start and stays a change.
+    pub fn watch(self, start: DumpStart) -> DumpWatch {
+        DumpWatch {
+            started_ns: start.started_ns,
+            before: self.before,
+        }
+    }
+}
+
+/// The listing half of [`watch_before_dump`]: it can run while the platform answers its first
+/// question, before the start is marked (#574). `None` as there, and also when `interrupted`
+/// stops the listing.
+pub fn list_before_dump(
+    context: &SourceSetContext,
+    work_path: &Path,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Option<TreeBeforeDump> {
     if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
         return None;
     }
@@ -984,7 +1012,7 @@ pub fn watch_before_dump(
     let listed = scanner::list_in_scope(
         context.path(),
         &excluded,
-        &mut || false,
+        &mut || interrupted(),
         scan_scope(context),
     );
     if let Err(error) = &listed {
@@ -994,8 +1022,7 @@ pub fn watch_before_dump(
             "the tree was not listed before the dump; what the dump writes is not remembered"
         );
     }
-    Some(DumpWatch {
-        started_ns: start.started_ns,
+    Some(TreeBeforeDump {
         before: listed
             .ok()?
             .files

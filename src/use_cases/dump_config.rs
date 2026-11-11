@@ -1,11 +1,12 @@
 use crate::change_detection::analyzer::{
-    list_after_dump, mark_dump_start, observe_dump_writes, watch_before_dump, ChangeDetectionError,
-    DumpFact, DumpStart, DumpWatch, DumpWrites,
+    list_after_dump, list_before_dump, mark_dump_start, observe_dump_writes, watch_before_dump,
+    ChangeDetectionError, DumpFact, DumpStart, DumpWatch, DumpWrites, TreeBeforeDump,
 };
 use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use crate::domain::progress::ProgressPhase;
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
+use crate::use_cases::source_changes::DumpHashing;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -188,10 +189,7 @@ fn mark_start(
     plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
 ) -> Option<StartMark> {
-    let by_version_file = matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
-        && objects.is_none()
-        && context.external_full_pull().is_none();
-    if !by_version_file {
+    if !by_version_file(context, plan, objects) {
         return None;
     }
     let mark = mark_dump_start(&resolved.platform_target_path);
@@ -203,6 +201,29 @@ fn mark_start(
         );
     }
     Some(mark)
+}
+
+/// Выгрузка по изменившемуся от файла версий, всего набора и без внешней публикации: только
+/// у неё отмечается начало ([`mark_start`]).
+fn by_version_file(
+    context: &ExecutionContext,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+) -> bool {
+    matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
+        && objects.is_none()
+        && context.external_full_pull().is_none()
+}
+
+/// Отметит ли [`mark_start`] начало этой выгрузки, а [`dump_watch`] — дерево до неё: только
+/// тогда перечень до выгрузки нужен.
+fn watches_the_dump(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+) -> bool {
+    config.format == SourceFormat::Designer && by_version_file(context, plan, objects)
 }
 
 /// Начало, если отмечено.
@@ -223,6 +244,69 @@ fn dump_watch(
     watch_before_dump(set?, &config.work_path, start?)
 }
 
+/// Шаг раннера `side` идёт в своём потоке, пока команда делает `step` с платформой (#571, #574).
+/// Поток не поднялся — шаг раннера идёт после: медленнее, но с тем же ответом. Паника потока
+/// доходит до вызвавшего.
+fn beside<T, U>(name: &str, side: impl FnOnce() -> U + Send, step: impl FnOnce() -> T) -> (T, U)
+where
+    U: Send,
+{
+    let side = std::sync::Mutex::new(Some(side));
+    let run_side = || {
+        side.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|side| side())
+    };
+    std::thread::scope(|scope| {
+        let span = tracing::Span::current();
+        let thread = std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn_scoped(scope, move || span.in_scope(run_side));
+        let answer = step();
+        let beside = match thread {
+            Ok(thread) => thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => run_side(),
+        };
+        (answer, beside.expect("the runner step runs exactly once"))
+    })
+}
+
+/// Перечень дерева до выгрузки по изменившемуся идёт, пока платформа отвечает на вопрос перед
+/// ней (`platform_step`), — уже после сторожа и всех отказов до платформы (#574). Он нужен
+/// только набору формата Конфигуратора (`wanted`), и только если выгрузка пойдёт: ответ, по
+/// которому `goes_on` говорит «не пойдёт», останавливает перечень, и ответ не ждёт его конца.
+/// Отмена (`interrupted`) тоже его останавливает; без перечня выгрузка ничего не запоминает.
+fn list_before_dump_while<T>(
+    set: Option<&SourceSetContext>,
+    work_path: &Path,
+    wanted: bool,
+    interrupted: &(dyn Fn() -> bool + Sync),
+    platform_step: impl FnOnce() -> T,
+    goes_on: impl FnOnce(&T) -> bool,
+) -> (T, Option<TreeBeforeDump>) {
+    let Some(set) = set.filter(|_| wanted) else {
+        return (platform_step(), None);
+    };
+    let dropped = std::sync::atomic::AtomicBool::new(false);
+    let stopped = || dropped.load(std::sync::atomic::Ordering::Relaxed) || interrupted();
+    let (answer, tree) = beside(
+        "dump-lister",
+        || list_before_dump(set, work_path, &stopped),
+        || {
+            let answer = platform_step();
+            if !goes_on(&answer) {
+                dropped.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            answer
+        },
+    );
+    let goes = !dropped.load(std::sync::atomic::Ordering::Relaxed);
+    (answer, tree.filter(|_| goes))
+}
+
 /// Что выгрузка оставила в каталоге: режим по факту и записанное для памяти.
 struct DumpObservation {
     /// `None` — режим по факту не спрашивался или перечень прервала отмена: режим плана.
@@ -234,12 +318,14 @@ struct DumpObservation {
 /// Режим по факту — у выгрузки с отметкой `fact_mark` — и то, что выгрузка по изменившемуся
 /// записала в каталог, найденное и прохешированное, пока платформа отвечала про поколение
 /// после выгрузки (#571). Каталог перечисляется один раз, обход читает только файлы и память,
-/// платформу не трогает.
+/// платформу не трогает. `hashing` — индекс git, прочитанный, пока шла выгрузка (#574); нет
+/// его — индекс читается рядом с перечнем.
 fn observe_dump_writes_while<T>(
     set: Option<&SourceSetContext>,
     work_path: &Path,
     fact_mark: Option<&StartMark>,
     watch: Option<&DumpWatch>,
+    hashing: Option<DumpHashing>,
     interrupted: &(dyn Fn() -> bool + Sync),
     platform_step: impl FnOnce() -> T,
 ) -> (T, DumpObservation) {
@@ -252,22 +338,11 @@ fn observe_dump_writes_while<T>(
             },
         );
     };
-    let observe = move || observe_dump(set, work_path, fact_mark, watch, interrupted);
-    std::thread::scope(|scope| {
-        let span = tracing::Span::current();
-        // Without a thread the walk runs after the platform step: slower, never wrong.
-        let observing = std::thread::Builder::new()
-            .name("dump-observer".to_owned())
-            .spawn_scoped(scope, move || span.in_scope(observe));
-        let answer = platform_step();
-        let observed = match observing {
-            Ok(observing) => observing
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            Err(_) => observe(),
-        };
-        (answer, observed)
-    })
+    beside(
+        "dump-observer",
+        move || observe_dump(set, work_path, fact_mark, watch, hashing, interrupted),
+        platform_step,
+    )
 }
 
 /// Перечень каталога после выгрузки отвечает и о режиме, и о записанном: второго обхода нет.
@@ -276,6 +351,7 @@ fn observe_dump(
     work_path: &Path,
     fact_mark: Option<&StartMark>,
     watch: Option<&DumpWatch>,
+    hashing: Option<DumpHashing>,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> DumpObservation {
     // Конец выгрузки по часам файловой системы набора, тем же, что отметили её начало: файл,
@@ -291,20 +367,28 @@ fn observe_dump(
             })
             .ok()
     });
-    let listed = list_after_dump(set, work_path, interrupted);
+    let list = || list_after_dump(set, work_path, interrupted);
+    let (listed, hashing) = match (watch, hashing) {
+        (Some(_), None) => {
+            let (hashing, listed) = beside("dump-lister", list, || DumpHashing::of(set));
+            (listed, Some(hashing))
+        }
+        (_, hashing) => (list(), hashing),
+    };
     let fact = fact_mark.and_then(|mark| match (mark, &listed) {
         (Ok(start), Ok(listing)) => Some(listing.fact(*start)),
         // Отмена во время перечня оставляет режим плана.
         (Ok(_), Err(_)) if interrupted() => None,
         (Err(_), _) | (Ok(_), Err(_)) => Some(DumpFact::Unlisted),
     });
-    let writes = watch.map(|watch| {
+    let writes = watch.zip(hashing).map(|(watch, hashing)| {
         listed.and_then(|listing| {
-            crate::use_cases::source_changes::with_dump_hasher(set, |blobs| {
+            hashing.with(|blobs| {
                 observe_dump_writes(set, work_path, watch, ended, listing, blobs, interrupted)
             })
         })
     });
+    tracing::debug!(source_set = %set.name(), "the dump writes were observed");
     DumpObservation { fact, writes }
 }
 
@@ -342,6 +426,16 @@ struct DumpNotes {
     discarded: Losses,
     /// Что сказало о случившемся режиме; `None` — ничего: режим плана.
     evidence: Option<ModeEvidence>,
+    /// Копия файла версий, если исполнитель уже записал её сам — рядом с перечнем каталога
+    /// после выгрузки (#574); `None` — её пишет координатор после удачи.
+    version_copy: Option<VersionCopy>,
+}
+
+/// Копия файла версий, записанная после удачной выгрузки: `warning` — копию записать не
+/// удалось, и ответ это называет.
+#[derive(Debug)]
+struct VersionCopy {
+    warning: Option<String>,
 }
 
 /// Что говорит о случившемся режиме выгрузки по изменившемуся
@@ -597,6 +691,7 @@ fn publish_full_dump(
         ),
         discarded: published.discarded,
         evidence: None,
+        version_copy: None,
     })
 }
 
@@ -1476,6 +1571,7 @@ fn finalize_edt_dump(
             ),
             discarded: publish_phase.discarded,
             evidence: None,
+            version_copy: None,
         }
         .after(inherited_message),
     ))
@@ -2911,6 +3007,44 @@ exit 0"#,
         let error = validate_supported_matrix(&config);
 
         assert!(error.is_none());
+    }
+
+    /// Превью, выгрузка расширения и живой агент, выключенный ключом, агента заранее не
+    /// поднимают (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`, #574).
+    #[test]
+    fn a_preview_an_extension_and_live_off_raise_no_early_agent() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        create_source_tree(dir.path());
+        write_script(&script, "exit 0");
+        let mut config = build_config_with_builder(
+            dir.path(),
+            &dir.path().join("work"),
+            &script,
+            [(
+                crate::domain::capability::Operation::Dump,
+                crate::domain::capability::Provider::Agent,
+            )]
+            .into(),
+        );
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let args = |dry_run: bool, extension: Option<&str>| DumpArgs {
+            dry_run,
+            discard_uncommitted: false,
+            force_way_out: ForceWayOut::PullForce,
+            mode: DumpModeRequest::Incremental,
+            source_set: Some(extension.map_or("main", |_| "ext").to_owned()),
+            extension: extension.map(str::to_owned),
+            objects: vec![],
+        };
+        let early = |config: &AppConfig, args: &DumpArgs| {
+            super::agent::start_early(&context, config, args, &super::DumpMode::Incremental)
+                .is_some()
+        };
+        assert!(!early(&config, &args(true, None)), "a preview");
+        assert!(!early(&config, &args(false, Some("ext"))), "an extension");
+        config.tools.designer_agent.live = Some(false);
+        assert!(!early(&config, &args(false, None)), "live: false");
     }
 
     #[test]
@@ -4827,6 +4961,7 @@ exit 0"#,
             &dir.path().join("work"),
             Some(&Ok(start)),
             None,
+            None,
             &|| false,
             || (),
         );
@@ -4890,6 +5025,7 @@ exit 0"#,
                 Some(&set),
                 &dir.path().join("work"),
                 Some(&mark),
+                None,
                 None,
                 &|| interrupted,
                 || (),
@@ -4959,6 +5095,7 @@ exit 0"#,
             &work,
             Some(&Ok(start)),
             Some(&watch),
+            None,
             &|| false,
             || "g1",
         );
@@ -5011,6 +5148,7 @@ exit 0"#,
             &work,
             Some(&Ok(start)),
             Some(&watch),
+            None,
             &|| false,
             || "g1",
         );
@@ -6319,6 +6457,89 @@ exit 0"#,
         assert!(matches!(error.0, AppError::Validation(_)));
     }
 
+    /// A set with memory of its base and one remembered file, for the listing tests.
+    fn remembered_set(
+        dir: &Path,
+    ) -> (
+        crate::domain::source_set::SourceSetContext,
+        PathBuf,
+        PathBuf,
+    ) {
+        let root = dir.join("src");
+        let work = dir.join("work");
+        fs::create_dir_all(&root).expect("root");
+        fs::write(root.join("Kept.bsl"), "before").expect("kept");
+        let set =
+            crate::domain::source_set::SourceSetContext::new("main", root.clone(), "designer-main")
+                .with_infobase_memory(&dir.join(".local"), "origin", "base-identity".to_owned());
+        crate::change_detection::analyzer::rescan_and_commit_full(&set, &work).expect("prime");
+        (set, root, work)
+    }
+
+    /// The tree is listed while the platform answers before the dump (#574): an answer by
+    /// which the dump goes on gets the listing, any other answer drops it, and so does a set
+    /// that needs none.
+    #[test]
+    fn the_tree_is_listed_while_the_platform_answers_only_for_a_dump_that_goes_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (set, _, work) = remembered_set(dir.path());
+        for (wanted, answer, listed) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let (got, tree) = super::list_before_dump_while(
+                Some(&set),
+                &work,
+                wanted,
+                &|| false,
+                || answer,
+                |answer| *answer,
+            );
+            assert_eq!(got, answer);
+            assert_eq!(tree.is_some(), listed, "wanted {wanted}, goes on {answer}");
+        }
+        let (_, tree) =
+            super::list_before_dump_while(Some(&set), &work, true, &|| true, || (), |()| true);
+        assert!(tree.is_none(), "a cancelled listing remembers nothing");
+    }
+
+    /// The listing taken before the start is marked keeps the rule's split: a file the dump
+    /// writes after the start is remembered, an edit made between the listing and the start
+    /// stays a change (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`, #574).
+    #[test]
+    fn a_listing_taken_before_the_start_remembers_only_what_the_dump_wrote() {
+        use crate::change_detection::analyzer::{list_before_dump, mark_dump_start};
+        use crate::change_detection::hash_storage::HashStorage;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (set, root, work) = remembered_set(dir.path());
+        let tree = list_before_dump(&set, &work, &|| false).expect("memory of this base");
+        fs::write(root.join("Edited.bsl"), "a person's edit").expect("edit");
+        // The file system stamps by its own clock: let it move past the edit.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let start = mark_dump_start(&root).expect("start");
+        let watch = tree.watch(start);
+        fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        let (answer, observed) = super::observe_dump_writes_while(
+            Some(&set),
+            &work,
+            Some(&Ok(start)),
+            Some(&watch),
+            None,
+            &|| false,
+            || "g1",
+        );
+        let note =
+            super::remember_dump_writes(&set, &work, observed.writes, Some("g1"), Some(answer));
+        assert!(note.is_none(), "{note:?}");
+        let snapshot = HashStorage::new(set.storage_path(&work).expect("memory path"))
+            .load_snapshot()
+            .expect("snapshot");
+        assert!(snapshot.entries.contains_key("Written.bsl"));
+        assert!(!snapshot.entries.contains_key("Edited.bsl"));
+    }
+
     /// The walk of what the dump wrote now runs before the platform answers about the
     /// generation; a changed generation must still leave the memory as it was
     /// (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`, #571).
@@ -6354,6 +6575,7 @@ exit 0"#,
                 &work,
                 Some(&Ok(start)),
                 Some(&watch),
+                None,
                 &|| false,
                 || after,
             );

@@ -1,3 +1,4 @@
+use crate::use_cases::agent_session::EarlyAgent;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -129,6 +130,13 @@ fn run_build_branch(
         return Err(refused_before_work(error));
     }
     let memory = require_memory(context, config, args);
+    // Живой агент поднимается, пока идёт разбор (#574), но к базе не подключается, пока разбор
+    // не найдёт работы. Без памяти о базе платформа не запускается
+    // (`INV.USE-CASES.OWNERSHIP-IS-CHECKED-BEFORE-MEMORY-AND-GENERATION`).
+    let mut early = match &memory {
+        Ok(()) => agent::start_early(context, config, args),
+        Err(_) => None,
+    };
     // Объём отправки выбирает исполнителя (#559), поэтому разбор изменений идёт до выбора, а
     // не внутри исполнителя: исходники хешируются один раз. Память о базе проверена раньше —
     // без неё разбор не нужен.
@@ -161,8 +169,14 @@ fn run_build_branch(
             receipt,
         ),
     };
+    // Выбран не агент: поднятый заранее агент отпускается до работы другого исполнителя.
+    if provider != Provider::Agent {
+        if let Some(early) = early.take() {
+            early.release_before_another_executor();
+        }
+    }
     let outcome = match memory {
-        Ok(()) => run_build_selected(context, config, args, provider, analysis),
+        Ok(()) => run_build_selected(context, config, args, provider, analysis, &mut early),
         Err(error) => Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
@@ -176,6 +190,8 @@ fn run_build_branch(
             },
         )),
     };
+    // Агент, которого отправка не взяла, снимается здесь, до возврата из сценария.
+    drop(early);
     let outcome = forget_new_owner_after_a_push(config, args, outcome);
     stamp_detection(
         crate::use_cases::provider_selection::attach(outcome, &receipt),
@@ -345,6 +361,7 @@ fn run_build_selected(
     args: &BuildArgs,
     provider: Provider,
     analysis: Option<AnalysisByName>,
+    early: &mut Option<EarlyAgent>,
 ) -> UseCaseResult<BuildResult> {
     if config.format == SourceFormat::Edt {
         return run_build_edt(context, config, args, provider);
@@ -370,7 +387,7 @@ fn run_build_selected(
     match provider {
         Provider::Designer => run_build_designer(context, config, args, analysis),
         Provider::Ibcmd => run_build_ibcmd(context, config, args, analysis),
-        Provider::Agent => run_build_agent(context, config, args, analysis),
+        Provider::Agent => run_build_agent(context, config, args, analysis, early.take()),
         other => Err(BuildExecutionFailure::with_payload(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
             BuildResult {
@@ -422,9 +439,10 @@ fn run_build_agent(
     config: &AppConfig,
     args: &BuildArgs,
     analysis: Option<AnalysisByName>,
+    early: Option<EarlyAgent>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
-    let mut result = coordinator::run_build_agent(context, config, args, analysis)?;
+    let mut result = coordinator::run_build_agent(context, config, args, analysis, early)?;
     append_client_mcp_extension_step(context, config, args, Provider::Agent, started, &mut result)?;
     Ok(result)
 }
