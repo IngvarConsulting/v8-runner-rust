@@ -444,6 +444,7 @@ EDT, в прерванной загрузке `tools download`. Прежде т�
 | `--version` | Печатает версию приложения и завершает выполнение |
 | `--config <CONFIG>` | Путь к существующему `v8project.yaml`; по умолчанию `./v8project.yaml` |
 | `--json-message` | Structured JSON envelope вместо text output |
+| `--events -` | Только с `--json-message`: stdout становится NDJSON — события хода (`step`, `agent`, `cancel`, форма `docs/schemas/progress-event.schema.json`) строками по мере работы, последней строкой конверт одной строкой; после него ничего. Рядом с `--publication-stdio`, у `mcp serve` и без `--json-message` — отказ при старте текстом в stderr |
 | `--log-level <LOG_LEVEL>` | `error`, `warn`, `info`, `debug`, `trace` |
 | `--clean-before-execution` | Очистить лог-файлы перед запуском |
 | `--no-color` | Отключить ANSI-цвета |
@@ -460,6 +461,9 @@ overrides. Сам local overlay нельзя передавать как `--conf
 - Live progress в text output использует human-readable строки; для long-running stages время
   старта может выводиться как локальный префикс `HH:MM:SS`, без structured ключей вроде
   `started_at`.
+- Долгая команда агента показывает ход: в text output — строки `│     ↳ progress|log|loading_issue: …`
+  под узлом этапа, в JSON — события `--events -` перед конвертом. Текст агента проходит маску
+  учётных данных базы, СУБД и кластера; в сам конверт ход не попадает.
 - Важные warnings, degraded behavior, diagnostics и created artifacts должны быть видимы и в text,
   и в JSON.
 - `--json-message` остаётся machine-readable contract для автоматизации.

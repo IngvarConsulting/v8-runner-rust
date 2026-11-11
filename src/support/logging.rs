@@ -12,7 +12,11 @@ use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 
+use crate::domain::progress::{AgentProgressKind, ProgressPhase};
+use crate::output::text::{AGENT_LINE_INDENT, AGENT_LINE_MARK};
+
 const ACTION_LOG_FILE_ENV: &str = "V8TR_ACTION_LOG_FILE";
+const LIVE_PROGRESS_TARGET: &str = "v8_runner::live_progress";
 const LIVE_PROGRESS_FILTER_DIRECTIVE: &str = "v8_runner::live_progress=info";
 
 #[derive(Debug, Error)]
@@ -107,12 +111,18 @@ fn init_action_logging_impl(
             .try_init()
             .map_err(|error| LoggingInitError::Install(error.to_string()))?;
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(writer)
-            .with_timer(UtcTimer)
-            .with_ansi(false)
-            .with_target(false)
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .with_timer(UtcTimer)
+                    .with_ansi(false)
+                    .with_target(false),
+            )
+            .with(ProgressEventsLayer)
             .try_init()
             .map_err(|error| LoggingInitError::Install(error.to_string()))?;
     }
@@ -129,6 +139,37 @@ fn env_filter_with_live_progress(level: &str) -> EnvFilter {
     };
     EnvFilter::try_new(filter)
         .unwrap_or_else(|_| EnvFilter::new(format!("info,{LIVE_PROGRESS_FILTER_DIRECTIVE}")))
+}
+
+/// Ход команды при ответе JSON: события живого прогресса журнала уходят в поток `--events -`
+/// (`CTR.WIRE.PROGRESS-EVENTS`). Без открытого потока слой ничего не делает.
+struct ProgressEventsLayer;
+
+impl<S: Subscriber> tracing_subscriber::Layer<S> for ProgressEventsLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != LIVE_PROGRESS_TARGET || !crate::output::events::is_open() {
+            return;
+        }
+        let mut fields = EventFieldVisitor::default();
+        event.record(&mut fields);
+        if let (Some(kind), Some(text)) = (
+            fields
+                .agent_type
+                .as_deref()
+                .and_then(AgentProgressKind::parse),
+            fields.agent_text.as_deref(),
+        ) {
+            crate::output::events::agent(kind, text);
+        } else if let (Some("running"), Some(phase)) = (
+            fields.timeline_status.as_deref(),
+            fields
+                .progress_phase
+                .as_deref()
+                .and_then(ProgressPhase::parse),
+        ) {
+            crate::output::events::step(phase, fields.progress_set.as_deref());
+        }
+    }
 }
 
 fn resolve_action_log_path(
@@ -220,6 +261,10 @@ struct EventFieldVisitor {
     timeline_label: Option<String>,
     timeline_status: Option<String>,
     timeline_detail: Option<String>,
+    progress_phase: Option<String>,
+    progress_set: Option<String>,
+    agent_type: Option<String>,
+    agent_text: Option<String>,
 }
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ActionLogMakeWriter {
@@ -257,6 +302,12 @@ where
         let meta = event.metadata();
         let mut visitor = EventFieldVisitor::default();
         event.record(&mut visitor);
+
+        if let (Some(kind), Some(text)) =
+            (visitor.agent_type.as_deref(), visitor.agent_text.as_deref())
+        {
+            return write_agent_lines(&mut writer, kind, text);
+        }
 
         if let Some(label) = visitor.timeline_label.as_deref() {
             return self.format_timeline_event(
@@ -339,6 +390,22 @@ impl CliEventFormatter {
 
         Ok(())
     }
+}
+
+/// Строки хода агента под узлом этапа: вид `agent` грамматики `CTR.CLI.TEXT-OUTPUT`. Отступ
+/// глубже подробности, чтобы ход читался внутри этапа, который его вызвал.
+fn write_agent_lines(writer: &mut Writer<'_>, kind: &str, text: &str) -> std::fmt::Result {
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        write_timeline_pipe(writer)?;
+        write!(writer, "{AGENT_LINE_INDENT}")?;
+        if writer.has_ansi_escapes() {
+            write!(writer, "\x1b[90m{AGENT_LINE_MARK} {kind}:\x1b[0m")?;
+        } else {
+            write!(writer, "{AGENT_LINE_MARK} {kind}:")?;
+        }
+        writeln!(writer, " {line}")?;
+    }
+    Ok(())
 }
 
 fn running_started_at_detail() -> String {
@@ -454,6 +521,10 @@ impl EventFieldVisitor {
             "timeline_label" => self.timeline_label = Some(value),
             "timeline_status" => self.timeline_status = Some(value),
             "timeline_detail" => self.timeline_detail = Some(value),
+            "progress_phase" => self.progress_phase = Some(value),
+            "progress_set" => self.progress_set = Some(value),
+            "agent_type" => self.agent_type = Some(value),
+            "agent_text" => self.agent_text = Some(value),
             _ => return false,
         }
         true

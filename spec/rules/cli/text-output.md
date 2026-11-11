@@ -1,11 +1,12 @@
 ---
 id: CTR.CLI.TEXT-OUTPUT
-version: 2
+version: 3
 artifact: docs/schemas/text-output.json
 check:
   - src/output/text.rs::generated_text_output_grammar_is_current
   - tests/contract_text_output.rs::every_printed_line_is_a_declared_kind
   - tests/contract_text_output.rs::details_of_a_node_are_printed_in_the_declared_order
+  - tests/cli_progress_events.rs::text_output_shows_the_agent_progress_lines
 ---
 
 # Текстовый вывод для человека
@@ -37,11 +38,22 @@ check:
 — свой вид строки: его пометка называет предмет, и одна причина у разных исполнителей
 печатается у каждого.
 
+Ход агента под узлом этапа — свой вид строки `agent`: `│     ↳ <вид>: <текст>`, где вид —
+`progress`, `log` или `loading_issue`, а текст — сообщение агента с маской учётных данных
+(`INV.USE-CASES.A-LONG-AGENT-COMMAND-SHOWS-ITS-PROGRESS`). Отступ глубже подробности, поэтому
+строка хода с подробностью не путается. Как и прочий живой прогресс, порядка видов она не
+обещает: она приходит, когда агент её прислал.
+
 Проза внутри строки не закреплена: форма отвечает за строение, а не за слова.
 
 ## Пример
 
 ```text
+◌ dump: full
+│   20:32:40  [агент] exporting configuration files
+│     ↳ log: Подключение с паролем *** выполнено
+│     ↳ progress: Выгрузка конфигурации 50%
+│
 ● init:
 │   → infobase: create - would create a file infobase at 'build/ib' via /opt/1cv8/bin/1cv8
 │

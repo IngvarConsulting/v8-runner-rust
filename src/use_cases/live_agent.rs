@@ -17,6 +17,7 @@ use crate::domain::live_agent::{
     AgentHoldResult, AgentReleaseResult, AgentStatusResult, AgentStopRefusal, AgentStopResult,
     LiveAgentEntry,
 };
+use crate::domain::progress::ProgressPhase;
 use crate::platform::agent_keeper::client::{
     live_keepers, KeeperClient, KeeperStartError, LiveKeeper, Removal,
 };
@@ -94,7 +95,7 @@ pub fn hold(
         &context.cancellation(),
         &holder,
         &mut |waiting| {
-            crate::use_cases::progress::log_live_stage("agent hold:", &format!("waiting for {waiting}"))
+            crate::use_cases::progress::log_live_stage(ProgressPhase::Wait, None, "agent hold:", &format!("waiting for {waiting}"))
         },
     ) {
         Ok(taken) => taken,

@@ -10,6 +10,7 @@ use crate::change_detection::partial_load;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::capability::{Operation, OperationSize, Provider};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -20,7 +21,7 @@ use crate::support::edt_project;
 use crate::support::error::AppError;
 use crate::support::temp::{partial_list_file, platform_logs_dir};
 use crate::use_cases::build_progress::{
-    build_mode_label, log_build_step_timeline, log_timeline_stage, TimelineStageStatus,
+    log_build_step_timeline, log_timeline_stage, TimelineStageStatus,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
@@ -817,19 +818,17 @@ fn execute_source_set_step(
         ) {
             return Err(error);
         }
-        if let Some(paths) = partial_paths {
+        if partial_paths.is_some() {
             log_timeline_stage(
                 &source_set.name,
-                &build_mode_label(&BuildMode::Partial {
-                    file_count: paths.len(),
-                }),
+                ProgressPhase::Load,
                 "[Конфигуратор] Загрузка изменений в базу",
                 TimelineStageStatus::Running,
             );
         } else {
             log_timeline_stage(
                 &source_set.name,
-                "full",
+                ProgressPhase::Load,
                 "[Конфигуратор] Загрузка в базу",
                 TimelineStageStatus::Running,
             );
@@ -1027,7 +1026,7 @@ fn execute_source_set_step_ibcmd(
                 })?;
             log_timeline_stage(
                 &source_set.name,
-                "ibcmd_import",
+                ProgressPhase::Load,
                 "[ibcmd] Загрузка изменений в базу",
                 TimelineStageStatus::Running,
             );
@@ -1037,7 +1036,7 @@ fn execute_source_set_step_ibcmd(
         } else {
             log_timeline_stage(
                 &source_set.name,
-                "ibcmd_import",
+                ProgressPhase::Load,
                 "[ibcmd] Загрузка в базу",
                 TimelineStageStatus::Running,
             );

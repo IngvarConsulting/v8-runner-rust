@@ -43,6 +43,10 @@
     }
   ],
   "line_kinds": {
+    "agent": {
+      "description": "Строка хода агента под узлом этапа: вид сообщения агента и его текст с маской учётных данных.",
+      "pattern": "^│     ↳ (progress|log|loading_issue): \\S.*$"
+    },
     "bare": {
       "description": "Ответ без ленты. Так отвечает только `version`.",
       "pattern": "^v8-runner \\S+$"
@@ -78,6 +82,7 @@
     "stdout": [
       "node",
       "detail",
+      "agent",
       "separator",
       "bare"
     ]

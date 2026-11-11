@@ -46,6 +46,8 @@ pub mod next_step;
 pub mod partial_dump_selector;
 /// Установленные платформы и выбор раннера у `platforms`.
 pub mod platforms;
+/// Словарь хода долгой команды: фазы шагов, строки агента, причина отмены.
+pub mod progress;
 /// Web publication domain models.
 pub mod publish;
 /// Ответ команды `reset`.

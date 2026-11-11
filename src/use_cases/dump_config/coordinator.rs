@@ -1,6 +1,7 @@
 use super::helpers::read_dump_generation;
 use super::*;
 use crate::domain::capability::{Operation, OperationSize, Provider};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
@@ -244,6 +245,8 @@ fn run_dump_selected(
         // оставляет вовсе — ни рабочего каталога, ни журнала действий; запись о вызове
         // несёт конверт на stdout (`DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE`).
         crate::use_cases::progress::log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "dump: preview",
             "[Dump] preview only, nothing written",
         );
