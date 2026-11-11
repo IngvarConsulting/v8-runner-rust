@@ -1609,9 +1609,12 @@ fn execute_standalone(
     let present = |outcome: crate::use_cases::result::UseCaseResult<
         crate::domain::standalone::StandaloneResult,
     >| match outcome {
-        Ok(result) => {
+        Ok(mut result) => {
             if presenter.is_json() {
-                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
             } else {
                 render_standalone_text(name, &result, presenter);
             }
@@ -1722,6 +1725,10 @@ fn standalone_text(
             "PostgreSQL stopped",
             result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
         ),
+        (
+            "previous port",
+            result.previous_port.map(|port| port.to_string()),
+        ),
     ];
     for (label, value) in details {
         if let Some(value) = value {
@@ -1731,6 +1738,12 @@ fn standalone_text(
     if result.stale_record {
         lines.push("  the recorded process is gone".to_owned());
     }
+    lines.extend(
+        result
+            .warnings
+            .iter()
+            .map(|warning| format!("warning: {warning}")),
+    );
     lines
 }
 
@@ -2004,9 +2017,12 @@ fn execute_cluster(
     let present = |outcome: crate::use_cases::result::UseCaseResult<
         crate::domain::cluster::ClusterResult,
     >| match outcome {
-        Ok(result) => {
+        Ok(mut result) => {
             if presenter.is_json() {
-                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
             } else {
                 render_cluster_text(name, &result, presenter);
             }
@@ -2161,6 +2177,9 @@ fn render_cluster_text(
     }
     if result.stale_record {
         presenter.print_bare("  the recorded process is gone");
+    }
+    for warning in &result.warnings {
+        presenter.print_bare(&format!("warning: {warning}"));
     }
 }
 
@@ -7417,7 +7436,9 @@ mod tests {
             occupant_pid: None,
             stopped_pid: Some(8576),
             stopped_dbms_pid: Some(6320),
+            previous_port: None,
             duration_ms: 0,
+            warnings: Vec::new(),
         };
         let lines = super::standalone_text(CommandName::StandaloneStop, &result);
         assert_eq!(

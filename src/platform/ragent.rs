@@ -43,6 +43,11 @@ impl ClusterPorts {
             .chain(self.range_start..=self.range_end())
     }
 
+    /// Блоки делят хотя бы один порт.
+    pub fn overlaps(self, other: Self) -> bool {
+        crate::platform::service::ports_overlap(self.all(), other.all())
+    }
+
     /// Строка соединения: клиент идёт на `regport` (замер #534).
     pub fn connection(self, name: &str) -> String {
         format!("Srvr=127.0.0.1:{};Ref={name}", self.regport)

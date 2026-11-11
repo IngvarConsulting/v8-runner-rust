@@ -88,7 +88,7 @@
       ]
     },
     "previous_regport": {
-      "description": "`regport` прежнего реестра, если команда завела новый (`--new-regport`).",
+      "description": "`regport` прежнего реестра, если команда завела новый: по `--new-regport` или сама,\nпотому что закреплённый порт занят чужим процессом.",
       "format": "uint16",
       "maximum": 65535,
       "minimum": 0,

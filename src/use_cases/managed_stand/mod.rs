@@ -204,6 +204,37 @@ fn occupant_of(host: &dyn ServiceHost, port: u16) -> Option<u32> {
         .or_else(|| host.port_answers(port).then_some(0))
 }
 
+/// Закреплённый порт, занятый чужим процессом: что сказать в предупреждении о переносе.
+#[derive(Debug, Clone, Copy)]
+struct Taken {
+    port: u16,
+    /// `0` — система не назвала процесс (как у [`occupant_of`]).
+    pid: u32,
+}
+
+impl Taken {
+    fn who(self) -> String {
+        occupant_name(self.pid)
+    }
+}
+
+/// Первый занятый порт блока — единственный перебор занятости закреплённых портов для сервера и
+/// кластера.
+fn first_taken(host: &dyn ServiceHost, ports: impl IntoIterator<Item = u16>) -> Option<Taken> {
+    ports
+        .into_iter()
+        .find_map(|port| occupant_of(host, port).map(|pid| Taken { port, pid }))
+}
+
+/// Кто держит порт, словами отказа или предупреждения: `0` — система процесс не назвала.
+fn occupant_name(pid: u32) -> String {
+    if pid == 0 {
+        "another process".to_owned()
+    } else {
+        format!("process {pid}")
+    }
+}
+
 /// Смещения первого порта от пути копии: копии не мешают друг другу.
 fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
@@ -555,11 +586,7 @@ impl<'a> Stand<'a> {
     }
 
     fn occupied(&self, port: u16, pid: u32) -> UseCaseError {
-        let who = if pid == 0 {
-            "another process".to_owned()
-        } else {
-            format!("process {pid}")
-        };
+        let who = occupant_name(pid);
         UseCaseError::new(
             UseCaseErrorKind::WorkspaceBusy,
             format!(

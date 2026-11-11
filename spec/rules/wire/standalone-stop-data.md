@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STANDALONE-STOP-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/standalone-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current

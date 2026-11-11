@@ -78,6 +78,7 @@
 <pre data-output-command><code>v8-runner standalone start</code></pre>
 <p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code> или над базой из секции <code>dbms</code>; база должна быть создана заранее. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД <code>ibsrv</code> получает ключом <code>-W</code> через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>localPath</code>.</p>
 <p>Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс <code>ibsrv</code>, команда отказывает и называет его: второй сервер над той же базой не поднимается.</p>
+<p>Если закреплённый порт занял другой процесс, команда берёт новый свободный блок портов и закрепляет его; чужой процесс остаётся работать. Ответ называет новые адреса, прямой порт прежнего блока и предупреждает, кто занял порт. Ключ хоста SSH-шлюза и его отпечаток не меняются. <code>v8project*.yaml</code> раннер не правит: адрес сервера берите из ответа <code>standalone start</code> или <code>standalone status</code> и не кешируйте. Если перечня процессов нет и не сказать, кто держит порт, команда отказывает.</p>
 <pre data-output-command><code>v8-runner standalone start --dry-run</code></pre>
 <p>Показывает каталог данных, журнал и закреплённые адреса, если сервер уже запускался. Ничего не запускает. Такое же превью есть у <code>standalone stop</code> и <code>standalone restart</code>. Команды <code>standalone</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
 <h2 class="command-variant" id="op-standalone-status">standalone status</h2>
@@ -96,6 +97,7 @@
 <tr data-response-class="outcome"><td>Уже поднят этой копией</td><td>Свой сервер работает: новый не запускается. <a href="#standalone-already">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Состояние</td><td><code>standalone status</code> различает: не поднят, поднят раннером, поднят не раннером. <a href="#standalone-status-own">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Сервер остановлен</td><td><code>standalone stop</code> завершил свой процесс. <a href="#standalone-stopped">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Порт занят — новый блок</td><td>Закреплённый порт держит другой процесс: сервер поднят на новых портах, в ответе <code>previous_port</code>, в предупреждении — кто занял порт. <a href="#standalone-ports-moved">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Чужой сервер не тронут</td><td>Базу держит <code>ibsrv</code>, поднятый не раннером: <code>standalone start</code> отказывает, <code>standalone stop</code> его не останавливает. <a href="#standalone-foreign">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Сервер не стал готов</td><td>Процесс завершился или проба не прошла за отведённое время: <code>platform_failure</code>, выход CLI 4, в ответе — журнал <code>ibsrv</code>. <a href="#standalone-not-ready">Пример</a></td></tr>
 </tbody>
@@ -109,6 +111,15 @@
   http  http://127.0.0.1:24643/demo
   data  .local/infobases/origin/managed/standalone/data
   log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
+<h4 id="standalone-ports-moved">Порт занят — новый блок</h4>
+<pre data-output-example="standalone-ports-moved" data-output-schema="standalone-start"><code>standalone start: started ibsrv, pid 48213
+  direct gate  Srvr=127.0.0.1:31233;Ref=demo
+  ssh gate  127.0.0.1:31234
+  http  http://127.0.0.1:31235/demo
+  data  .local/infobases/origin/managed/standalone/data
+  log  .local/infobases/origin/managed/standalone/standalone.log
+  previous port  24641
+warning: port 24641 of the server of 'origin' is taken by process 9008, which this runner did not start; it is left running: the server moved from port 24641 to port 31233, the gate key and its fingerprint stay; take the address from this answer, v8project*.yaml is not changed</code></pre>
 <h4 id="standalone-already">Уже поднят этой копией</h4>
 <pre data-output-example="standalone-already" data-output-schema="standalone-start"><code>standalone start: already running for origin, pid 48213
   direct gate  Srvr=127.0.0.1:24641;Ref=demo
@@ -150,6 +161,30 @@
       "duration_ms": 14210
     },
     "warnings": [],
+    "steps": []
+  },
+  "standalone-ports-moved": {
+    "ok": true,
+    "command": "standalone start",
+    "duration_ms": 14210,
+    "data": {
+      "ok": true,
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "pid": 48213,
+      "connection": "Srvr=127.0.0.1:31233;Ref=demo",
+      "gate": "127.0.0.1:31234",
+      "http": "http://127.0.0.1:31235/demo",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
+      "ready": true,
+      "action": "started",
+      "previous_port": 24641,
+      "duration_ms": 14210
+    },
+    "warnings": [
+      "port 24641 of the server of 'origin' is taken by process 9008, which this runner did not start; it is left running: the server moved from port 24641 to port 31233, the gate key and its fingerprint stay; take the address from this answer, v8project*.yaml is not changed"
+    ],
     "steps": []
   },
   "standalone-already": {

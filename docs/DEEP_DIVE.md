@@ -323,6 +323,21 @@ run_snapshot_provider` и `run_restore_provider` с Конфигуратором
 памятью набора, `build_project` превращает первую отправку в полную, `Standing` не предлагает
 выгрузку; признак снимает удачная отправка (`forget_copied_base`) и `remember_created_base`.
 
+### Стенд: занятый закреплённый порт
+
+Порты стенда выводит из пути копии `managed_stand::port_offsets`. Автономный сервер решает судьбу
+закреплённого блока в `standalone::Server::taken_block` до запуска PostgreSQL шагом: блок свободен —
+запуск на нём; в блоке закреплённый порт PostgreSQL раннера — `MoveCause::Postgres`; порт занят (`first_taken`,
+общий с кластером) — нужен перечень процессов, и чужой `ibsrv` над той же базой в нём отказывает, иначе
+`MoveCause::Taken`. `Moved` ведёт `start_process` к `choose_ports`, который берёт блок, не задевающий прежний и
+порт PostgreSQL раннера. `launch` закрепляет блок только после пробы готовности, поэтому неудача оставляет прежний;
+если сервер не снялся, закреплённое переходит к нему. Удачный запуск даёт `previous_port` и предупреждение. Ключ
+шлюза (`host_key`) создаётся только при его отсутствии и поэтому переживает смену блока. У кластера
+`cluster::Cluster::busy` различает `Busy::Refused` (чужой `ragent` над реестром, нет перечня) и
+`Busy::Port`; второй ведёт `start` в `move_registry`, как `--new-regport`. Новые порты попадают только в
+закреплённое под `localPath`, откуда их читают загрузчик настроек и ответы `start`/`status`;
+`v8project*.yaml` не меняется.
+
 ## Shared EDT
 
 `tools.edt_cli.interactive_mode` включает shared interactive EDT execution model.
