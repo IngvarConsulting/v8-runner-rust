@@ -14,9 +14,50 @@ use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
     argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
-    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
+    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, EarlyAgent, EarlySession,
+    Exchange,
 };
 use crate::use_cases::interruption::Deferrals;
+
+/// Живой агент, которого `push` поднимает в начале команды, пока идёт разбор изменений (#574):
+/// только без `--dry-run`, у исходников Конфигуратора, по изменившемуся и если агент ведёт
+/// цепочку такого объёма. Формат каждого набора сверяется с платформой заранее: набор, формат
+/// которого новее, отказывает до запуска платформы
+/// (`INV.USE-CASES.A-LOAD-FROM-A-NEWER-FORMAT-IS-REFUSED-BEFORE-THE-PLATFORM-STARTS`), и такая
+/// отправка агента заранее не поднимает. Ошибка прогноза стоит поднятого живого агента без
+/// подключения к базе, который живёт по обычным правилам.
+pub(super) fn start_early(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Option<EarlyAgent> {
+    if args.dry_run || config.format != SourceFormat::Designer || args.load.is_whole() {
+        return None;
+    }
+    let (plan, _) = config.provider_plan_sized(Operation::Build, OperationSize::ByChanges);
+    if plan.candidates().first() != Some(&Provider::Agent) {
+        return None;
+    }
+    let location = PlatformUtilities::from_config(config)
+        .locate(UtilityType::V8)
+        .ok()?;
+    let platform = crate::platform::locator::platform_version_of(location.utility, &location.path);
+    let inventory = SourceSetInventory::new(config);
+    let source_sets = selected_ordered_source_sets(&inventory, args.source_set.as_deref()).ok()?;
+    for source_set in source_sets
+        .iter()
+        .filter(|source_set| !source_set.purpose.is_external())
+    {
+        let context = inventory.designer_context(&source_set.name)?;
+        crate::use_cases::version_file::check_load_format(
+            &config.work_path,
+            context,
+            platform.as_ref(),
+        )
+        .ok()?;
+    }
+    EarlyAgent::start(context, config, &location.path, EarlySession::Later)
+}
 
 pub(super) struct AgentLoader {
     utilities: PlatformUtilities,
@@ -27,11 +68,15 @@ pub(super) struct AgentLoader {
     /// команды, и сессия без неё означала бы ожидание без срока.
     session: Option<(AgentHandle, WaitPolicy)>,
     run: String,
+    /// Живой агент, поднятый в начале команды без подключения к базе (#574): сессия берёт его,
+    /// когда разбор нашёл работу; не взятый снимается вместе с загрузчиком.
+    early: Option<EarlyAgent>,
 }
 
 impl AgentLoader {
-    pub(super) fn new(config: &AppConfig) -> Self {
+    pub(super) fn new(config: &AppConfig, early: Option<EarlyAgent>) -> Self {
         Self {
+            early,
             utilities: PlatformUtilities::from_config(config),
             // Платформа нужна только управляемому агенту; чужой агент и шлюз
             // автономного сервера поднимает не раннер.
@@ -68,6 +113,7 @@ impl AgentLoader {
                 self.location.as_ref().map(|found| found.path.as_path()),
                 transcript,
                 &wait,
+                self.early.take(),
             )?;
             self.session = Some((handle, wait));
         }

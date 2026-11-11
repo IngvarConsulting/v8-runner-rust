@@ -458,6 +458,7 @@ impl Asker {
                             location.as_ref().map(|location| location.path.as_path()),
                             log,
                             &wait,
+                            None,
                         )
                     })
                     .map_err(|error| (Some(tool), error))?;

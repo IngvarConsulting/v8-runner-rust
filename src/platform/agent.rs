@@ -797,6 +797,15 @@ enum AgentOwnership {
     External,
 }
 
+/// Подключать ли агента к базе, открывая сессию.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AtOpen {
+    /// `common connect-ib` сразу после машинного режима.
+    Connect,
+    /// Без подключения: агент поднят, но базы не держит, пока его не подключат.
+    Idle,
+}
+
 /// Открытая сессия: соединение, канал shell и накопленный, ещё не разобранный ответ.
 pub struct AgentSession {
     runtime: tokio::runtime::Runtime,
@@ -832,7 +841,13 @@ impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
-        Self::open_within(request, policy, AgentOwnership::External, None)
+        Self::open_within(
+            request,
+            policy,
+            AgentOwnership::External,
+            None,
+            AtOpen::Connect,
+        )
     }
 
     /// То же, но рукопожатие транспорта ограничено `handshake`: слушатель, который принял
@@ -843,6 +858,7 @@ impl AgentSession {
         policy: &WaitPolicy,
         ownership: AgentOwnership,
         handshake: Option<Duration>,
+        at_open: AtOpen,
     ) -> Result<Self, AgentError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -978,7 +994,9 @@ impl AgentSession {
         // команды они не отмечают.
         let service = policy.without_work();
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
-        session.connect_infobase(&service)?;
+        if at_open == AtOpen::Connect {
+            session.connect_infobase(&service)?;
+        }
         Ok(session)
     }
 
@@ -1831,17 +1849,21 @@ impl ManagedAgent {
             startup_timeout,
             policy,
             ManagedSpawnMode::Wait,
+            AtOpen::Connect,
         )
     }
 
     /// То же для сторожа живого агента: процесс агента умирает вместе со сторожем
     /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`), поэтому звать это можно только из
     /// потока, который живёт столько же, сколько сторож ([`ManagedSpawnMode::Tied`]).
+    /// `at_open` — подключать ли агента к базе при подъёме: агента, поднятого заранее для
+    /// `push`, не подключают, пока разбор не нашёл работы (#574).
     pub fn launch_for_keeper(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
         startup_timeout: Duration,
         policy: &WaitPolicy,
+        at_open: AtOpen,
     ) -> Result<Self, AgentError> {
         Self::launch_in(
             runner,
@@ -1849,6 +1871,7 @@ impl ManagedAgent {
             startup_timeout,
             policy,
             ManagedSpawnMode::Tied,
+            at_open,
         )
     }
 
@@ -1858,6 +1881,7 @@ impl ManagedAgent {
         startup_timeout: Duration,
         policy: &WaitPolicy,
         mode: ManagedSpawnMode,
+        at_open: AtOpen,
     ) -> Result<Self, AgentError> {
         let port = match launch.port {
             Some(port) => port,
@@ -1872,6 +1896,7 @@ impl ManagedAgent {
             startup_timeout,
             policy,
             mode,
+            at_open,
         ) {
             Err(AgentError::ForeignAgentOnPort { .. } | AgentError::PortTaken { .. })
                 if launch.port.is_none()
@@ -1891,12 +1916,14 @@ impl ManagedAgent {
                     startup_timeout,
                     policy,
                     mode,
+                    at_open,
                 )
             }
             result => result,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_once(
         runner: &dyn ProcessRunner,
         launch: &AgentLaunch,
@@ -1905,6 +1932,7 @@ impl ManagedAgent {
         startup_timeout: Duration,
         policy: &WaitPolicy,
         mode: ManagedSpawnMode,
+        at_open: AtOpen,
     ) -> Result<Self, AgentError> {
         let host_key = launch.host_key_for_attempt()?;
         let session = AgentSessionRequest {
@@ -1946,6 +1974,7 @@ impl ManagedAgent {
                 policy,
                 AgentOwnership::Managed,
                 Some(HANDSHAKE_PROBE),
+                at_open,
             ) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),

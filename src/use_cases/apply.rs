@@ -509,6 +509,7 @@ impl Executor {
                 self.binary.as_deref(),
                 transcript,
                 &wait,
+                None,
             )?;
             self.session = Some((handle, wait));
         }

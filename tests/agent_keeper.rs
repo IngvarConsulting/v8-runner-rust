@@ -198,9 +198,24 @@ impl Keeper {
     }
 
     fn start_as(bench: &Bench, idle_ms: u64, user: &str, password: &str) -> Self {
+        Self::start_with(bench, idle_ms, user, password, None)
+    }
+
+    /// Сторож, который поднимает агента без подключения к базе (`at_open: Idle`, #574).
+    fn start_idle(bench: &Bench, idle_ms: u64) -> Self {
+        Self::start_with(bench, idle_ms, "", AGENT_PASSWORD, Some("Idle"))
+    }
+
+    fn start_with(
+        bench: &Bench,
+        idle_ms: u64,
+        user: &str,
+        password: &str,
+        at_open: Option<&str>,
+    ) -> Self {
         let key = uuid::Uuid::new_v4().simple().to_string();
         let state = bench.state();
-        let start = json!({
+        let mut start = json!({
             "launch": {
                 "v8": bench.designer,
                 "infobase_args": ["/F", bench.root().join("ib")],
@@ -211,6 +226,9 @@ impl Keeper {
             },
             "credentials": { "user": user, "password": password },
         });
+        if let Some(at_open) = at_open {
+            start["at_open"] = json!(at_open);
+        }
         let log_path = bench.root().join(format!("keeper-{key}.log"));
         let log = fs::File::create(&log_path).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
@@ -935,6 +953,46 @@ fn an_open_session_keeps_the_agent_from_idling_out() {
     );
     assert_eq!(keeper.end(session)["frame"], "ended");
     assert!(keeper.exited_within(GONE_WITHIN), "the idle keeper left");
+}
+
+/// Агент, которого `push` поднимает заранее (#574), к базе не подключается, пока команда не
+/// начнёт сессию: подъём без `common connect-ib` и без отключения после него
+/// (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
+#[test]
+fn an_agent_started_idle_connects_only_when_a_session_begins() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start_idle(&bench, 600_000);
+    ready(&keeper);
+    assert_eq!(ready(&keeper)["connected"], false);
+    let log = fs::read_to_string(&bench.commands_log).unwrap_or_default();
+    assert_eq!(log.matches("common connect-ib").count(), 0, "{log}");
+    assert_eq!(log.matches("common disconnect-ib").count(), 0, "{log}");
+    let session = keeper.begin();
+    assert_eq!(ready(&keeper)["connected"], true);
+    assert_eq!(keeper.end(session)["frame"], "ended");
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(log.matches("common connect-ib").count(), 1, "{log}");
+    assert_eq!(log.matches("common disconnect-ib").count(), 1, "{log}");
+    assert_eq!(bench.launches(), 1);
+}
+
+/// Агент, поднятый без подключения, чьё первое подключение не удалось, не остаётся держать сеанс
+/// лицензии: сторож снимает его, как агента, который не поднялся (#574).
+#[test]
+fn an_agent_started_idle_that_cannot_connect_is_removed() {
+    let (bench, ()) = Bench::with_server(false, |agent| {
+        agent
+            .fail_connect
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        serve_managed_launches(agent, None);
+    });
+    let mut keeper = Keeper::start_idle(&bench, 600_000);
+    ready(&keeper);
+    assert!(keeper.try_begin().is_err(), "the connection is refused");
+    assert!(
+        keeper.exited_within(GONE_WITHIN),
+        "the agent that never connected is removed"
+    );
 }
 
 /// Команда, ушедшая без `end`, не оставляет агента подключённым к базе: сторож отключает его

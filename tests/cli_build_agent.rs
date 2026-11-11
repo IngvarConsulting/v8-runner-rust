@@ -615,6 +615,34 @@ fn a_build_without_changes_opens_no_session() {
     assert_eq!(read_or_empty(&harness.designer_args_log).lines().count(), 1);
 }
 
+/// Отправка, которой грузить нечего, может поднять живого агента заранее, пока идёт разбор, но
+/// к базе его не подключает: `common connect-ib` идёт, только когда разбор нашёл работу
+/// (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`,
+/// `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
+#[test]
+fn a_push_with_nothing_to_load_never_connects_an_early_agent() {
+    let harness = harness();
+    let (first, payload) = run(&harness, &["build"]);
+    assert_eq!(first, 0, "{payload}");
+    let (stopped, payload) = run(&harness, &["agent", "stop"]);
+    assert_eq!(stopped, 0, "{payload}");
+    let connects = || {
+        commands(&harness)
+            .iter()
+            .filter(|line| line.starts_with("common connect-ib"))
+            .count()
+    };
+    let before = connects();
+    // Поднимет ли вторая отправка агента, зависит от того, кончится ли её разбор раньше подъёма:
+    // проверяется обещание, верное в обоих случаях, — к базе её агент не подключается.
+
+    let (second, payload) = run(&harness, &["build"]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["steps"][0]["mode"], "skipped", "{payload}");
+    assert_eq!(connects(), before, "{:?}", commands(&harness));
+}
+
 /// Изменённый файл грузится частично, со списком путей относительно каталога загрузки.
 #[test]
 fn a_changed_file_loads_partially_with_a_list_file() {

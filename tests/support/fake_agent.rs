@@ -119,6 +119,8 @@ pub struct FakeAgent {
     /// Подключён ли агент к базе: повторный `common connect-ib` отвечает
     /// `DesignerAlreadyConnectedToInfoBase`, как платформа.
     pub connected: Arc<AtomicBool>,
+    /// `common connect-ib` отвечает ошибкой платформы, пока флаг поднят.
+    pub fail_connect: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -183,6 +185,7 @@ impl FakeAgent {
             dump_info: Arc::new(Mutex::new(None)),
             connect_log: None,
             connected: Arc::new(AtomicBool::new(false)),
+            fail_connect: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -331,6 +334,12 @@ impl FakeAgent {
         {
             if line == "common disconnect-ib" {
                 self.connected.store(false, Ordering::SeqCst);
+            }
+            if line == "common connect-ib" && self.fail_connect.load(Ordering::SeqCst) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"InfoBaseNotFound\",\"message\":\"Информационная база не найдена\"}]\n".to_owned(),
+                    false,
+                );
             }
             if line == "common connect-ib" && self.connected.swap(true, Ordering::SeqCst) {
                 return (

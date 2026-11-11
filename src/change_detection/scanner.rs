@@ -18,7 +18,7 @@ pub enum ScanError {
     #[error("failed to walk directory '{path}': {source}")]
     Walk {
         path: PathBuf,
-        source: walkdir::Error,
+        source: std::io::Error,
     },
 
     #[error("failed to read file '{path}': {source}")]
@@ -81,9 +81,8 @@ pub struct ScanSnapshot {
 
 /// A single-set make may publish inside its source set. Keep its lock, staged
 /// packages and publication metadata out of the snapshot of platform inputs.
-fn is_build_artifact(entry: &walkdir::DirEntry, name: &str) -> bool {
-    if entry
-        .path()
+fn is_build_artifact(path: &Path, name: &str) -> bool {
+    if path
         .extension()
         .and_then(|value| value.to_str())
         .is_some_and(|extension| {
@@ -174,60 +173,271 @@ pub(super) fn list_in_scope(
     scope: ScanScope,
 ) -> Result<Listing, ScanError> {
     check_interruption(interrupted)?;
+    let listing_started = std::time::Instant::now();
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
             path: root.to_path_buf(),
             source,
         })?;
-    let mut candidates = Vec::new();
-    let mut has_untracked_links = false;
-
-    for entry in source_entries(root, excluded, scope) {
-        check_interruption(interrupted)?;
-        let entry = entry.map_err(|e| ScanError::Walk {
-            path: root.to_path_buf(),
-            source: e,
-        })?;
-        if matches!(scope, ScanScope::Build) && entry.file_type().is_symlink() {
-            // The platform may consume a link's contents. An untracked link prevents reuse
-            // but still permits the same fresh full load that the platform handled before.
-            has_untracked_links = true;
-        }
-
-        if !is_source_file(&entry, root, scope) {
-            continue;
-        }
-        let path = entry.path();
-        // A selected entry is a regular file, never a link, so the walk's own metadata is the
-        // file's. On Windows it comes with the directory listing and opens no file; a
-        // separate `fs::metadata` opened every file of the tree once more (#571).
-        let meta = entry.metadata().map_err(|e| ScanError::Meta {
-            path: path.to_path_buf(),
-            source: e.into_io_error().unwrap_or_else(|| {
-                std::io::Error::other("the walk reported no metadata for a selected file")
-            }),
-        })?;
-
-        let mtime_ns = mtime_nanos(
-            meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            path,
-        )
-        .map_err(|source| ScanError::Mtime {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        candidates.push(Candidate {
-            rel_path: rel_path(root, path)?,
-            path: path.to_path_buf(),
-            mtime_ns,
-        });
+    let walk = TreeWalk {
+        root,
+        excluded,
+        scope,
+    };
+    // The root is read on the calling thread, an entry at a time with the caller's predicate,
+    // as a sequential walk reads it; only the directories below it go to the workers.
+    check_interruption(interrupted)?;
+    let mut top = DirListing::default();
+    walk.read_dir(root, &mut top, &mut || interrupted())?;
+    let mut candidates = top.files;
+    let mut has_untracked_links = top.has_links;
+    if !top.dirs.is_empty() {
+        let below = walk.read_below(top.dirs, walk_workers(), interrupted)?;
+        candidates.extend(below.files);
+        has_untracked_links |= below.has_links;
     }
+    // The workers finish in any order: the listing does not depend on it.
+    candidates.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    tracing::debug!(
+        root = %root.display(),
+        files = candidates.len(),
+        elapsed_ms = listing_started.elapsed().as_millis() as u64,
+        "the source tree was listed"
+    );
 
     Ok(Listing {
         scan_started_at,
         files: candidates,
         has_untracked_links,
     })
+}
+
+/// Reading a large tree past this many threads gave nothing on the measured disk (#574: 113 000
+/// files, 0.6 s on eight threads against 3.3 s on one).
+const MAX_WALK_WORKERS: usize = 8;
+
+fn walk_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(MAX_WALK_WORKERS)
+}
+
+/// One walk of a source tree: the selection of [`source_entries`] and [`is_source_file`] —
+/// generated directories and `excluded` skipped, links never followed — over plain directory
+/// reads, so that the directories can be read on several threads (#574).
+struct TreeWalk<'w> {
+    root: &'w Path,
+    excluded: &'w [PathBuf],
+    scope: ScanScope,
+}
+
+/// What one or more directory reads found.
+#[derive(Default)]
+struct DirListing {
+    files: Vec<Candidate>,
+    /// Directories still to read.
+    dirs: Vec<PathBuf>,
+    has_links: bool,
+}
+
+/// The shared queue of the walk workers.
+struct WalkQueue {
+    dirs: Vec<PathBuf>,
+    /// Workers reading a directory now: the walk ends when none is and the queue is empty.
+    reading: usize,
+}
+
+impl TreeWalk<'_> {
+    /// Reads one directory: its selected files with their metadata, its directories to read
+    /// next. The predicate is asked before every entry the walk keeps.
+    fn read_dir(
+        &self,
+        dir: &Path,
+        into: &mut DirListing,
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> Result<(), ScanError> {
+        let walk_error = |source| ScanError::Walk {
+            path: dir.to_path_buf(),
+            source,
+        };
+        for entry in std::fs::read_dir(dir).map_err(walk_error)? {
+            let entry = entry.map_err(walk_error)?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(walk_error)?;
+            let name = entry.file_name();
+            let name = name.to_str();
+            if file_type.is_dir()
+                && (name.is_some_and(|name| is_ignored_dir_name(name, self.scope))
+                    || self.excluded.iter().any(|excluded| *excluded == path))
+            {
+                continue;
+            }
+            check_interruption(interrupted)?;
+            if file_type.is_dir() {
+                into.dirs.push(path);
+                continue;
+            }
+            if matches!(self.scope, ScanScope::Build) && file_type.is_symlink() {
+                // The platform may consume a link's contents. An untracked link prevents reuse
+                // but still permits the same fresh full load that the platform handled before.
+                into.has_links = true;
+            }
+            if !file_type.is_file()
+                || name.is_some_and(|name| !selects_file_name(&path, name, self.root, self.scope))
+            {
+                continue;
+            }
+            // A selected entry is a regular file, never a link, so the listing's own metadata
+            // is the file's. On Windows it comes with the directory read and opens no file; a
+            // separate `fs::metadata` opened every file of the tree once more (#571).
+            let meta = entry.metadata().map_err(|source| ScanError::Meta {
+                path: path.clone(),
+                source,
+            })?;
+            let mtime_ns = mtime_nanos(
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                &path,
+            )
+            .map_err(|source| ScanError::Mtime {
+                path: path.clone(),
+                source,
+            })?;
+            into.files.push(Candidate {
+                rel_path: rel_path(self.root, &path)?,
+                path,
+                mtime_ns,
+            });
+        }
+        Ok(())
+    }
+
+    /// Reads every directory below `dirs` on `workers` threads. The caller's predicate stays on
+    /// the calling thread and is polled while the workers read, as [`hash_candidates`] polls
+    /// it; a cancellation or the first failure stops the workers, and no partial listing is
+    /// returned. Of the failures seen before the workers stopped, the one of the first path in
+    /// name order is reported.
+    fn read_below(
+        &self,
+        dirs: Vec<PathBuf>,
+        workers: usize,
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> Result<DirListing, ScanError> {
+        if workers <= 1 {
+            let mut listing = DirListing {
+                dirs,
+                ..DirListing::default()
+            };
+            while let Some(dir) = listing.dirs.pop() {
+                self.read_dir(&dir, &mut listing, interrupted)?;
+            }
+            return Ok(listing);
+        }
+        let queue = Mutex::new(WalkQueue { dirs, reading: 0 });
+        let ready = std::sync::Condvar::new();
+        let stop = AtomicBool::new(false);
+        let found: Mutex<DirListing> = Mutex::new(DirListing::default());
+        let failure: Mutex<Option<ScanError>> = Mutex::new(None);
+        let mut cancelled = false;
+
+        std::thread::scope(|scope| {
+            let (done, finished) = mpsc::channel::<()>();
+            for _ in 0..workers {
+                let done = done.clone();
+                let (queue, ready, stop, found, failure) =
+                    (&queue, &ready, &stop, &found, &failure);
+                scope.spawn(move || {
+                    let _guard = StopOnPanic(stop);
+                    let mut own = DirListing::default();
+                    loop {
+                        let next = {
+                            let mut state = queue.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if stop.load(Ordering::Relaxed) {
+                                    break None;
+                                }
+                                if let Some(dir) = state.dirs.pop() {
+                                    state.reading += 1;
+                                    break Some(dir);
+                                }
+                                if state.reading == 0 {
+                                    break None;
+                                }
+                                state = ready
+                                    .wait_timeout(state, INTERRUPTION_POLL)
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .0;
+                            }
+                        };
+                        let Some(dir) = next else {
+                            break;
+                        };
+                        let read =
+                            self.read_dir(&dir, &mut own, &mut || stop.load(Ordering::Relaxed));
+                        let below = std::mem::take(&mut own.dirs);
+                        {
+                            let mut state = queue.lock().unwrap_or_else(|e| e.into_inner());
+                            state.dirs.extend(below);
+                            state.reading -= 1;
+                        }
+                        ready.notify_all();
+                        match read {
+                            Ok(()) => {}
+                            // Raised by the flag: a cancellation or another worker's failure.
+                            Err(ScanError::Interrupted) => break,
+                            Err(error) => {
+                                stop.store(true, Ordering::Relaxed);
+                                let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                                if slot.as_ref().is_none_or(|earlier| {
+                                    failure_path(&error) < failure_path(earlier)
+                                }) {
+                                    *slot = Some(error);
+                                }
+                                ready.notify_all();
+                                break;
+                            }
+                        }
+                    }
+                    let mut all = found.lock().unwrap_or_else(|e| e.into_inner());
+                    all.files.append(&mut own.files);
+                    all.has_links |= own.has_links;
+                    drop(done);
+                });
+            }
+            drop(done);
+            // Every sender is dropped when its worker ends; the loop ends with the last of them.
+            while let Err(mpsc::RecvTimeoutError::Timeout) =
+                finished.recv_timeout(INTERRUPTION_POLL)
+            {
+                if !cancelled && interrupted() {
+                    cancelled = true;
+                    stop.store(true, Ordering::Relaxed);
+                    ready.notify_all();
+                }
+            }
+        });
+
+        if cancelled {
+            return Err(ScanError::Interrupted);
+        }
+        if let Some(error) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            return Err(error);
+        }
+        // Workers faster than one poll still answer a cancellation raised meanwhile.
+        check_interruption(interrupted)?;
+        Ok(found.into_inner().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+/// The path a walk failure names: of several, the first in name order is reported.
+fn failure_path(error: &ScanError) -> Option<&Path> {
+    match error {
+        ScanError::Walk { path, .. }
+        | ScanError::Read { path, .. }
+        | ScanError::Meta { path, .. }
+        | ScanError::Mtime { path, .. }
+        | ScanError::RelativePath { path, .. } => Some(path),
+        ScanError::Interrupted => None,
+    }
 }
 
 fn hash_listed_with(
@@ -522,13 +732,20 @@ pub(super) fn source_entries<'a>(
 
 pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: ScanScope) -> bool {
     entry.file_type().is_file()
-        && !entry.file_name().to_str().is_some_and(|name| match scope {
-            ScanScope::Push => is_ignored_file(name),
-            ScanScope::Build => {
-                entry.path().parent() == Some(root) && is_ignored_file(name)
-                    || is_build_artifact(entry, name)
-            }
-        })
+        && entry
+            .file_name()
+            .to_str()
+            .is_none_or(|name| selects_file_name(entry.path(), name, root, scope))
+}
+
+/// The file-name half of [`is_source_file`]: whether a regular file `name` at `path` is a source.
+fn selects_file_name(path: &Path, name: &str, root: &Path, scope: ScanScope) -> bool {
+    match scope {
+        ScanScope::Push => !is_ignored_file(name),
+        ScanScope::Build => {
+            !(path.parent() == Some(root) && is_ignored_file(name) || is_build_artifact(path, name))
+        }
+    }
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
@@ -947,6 +1164,164 @@ mod tests {
             let body: Vec<u8> = (0..size).map(|byte| (byte * 31 + index) as u8).collect();
             fs::write(dir.join(format!("Module{index}.bsl")), body).expect("file");
         }
+    }
+
+    /// A tree with nested folders, generated folders at the top and deeper, an excluded folder,
+    /// ignored files and build artifacts: what each walk must leave out.
+    fn walked_tree(root: &Path) -> std::path::PathBuf {
+        many_files(root, 120);
+        for (folder, file) in [
+            ("build", "Hidden.bsl"),
+            ("Catalogs/Goods/build", "Form.xml"),
+            ("Catalogs/Goods/.git", "HEAD"),
+            ("Catalogs/Goods/Forms/target", "Form.xml"),
+            ("work", "Inside.bsl"),
+            ("Catalogs/Goods", "ConfigDumpInfo.xml"),
+            ("Catalogs/Goods", "main.cf"),
+            ("", "ConfigDumpInfo.xml"),
+            ("", "Configuration.xml"),
+        ] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("folder");
+            fs::write(dir.join(file), folder).expect("file");
+        }
+        root.join("work")
+    }
+
+    /// What the sequential walk of [`super::source_entries`] selects, as the listing names it.
+    fn sequential_selection(
+        root: &Path,
+        excluded: &[std::path::PathBuf],
+        scope: ScanScope,
+    ) -> Vec<(String, u64)> {
+        let mut selected: Vec<(String, u64)> = super::source_entries(root, excluded, scope)
+            .map(|entry| entry.expect("entry"))
+            .filter(|entry| super::is_source_file(entry, root, scope))
+            .map(|entry| {
+                let modified = entry.metadata().expect("meta").modified().expect("mtime");
+                (
+                    super::rel_path(root, entry.path()).expect("relative"),
+                    mtime_nanos(modified, entry.path()).expect("nanos"),
+                )
+            })
+            .collect();
+        selected.sort();
+        selected
+    }
+
+    /// The listing reads folders on several threads and selects exactly what the sequential
+    /// walk selects, in name order whatever the number of threads (#574).
+    #[test]
+    fn a_parallel_listing_selects_what_the_sequential_walk_selects() {
+        let dir = tempdir().expect("tempdir");
+        let excluded = vec![walked_tree(dir.path())];
+        for scope in [ScanScope::Push, ScanScope::Build] {
+            let expected = sequential_selection(dir.path(), &excluded, scope);
+            assert!(expected.len() > 120, "{}", expected.len());
+            for workers in [1, 2, 8] {
+                let walk = super::TreeWalk {
+                    root: dir.path(),
+                    excluded: &excluded,
+                    scope,
+                };
+                let mut top = super::DirListing::default();
+                walk.read_dir(dir.path(), &mut top, &mut || false)
+                    .expect("root");
+                let below = walk
+                    .read_below(top.dirs, workers, &mut || false)
+                    .expect("below");
+                let mut listed: Vec<(String, u64)> = top
+                    .files
+                    .into_iter()
+                    .chain(below.files)
+                    .map(|file| (file.rel_path, file.mtime_ns))
+                    .collect();
+                listed.sort();
+                assert_eq!(listed, expected, "{workers} workers");
+            }
+            let listing =
+                super::list_in_scope(dir.path(), &excluded, &mut || false, scope).expect("listing");
+            let names: Vec<&str> = listing
+                .files
+                .iter()
+                .map(|file| file.rel_path.as_str())
+                .collect();
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            assert_eq!(names, sorted, "the listing comes in name order");
+            assert_eq!(names.len(), expected.len());
+        }
+    }
+
+    /// Замер перечня на большом дереве: `V8R_LIST_ROOT=<каталог> cargo test --release -- --ignored
+    /// the_listing_of_a_large_tree_is_timed --nocapture`.
+    #[test]
+    #[ignore = "a measurement on a tree named by V8R_LIST_ROOT"]
+    fn the_listing_of_a_large_tree_is_timed() {
+        let root = std::path::PathBuf::from(std::env::var("V8R_LIST_ROOT").expect("V8R_LIST_ROOT"));
+        for workers in [1, 4, 8, 8] {
+            let clock = std::time::Instant::now();
+            let walk = super::TreeWalk {
+                root: &root,
+                excluded: &[],
+                scope: ScanScope::Push,
+            };
+            let mut top = super::DirListing::default();
+            walk.read_dir(&root, &mut top, &mut || false).expect("root");
+            let below = walk
+                .read_below(top.dirs, workers, &mut || false)
+                .expect("below");
+            println!(
+                "{workers} workers: {} files in {:?}",
+                top.files.len() + below.files.len(),
+                clock.elapsed()
+            );
+        }
+    }
+
+    /// A cancellation while the folders below the root are read gives no listing at all.
+    #[test]
+    fn a_cancelled_parallel_listing_returns_nothing() {
+        let dir = tempdir().expect("tempdir");
+        many_files(dir.path(), 300);
+        let mut polls = 0;
+        let error = super::list_in_scope(
+            dir.path(),
+            &[],
+            &mut || {
+                polls += 1;
+                // The root and its seven folders pass; the stop comes while the workers read.
+                polls > 9
+            },
+            ScanScope::Push,
+        )
+        .err()
+        .expect("a cancelled listing");
+        assert!(matches!(error, super::ScanError::Interrupted), "{error:?}");
+    }
+
+    /// A folder that cannot be read fails the listing and is named, on any number of threads.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_fails_the_parallel_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().expect("tempdir");
+        many_files(dir.path(), 70);
+        let locked = dir.path().join("Dir3").join("Ext");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+        if fs::read_dir(&locked).is_ok() {
+            // Root ignores permissions: nothing to observe.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+            return;
+        }
+        let error = super::list_in_scope(dir.path(), &[], &mut || false, ScanScope::Push)
+            .err()
+            .expect("an unreadable folder");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+        assert!(
+            matches!(&error, super::ScanError::Walk { path, .. } if *path == locked),
+            "{error:?}"
+        );
     }
 
     #[test]
