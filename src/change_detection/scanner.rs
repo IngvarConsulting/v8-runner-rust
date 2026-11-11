@@ -268,7 +268,7 @@ impl TreeWalk<'_> {
             let name = name.to_str();
             if file_type.is_dir()
                 && (name.is_some_and(|name| is_ignored_dir_name(name, self.scope))
-                    || self.excluded.iter().any(|excluded| *excluded == path))
+                    || self.excluded.contains(&path))
             {
                 continue;
             }
