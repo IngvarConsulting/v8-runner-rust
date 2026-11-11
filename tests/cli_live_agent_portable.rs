@@ -373,6 +373,47 @@ fn a_second_command_reuses_the_live_agent_on_any_os() {
     assert!(alive(bench.designer_pid()), "the agent lives on");
 }
 
+#[test]
+fn status_deep_reports_reusing_the_generation_agent() {
+    let bench = Bench::new("    live: true\n");
+    let config = fs::read_to_string(&bench.config_path).expect("config");
+    fs::write(
+        &bench.config_path,
+        config.replacen("providers:\n", "providers:\n  extensions: agent\n", 1),
+    )
+    .expect("read extensions with the same agent");
+
+    let (code, shallow) = bench.run(&["status"]);
+    assert_eq!(code, 0, "{shallow}");
+    assert!(shallow["data"].get("provider").is_none(), "{shallow}");
+    assert_eq!(bench.launches(), 0);
+
+    for reused in [false, true] {
+        let (code, payload) = bench.run(&["status", "--deep"]);
+        assert_eq!(code, 0, "{payload}");
+        let base = &payload["data"]["infobases"][0]["source_sets"][0]["base"];
+        assert_eq!(base["tool"], "agent", "{payload}");
+        assert!(base["token"].is_string(), "{payload}");
+        assert!(base["unapplied"].is_null(), "{payload}");
+        assert_eq!(
+            payload["data"]["provider"]["selected"], "agent",
+            "{payload}"
+        );
+        if in_a_closed_job(&payload) {
+            return;
+        }
+        let extensions = &payload["data"]["infobases"][0]["extensions"];
+        assert_eq!(extensions["provider"]["selected"], "agent", "{payload}");
+        assert!(extensions["installed"].is_array(), "{payload}");
+        assert_eq!(
+            live(&payload),
+            &json!({"reused": reused, "holders": [], "kept": true}),
+            "{payload}"
+        );
+    }
+    assert_eq!(bench.launches(), 1, "one 1cv8 for both status commands");
+}
+
 /// С `live: false` команда работает с разовым агентом и снимает живого агента своей рабочей
 /// копии (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
 #[test]
