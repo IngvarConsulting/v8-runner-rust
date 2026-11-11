@@ -24,7 +24,6 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use crate::use_cases::source_inventory::SourceSetInventory;
-use crate::use_cases::staged_publication::is_superseded_backup;
 
 use super::ResolvedDumpTarget;
 
@@ -210,7 +209,7 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
         }
         // Прежнее дерево завершённой замены — остаток в любом возрасте: его не успело или не
         // смогло удалить фоновое удаление (#616), или оно удаляет его прямо сейчас.
-        if !is_superseded_backup(&metadata)
+        if !metadata.is_superseded_backup()
             && (chrono::Utc::now() - metadata.created_at)
                 .to_std()
                 .unwrap_or_default()
@@ -219,14 +218,26 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
             continue;
         }
 
-        remove_tree_in_parallel(&path)
-            .or_else(already_gone)
-            .map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to remove stale temp dir '{}': {error}",
-                    path.display()
-                ))
-            })?;
+        let removed = remove_tree_in_parallel(&path).or_else(already_gone);
+        if metadata.is_superseded_backup() {
+            // Прежнее дерево ни для чего не нужно: не удалось сейчас — удалится в следующий раз,
+            // а выгрузку это не останавливает. Его может удалять и фоновый процесс.
+            match removed.and_then(|()| remove_path_if_exists(&metadata_sidecar_path(&path))) {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove the replaced tree of a previous pull yet"
+                ),
+            }
+            continue;
+        }
+        removed.map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to remove stale temp dir '{}': {error}",
+                path.display()
+            ))
+        })?;
         remove_path_if_exists(&metadata_sidecar_path(&path)).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to remove stale temp metadata '{}': {error}",
@@ -269,7 +280,7 @@ fn remove_metadata_of_a_removed_backup(
     };
     if !is_known_tool_name(&metadata.tool)
         || metadata.target_identity != target_identity
-        || !is_superseded_backup(&metadata)
+        || !metadata.is_superseded_backup()
     {
         return Ok(());
     }

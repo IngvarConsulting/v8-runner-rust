@@ -1313,6 +1313,10 @@ fn a_full_pull_answers_before_the_replaced_tree_is_removed() {
         trees[0].join("old.txt").is_file(),
         "it is the previous tree"
     );
+    assert_eq!(
+        fs::read_to_string(trees[0].join(".gitignore")).expect("hidden from git"),
+        "*\n"
+    );
     assert!(project.sources.join("Module.bsl").is_file(), "published");
     assert!(
         support::wait_until(

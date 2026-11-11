@@ -41,20 +41,21 @@ pub fn allow_from_this_executable() {
 pub enum SpawnRefusal {
     #[error("this process is not the runner executable")]
     NotTheRunner,
-    #[error("{0}")]
+    #[error("the path is not valid Unicode: {0}")]
+    NotUnicode(PathBuf),
+    #[error(transparent)]
     Spawn(#[from] ServiceSpawnError),
 }
 
 /// Запускает отделённый процесс раннера, который удалит прежнее дерево `backup`.
 pub fn spawn(backup: &Path) -> Result<u32, SpawnRefusal> {
     let program = RUNNER_EXECUTABLE.get().ok_or(SpawnRefusal::NotTheRunner)?;
+    let path = backup
+        .to_str()
+        .ok_or_else(|| SpawnRefusal::NotUnicode(backup.to_path_buf()))?;
     let request = ServiceRequest {
         program: program.clone(),
-        args: vec![
-            COMMAND.to_owned(),
-            "--path".to_owned(),
-            backup.to_string_lossy().into_owned(),
-        ],
+        args: vec![COMMAND.to_owned(), "--path".to_owned(), path.to_owned()],
         // Текущий каталог процесса держится открытым: не каталог проекта.
         workdir: Some(std::env::temp_dir()),
         // Отказ виден по оставшемуся дереву, его доберёт следующая команда: журнал не нужен.

@@ -333,7 +333,9 @@ impl StagedPublication {
 fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval) -> Option<String> {
     match removal {
         BackupRemoval::Inline => backup.remove(),
-        BackupRemoval::Background => match crate::platform::backup_removal::spawn(backup.path()) {
+        BackupRemoval::Background => match hide_from_git(&backup)
+            .and_then(|()| crate::platform::backup_removal::spawn(backup.path()))
+        {
             Ok(pid) => {
                 tracing::debug!(
                     backup = %backup.path().display(),
@@ -348,6 +350,15 @@ fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval) -> Option
             }
         },
     }
+}
+
+/// Прежнее дерево лежит рядом с набором и после ответа: git его не видит, и `git add -A`
+/// сразу после `pull --force` его не возьмёт.
+fn hide_from_git(
+    backup: &SupersededBackup,
+) -> Result<(), crate::platform::backup_removal::SpawnRefusal> {
+    std::fs::write(backup.path().join(".gitignore"), "*\n")
+        .map_err(|error| crate::platform::backup_removal::SpawnRefusal::Spawn(error.into()))
 }
 
 /// Переносит дерево `source` поверх `target`, кроме файла `skip` в корне: каталоги
@@ -447,21 +458,14 @@ pub(super) fn cleanup_owned_orphan_files(
 
 /// A backup of a finished replacement is a leftover at any age: its tree is older than the
 /// target, and the background removal (#616) may have left part of it. Anything else is a
-/// leftover once stale, unless it is the only copy of its target.
+/// leftover once stale. Neither goes while it may be the only copy of its target.
 fn is_a_leftover(metadata: &TempDirMetadata, temp_path: &Path) -> bool {
-    if is_superseded_backup(metadata) {
-        return true;
-    }
-    (Utc::now() - metadata.created_at)
-        .to_std()
-        .unwrap_or_default()
-        >= ORPHAN_TTL
+    (metadata.is_superseded_backup()
+        || (Utc::now() - metadata.created_at)
+            .to_std()
+            .unwrap_or_default()
+            >= ORPHAN_TTL)
         && !backup_is_the_only_copy(&metadata.kind, temp_path, &metadata.target_path)
-}
-
-/// The previous tree of a finished replacement: marked once the new tree took its place.
-pub(super) fn is_superseded_backup(metadata: &TempDirMetadata) -> bool {
-    matches!(metadata.kind, TempDirKind::Backup) && metadata.superseded
 }
 
 /// A process that died between the two renames of a replacement leaves the backup and no

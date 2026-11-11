@@ -87,6 +87,13 @@ pub struct TempDirMetadata {
     pub superseded: bool,
 }
 
+impl TempDirMetadata {
+    /// The previous tree of a finished replacement: marked once the new tree took its place.
+    pub fn is_superseded_backup(&self) -> bool {
+        matches!(self.kind, TempDirKind::Backup) && self.superseded
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvisoryLockMetadata {
     pub tool: String,
@@ -141,6 +148,7 @@ pub struct ReplaceDirOutcome {
 
 /// A finished directory replacement whose previous tree may still be on disk.
 #[derive(Debug)]
+#[must_use = "the previous tree stays on disk until it is removed"]
 pub struct SwappedDir {
     /// The previous tree, marked superseded and not yet removed; `None` when there was no
     /// previous tree or when it was removed in place because the mark could not be written.
@@ -1216,10 +1224,12 @@ pub fn remove_superseded_backup(backup: &Path) -> std::io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(&format!("-{}", metadata.run_id)));
+    let beside_its_target =
+        parent_dir(backup).is_some() && parent_dir(backup) == parent_dir(&metadata.target_path);
     if !is_known_tool_name(&metadata.tool)
-        || !matches!(metadata.kind, TempDirKind::Backup)
-        || !metadata.superseded
+        || !metadata.is_superseded_backup()
         || !named_for_its_run
+        || !beside_its_target
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1244,14 +1254,13 @@ fn remove_backup_tree(backup_dir: &Path) -> Option<String> {
             backup_dir.display()
         ));
     }
-    remove_path_if_exists(&metadata_sidecar_path(backup_dir))
-        .err()
-        .map(|error| {
-            format!(
-                "failed to remove backup metadata '{}': {error}",
-                metadata_sidecar_path(backup_dir).display()
-            )
-        })
+    let sidecar = metadata_sidecar_path(backup_dir);
+    remove_path_if_exists(&sidecar).err().map(|error| {
+        format!(
+            "failed to remove backup metadata '{}': {error}",
+            sidecar.display()
+        )
+    })
 }
 
 pub fn replace_file_atomically(
