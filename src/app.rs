@@ -99,6 +99,18 @@ pub fn run() -> i32 {
                 )
             })
         });
+    if cli.events.is_some() {
+        let publication_stdio =
+            matches!(&cli.command, Command::Dump(args) if args.publication_stdio.is_some());
+        if let Some(error) =
+            global_flags::events_refusal(&leaf, cli.json_message, publication_stdio)
+        {
+            // Поток событий занял бы stdout, где уже говорит другой протокол или текст: отказ
+            // уходит в stderr, а stdout остаётся пустым.
+            return render_startup_refusal(&leaf, &cli.command, cli.no_color, "text", error);
+        }
+        crate::output::events::open(command_name(&cli.command));
+    }
     if let Command::Dump(args) = &cli.command {
         if args.publication_stdio.is_some() {
             return crate::cli::external_pull::run(&cli, args, startup_refusal);

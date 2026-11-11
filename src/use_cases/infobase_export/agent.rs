@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::config::model::AppConfig;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::locator::{PlatformVersion, UtilityLocation, UtilityVersion};
 use crate::platform::result::PlatformCommandResult;
 use crate::use_cases::agent_session::{
@@ -74,6 +75,8 @@ pub(super) fn export_configuration(
                 command.push_str(&format!(" --extension={}", argument(extension)));
             }
             log_live_stage(
+                ProgressPhase::Package,
+                None,
                 "infobase export: agent",
                 "[агент] exporting configuration package",
             );
@@ -107,6 +110,8 @@ pub(super) fn export_snapshot(
             make_output_dir(handle, exchange, &out)?;
             let relative = format!("{out}/infobase.dt");
             log_live_stage(
+                ProgressPhase::Infobase,
+                None,
                 "infobase dump: agent",
                 "[агент] exporting infobase snapshot",
             );
@@ -144,6 +149,8 @@ pub(super) fn restore_snapshot(
             let relative = format!("restore/{}.dt", run_id());
             stage_file(handle, exchange, &relative, source_file)?;
             log_live_stage(
+                ProgressPhase::Infobase,
+                None,
                 "infobase restore: agent",
                 "[агент] restoring infobase snapshot",
             );

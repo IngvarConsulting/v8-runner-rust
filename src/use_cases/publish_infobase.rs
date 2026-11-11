@@ -11,6 +11,7 @@ use tracing::debug;
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::publish::{PublishAction, PublishPlan, PublishResult};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRequest;
@@ -111,6 +112,8 @@ fn run_publish(
 
     if request.dry_run {
         log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "publish: preview",
             "[webinst] preview only, web server not touched",
         );
@@ -141,6 +144,8 @@ fn run_publish(
         std::process::id()
     ));
     log_live_stage(
+        ProgressPhase::Publish,
+        None,
         "publish: webinst",
         &format!(
             "[webinst] {} '{}' on {}",

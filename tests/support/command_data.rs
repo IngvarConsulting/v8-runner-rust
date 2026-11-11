@@ -102,3 +102,23 @@ pub fn assert_full_pull_publication_contract(frame: &Value) {
         "live publication frame violates its published contract: {frame}\n{errors:#?}"
     );
 }
+
+/// Сверяет событие хода `--events -` с опубликованной формой `CTR.WIRE.PROGRESS-EVENTS`.
+pub fn assert_progress_event_contract(event: &Value) {
+    static CONTRACT: OnceLock<jsonschema::Validator> = OnceLock::new();
+    let contract = CONTRACT.get_or_init(|| {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/progress-event.schema.json"
+        ))
+        .expect("published progress event schema");
+        jsonschema::validator_for(&schema).expect("progress event contract compiles")
+    });
+    let errors: Vec<String> = contract
+        .iter_errors(event)
+        .map(|error| format!("{} at {}", error, error.instance_path))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "progress event violates its published contract: {event}\n{errors:#?}"
+    );
+}

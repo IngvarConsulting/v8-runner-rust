@@ -95,9 +95,17 @@ impl CliSignalGuard {
                             _ => break,
                         }
                     }
+                    let first = first_at.is_none();
                     first_at.get_or_insert_with(std::time::Instant::now);
                     token.cancel();
                     tracing::info!("{}", line);
+                    // Первый сигнал — событие `cancel` хода команды (`CTR.WIRE.PROGRESS-EVENTS`):
+                    // прямо в поток, и тогда, когда журнал команды ещё не заведён.
+                    if first {
+                        crate::output::events::cancel(
+                            crate::domain::progress::CancelReason::Cancelled,
+                        );
+                    }
                 }
             });
         });
