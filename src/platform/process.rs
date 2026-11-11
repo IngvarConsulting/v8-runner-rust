@@ -3046,8 +3046,13 @@ mod tests {
                 pid_file.display()
             ),
         );
+        // Ожидающему режиму нужен журнал stderr: без него запуск отказывает раньше процесса.
+        let request = ProcessRequest {
+            stderr_log_path: Some(dir.path().join("stderr.log")),
+            ..plain_request(script)
+        };
         let managed = ProcessExecutor
-            .spawn_managed(&plain_request(script), ManagedSpawnMode::Wait, None)
+            .spawn_managed(&request, ManagedSpawnMode::Wait, None)
             .expect("spawn managed");
         let pid = read_pid(&pid_file);
         let child_pid = read_pid(&child_pid_file);
