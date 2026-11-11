@@ -18,6 +18,24 @@ pub struct InfobaseSessions {
     pub terminable: bool,
     /// Блокировка начала сеансов, которая уже стоит у базы.
     pub lock: SessionLock,
+    /// Откуда известно, что базу держат сеансы.
+    pub evidence: SessionsEvidence,
+    /// Отказ исполнителя как он есть, когда признак — список сервера (`evidence: server_list`):
+    /// база занята, но отказ мог быть и по другой причине. У `executor` — `null`.
+    pub executor_error: Option<String>,
+}
+
+/// Источник признака «базу держат сеансы».
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionsEvidence {
+    /// Улика исполнителя или состояния базы: `error-type` агента, его вопрос, блокировка файлов
+    /// файловой базы, отказ СУБД из-за подключений, у пересоздания — сеансы в `rac`: другой
+    /// причины отказа нет. Отказ — точно из-за сеансов.
+    Executor,
+    /// Улики исполнителя нет, а собственный список сервера (`rac session list`, `ibcmd session
+    /// list`) называет чужие живые сеансы: база занята, но причина отказа может быть другой.
+    ServerList,
 }
 
 /// Один сеанс из списка платформы.

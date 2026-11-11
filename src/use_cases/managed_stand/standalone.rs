@@ -715,6 +715,80 @@ pub(super) fn run_standalone(
     outcome.map_err(|error| UseCaseFailure::with_payload(error, server.failed()))
 }
 
+/// Сколько ждать ответа `ibcmd session list`: на замере он отвечает за 0,1–0,2 с.
+const SESSIONS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Сеансы базы у автономного сервера: источник признака «базу держат сеансы» у применения
+/// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). Свой `ibsrv` раннер спрашивает по pid
+/// из записи (`ibcmd` из того же каталога, что `ibsrv`), чужой — через объявленный SSH-шлюз
+/// (`ibcmd` проекта). `None` — свой сервер не работает, пути нет или `ibcmd` не ответил: на
+/// замере #613 у сервера над файловой базой, в котором сеансов ещё не было, он отвечает rc=−1.
+pub(super) fn sessions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Option<Vec<crate::platform::rac::Session>> {
+    let standalone = config.infobase.standalone.as_ref()?;
+    let request = if standalone.managed.is_some() {
+        let declared = declared(config).ok()?;
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            &declared.infobase,
+            StandService::Standalone,
+        );
+        let no_locate = || Err(validation("a running server names its own utilities"));
+        let server = Server {
+            config,
+            context,
+            runner,
+            host,
+            locate: &no_locate,
+            declared,
+            paths,
+            started_at: Instant::now(),
+        };
+        let Observed::Own(record) = server.observe() else {
+            return None;
+        };
+        let ibcmd = record
+            .bin
+            .parent()?
+            .join(format!("ibcmd{}", std::env::consts::EXE_SUFFIX));
+        ibsrv::session_list(&ibcmd, ibsrv::SessionSource::Pid(record.pid?))
+    } else {
+        let gate = standalone.gate.as_deref()?;
+        let ibcmd = crate::platform::utilities::PlatformUtilities::from_config(config)
+            .locate(crate::platform::locator::UtilityType::Ibcmd)
+            .ok()?
+            .path;
+        ibsrv::session_list(&ibcmd, ibsrv::SessionSource::Gate(gate))
+    };
+    let answer = match runner.run_with_policy(
+        &request,
+        &context.process_policy(
+            InterruptionSafetyClass::GracefulThenKill,
+            Some(SESSIONS_TIMEOUT),
+        ),
+    ) {
+        Ok(answer) => answer,
+        Err(error) => {
+            tracing::debug!(%error, "ibcmd session list did not run: no evidence of sessions");
+            return None;
+        }
+    };
+    if answer.outcome().is_err() {
+        tracing::debug!(
+            code = answer.exit_code,
+            stderr = answer.stderr.trim(),
+            stdout = answer.stdout.trim(),
+            "ibcmd session list refused: no evidence of sessions"
+        );
+        return None;
+    }
+    Some(crate::platform::rac::sessions(&answer.stdout))
+}
+
 /// Значения для ключей `ibsrv`, владеющие своими строками.
 enum OwnedStorage {
     File(PathBuf),
