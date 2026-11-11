@@ -18,7 +18,9 @@ const SECOND_SIGNAL_GAP: std::time::Duration = std::time::Duration::from_secs(1)
 
 /// Lifetime guard that forwards CLI termination signals into a shared cancellation token.
 ///
-/// Первый `Ctrl+C` или `SIGTERM` отменяет команду. Второй выставляет второй сигнал
+/// Прерывание оператора — `Ctrl+C`, `SIGTERM` на Unix, `CTRL_BREAK` на Windows. Закрытие
+/// окна консоли (`CTRL_CLOSE`) не слушается: Windows даёт на него секунды и снимает процесс,
+/// дождаться агента всё равно нельзя. Первое прерывание отменяет команду. Второе выставляет второй сигнал
 /// ([`OperatorInsistence`]): раннер перестаёт ждать команду чужого агента, которую снять
 /// не может, и отвечает, что бросил её.
 pub struct CliSignalGuard {
@@ -43,9 +45,14 @@ impl CliSignalGuard {
             };
 
             runtime.block_on(async move {
+                // Третий путь прерывания: `SIGTERM` на Unix и `CTRL_BREAK` на Windows — его
+                // шлёт тот, кто запустил раннер в своей группе процессов: `CTRL_C` в чужую группу
+                // не доставить, а по умолчанию `CTRL_BREAK` обрывает процесс без ответа.
                 #[cfg(unix)]
                 let mut term =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+                #[cfg(windows)]
+                let mut term = tokio::signal::windows::ctrl_break().ok();
                 let mut stopped = tokio::task::spawn_blocking(move || {
                     let _ = stop_rx.recv();
                 });
@@ -64,7 +71,16 @@ impl CliSignalGuard {
                                 None => std::future::pending::<()>().await,
                             }
                         };
-                        #[cfg(not(unix))]
+                        #[cfg(windows)]
+                        let termination = async {
+                            match term.as_mut() {
+                                Some(term) => {
+                                    let _ = term.recv().await;
+                                }
+                                None => std::future::pending::<()>().await,
+                            }
+                        };
+                        #[cfg(not(any(unix, windows)))]
                         let termination = std::future::pending::<()>();
 
                         tokio::select! {

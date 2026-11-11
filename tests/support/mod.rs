@@ -367,6 +367,7 @@ pub fn interrupt_twice_at_hold(
         "the held work never started"
     );
     send_sigterm(&runner.0);
+    let first = std::time::Instant::now();
     let waited = wait_until(timeout, Duration::from_millis(20), || {
         fs::read_to_string(action_log).is_ok_and(|log| log.contains(waiting))
     });
@@ -375,7 +376,9 @@ pub fn interrupt_twice_at_hold(
         "the runner never logged {waiting:?}: {}",
         fs::read_to_string(action_log).unwrap_or_default()
     );
-    // Второй сигнал — после строки ожидания: два сигнала подряд могли бы слиться в один.
+    // Второй сигнал — после строки ожидания и не раньше секунды после первого: раннер
+    // считает сигнал в пределах секунды тем же нажатием (`SECOND_SIGNAL_GAP`).
+    std::thread::sleep(Duration::from_millis(1500).saturating_sub(first.elapsed()));
     send_sigterm(&runner.0);
     let exited = wait_until(timeout, Duration::from_millis(20), || {
         runner.0.try_wait().expect("wait runner").is_some()

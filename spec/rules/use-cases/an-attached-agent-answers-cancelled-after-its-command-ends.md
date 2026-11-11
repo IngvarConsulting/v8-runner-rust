@@ -4,6 +4,7 @@ check:
   - tests/cli_agent_standalone.rs::cancellation_of_an_external_agent_waits_for_a_terminal_reply
   - tests/cli_agent_standalone.rs::a_second_interrupt_abandons_the_wait_for_an_external_agent
   - src/mcp/server.rs::a_repeated_cancellation_of_a_call_reaches_it_as_the_second_signal
+  - tests/cli_agent_standalone.rs::a_ctrl_break_from_another_process_group_cancels_like_ctrl_c
 ---
 
 # Чужой агент отвечает отменой после конца своей команды
@@ -16,7 +17,8 @@ check:
 `canceled` агента дают `cancelled`; отказ агента, вопрос и потеря канала до итога сохраняют
 свои ошибки. Результат прерванной выгрузки не публикуется.
 
-Ожидание ограничивает второй сигнал: второй `Ctrl+C` или `SIGTERM` командной строки, у MCP —
+Ожидание ограничивает второй сигнал: второе прерывание командной строки (`Ctrl+C`, `SIGTERM`
+на Unix, `CTRL_BREAK` на Windows) не раньше секунды после первого, у MCP —
 повторное `notifications/cancelled` для того же запроса. Тогда раннер перестаёт ждать и
 отвечает конвертом с кодом `agent_command_abandoned` рода `platform` (выход 4, у MCP —
 `platform_failure`): конец команды не наблюдался, агент, возможно, ещё её выполняет и держит

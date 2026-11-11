@@ -1523,12 +1523,10 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
 }
 
 /// Строка журнала первого сигнала у чужого агента: раннер ждёт итог команды.
-#[cfg(unix)]
 const WAITING_FOR_EXTERNAL_AGENT: &str =
     "interruption requested after sending a command to an external agent; waiting for terminal reply";
 
 /// Чужая точка входа выгрузки: шлюз автономного сервера или подключённый агент.
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum Entry {
     Gate,
@@ -1537,7 +1535,6 @@ enum Entry {
 
 /// Выгрузка `pull main --force` через точку входа `Entry`, чью команду
 /// `config dump-config-to-files` двойник держит до `release`.
-#[cfg(unix)]
 struct HeldDump {
     harness: Harness,
     marks: tempfile::TempDir,
@@ -1545,7 +1542,6 @@ struct HeldDump {
     release: PathBuf,
 }
 
-#[cfg(unix)]
 impl HeldDump {
     fn new(entry: Entry, reply: support::fake_agent::HoldReply) -> Self {
         let marks = temp_workspace();
@@ -1730,6 +1726,87 @@ fn a_second_interrupt_abandons_the_wait_for_an_external_agent() {
                 .transcript()
                 .contains("held dump finished after abandonment"),
             "the runner must not have waited for the terminal reply ({entry:?})"
+        );
+        held.assert_not_published();
+    }
+}
+
+/// `CTRL_BREAK` — прерывание оператора на Windows, как `Ctrl+C`: тот, кто запустил раннер в
+/// своей группе процессов (`CREATE_NEW_PROCESS_GROUP`), иначе прервать его не может, а по
+/// умолчанию `CTRL_BREAK` обрывает процесс без ответа. Раннер ждёт итог чужого агента и
+/// отвечает конвертом `cancelled`.
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_from_another_process_group_cancels_like_ctrl_c() {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::time::Duration;
+    use support::fake_agent::HoldReply;
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, CTRL_BREAK_EVENT,
+    };
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+    // Событие доходит только до процессов той же консоли; у теста без консоли её заводят.
+    // SAFETY: вызовы без аргументов-указателей; консоль своего процесса тестов.
+    unsafe {
+        if GetConsoleWindow().is_null() {
+            AllocConsole();
+        }
+    }
+    for entry in [Entry::Gate, Entry::Attached] {
+        let held = HeldDump::new(
+            entry,
+            HoldReply::JsonMessages(r#"[{"type":"success","message":"held dump finished"}]"#),
+        );
+        let action_log = held.action_log();
+        let mut command = held.runner();
+        command
+            .env("V8TR_ACTION_LOG_FILE", &action_log)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP);
+        let mut runner = support::RunnerGuard(command.spawn().expect("spawn runner"));
+        let mut stdout = runner.0.stdout.take().expect("piped stdout");
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            stdout.read_to_string(&mut text).map(|_| text)
+        });
+        let timeout = Duration::from_secs(30);
+        assert!(
+            support::wait_for_file(&held.started, timeout),
+            "the held work never started"
+        );
+        // SAFETY: группа процессов раннера — его pid (`CREATE_NEW_PROCESS_GROUP`).
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, runner.0.id()) };
+        assert_ne!(sent, 0, "CTRL_BREAK was not delivered");
+        let waited = support::wait_until(timeout, Duration::from_millis(20), || {
+            fs::read_to_string(&action_log)
+                .is_ok_and(|log| log.contains(WAITING_FOR_EXTERNAL_AGENT))
+        });
+        assert!(
+            waited,
+            "the runner never waited for the agent ({entry:?}): {}",
+            fs::read_to_string(&action_log).unwrap_or_default()
+        );
+        fs::write(&held.release, "").expect("release the held work");
+        let exited =
+            support::wait_until(Duration::from_secs(60), Duration::from_millis(20), || {
+                runner.0.try_wait().expect("wait runner").is_some()
+            });
+        assert!(exited, "the runner did not exit after the release");
+        let code = runner.0.wait().expect("exit status").code().unwrap_or(-1);
+        let stdout = reader.join().expect("reader").expect("stdout");
+        let payload: Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+        assert_eq!(
+            payload["error"]["code"], "cancelled",
+            "{entry:?}: {payload}"
+        );
+        assert_eq!(code, 4, "{payload}");
+        assert!(
+            held.transcript().contains("held dump finished"),
+            "the runner answered before the agent's terminal reply ({entry:?})"
         );
         held.assert_not_published();
     }

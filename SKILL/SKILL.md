@@ -196,7 +196,12 @@ v8-runner infobase create
   `--infobase <connection string>` never becomes an owner. An unreadable marker or one of an
   unknown version stops a write with `runtime_failure`. MCP tools behave the same and carry the
   same texts in `warnings`, after the command's own.
-- When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
+- An operator's interrupt is Ctrl+C, SIGTERM (Unix) or CTRL_BREAK (Windows; send it with
+  `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` to a runner started with
+  `CREATE_NEW_PROCESS_GROUP` — CTRL_C cannot reach another group). A second one, at least 1 s
+  later, stops waiting for an external agent (below). Closing the console window is not an
+  interrupt.
+- When an operator's interrupt ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
   its own code, and a critical phase such as a database write runs to its end — a success stays
@@ -212,7 +217,7 @@ v8-runner infobase create
 - Interrupting a command already sent to an attached agent or SSH gate does not stop it on the
   agent side: the runner logs that it waits and reads the terminal reply first (`success` or the
   agent's `canceled` -> `cancelled`; a refusal, question or lost channel keeps its own error).
-  A second Ctrl+C/SIGTERM (MCP: a repeated `notifications/cancelled` for the same request)
+  A second interrupt (MCP: a repeated `notifications/cancelled` for the same request)
   stops waiting and answers `agent_command_abandoned` (kind `platform`, exit 4; MCP
   `platform_failure`): the agent may still run the command and keep the base locked for the
   Designer even after it ends; on a runner standalone server `standalone restart` clears it.
