@@ -1029,7 +1029,7 @@ impl AgentSession {
     }
 
     /// Отключает агента от базы (`common disconnect-ib`), не закрывая сессии: так живой агент
-    /// между командами базу не держит. Служебная команда работы команды не отмечает.
+    /// отпускает базу другому исполнителю (#644). Служебная команда работы команды не отмечает.
     pub fn disconnect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
         self.run(DISCONNECT_COMMAND, &policy.without_work())?
             .outcome()

@@ -293,6 +293,20 @@ pub(crate) fn refusal(
     holder: Holder,
     cause: &AppError,
 ) -> AppError {
+    // Живой агент раннера, оставшийся подключённым к базе, — тоже её сеанс Конфигуратора (#644):
+    // отказ называет его и выход `agent release`, не утверждая, что держит именно он.
+    let agents = crate::use_cases::infobase_lock::attached_live_agents_hint(config);
+    refusal_naming(gate, config, holder, cause, agents)
+}
+
+/// Отказ «базу держат» с подключёнными живыми агентами базы `agents`, если они есть.
+fn refusal_naming(
+    gate: &SessionsGate,
+    config: &AppConfig,
+    holder: Holder,
+    cause: &AppError,
+    agents: Option<String>,
+) -> AppError {
     let (kind, list, terminable, evidence, headline) = match holder.sessions() {
         None => (
             UseCaseErrorKind::InfobaseDesignerBusy,
@@ -330,6 +344,10 @@ pub(crate) fn refusal(
         }
     };
     let executor_error = (evidence == SessionsEvidence::ServerList).then(|| cause.to_string());
+    let headline = match agents {
+        Some(agents) => format!("{headline}; {agents}"),
+        None => headline,
+    };
     let mut refusal = UseCaseError::new(kind, format!("{headline}; {cause}")).with_sessions(
         infobase_sessions(config, list, terminable, evidence, executor_error),
     );
@@ -408,6 +426,40 @@ fn name_sessions(list: &[SessionEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Отказ по сеансам называет живых агентов раннера, оставшихся подключёнными к базе, и выход
+    /// `agent release` (#644, `INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[test]
+    fn a_sessions_refusal_names_the_connected_live_agents_and_agent_release() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = file_config(dir.path());
+        let agents = crate::use_cases::infobase_lock::attached_agents_text(&[(
+            Some(4120),
+            Some("/work/a".to_owned()),
+        )]);
+        let cause = AppError::Runtime("the platform refused".to_owned());
+        let refused = refusal_naming(
+            &SessionsGate::default(),
+            &config,
+            Holder::Designer,
+            &cause,
+            agents,
+        );
+        let text = refused.to_string();
+        assert!(text.contains("pid 4120"), "{text}");
+        assert!(text.contains("workPath '/work/a'"), "{text}");
+        assert!(text.contains("`v8-runner agent release`"), "{text}");
+        assert!(text.contains("the platform refused"), "{text}");
+        let plain = refusal_naming(
+            &SessionsGate::default(),
+            &config,
+            Holder::Designer,
+            &cause,
+            None,
+        );
+        assert!(!plain.to_string().contains("agent release"), "{plain}");
+        assert!(crate::use_cases::infobase_lock::attached_agents_text(&[]).is_none());
+    }
+
     use super::*;
     use crate::domain::sessions::SessionLockState;
 

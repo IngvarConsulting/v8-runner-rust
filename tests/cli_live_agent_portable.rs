@@ -235,6 +235,22 @@ impl Bench {
         ])
     }
 
+    /// Команды, которые получил двойник агента.
+    fn agent_commands(&self) -> Vec<String> {
+        read_or_empty(&self.marks.join("agent-commands.log"))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Сколько раз двойник получил команду `command`.
+    fn sent(&self, command: &str) -> usize {
+        self.agent_commands()
+            .iter()
+            .filter(|line| line.as_str() == command)
+            .count()
+    }
+
     /// Запуски поддельного `1cv8`.
     fn launches(&self) -> usize {
         read_or_empty(&self.marks.join("designer-args.log"))
@@ -751,6 +767,10 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
     assert_eq!(agents.len(), 1, "{payload}");
     assert_eq!(agents[0]["this_project"], true, "{payload}");
     assert_eq!(agents[0]["connected"], false, "{payload}");
+    assert_eq!(
+        agents[0]["attached"], true,
+        "the idle agent stays connected to the infobase: {payload}"
+    );
     assert!(
         agents[0]["infobase"]
             .as_str()
@@ -809,6 +829,107 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
         "--all stops the agents of every project: {payload}"
     );
     assert_eq!(payload["data"]["refused"], json!([]), "{payload}");
+}
+
+/// Вторая команда берёт подключение к базе, оставшееся от первой: `common connect-ib` идёт один
+/// раз на агента (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+#[test]
+fn a_second_command_takes_the_kept_connection_without_connect_ib() {
+    let bench = Bench::new("");
+    let (code, first) = bench.download();
+    assert_eq!(code, 0, "{first}");
+    if in_a_closed_job(&first) {
+        return;
+    }
+    let (code, second) = bench.download();
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(
+        bench.sent("common connect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        0,
+        "{:?}",
+        bench.agent_commands()
+    );
+}
+
+/// `agent release` отключает живого агента от базы — так её отпускают чужому Конфигуратору или
+/// чужой монопольной операции, — а сам агент остаётся; следующая команда подключает его заново
+/// (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`, `CTR.WIRE.AGENT-RELEASE-DATA`).
+#[test]
+fn agent_release_disconnects_the_live_agent_from_the_infobase() {
+    let bench = Bench::new("");
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    let (code, payload) = bench.run(&["agent", "release"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["released"], false, "{payload}");
+    assert_eq!(payload["data"]["disconnected"], true, "{payload}");
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    let (code, payload) = bench.run(&["agent", "status"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["agents"][0]["attached"], false, "{payload}");
+    assert!(
+        alive(bench.designer_pid()),
+        "release does not stop the agent"
+    );
+
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(live(&payload)["reused"], true, "{payload}");
+    assert_eq!(
+        bench.sent("common connect-ib"),
+        2,
+        "{:?}",
+        bench.agent_commands()
+    );
+}
+
+/// Команда, выбравшая другого исполнителя той же базы, сначала отключает от неё живого агента:
+/// пакетный Конфигуратор или `ibcmd` не застают базу подключённой к нему (#644,
+/// `INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+#[test]
+fn another_executor_finds_the_infobase_released_by_the_live_agent() {
+    let bench = Bench::new("");
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    let config = fs::read_to_string(&bench.config_path).expect("config");
+    fs::write(
+        &bench.config_path,
+        config.replace(
+            "infobase.configuration.export: agent",
+            "infobase.configuration.export: designer",
+        ),
+    )
+    .expect("designer for download");
+
+    // Поддельный `1cv8` пакетного запуска не умеет выгрузку: исход команды здесь не важен.
+    let _ = bench.download();
+
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    let (code, payload) = bench.run(&["agent", "status"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["agents"][0]["attached"], false, "{payload}");
 }
 
 /// Держатель ушёл, пока команда работала: сторож снимает агента после её сессии, и квитанция

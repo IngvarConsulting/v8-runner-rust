@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.AGENT-STOP-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/agent-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -32,6 +32,7 @@ check:
       "holders": [],
       "busy": null,
       "connected": false,
+      "attached": false,
       "idle_ms": 41250,
       "closing": false
     }

@@ -209,6 +209,12 @@ class Runner:
         subprocess.run([self.exe, "--config", self.stand.config, "agent", "stop", "--all"], capture_output=True,
                        stdin=subprocess.DEVNULL, cwd=self.stand.project)
 
+    def release_agents(self):
+        """A live agent stays connected between commands (#644) and holds the base for
+        configuring: batch Designer steps of the bench release it first (not timed)."""
+        subprocess.run([self.exe, "--config", self.stand.config, "agent", "release"], capture_output=True,
+                       stdin=subprocess.DEVNULL, cwd=self.stand.project)
+
     def version(self):
         q = subprocess.run([self.exe, "--version"], capture_output=True, text=True)
         return q.stdout.strip()
