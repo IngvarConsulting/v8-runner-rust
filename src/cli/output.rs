@@ -111,6 +111,9 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),
         UseCaseErrorKind::Validation => (ErrorCode::InvalidArgument, ErrorKind::Validation),
         UseCaseErrorKind::Runtime => (ErrorCode::RuntimeFailure, ErrorKind::Runtime),
+        UseCaseErrorKind::AgentCommandAbandoned => {
+            (ErrorCode::AgentCommandAbandoned, ErrorKind::Platform)
+        }
         UseCaseErrorKind::Platform => (ErrorCode::PlatformFailure, ErrorKind::Platform),
     }
 }

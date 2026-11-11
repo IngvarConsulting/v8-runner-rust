@@ -285,6 +285,9 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
+        Command::RemoveBackup(_) => {
+            unreachable!("the background removal is handled outside cli::execute")
+        }
         Command::Agent(args) => execute_agent(
             config,
             &args.command,
@@ -816,6 +819,9 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
+        Command::RemoveBackup(_) => {
+            unreachable!("the background removal does not map to CLI command names")
+        }
         Command::Agent(args) => agent_command_name(&args.command),
     }
 }

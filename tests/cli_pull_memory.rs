@@ -1267,3 +1267,104 @@ fn a_failed_pull_by_changes_leaves_the_memory() {
         );
     }
 }
+
+/// Скрытая переменная раннера: задержка фонового удаления прежнего дерева (#616).
+const BACKUP_REMOVAL_DELAY_ENV: &str = "V8_RUNNER_BACKUP_REMOVAL_DELAY_MS";
+
+/// Прежние деревья полной выгрузки рядом с каталогом набора.
+fn replaced_trees(project: &Project) -> Vec<PathBuf> {
+    let parent = project.sources.parent().expect("parent");
+    let mut trees: Vec<PathBuf> = fs::read_dir(parent)
+        .expect("project dir")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".dump-backup-"))
+        })
+        .collect();
+    trees.sort();
+    trees
+}
+
+fn full_pull_with_removal_delay(project: &Project, delay_ms: u64) -> Value {
+    succeeded(
+        v8_runner_command()
+            .env(BACKUP_REMOVAL_DELAY_ENV, delay_ms.to_string())
+            .arg("--config")
+            .arg(&project.config)
+            .arg("--json-message")
+            .args(["pull", "--force", "--source-set", "main"])
+            .output()
+            .expect("run CLI"),
+    )
+}
+
+/// Ответ `pull --force` приходит до удаления прежнего каталога: его удаляет процесс раннера,
+/// переживший команду (`INV.USE-CASES.A-REPLACED-TREE-IS-REMOVED-IN-THE-BACKGROUND`).
+#[test]
+fn a_full_pull_answers_before_the_replaced_tree_is_removed() {
+    let project = project("designer", false);
+
+    full_pull_with_removal_delay(&project, 3_000);
+
+    let trees = replaced_trees(&project);
+    assert_eq!(
+        trees.len(),
+        1,
+        "the replaced tree is still there: {trees:?}"
+    );
+    assert!(
+        trees[0].join("old.txt").is_file(),
+        "it is the previous tree"
+    );
+    assert_eq!(
+        fs::read_to_string(trees[0].join(".gitignore")).expect("hidden from git"),
+        "*\n"
+    );
+    assert!(project.sources.join("Module.bsl").is_file(), "published");
+    assert!(
+        support::wait_until(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(100),
+            || replaced_trees(&project).is_empty()
+        ),
+        "the background removal removes the replaced tree"
+    );
+    let parent = project.sources.parent().expect("parent");
+    let backup_entries = || {
+        fs::read_dir(parent)
+            .expect("project dir")
+            .filter_map(|entry| entry.expect("entry").file_name().into_string().ok())
+            .filter(|name| name.starts_with(".dump-backup-"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        support::wait_until(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(100),
+            || backup_entries().is_empty()
+        ),
+        "its metadata goes too: {:?}",
+        backup_entries()
+    );
+}
+
+/// Прежний каталог, который фон не успел удалить, убирает уборка следующей команды.
+#[test]
+fn the_next_pull_removes_a_replaced_tree_the_background_left() {
+    let project = project("designer", false);
+    full_pull_with_removal_delay(&project, 30_000);
+    let left = replaced_trees(&project);
+    assert_eq!(left.len(), 1, "{left:?}");
+
+    full_pull_with_removal_delay(&project, 30_000);
+
+    assert!(
+        !left[0].exists(),
+        "the next command removed the tree the background had not yet removed"
+    );
+    assert!(project.sources.join("Module.bsl").is_file());
+}

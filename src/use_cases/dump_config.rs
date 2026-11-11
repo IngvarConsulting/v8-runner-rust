@@ -64,7 +64,7 @@ use self::helpers::{
 use super::ignored_files::VERSION_FILE_NAME;
 #[cfg(test)]
 use super::staged_publication::cleanup_staging_path;
-use super::staged_publication::{interruption_before_publish, StagedPublication};
+use super::staged_publication::{interruption_before_publish, BackupRemoval, StagedPublication};
 #[cfg(test)]
 use crate::support::fs::metadata_sidecar_path;
 use crate::use_cases::source_inventory::SourceSetInventory;
@@ -556,6 +556,8 @@ fn publish_full_dump(
             resolved.platform_consent(),
             // Платформа пишет опись версий в каждую полную выгрузку.
             &[VERSION_FILE_NAME],
+            // Прежнее дерево полной выгрузки ответу не нужно (#616).
+            BackupRemoval::Background,
         )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
@@ -1423,6 +1425,7 @@ fn finalize_edt_dump(
             &resolved.consent,
             // Импорт EDT описи версий не пишет: исключений нет.
             &[],
+            BackupRemoval::Background,
         )
         .map_err(|error| publication.cleanup_failure(error))?;
 
@@ -3472,6 +3475,70 @@ exit 0"#,
             !backup_dir.exists(),
             "a superseded stale backup is a leftover"
         );
+    }
+
+    /// Прежнее дерево завершённой замены, которое не успело или не смогло удалить фоновое
+    /// удаление (#616), следующая команда убирает сразу, не дожидаясь срока уборки.
+    #[test]
+    fn cleanup_orphan_dirs_removes_a_fresh_superseded_backup() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = temp_dir_of(&resolved, TempDirKind::Backup);
+        fs::write(backup_dir.join("old.txt"), "old").expect("content");
+        let mut metadata = read_temp_dir_metadata(&backup_dir).expect("metadata");
+        metadata.superseded = true;
+        fs::write(
+            metadata_sidecar_path(&backup_dir),
+            serde_json::to_vec(&metadata).expect("json"),
+        )
+        .expect("mark superseded");
+        let fresh_unmarked = dir.path().join(".dump-backup-fresh");
+        fs::create_dir_all(&fresh_unmarked).expect("unmarked");
+        write_temp_dir_metadata(
+            &fresh_unmarked,
+            TempDirKind::Backup,
+            "fresh",
+            &resolved.target_path,
+            &resolved.target_identity,
+        )
+        .expect("metadata");
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(
+            !backup_dir.exists(),
+            "a superseded backup is a leftover at any age"
+        );
+        assert!(!metadata_sidecar_path(&backup_dir).exists());
+        assert!(
+            fresh_unmarked.exists(),
+            "a fresh unmarked backup waits for its term"
+        );
+        assert!(resolved.target_path.exists());
+    }
+
+    /// Фоновое удаление, оборванное между деревом и его метаданными, оставляет только
+    /// метаданные; следующая команда убирает и их.
+    #[test]
+    fn cleanup_orphan_dirs_removes_the_metadata_of_a_removed_superseded_backup() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = temp_dir_of(&resolved, TempDirKind::Backup);
+        let mut metadata = read_temp_dir_metadata(&backup_dir).expect("metadata");
+        metadata.superseded = true;
+        fs::write(
+            metadata_sidecar_path(&backup_dir),
+            serde_json::to_vec(&metadata).expect("json"),
+        )
+        .expect("mark superseded");
+        fs::remove_dir_all(&backup_dir).expect("tree removed");
+        let foreign = dir.path().join(".dump-backup-foreign.meta.json");
+        fs::write(&foreign, "{}").expect("foreign metadata");
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(!metadata_sidecar_path(&backup_dir).exists());
+        assert!(foreign.exists(), "unreadable metadata is not ours");
     }
 
     /// Каталог возвращён раньше, чем выгрузка создаст цель: отказ платформы его не трогает.

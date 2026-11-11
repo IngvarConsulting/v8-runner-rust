@@ -356,7 +356,9 @@ impl AgentFailure {
             },
             AgentError::Canceled { message } => Self::Canceled { message },
             AgentError::Question { message } => Self::Question { message },
+            // Сторож служит своему агенту, а бросают ожидание только чужого.
             AgentError::NotSent { .. }
+            | AgentError::Abandoned { .. }
             | AgentError::Exchange { .. }
             | AgentError::UnsafeEntryName { .. }
             | AgentError::Launch(_)

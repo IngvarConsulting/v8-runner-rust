@@ -227,6 +227,47 @@ fn first_taken(host: &dyn ServiceHost, ports: impl IntoIterator<Item = u16>) -> 
         .find_map(|port| occupant_of(host, port).map(|pid| Taken { port, pid }))
 }
 
+/// Почему закреплённый блок сервера или кластера не годится для запуска: выход — новый блок.
+#[derive(Debug, Clone, Copy)]
+enum MoveCause {
+    /// Порт держит чужой процесс; он остаётся работать.
+    Taken(Taken),
+    /// В блок попал закреплённый порт PostgreSQL раннера: поднятый, PostgreSQL занял бы его.
+    Postgres(u16),
+}
+
+impl MoveCause {
+    /// Причина словами предупреждения о переносе; `owner` — «the server of 'x'» или
+    /// «the cluster of 'x'».
+    fn reason(self, owner: &str) -> String {
+        match self {
+            Self::Taken(taken) => format!(
+                "port {} of {owner} is taken by {}, which this runner did not start; it is left running",
+                taken.port,
+                taken.who()
+            ),
+            Self::Postgres(port) => {
+                format!("port {port} of {owner} is the port of the runner's PostgreSQL")
+            }
+        }
+    }
+}
+
+/// Единственная проверка закреплённого блока для сервера и кластера: сначала порт PostgreSQL
+/// раннера `dbms` внутри блока, затем занятость портов чужим процессом. Решается до запуска
+/// PostgreSQL: поднятый, он сам занял бы порт блока, и занятость его не отличить от чужой.
+fn block_conflict(
+    host: &dyn ServiceHost,
+    ports: impl IntoIterator<Item = u16>,
+    dbms: Option<u16>,
+) -> Option<MoveCause> {
+    let ports: Vec<u16> = ports.into_iter().collect();
+    if let Some(port) = dbms.filter(|dbms| ports.contains(dbms)) {
+        return Some(MoveCause::Postgres(port));
+    }
+    first_taken(host, ports).map(MoveCause::Taken)
+}
+
 /// Кто держит порт, словами отказа или предупреждения: `0` — система процесс не назвала.
 fn occupant_name(pid: u32) -> String {
     if pid == 0 {

@@ -15,6 +15,9 @@ check:
   - src/use_cases/managed_stand/cluster.rs::start_rolls_back_an_interrupted_move
   - src/use_cases/managed_stand/cluster.rs::a_move_whose_new_agent_does_not_stop_is_left_to_the_next_start
   - src/use_cases/managed_stand/cluster.rs::a_foreign_agent_over_this_registry_on_other_ports_is_refused
+  - src/use_cases/managed_stand/cluster.rs::a_pinned_block_over_the_port_of_the_runners_postgres_moves_to_a_new_registry
+  - src/use_cases/managed_stand/cluster.rs::a_ras_port_over_the_port_of_the_runners_postgres_takes_a_new_port
+  - src/use_cases/managed_stand/cluster.rs::the_port_of_the_postgres_in_the_block_keeps_the_refusals_of_a_busy_port
 ---
 
 # Занятый закреплённый порт кластера ведёт к новому реестру, живой реестр — к отказу
@@ -23,6 +26,12 @@ check:
 `cluster start` и `restart` сами делают то же, что `--new-regport`: заводят новый реестр на новых портах, не задевая
 прежние и порт PostgreSQL раннера. Чужой процесс остаётся работать. Ответ называет `regport` прежнего реестра в
 `previous_regport` и предупреждает, указав порт и pid занявшего.
+
+Так же — новым реестром — `cluster start` и `restart` уходят из закреплённого блока, в который попал закреплённый порт
+PostgreSQL раннера: поднятый, PostgreSQL занял бы порт кластера, или кластер — его порт. Сверка идёт до запуска
+PostgreSQL, одной проверкой с автономным сервером; предупреждение называет порт PostgreSQL раннера. Порт `ras` не
+закрепляется: запуск берёт свободный вне блока кластера и порта PostgreSQL раннера, так что `ras` на порту PostgreSQL
+получает новый порт, а блок кластера остаётся.
 
 Остаётся отказом `workspace_busy` без нового реестра: на порту или на других портах работает чужой `ragent` над
 реестром этой копии — такой реестр живой, — или порт занят, а перечня процессов нет, и кто его держит, не сказать;

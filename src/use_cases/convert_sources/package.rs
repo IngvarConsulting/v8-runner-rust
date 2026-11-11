@@ -653,6 +653,7 @@ fn export_package(
         "failed to publish convert output",
         &resolved.consent,
         &[],
+        crate::use_cases::staged_publication::BackupRemoval::Inline,
     )?;
     let mut notes = Vec::new();
     notes.extend(discard_note(&item.target_path, &published.discarded));

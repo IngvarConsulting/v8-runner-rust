@@ -87,6 +87,13 @@ pub struct TempDirMetadata {
     pub superseded: bool,
 }
 
+impl TempDirMetadata {
+    /// The previous tree of a finished replacement: marked once the new tree took its place.
+    pub fn is_superseded_backup(&self) -> bool {
+        matches!(self.kind, TempDirKind::Backup) && self.superseded
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvisoryLockMetadata {
     pub tool: String,
@@ -137,6 +144,36 @@ impl Drop for AdvisoryLockGuard {
 #[derive(Debug)]
 pub struct ReplaceDirOutcome {
     pub cleanup_warning: Option<String>,
+}
+
+/// A finished directory replacement whose previous tree may still be on disk.
+#[derive(Debug)]
+#[must_use = "the previous tree stays on disk until it is removed"]
+pub struct SwappedDir {
+    /// The previous tree, marked superseded and not yet removed; `None` when there was no
+    /// previous tree or when it was removed in place because the mark could not be written.
+    pub backup: Option<SupersededBackup>,
+    pub cleanup_warning: Option<String>,
+}
+
+/// The previous tree of a finished directory replacement. Its metadata carries the
+/// `superseded` mark, so whatever a removal leaves behind never passes for the only copy and
+/// the orphan cleanup of the next command removes it at any age.
+#[derive(Debug)]
+#[must_use = "the previous tree stays on disk until it is removed"]
+pub struct SupersededBackup {
+    dir: PathBuf,
+}
+
+impl SupersededBackup {
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Removes the tree, then its metadata. The text returned is a warning for the answer.
+    pub fn remove(self) -> Option<String> {
+        remove_backup_tree(&self.dir)
+    }
 }
 
 #[derive(Debug)]
@@ -1061,6 +1098,34 @@ pub fn replace_dir_atomically(
     target_identity: &str,
     backup_prefix: &str,
 ) -> std::io::Result<ReplaceDirOutcome> {
+    let swapped = swap_dir_atomically(
+        staging_dir,
+        target_dir,
+        run_id,
+        target_identity,
+        backup_prefix,
+    )?;
+    let removal_warning = swapped.backup.and_then(SupersededBackup::remove);
+    let warnings: Vec<String> = swapped
+        .cleanup_warning
+        .into_iter()
+        .chain(removal_warning)
+        .collect();
+    Ok(ReplaceDirOutcome {
+        cleanup_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+    })
+}
+
+/// Puts `staging_dir` in place of `target_dir` and leaves the previous tree, marked
+/// superseded, for the caller to remove: now or in the background. Until the swap is done the
+/// backup is the only copy of the target, and a failure puts it back.
+pub fn swap_dir_atomically(
+    staging_dir: &Path,
+    target_dir: &Path,
+    run_id: &str,
+    target_identity: &str,
+    backup_prefix: &str,
+) -> std::io::Result<SwappedDir> {
     let parent = parent_dir(target_dir).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1069,14 +1134,14 @@ pub fn replace_dir_atomically(
     })?;
     let backup_dir = parent.join(format!("{backup_prefix}-{run_id}"));
     let stage_metadata_path = metadata_sidecar_path(staging_dir);
-    let backup_metadata_path = metadata_sidecar_path(&backup_dir);
 
     if !target_dir.exists() {
         std::fs::rename(staging_dir, target_dir)?;
         let fsync_result = best_effort_fsync_dir(parent);
         let _ = remove_path_if_exists(&stage_metadata_path);
         fsync_result?;
-        return Ok(ReplaceDirOutcome {
+        return Ok(SwappedDir {
+            backup: None,
             cleanup_warning: None,
         });
     }
@@ -1131,32 +1196,70 @@ pub fn replace_dir_atomically(
 
     let _ = remove_path_if_exists(&stage_metadata_path);
 
-    let mut warnings = Vec::new();
     // Removing a large tree can stop halfway. What it leaves must not pass for the only copy.
     if let Err(error) = mark_backup_superseded(&backup_dir) {
-        warnings.push(format!(
+        // Unmarked, the backup would be taken for the only copy by a later command: it goes now.
+        let mut warnings = vec![format!(
             "failed to mark backup dir '{}' as superseded: {error}",
             backup_dir.display()
+        )];
+        warnings.extend(remove_backup_tree(&backup_dir));
+        return Ok(SwappedDir {
+            backup: None,
+            cleanup_warning: Some(warnings.join("; ")),
+        });
+    }
+
+    Ok(SwappedDir {
+        backup: Some(SupersededBackup { dir: backup_dir }),
+        cleanup_warning: None,
+    })
+}
+
+/// Removes `backup` when its metadata names it a runner backup of a finished replacement: the
+/// background removal (#616) takes nothing else, whatever path it is given.
+pub fn remove_superseded_backup(backup: &Path) -> std::io::Result<()> {
+    let metadata = read_temp_dir_metadata(backup)?;
+    let named_for_its_run = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(&format!("-{}", metadata.run_id)));
+    let beside_its_target =
+        parent_dir(backup).is_some() && parent_dir(backup) == parent_dir(&metadata.target_path);
+    if !is_known_tool_name(&metadata.tool)
+        || !metadata.is_superseded_backup()
+        || !named_for_its_run
+        || !beside_its_target
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "'{}' is not a superseded backup of the runner",
+                backup.display()
+            ),
         ));
     }
-    if let Err(error) = remove_tree_in_parallel(&backup_dir) {
-        warnings.push(format!(
+    match remove_backup_tree(backup) {
+        None => Ok(()),
+        Some(warning) => Err(std::io::Error::other(warning)),
+    }
+}
+
+/// Removes a backup tree and then its metadata: the metadata goes last, so a removal that
+/// stops halfway leaves a tree the orphan cleanup still recognises.
+fn remove_backup_tree(backup_dir: &Path) -> Option<String> {
+    if let Err(error) = remove_tree_in_parallel(backup_dir) {
+        return Some(format!(
             "failed to remove backup dir '{}': {error}",
             backup_dir.display()
         ));
-    } else if let Err(error) = remove_path_if_exists(&backup_metadata_path) {
-        warnings.push(format!(
-            "failed to remove backup metadata '{}': {error}",
-            backup_metadata_path.display()
-        ));
     }
-
-    Ok(ReplaceDirOutcome {
-        cleanup_warning: if warnings.is_empty() {
-            None
-        } else {
-            Some(warnings.join("; "))
-        },
+    let sidecar = metadata_sidecar_path(backup_dir);
+    remove_path_if_exists(&sidecar).err().map(|error| {
+        format!(
+            "failed to remove backup metadata '{}': {error}",
+            sidecar.display()
+        )
     })
 }
 
@@ -2124,6 +2227,54 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(fs::read_to_string(&destination).expect("dest"), "new");
+    }
+
+    /// Подмена оставляет прежнее дерево помеченным `superseded` рядом с целью, а фоновое
+    /// удаление берёт только такое дерево (#616).
+    #[test]
+    fn a_swap_leaves_a_superseded_backup_that_only_the_marked_removal_takes() {
+        let dir = tempdir().expect("tempdir");
+        let staging_dir = dir.path().join(".stage-run");
+        let target_dir = dir.path().join("target");
+        fs::create_dir_all(staging_dir.join("new")).expect("staging");
+        fs::write(staging_dir.join("new").join("payload.txt"), "new").expect("payload");
+        fs::create_dir_all(&target_dir).expect("target");
+        fs::write(target_dir.join("old.txt"), "old").expect("old");
+
+        let swapped =
+            super::swap_dir_atomically(&staging_dir, &target_dir, "run", "identity", ".backup")
+                .expect("swap");
+
+        assert_eq!(swapped.cleanup_warning, None);
+        let backup = swapped.backup.expect("the previous tree is left");
+        assert_eq!(backup.path(), dir.path().join(".backup-run"));
+        assert!(backup.path().join("old.txt").exists());
+        assert!(
+            super::read_temp_dir_metadata(backup.path())
+                .expect("metadata")
+                .superseded
+        );
+        assert!(target_dir.join("new").join("payload.txt").exists());
+
+        let unmarked = dir.path().join(".backup-other");
+        fs::create_dir_all(&unmarked).expect("unmarked");
+        super::write_temp_dir_metadata(
+            &unmarked,
+            super::TempDirKind::Backup,
+            "other",
+            &target_dir,
+            "identity",
+        )
+        .expect("metadata");
+        assert!(super::remove_superseded_backup(&unmarked).is_err());
+        assert!(unmarked.exists(), "an unmarked backup may be the only copy");
+        assert!(super::remove_superseded_backup(&target_dir).is_err());
+        assert!(target_dir.exists());
+
+        let path = backup.path().to_path_buf();
+        super::remove_superseded_backup(&path).expect("removed");
+        assert!(!path.exists());
+        assert!(!super::metadata_sidecar_path(&path).exists());
     }
 
     #[cfg(windows)]
