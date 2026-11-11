@@ -55,13 +55,20 @@
 - `[modules]` — именованные наборы `.bsl` (пути от корня набора исходников); на них ссылаются
   сценарии.
 
-Есть стенды `ssl321` (БСП 3.2.1.569 на 8.5.1 из шаблона, поддержка снята) и `ka` (КА 8.3.27,
-существующий стенд `E:\stands\v8-runner\bench`, проект `p-new`).
+Есть стенды `ssl321` (БСП 3.2.1.569 на 8.5.1 из шаблона, поддержка снята), `ka` (КА 8.3.27,
+существующий стенд `E:\stands\v8-runner\bench`, проект `p-new`) и стенды замеров выпуска 0.17
+(#585) из шаблонов cf, поддержка снята: `kz83`/`kz85` (Бухгалтерия для Казахстана 3.0.75.1),
+`unf83`/`unf85` (УНФ 3.0.14.187) на 8.3.27.2342/8.5.1.1529 и `ka85` (КА 2.6.2.72 на 8.5.1.1529).
 
 ```powershell
 python scripts/bench/bench.py list
 python scripts/bench/bench.py setup --stand ssl321 --flag-text "v8-runner 89ada31d s3 #604"
 ```
+
+`setup --runner-016 <exe>` (`V8_BENCH_RUNNER_016`) готовит ещё проект исполнителя `runner-016`:
+`<work>\project-016` с той же базой, `git` и полной выгрузкой этим бинарником. У существующего
+стенда `setup` делает только это. Отдельный проект нужен, чтобы два раннера не делили память и
+файл версий в одном дереве.
 
 Новая конфигурация — новый файл `stands/<имя>.toml` с `[create]` и наборами модулей,
 которые есть в этой конфигурации (`setup` проверит пути).
@@ -70,7 +77,8 @@ python scripts/bench/bench.py setup --stand ssl321 --flag-text "v8-runner 89ada3
 
 ```powershell
 python scripts/bench/bench.py run --stand ka --flag-text "..." `
-    [--scenario push-common2 ...] [--executor runner ...] [--reps 3] [--runner <v8-runner.exe>] [--dry-run]
+    [--scenario push-common2 ...] [--executor runner ...] [--reps 3] [--runner <v8-runner.exe>] `
+    [--runner-016 <v8-runner.exe>] [--dry-run]
 ```
 
 По умолчанию — все сценарии, все их исполнители, 3 повтора, раннер из
@@ -82,6 +90,9 @@ python scripts/bench/bench.py run --stand ka --flag-text "..." `
 | `push` | В модули набора добавляется строка-метка; загрузить их в базу и обновить конфигурацию БД | Раннер: пакетный Конфигуратор выгружает изменённое в пустой каталог против `ConfigDumpInfo.xml` до `push`, метка в файлах. Остальные: `v8-runner pull` возвращает метку в исходники |
 | `pull` | Метка попадает в базу отдельным пакетным Конфигуратором (вне замера); выгрузить изменённое | Метка в выгруженном файле |
 | `status` | Ничего не менялось; ответить, что изменилось | Раннер: `changed_files` у всех наборов 0. Остальные: пустой список изменений |
+| `pull-none` | Ничего не менялось; выгрузить изменённое | Раннер: дерево проекта не изменилось. Остальные: в пустом каталоге ничего, кроме файла версий |
+| `push-after-pull` | Метка попадает в базу пакетным Конфигуратором, раннер берёт её своим `pull` (вне замера, время — `pull_seconds`); затем `push` без правок | Метка в дереве, дерево не изменилось. Только раннеры |
+| `pull-full` | Вся конфигурация в файлы: у раннера `pull --force`, у остальных выгрузка в пустой каталог | Раннер: дерево не изменилось. Остальные: есть `Configuration.xml` |
 
 Файл версий для сравнения (`<cdi>` ниже и проверка `push` у раннера) скрипт каждый раз снимает
 с базы заново: `/DumpConfigToFiles <dir> -configDumpInfoOnly`, вне замера, и на
@@ -92,10 +103,11 @@ python scripts/bench/bench.py run --stand ka --flag-text "..." `
 | Исполнитель | Как |
 | --- | --- |
 | `runner` | `v8-runner push`, `pull`, `status`; агент снят (`agent stop --all`) перед каждой командой — разовая команда |
-| `runner-live` | То же с живым агентом раннера; первый прогон — прогрев (`rep 0`), в медианы не идёт |
+| `runner-live` | То же с живым агентом раннера; первый прогон — прогрев (`rep 0`), в медианы не идёт. Только `push`, `pull`, `pull-none`, `push-after-pull`: `status` агента не спрашивает, полный `pull` файловой базы идёт через `ibcmd` |
+| `runner-016` | Другой бинарник раннера (`--runner-016`, выпуск 0.16) в своём проекте `project-016`; перед каждой командой его проект берёт из базы чужие правки (`pull`, вне замера), после — раннер стенда берёт его правки. Без `--runner-016` исполнитель пропускается |
 | `agent` | Голый агент: запуск `1cv8 DESIGNER /AgentMode`, SSH, `common connect-ib`, команды, снятие. Время — вся операция, шаги — в `steps` |
-| `batch` | Один запуск пакетного Конфигуратора: `/LoadConfigFromFiles <dir> -partial -listFile <list> /UpdateDBCfg -Dynamic-`; `/DumpConfigToFiles <пустой> -update -configDumpInfoForChanges <cdi>`; `... -getChanges <file> -configDumpInfoForChanges <cdi>` |
-| `ibcmd` | `infobase config import files --partial` и `infobase config apply --force --dynamic=disable`; `infobase config export status --base=<cdi>`. Для `pull` выгрузки только изменённого в пустой каталог у `ibcmd` нет, исполнитель в этом виде не участвует |
+| `batch` | Один запуск пакетного Конфигуратора: `/LoadConfigFromFiles <dir> -partial -listFile <list> /UpdateDBCfg -Dynamic-`; `/DumpConfigToFiles <пустой> -update -configDumpInfoForChanges <cdi>`; `... -getChanges <file> -configDumpInfoForChanges <cdi>`; `/DumpConfigToFiles <пустой>` у `pull-full` |
+| `ibcmd` | `infobase config import files --partial` и `infobase config apply --force --dynamic=disable`; `infobase config export status --base=<cdi>`; `infobase config export <dir>` у `pull-full`. Для `pull` выгрузки только изменённого в пустой каталог у `ibcmd` нет, исполнитель в этом виде не участвует |
 
 Исполнители платформы грузят только `.bsl`, без описаний объектов, как раннер после #599.
 Динамическое обновление конфигурации БД не использует ни один исполнитель: `-Dynamic-`,
@@ -110,7 +122,8 @@ python scripts/bench/bench.py run --stand ka --flag-text "..." `
 `v8-runner push` в базу, коммит. Если исполнитель упал, оставшиеся повторы этого исполнителя
 пропускаются, стенд возвращается, сценарий идёт дальше.
 
-Новый сценарий — таблица в `scenarios.toml`: `kind` (`push`, `pull`, `status`), `modules`
+Новый сценарий — таблица в `scenarios.toml`: `kind` (`push`, `pull`, `status`, `pull-none`,
+`push-after-pull`, `pull-full`), `modules`
 (набор стенда), `executors`, при необходимости `runner_args` (например `["--deep"]` у
 `status`). Новый вид работы — код: метод `<вид>_runner` и `<вид>_other` в `bench.py`, командные
 строки в `executors.py`, вид в `describe.KINDS` и `describe.CAN`.

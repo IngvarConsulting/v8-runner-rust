@@ -14,15 +14,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STANDS_DIR = os.path.join(HERE, "stands")
 SCENARIOS_FILE = os.path.join(HERE, "scenarios.toml")
 
-KINDS = ("push", "pull", "status")
-EXECUTORS = ("runner", "runner-live", "agent", "batch", "ibcmd")
-# What each executor can do; a scenario may list only these.
+KINDS = ("push", "pull", "status", "pull-none", "push-after-pull", "pull-full")
+# Kinds that change no module of a set: the scenario names no `modules`.
+NO_MODULES = {"status", "pull-none", "pull-full"}
+# runner-016: another runner binary (`--runner-016`, release 0.16) on its own project
+# `<work>/project-016` over the same base, so the two runners never share memory or files.
+EXECUTORS = ("runner", "runner-live", "runner-016", "agent", "batch", "ibcmd")
+RUNNERS = ("runner", "runner-live", "runner-016")
+# What each executor can do; a scenario may list only these. `push-after-pull` is the runner's
+# own sequence (its memory after a pull); without memory there is nothing to compare.
 CAN = {
-    "runner": {"push", "pull", "status"},
-    "runner-live": {"push", "pull", "status"},
-    "agent": {"push", "pull", "status"},
-    "batch": {"push", "pull", "status"},
-    "ibcmd": {"push", "status"},
+    "runner": set(KINDS),
+    "runner-live": set(KINDS),
+    "runner-016": set(KINDS),
+    "agent": {"push", "pull", "status", "pull-none", "pull-full"},
+    "batch": {"push", "pull", "status", "pull-none", "pull-full"},
+    "ibcmd": {"push", "status", "pull-full"},
 }
 CREATED_MARK = "created-by: scripts/bench"
 DEFAULT_STANDS_ROOT = r"E:\stands\v8-runner"
@@ -72,13 +79,18 @@ class Stand:
     def src(self):
         return os.path.join(self.project, *self.source_path.split("/"))
 
+    @property
+    def project_016(self):
+        """The project of the runner-016 executor: its own tree and memory over the same base."""
+        return os.path.join(self.work, "project-016")
+
 
 @dataclass
 class Scenario:
     name: str
     title: str
     kind: str
-    modules: str              # module set name in the stand; "" for status
+    modules: str              # module set name in the stand; "" for NO_MODULES kinds
     executors: list
     runner_args: list = field(default_factory=list)
 
@@ -134,8 +146,8 @@ def load_scenarios(path=SCENARIOS_FILE):
         if kind not in KINDS:
             raise DescriptionError(f"{where}: kind {kind!r} is not one of {KINDS}")
         modules = table.get("modules", "")
-        if (kind == "status") == bool(modules):
-            raise DescriptionError(f"{where}: {'status takes no modules' if modules else 'needs `modules`'}")
+        if (kind in NO_MODULES) == bool(modules):
+            raise DescriptionError(f"{where}: {f'{kind} takes no modules' if modules else 'needs `modules`'}")
         executors = table.get("executors") or list(EXECUTORS)
         for executor in executors:
             if executor not in CAN:

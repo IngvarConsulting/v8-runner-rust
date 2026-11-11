@@ -8,8 +8,17 @@
 #   pull   — метка попадает в базу отдельным пакетным Конфигуратором (не в замере); исполнитель
 #            выгружает изменённое. Проверка: метка в выгруженном файле.
 #   status — без изменений; исполнитель отвечает, что изменилось. Проверка: ответ «ничего».
+#   pull-none — без изменений в базе; исполнитель выгружает изменённое. Проверка: у раннера
+#            дерево проекта не изменилось, у остальных выгружено ничего, кроме файла версий.
+#   push-after-pull — модуль меняется в базе, раннер берёт его своим pull (не в замере), затем
+#            push без правок. Только раннеры: это их память после pull.
+#   pull-full — вся конфигурация в файлы: у раннера `pull --force`, у остальных выгрузка в пустой
+#            каталог. Проверка: у раннера дерево не изменилось, у остальных есть Configuration.xml.
 # Исполнители: runner (агент снят перед каждой командой), runner-live (живой агент, первый
-# прогон — прогрев, в медианы не идёт), agent (голый агент), batch (пакетный Конфигуратор), ibcmd.
+# прогон — прогрев, в медианы не идёт), runner-016 (другой бинарник раннера, `--runner-016`, на
+# своём проекте project-016), agent (голый агент), batch (пакетный Конфигуратор), ibcmd.
+# runner-live нет у status и pull-full: status агента не спрашивает, полный pull файловой базы
+# идёт через ibcmd (#559) — живому агенту там нечего держать.
 
 [push-common2]
 title = "push двух общих модулей"
@@ -18,15 +27,37 @@ modules = "common2"
 executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
 
 [pull-common1]
-title = "pull после правки модуля в базе"
+title = "pull 1: после правки модуля в базе"
 kind = "pull"
 modules = "common1"
-executors = ["runner", "runner-live", "agent", "batch"]
+executors = ["runner", "runner-live", "runner-016", "agent", "batch"]
 
 [status]
 title = "status без изменений"
 kind = "status"
-executors = ["runner", "agent", "batch", "ibcmd"]
+executors = ["runner", "runner-016", "agent", "batch", "ibcmd"]
+
+[pull-none]
+title = "pull без изменений"
+kind = "pull-none"
+executors = ["runner", "runner-live", "runner-016", "agent", "batch"]
+
+[push-common1]
+title = "push 1: одного общего модуля"
+kind = "push"
+modules = "common1"
+executors = ["runner", "runner-live", "runner-016", "agent", "batch", "ibcmd"]
+
+[push-after-pull]
+title = "push после pull одного модуля"
+kind = "push-after-pull"
+modules = "common1"
+executors = ["runner", "runner-live", "runner-016"]
+
+[pull-full]
+title = "полный pull"
+kind = "pull-full"
+executors = ["runner", "runner-016", "agent", "batch", "ibcmd"]
 
 [push-form]
 title = "push модулей формы объекта и общей формы"

@@ -33,6 +33,17 @@ def has_marker(path, marker):
         return False
 
 
+def dumped_files(root):
+    """Files a dump of changes wrote, apart from its version file; [] when the directory is absent."""
+    found = []
+    for folder, _, files in os.walk(root):
+        for name in files:
+            rel = os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
+            if rel != "ConfigDumpInfo.xml":
+                found.append(rel)
+    return sorted(found)
+
+
 def write_files(root, texts):
     for rel, data in texts.items():
         path = os.path.join(root, *rel.split("/"))
@@ -68,6 +79,10 @@ def batch_pull_args(dump_dir, version_file):
     return ["/DumpConfigToFiles", dump_dir, "-update", "-configDumpInfoForChanges", version_file]
 
 
+def batch_full_args(dump_dir):
+    return ["/DumpConfigToFiles", dump_dir]
+
+
 def batch_status_args(dump_dir, changes, version_file):
     return ["/DumpConfigToFiles", dump_dir, "-getChanges", changes, "-configDumpInfoForChanges", version_file]
 
@@ -86,6 +101,10 @@ def ibcmd_apply_args(stand, data_dir):
     return ["infobase", "config", "apply", *ibcmd_base(stand, data_dir), "--force", "--dynamic=disable"]
 
 
+def ibcmd_export_args(stand, data_dir, out_dir):
+    return ["infobase", "config", "export", *ibcmd_base(stand, data_dir), out_dir]
+
+
 def ibcmd_status_args(stand, data_dir, version_file, out):
     return ["infobase", "config", "export", "status", *ibcmd_base(stand, data_dir), f"--base={version_file}",
             f"--out={out}"]
@@ -98,6 +117,10 @@ def agent_push_commands(stage_rel, listing_rel):
 
 def agent_pull_commands(dump_rel, version_rel):
     return [("dump", f"config dump-config-to-files --dir={dump_rel} --update --config-dump-info-for-changes={version_rel}")]
+
+
+def agent_full_commands(dump_rel):
+    return [("dump", f"config dump-config-to-files --dir={dump_rel}")]
 
 
 def agent_status_commands(dump_rel, changes_rel, version_rel):

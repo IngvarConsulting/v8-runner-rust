@@ -130,11 +130,36 @@ class DescriptionTest(unittest.TestCase):
         scenarios = describe.load_scenarios()
         used = {e for s in scenarios.values() for e in s.executors}
         self.assertEqual(used, set(describe.EXECUTORS))
-        kinds = {s.modules: s.kind for s in scenarios.values() if s.modules}
-        self.assertEqual(kinds.get("common2"), "push")
-        self.assertEqual(kinds.get("form"), "push")
-        self.assertEqual(kinds.get("object"), "push")
-        self.assertIn("pull", kinds.values())
+        self.assertEqual({s.kind for s in scenarios.values()}, set(describe.KINDS))
+        pairs = {(s.modules, s.kind) for s in scenarios.values() if s.modules}
+        self.assertTrue({("common2", "push"), ("form", "push"), ("object", "push"), ("common1", "pull")} <= pairs)
+
+    def test_release_set_of_585(self):
+        """#585: status, pull without changes, pull 1, push 1, push after pull, full pull; bare
+        Designer, bare agent, runner 0.16, runner 0.17 first command and with its live agent."""
+        scenarios = describe.load_scenarios()
+        want = {"status": ("status", ""), "pull-none": ("pull-none", ""), "pull-common1": ("pull", "common1"),
+                "push-common1": ("push", "common1"), "push-after-pull": ("push-after-pull", "common1"),
+                "pull-full": ("pull-full", "")}
+        for name, (kind, modules) in want.items():
+            self.assertEqual((scenarios[name].kind, scenarios[name].modules), (kind, modules), name)
+            self.assertIn("runner", scenarios[name].executors, name)
+            self.assertIn("runner-016", scenarios[name].executors, name)
+        for name in ("pull-none", "pull-common1", "push-common1", "push-after-pull"):
+            self.assertIn("runner-live", scenarios[name].executors, name)
+        for name in ("status", "pull-none", "pull-common1", "push-common1", "pull-full"):
+            self.assertTrue({"batch", "agent"} <= set(scenarios[name].executors), name)
+
+    def test_release_stands_on_both_platforms(self):
+        by = {}
+        for name in describe.stand_names():
+            stand = describe.load_stand(name, stands_root=r"X:\stands")
+            source = stand.template_cf or stand.template_dt or stand.project
+            by.setdefault(os.path.dirname(source), set()).add(stand.platform)
+        self.assertEqual(by[r"E:\1c\tmplts\1c\accountingkz\3_0_75_1"], {"8.3.27.2342", "8.5.1.1529"})
+        self.assertEqual(by[r"E:\1c\tmplts\1c\smallbusiness\3_0_14_187"], {"8.3.27.2342", "8.5.1.1529"})
+        self.assertEqual(by[r"E:\1c\tmplts\1c\ARAutomation20\2_6_2_72"], {"8.5.1.1529"})
+        self.assertEqual(describe.load_stand("ka").platform, "8.3.27.2342")
 
     def write(self, text):
         d = tempfile.TemporaryDirectory()
@@ -147,8 +172,13 @@ class DescriptionTest(unittest.TestCase):
     def test_bad_scenarios_are_refused(self):
         for text in ('[a]\nkind = "build"\nmodules = "x"\n',
                      '[a]\nkind = "status"\nmodules = "x"\n',
+                     '[a]\nkind = "pull-none"\nmodules = "x"\n',
+                     '[a]\nkind = "pull-full"\nmodules = "x"\n',
                      '[a]\nkind = "push"\n',
+                     '[a]\nkind = "push-after-pull"\n',
                      '[a]\nkind = "pull"\nmodules = "x"\nexecutors = ["ibcmd"]\n',
+                     '[a]\nkind = "push-after-pull"\nmodules = "x"\nexecutors = ["batch"]\n',
+                     '[a]\nkind = "pull-none"\nexecutors = ["ibcmd"]\n',
                      '[a]\nkind = "push"\nmodules = "x"\nexecutors = ["gate"]\n'):
             with self.assertRaises(describe.DescriptionError, msg=text):
                 describe.load_scenarios(self.write(text))
@@ -226,6 +256,103 @@ class RestoreTest(unittest.TestCase):
         b.base_marked = b.needs_resync = True
         self.run_restore(b)
         self.assertEqual(calls, ["pull", "push"])
+
+
+class Runner016Test(unittest.TestCase):
+    """The runner-016 executor: another runner binary on its own project over the same base."""
+
+    EXE = r"X:\bin-0.16\v8-runner.exe"
+
+    def bench(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        stand = describe.load_stand("ssl321", stands_root=d.name)
+        b = bench.Bench(stand, "runner.exe", os.path.join(d.name, "r.jsonl"), trace=False, verify=False,
+                        runner_016=self.EXE)
+        return stand, b
+
+    def test_runner_016_works_in_its_own_project(self):
+        stand, b = self.bench()
+        r = b.runner_for("runner-016")
+        self.assertEqual(r.exe, self.EXE)
+        self.assertEqual(r.stand.project, os.path.join(stand.work, "project-016"))
+        self.assertEqual(r.stand.infobase, stand.infobase)
+        self.assertEqual(r.base_cmd()[:3], [self.EXE, "--config", os.path.join(stand.project_016, "v8project.yaml")])
+        self.assertIs(b.runner_for("runner"), b.runner)
+        self.assertIs(b.runner_for("runner-live"), b.runner)
+
+    def test_without_the_binary_runner_016_is_left_out_unless_named(self):
+        stand = describe.load_stand("ssl321", stands_root=r"X:\s")
+        scenarios = [describe.load_scenarios()["pull-common1"]]
+        plan = bench.plan_of(stand, scenarios, None, None)
+        self.assertNotIn("runner-016", plan[0][1])
+        self.assertIn("runner-016", bench.plan_of(stand, scenarios, None, self.EXE)[0][1])
+        with self.assertRaises(SystemExit):
+            bench.plan_of(stand, scenarios, ["runner-016"], None)
+
+    def test_cli_passes_the_binary_to_run_and_setup(self):
+        seen = {}
+        with mock.patch.object(bench, "run", lambda *a, **k: seen.setdefault("run", a)), \
+                mock.patch.object(bench, "setup", lambda *a, **k: seen.setdefault("setup", a)), \
+                mock.patch.object(bench.flag, "Held", mock.MagicMock()):
+            bench.main(["run", "--stand", "ka", "--flag-text", OURS, "--runner-016", self.EXE])
+            bench.main(["setup", "--stand", "ka", "--flag-text", OURS, "--runner-016", self.EXE])
+        self.assertEqual(seen["run"][-1], self.EXE)
+        self.assertEqual(seen["setup"][-1], self.EXE)
+
+    def test_an_existing_stand_gets_only_project_016(self):
+        stand = describe.load_stand("ka", stands_root=r"X:\s")
+        with self.assertRaises(SystemExit):
+            bench.setup(stand, "runner.exe", OURS, False)
+        with mock.patch.object(bench, "setup_016") as setup_016:
+            bench.setup(stand, "runner.exe", OURS, False, self.EXE)
+        setup_016.assert_called_once_with(stand, self.EXE, OURS)
+
+    def test_push_by_runner_016_lands_in_its_project_and_the_stand_runner_catches_up(self):
+        stand, b = self.bench()
+        b.runner, b.runner_016 = mock.Mock(), mock.Mock(stand=b.runner_016.stand)
+        b.runner_016.run.return_value = ({"seconds": 1.0, "rc": 0}, {})
+        b.runner.must.return_value = ({"seconds": 1.0}, {})
+        rel = "CommonModules/М/Ext/Module.bsl"
+        scn = describe.load_scenarios()["push-common1"]
+        with mock.patch.object(bench, "commit"), mock.patch("builtins.print"):
+            b.push_runner(scn, "runner-016", [rel], {rel: b"original"}, "m1")
+        self.assertTrue(ex.has_marker(os.path.join(b.runner_016.stand.src, *rel.split("/")), "m1"))
+        self.assertFalse(os.path.exists(b.project_file(rel)))
+        self.assertEqual(b.runner_016.run.call_args.args[1], "push")
+        self.assertEqual([c.args[1] for c in b.runner.must.call_args_list], ["pull"])
+        self.assertTrue(b.base_marked)
+        self.assertFalse(b.needs_resync)
+
+    def test_restore_after_runner_016_syncs_its_project(self):
+        stand, b = self.bench()
+        b.runner, b.runner_016 = mock.Mock(), mock.Mock(stand=b.runner_016.stand)
+        b.runner.must.return_value = ({"seconds": 1.0}, {})
+        b.runner_016.must.return_value = ({"seconds": 1.0}, {})
+        b.base_marked = b.used_016 = True
+        originals = {"CommonModules/М/Ext/Module.bsl": b"original"}
+        with mock.patch.object(bench, "commit"), mock.patch("builtins.print"):
+            b.restore(list(originals), originals, "s")
+        self.assertEqual([c.args[1] for c in b.runner.must.call_args_list], ["push"])
+        self.assertEqual([c.args[1] for c in b.runner_016.must.call_args_list], ["pull"])
+        self.assertFalse(b.used_016)
+
+    def test_every_kind_has_its_measure(self):
+        for kind in describe.KINDS:
+            for executor in describe.EXECUTORS:
+                if kind in describe.CAN[executor]:
+                    family = "runner" if executor in describe.RUNNERS else "other"
+                    self.assertTrue(callable(getattr(bench.Bench, f"{kind.replace('-', '_')}_{family}", None)),
+                                    f"{kind} {executor}")
+
+    def test_dumped_files_ignore_the_version_file(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.assertEqual(ex.dumped_files(os.path.join(d.name, "absent")), [])
+        ex.write_files(d.name, {"ConfigDumpInfo.xml": b"x"})
+        self.assertEqual(ex.dumped_files(d.name), [])
+        ex.write_files(d.name, {"CommonModules/М/Ext/Module.bsl": b"x"})
+        self.assertEqual(ex.dumped_files(d.name), ["CommonModules/М/Ext/Module.bsl"])
 
 
 class CommandTest(unittest.TestCase):

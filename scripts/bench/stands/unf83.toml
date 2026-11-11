@@ -1,0 +1,18 @@
+# УНФ 3.0.14.187 на 8.3.27: база из шаблона cf (пустая, без пользователей), поддержка снята.
+# `bench.py setup` создаёт стенд в <stands_root>/bench-unf83: база ib, проект project (git, полная
+# выгрузка раннера); с `--runner-016` — ещё project-016 с полной выгрузкой раннера 0.16.
+title = "УНФ 3.0.14.187, 8.3.27"
+platform = "8.3.27.2342"
+
+[create]
+cf = 'E:\1c\tmplts\1c\smallbusiness\3_0_14_187\1Cv8.cf'
+disable_support = true
+
+# Наборы модулей, на которые ссылаются сценарии (scenarios.toml, ключ `modules`).
+[modules]
+common1 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl"]
+common2 = ["CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+           "CommonModules/СтроковыеФункцииКлиентСервер/Ext/Module.bsl"]
+form = ["Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl",
+        "CommonForms/Вопрос/Ext/Form/Module.bsl"]
+object = ["Catalogs/Номенклатура/Ext/ObjectModule.bsl"]
