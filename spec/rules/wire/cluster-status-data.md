@@ -27,8 +27,8 @@ check:
   "agent": "127.0.0.1:46760",
   "ras": "127.0.0.1:25425",
   "worker_range": "46762:46777",
-  "registry_dir": "build/infobases/origin/managed/cluster/registry-46761",
-  "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+  "registry_dir": ".local/infobases/origin/managed/cluster/registry-46761",
+  "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
   "ready": true,
   "registered": true,
   "duration_ms": 420

@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::config::loader::ConfigLoadError;
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
@@ -97,7 +98,13 @@ impl UseCaseErrorKind {
                     EnvironmentReason::Unavailable
                 })
             }
-            AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
+            // Стенд базы принадлежит другому проекту общего `localPath`: занято, а не неверно.
+            AppError::WorkspaceBusy(_)
+            | AppError::Config(ConfigLoadError::StandOfAnotherProject(_))
+            | AppError::ConfigContext {
+                source: ConfigLoadError::StandOfAnotherProject(_),
+                ..
+            } => Self::WorkspaceBusy,
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
             AppError::Refused(refusal) => refusal.kind(),
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),

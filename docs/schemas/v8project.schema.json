@@ -1204,6 +1204,10 @@
       "deprecated": true,
       "description": "One-cycle synonym for `infobases.origin` of v8project.local.yaml: which infobase a\ncheckout is attached to is known to the machine, not to the project."
     },
+    "localPath": {
+      "description": "Directory of the personal state of this checkout: data of managed stands and the\ndefault file infobase. Deleting workPath leaves it intact. Relative to the directory of\nv8project.yaml; `.local` by default. It must not hold that directory or a source set,\nand must not overlap workPath or infobase.standalone.exchange.dir.",
+      "type": "string"
+    },
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "MCP server transport and execution settings."

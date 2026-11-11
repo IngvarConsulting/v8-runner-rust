@@ -103,7 +103,7 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
         fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local config");
     assert!(local_config.starts_with(LOCAL_CONFIG_SCHEMA_MODEL_LINE));
     assert!(
-        local_config.contains("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+        local_config.contains("infobases:\n  origin:\n    connection: 'File=.local/db'\n"),
         "the local layer declares origin:\n{local_config}"
     );
     serde_yaml::from_str::<serde_yaml::Value>(&local_config)
@@ -376,7 +376,7 @@ fn init_in_a_declared_project_leaves_the_project_file_and_writes_the_local_layer
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("origin: declared (File=build/ib)"),
+        stdout.contains("origin: declared (File=.local/db)"),
         "{stdout}"
     );
     assert!(!stdout.contains("Config written"), "{stdout}");
@@ -386,7 +386,7 @@ fn init_in_a_declared_project_leaves_the_project_file_and_writes_the_local_layer
     );
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
     assert!(
-        local.contains("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+        local.contains("infobases:\n  origin:\n    connection: 'File=.local/db'\n"),
         "{local}"
     );
 
@@ -410,7 +410,7 @@ fn init_in_a_declared_project_leaves_the_project_file_and_writes_the_local_layer
         );
     }
     assert_eq!(data["origin"]["change"], "unchanged", "{payload}");
-    assert_eq!(data["origin"]["connection"], "File=build/ib", "{payload}");
+    assert_eq!(data["origin"]["connection"], "File=.local/db", "{payload}");
     assert_eq!(
         fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
         "existing"

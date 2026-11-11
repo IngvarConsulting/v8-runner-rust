@@ -238,7 +238,7 @@ source-set:
 tools:
   postgres:
     path: &quot;C:/PostgreSQL-1C/17&quot;  # каталог сборки</code></pre>
-<p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-standalone.html#op-standalone-status"><code>standalone status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>workPath</code>.</p>
+<p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-standalone.html#op-standalone-status"><code>standalone status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>localPath</code>.</p>
 <h3 id="d-standalone-managed-cycle">Цикл работы</h3>
 <pre class="sh"><code>v8-runner infobase create   # база в db-path с конфигурацией из исходников
 v8-runner standalone start      # ibsrv над этой базой, ждёт готовности
@@ -255,7 +255,7 @@ v8-runner test
 v8-runner standalone stop
 v8-runner dbms stop</code></pre>
 <p>Прямой шлюз <code>ibsrv</code> и его диапазон слушают все интерфейсы машины, ключей ограничить их адресом нет; HTTP и SSH-шлюз слушают только <code>127.0.0.1</code>. База без пользователей открывается по прямому шлюзу без учётных данных. Закройте порты брандмауэром, если машина доступна из сети.</p>
-<p>При <code>dbms.managed</code> данные лежат под <code>workPath/infobases/&lt;база&gt;/managed/</code>: удаление <code>workPath</code> уничтожает базу. Команды удаления данных у раннера нет.</p>
+<p>При <code>dbms.managed</code> данные лежат под <code>localPath/infobases/&lt;база&gt;/managed/</code> (по умолчанию <code>.local/</code> рядом с <code>v8project.yaml</code>): удаление <code>workPath</code> их не трогает. Команды удаления данных у раннера нет.</p>
 <p>Останавливает раннер только сервер, который поднял сам. <code>ibsrv</code>, поднятый не раннером над той же базой или на том же порту, он не трогает и называет в ответе.</p>
 <p class="hint">Возможности операций — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
 </main>

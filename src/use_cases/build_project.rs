@@ -1382,6 +1382,7 @@ mod tests {
             providers
         };
         AppConfig {
+            local_path: base_path.join(".local"),
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format,
@@ -1423,6 +1424,7 @@ mod tests {
         edt_cli_path: &Path,
     ) -> AppConfig {
         AppConfig {
+            local_path: base_path.join(".local"),
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Edt,

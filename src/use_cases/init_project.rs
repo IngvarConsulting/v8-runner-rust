@@ -1484,6 +1484,7 @@ mod tests {
 
     fn sample_config() -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/base").join(".local"),
             base_path: PathBuf::from("/tmp/base"),
             work_path: PathBuf::from("/tmp/work"),
             format: SourceFormat::Edt,

@@ -37,7 +37,10 @@ v8-runner init
 - создаёт рядом `v8project.local.yaml` с modeline на
   `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`
   и объявляет в нём базу `origin`: адрес из `--infobase <строка соединения>` (прежний ключ
-  `--connection` принимается скрыто), по умолчанию `File=build/ib`.
+  `--connection` принимается скрыто), по умолчанию файловой базой `<localPath>/db`
+  ([`localPath`](#localpath)): `File=.local/db`, относительным путём, если `localPath` внутри
+  каталога конфигурации, иначе абсолютным. Объявленный `origin`, в том числе `File=build/ib`
+  прежних проектов, не меняется.
   Существующий местный слой сохраняется: `origin` дописывается, если не объявлен; секция
   без адреса (прежний `infobase:` только с учётными данными) получает адрес и переезжает в
   `infobases.origin`; объявленный адрес, отличный от названного, — отказ в каталоге без
@@ -135,7 +138,7 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `format`, `providers`, `source-set`, `push`, `tools`,
+- top-level app keys: `workPath`, `localPath`, `format`, `providers`, `source-set`, `push`, `tools`,
   `mcp`, `tests`; базы объявляет местный слой ключом `infobases`;
 - `push` ключей сегодня не принимает: прежний `partialLoadThreshold` отвергается по имени;
 - `mcp.*` и `tests.*` используют `snake_case`;
@@ -257,6 +260,7 @@ Merge rules:
 Local overlay может задавать machine-local секции:
 
 - `workPath`;
+- `localPath`;
 - `infobases.<имя>.*` — секции баз целиком: `connection`, `user`/`password`, `dbms`,
   `cluster`, `web`, `standalone`; `origin` — умолчание;
 - `infobase` — синоним `infobases.origin` на один цикл выпуска;
@@ -309,7 +313,7 @@ command-specific validation, а не ослабление `push`, source `pull`,
 остальных project workflows.
 
 Каталог `workPath` внутри набора исходников, например при наборе в корне проекта, исходником
-не считается: определение изменений его не читает.
+не считается: определение изменений его не читает. То же верно для [`localPath`](#localpath).
 
 Корень runtime state:
 
@@ -348,6 +352,60 @@ command-specific validation, а не ослабление `push`, source `pull`,
 
 Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
 selection для infobase export не создаёт `workPath` и runtime-файлы.
+
+### `localPath`
+
+- Тип: путь
+- Обязателен: нет, по умолчанию `.local`
+- Где: проектный файл и местный слой; местный слой главнее. `--workdir` его не меняет,
+  своего ключа командной строки у него нет.
+
+Личное состояние рабочей копии — то, что нельзя пересобрать. `workPath` пересобирается и его
+можно удалить; `localPath` удаление `workPath` не задевает. Относительный путь — от каталога
+`v8project.yaml`, как у `workPath`.
+
+```
+.local/
+  db/                                  файловая база по умолчанию у `init`
+  infobases/<база>/managed/
+    postgres/   data/ password record.json ports.json postgres.log
+    standalone/ data/ record.json ports.json
+    cluster/    registry-<regport>/ record.json ports.json cluster.log
+    ras/        record.json
+  .lock                                замок команд, меняющих стенд
+  .gitignore                           строка `*`
+```
+
+- Каталог создаёт первый писатель в него — команда стенда (`dbms`, `cluster`, `standalone`),
+  замок или метка файловой базы внутри него — и кладёт `.gitignore` со строкой `*`; чужой
+  `.gitignore` не перезаписывается. Превью ничего не пишет. В `.gitignore` проекта раннер
+  ничего не добавляет; если хочется, допишите туда привязанное `/.local/`.
+- Проверка настроек отказывает, если `localPath` совпадает с каталогом конфигурации или
+  содержит его, содержит корень набора исходников, пересекается с `workPath` или с
+  `infobase.standalone.exchange.dir` любой базы. Проверка только сравнивает пути и ничего не
+  создаёт.
+- Внутри набора исходников `localPath` не исходник: определение изменений, частичная
+  загрузка и копия для агента его пропускают, а полный `pull` над каталогом, который его
+  содержит, отказывает. Набор в корне проекта (`path: .`) поэтому полным `pull` не
+  выгружается, пока `localPath` внутри него: вынесите `localPath` за пределы набора.
+- Команды, меняющие стенд (`dbms`, `cluster`, `standalone` кроме `status`; `infobase create`
+  базы управляемого стенда), берут замок `<localPath>/.lock` после замка `workPath`: запуски
+  одного проекта с разными `workPath` (`--workdir`) не меняют один стенд разом.
+- `localPath`, общий у двух проектов, стенд не делит: стенд базы принадлежит проекту, который
+  первым его поднял (метка `managed/owner.json` переживает `stop` и перезагрузку). Команды стенда
+  второго проекта — `status`, `start`, `stop`, `restart`, `infobase create` — и его рабочие
+  команды над этой базой отказывают `workspace_busy`, называя первый проект, работает его стенд
+  или остановлен, а его данные не трогают. Замок здесь ни при чём; дайте каждому проекту свой
+  `localPath`.
+- Запись службы помнит канонический путь своего каталога и каталог проекта. Копия `.local` в
+  другой каталог получает устаревшие записи: чужой сервер, поднятый из оригинала, раннер не
+  останавливает и своим не называет.
+- Повторный `clone` не считает каталог непустым, пока в `localPath` лежат лишь `.gitignore` и
+  файлы замков.
+
+**Удаление `workPath`.** Стенды и база целы, но память о базе
+(`workPath/infobases/<база>/`) пропала: следующий `push` отказывает `untracked_base`.
+Связь восстанавливает `pull --force` — он выгружает базу целиком и записывает память заново.
 
 ### `execution_timeout` — изъят
 

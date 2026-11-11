@@ -1,5 +1,5 @@
 //! Запись о процессе раннера, который переживает команду: служба стенда под
-//! `workPath/infobases/<база>/managed/<служба>/` или процесс в другом каталоге-корне, например
+//! `localPath/infobases/<база>/managed/<служба>/` или процесс в другом каталоге-корне, например
 //! в каталоге состояния учётной записи ОС. Единственный носитель такой записи: её вид, чтение,
 //! атомарная замена и опознание своего процесса.
 
@@ -12,7 +12,112 @@ use crate::platform::ibsrv::ServerPorts;
 use crate::platform::ragent::ClusterPorts;
 use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
+use crate::support::local_dir::LocalDir;
 use crate::support::machine::{machine_hash, machine_id};
+use crate::support::path::{compared_path, snapshot_path_identity};
+
+/// Служба стенда базы. Единственный владелец имён их каталогов под
+/// `localPath/infobases/<база>/managed/`: имя пишется только здесь.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandService {
+    Postgres,
+    Standalone,
+    Cluster,
+    Ras,
+}
+
+impl StandService {
+    /// Все службы стенда: их обходят тесты.
+    #[cfg(test)]
+    pub const ALL: [Self; 4] = [Self::Postgres, Self::Standalone, Self::Cluster, Self::Ras];
+
+    /// Имя каталога службы, её журнала и слово, которым её называет ответ.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Standalone => "standalone",
+            Self::Cluster => "cluster",
+            Self::Ras => "ras",
+        }
+    }
+}
+
+impl std::fmt::Display for StandService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Метка владельца стенда базы: `managed/owner.json`. Её заводит первая служба стенда, и она
+/// переживает `stop` и перезагрузку, в отличие от записи о процессе.
+const OWNER_FILE: &str = "owner.json";
+
+/// Каталог служб стенда базы под `localPath`.
+fn managed_of(local: &LocalDir, infobase: &str) -> PathBuf {
+    local
+        .path()
+        .join("infobases")
+        .join(infobase)
+        .join("managed")
+}
+
+/// Отпечаток пути в том виде, в каком его сравнивают проверки каталогов раннера.
+fn path_identity(path: &Path) -> String {
+    snapshot_path_identity(&compared_path(path))
+}
+
+/// Место стенда или службы: отпечатки каталога `root` и проекта и сам проект.
+fn location_of(root: &Path, local: &LocalDir) -> ServiceLocation {
+    ServiceLocation {
+        root_identity: path_identity(root),
+        project_identity: path_identity(local.project()),
+        project: local.project().display().to_string(),
+    }
+}
+
+/// Проект, которому принадлежит стенд в каталоге `managed`, если это другой проект того же
+/// каталога: `localPath` общий. Метка из другого каталога — копия, она ничего не значит.
+fn other_owner(managed: &Path, local: &LocalDir) -> Option<String> {
+    let expected = location_of(managed, local);
+    let written = read_json::<ServiceLocation>(&managed.join(OWNER_FILE))?;
+    (written.root_identity == expected.root_identity
+        && written.project_identity != expected.project_identity)
+        .then_some(written.project)
+}
+
+/// Стенд базы в общем `localPath` принадлежит другому проекту: команды этого проекта его не
+/// трогают (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`). Единственный текст этого
+/// отказа: его говорят и команды стенда, и загрузчик настроек рабочей команды.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandOfAnotherProject {
+    pub infobase: String,
+    pub local_path: PathBuf,
+    pub project: String,
+}
+
+impl std::fmt::Display for StandOfAnotherProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the stand of '{}' under localPath '{}' belongs to the project '{}': this localPath is shared, and the stand is left alone; give this project its own localPath",
+            self.infobase,
+            self.local_path.display(),
+            self.project
+        )
+    }
+}
+
+impl std::error::Error for StandOfAnotherProject {}
+
+/// Принадлежит ли стенд объявленной базы другому проекту. Ответ не зависит от того, работают ли
+/// его службы: метка владельца переживает `stop`.
+pub fn stand_of_another_project(local: &LocalDir, infobase: &str) -> Option<StandOfAnotherProject> {
+    other_owner(&managed_of(local, infobase), local).map(|project| StandOfAnotherProject {
+        infobase: infobase.to_owned(),
+        local_path: local.path().to_path_buf(),
+        project,
+    })
+}
 
 /// Где живёт служба: каталог `<корень>/<служба>/` с записью, журналом и данными.
 #[derive(Debug, Clone)]
@@ -20,15 +125,29 @@ pub struct ServicePaths {
     managed: PathBuf,
     root: PathBuf,
     service: String,
+    /// `localPath`, которому принадлежит служба стенда; у процесса под другим корнем его нет.
+    local: Option<LocalDir>,
+}
+
+/// Где записана служба стенда: отпечатки канонического пути её каталога и каталога проекта и
+/// сам каталог проекта, чтобы его назвать (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+///
+/// Другой каталог службы — запись скопирована вместе с `.local`: она устаревшая, а сервер из неё
+/// чужой. Тот же каталог при другом проекте — `localPath` общий у двух проектов: запись живая и
+/// чужая, её не трогают ([`ServicePaths::another_project`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceLocation {
+    pub root_identity: String,
+    pub project_identity: String,
+    pub project: String,
 }
 
 impl ServicePaths {
-    /// Служба объявленной базы под `workPath/infobases/<база>/managed/`.
-    pub fn new(work_path: &Path, infobase: &str, service: &str) -> Self {
-        Self::under(
-            &work_path.join("infobases").join(infobase).join("managed"),
-            service,
-        )
+    /// Служба объявленной базы под `localPath/infobases/<база>/managed/`.
+    pub fn new(local: &LocalDir, infobase: &str, service: StandService) -> Self {
+        let mut paths = Self::under(&managed_of(local, infobase), service.name());
+        paths.local = Some(local.clone());
+        paths
     }
 
     /// Служба под другим корнем: каталог службы — `<managed>/<service>/`, соседние службы
@@ -38,6 +157,37 @@ impl ServicePaths {
             managed: managed.to_path_buf(),
             root: managed.join(service),
             service: service.to_owned(),
+            local: None,
+        }
+    }
+
+    /// Соседняя служба той же базы: сервер над этой СУБД.
+    pub fn sibling(&self, service: StandService) -> Self {
+        let mut sibling = Self::under(&self.managed, service.name());
+        sibling.local = self.local.clone();
+        sibling
+    }
+
+    /// Место, которое записывает и сверяет служба стенда; `None` — у процесса под другим
+    /// корнем.
+    pub fn location(&self) -> Option<ServiceLocation> {
+        Some(location_of(&self.root, self.local.as_ref()?))
+    }
+
+    /// Запись о службе, если она записана здесь: по копии из чужого `localPath` или проекта
+    /// раннер ничего не снимает.
+    pub fn own_record(&self) -> Option<ServiceRecord> {
+        read_json::<ServiceRecord>(&self.record()).filter(|record| self.wrote(record))
+    }
+
+    /// Записана ли запись здесь: у службы стенда место в записи совпало с её местом.
+    fn wrote(&self, record: &ServiceRecord) -> bool {
+        match self.location() {
+            Some(location) => record.location.as_ref().is_some_and(|written| {
+                written.root_identity == location.root_identity
+                    && written.project_identity == location.project_identity
+            }),
+            None => true,
         }
     }
 
@@ -73,17 +223,32 @@ impl ServicePaths {
         &self.root
     }
 
-    /// Запись соседней службы той же базы: сервера над этой СУБД.
-    pub fn sibling_record(&self, service: &str) -> PathBuf {
-        self.managed.join(service).join("record.json")
+    /// Запись соседней службы той же базы: сервера над этой СУБД. Нужна только тестам: команды
+    /// находят соседей по записям каталога `managed`.
+    #[cfg(test)]
+    pub fn sibling_record(&self, service: StandService) -> PathBuf {
+        self.managed.join(service.name()).join("record.json")
     }
 
-    /// Каталог `managed/` со своим `.gitignore`: его содержимому в репозитории не место.
+    /// Каталог службы. Служба стенда — первый писатель в `localPath`: каталог заводит
+    /// [`LocalDir::prepare`] вместе со своим `.gitignore`, а стенд получает метку владельца —
+    /// этот проект. Метку другого проекта того же каталога не перезаписывает, это отказ; метку,
+    /// скопированную из другого каталога, заменяет своей.
     pub fn prepare(&self) -> std::io::Result<()> {
+        let Some(local) = &self.local else {
+            return std::fs::create_dir_all(&self.root);
+        };
+        local.prepare()?;
+        if let Some(project) = other_owner(&self.managed, local) {
+            return Err(std::io::Error::other(format!(
+                "the stand belongs to the project '{project}'"
+            )));
+        }
         std::fs::create_dir_all(&self.root)?;
-        let ignore = self.managed.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(ignore, "*\n")?;
+        let owner = location_of(&self.managed, local);
+        let marker = self.managed.join(OWNER_FILE);
+        if read_json::<ServiceLocation>(&marker).as_ref() != Some(&owner) {
+            write_json(&marker, &owner)?;
         }
         Ok(())
     }
@@ -115,6 +280,10 @@ pub struct ServiceRecord {
     /// Живой агент Конфигуратора, которого держит этот процесс-сторож: у служб стенда его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<LiveAgentFacts>,
+    /// Где записана служба стенда ([`ServicePaths::location`]). У записи сторожа агента его нет;
+    /// у записи службы стенда без него место неизвестно, и она считается устаревшей.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<ServiceLocation>,
 }
 
 /// Что запись сторожа говорит о его агенте: по этому команда находит агента и сверяет, тот ли
@@ -169,8 +338,8 @@ pub struct PreviousRegistry {
 }
 
 /// Работающий свой кластер объявленной базы. Посреди переноса реестра его нет.
-pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> {
-    let paths = ServicePaths::new(work_path, infobase, "cluster");
+pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> {
+    let paths = ServicePaths::new(local, infobase, StandService::Cluster);
     let machine = machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
@@ -182,24 +351,21 @@ pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> 
 }
 
 /// Работает ли своя служба PostgreSQL этой базы.
-pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
-    let paths = ServicePaths::new(work_path, infobase, "postgres");
-    record_names_own_process(
-        &paths.record(),
-        machine_fingerprint().as_deref(),
-        &process_facts,
-    )
+pub fn running_postgres(local: &LocalDir, infobase: &str) -> bool {
+    let paths = ServicePaths::new(local, infobase, StandService::Postgres);
+    record_names_own_process(&paths, machine_fingerprint().as_deref(), &process_facts)
 }
 
 /// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
 /// отказывают, пока работает другая служба (`one-server-owns-a-database`, `dbms stop`). Запись
 /// `starting` без pid процесса не называет.
 pub fn record_names_own_process(
-    record: &Path,
+    paths: &ServicePaths,
     machine: Option<&str>,
     facts: &dyn Fn(u32) -> Option<ProcessFacts>,
 ) -> bool {
-    read_json::<ServiceRecord>(record)
+    paths
+        .own_record()
         .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
@@ -237,6 +403,10 @@ pub fn observe_service(
     let Some(mut record) = read_json::<ServiceRecord>(&paths.record()) else {
         return Observed::Nothing;
     };
+    // Запись из другого места — копия чужого стенда: её процесс не наш, что бы он ни делал.
+    if !paths.wrote(&record) {
+        return Observed::Stale;
+    }
     if record.state == RecordState::Starting {
         let starter_alive = record
             .starter
@@ -270,8 +440,8 @@ pub fn adopt_recorded_pid(
 }
 
 /// Работающий свой сервер объявленной базы. Адрес такой цели не объявлен, его знает только запись.
-pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningServer> {
-    let paths = ServicePaths::new(work_path, infobase, "standalone");
+pub fn running_standalone(local: &LocalDir, infobase: &str) -> Option<RunningServer> {
+    let paths = ServicePaths::new(local, infobase, StandService::Standalone);
     let machine = machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
@@ -404,6 +574,7 @@ mod tests {
             bin: PathBuf::from("bin"),
             version: None,
             agent: None,
+            location: None,
         }
     }
 
@@ -444,16 +615,20 @@ mod tests {
         );
     }
 
+    fn local(dir: &Path) -> LocalDir {
+        LocalDir::new(&dir.join(".local"), dir)
+    }
+
     #[test]
     fn a_service_under_another_root_keeps_the_same_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let declared = ServicePaths::new(dir.path(), "origin", "postgres");
+        let declared = ServicePaths::new(&local(dir.path()), "origin", StandService::Postgres);
         let under = ServicePaths::under(declared.managed(), "postgres");
         assert_eq!(under.record(), declared.record());
         assert_eq!(under.log(), declared.log());
         assert_eq!(
-            under.sibling_record("cluster"),
-            declared.sibling_record("cluster")
+            under.sibling_record(StandService::Cluster),
+            declared.sibling_record(StandService::Cluster)
         );
 
         let state = dir.path().join("agents");
@@ -463,14 +638,163 @@ mod tests {
         assert_eq!(agent.log(), state.join("0f1e").join("0f1e.log"));
     }
 
+    /// Данные стенда лежат под `localPath`, а не под `workPath`
+    /// (`INV.PLATFORM.A-MANAGED-SERVER-KEEPS-ITS-OWN-DATA-DIRECTORY`).
     #[test]
-    fn the_managed_directory_ignores_its_own_content() {
+    fn a_stand_service_lives_under_the_local_path() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = ServicePaths::new(dir.path(), "origin", "postgres");
+        let local = local(dir.path());
+        for service in StandService::ALL {
+            let paths = ServicePaths::new(&local, "origin", service);
+            let root = dir
+                .path()
+                .join(".local")
+                .join("infobases")
+                .join("origin")
+                .join("managed")
+                .join(service.name());
+            assert_eq!(paths.root(), root.as_path());
+            assert_eq!(paths.data(), root.join("data"));
+            assert_eq!(paths.record(), root.join("record.json"));
+            assert_eq!(paths.pins(), root.join("ports.json"));
+        }
+    }
+
+    /// Каталог службы заводит `localPath` со своим `.gitignore`; у `managed/` своего нет
+    /// (`INV.USE-CASES.THE-LOCAL-DIRECTORY-IGNORES-ITSELF`).
+    #[test]
+    fn a_stand_service_prepares_the_local_directory_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ServicePaths::new(&local(dir.path()), "origin", StandService::Postgres);
         paths.prepare().unwrap();
+        assert!(paths.root().is_dir());
         assert_eq!(
-            std::fs::read_to_string(paths.managed().join(".gitignore")).unwrap(),
-            "*\n"
+            std::fs::read_to_string(dir.path().join(".local").join(".gitignore")).unwrap(),
+            "*
+"
+        );
+        assert!(!paths.managed().join(".gitignore").exists());
+    }
+
+    /// Защита от повторения: имена каталогов служб стенда пишет только [`StandService`]. Список
+    /// строк служб в проверке «стенд другого проекта» повторял `ServicePaths::new` (ревью #608).
+    /// Защита сравнивает по виду строки: имя под другим написанием она не увидит, такое ловит
+    /// ревью.
+    #[test]
+    fn stand_service_names_are_spelled_only_here() {
+        let offenders: Vec<String> = source_files()
+            .iter()
+            .filter(|path| !path.ends_with("platform/service_record.rs"))
+            .filter(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                text.lines().any(|line| {
+                    (line.contains("ServicePaths::new(")
+                        || line.contains(".sibling(")
+                        || line.contains("sibling_record("))
+                        && ["\"postgres\"", "\"standalone\"", "\"cluster\"", "\"ras\""]
+                            .iter()
+                            .any(|name| line.contains(name))
+                })
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+        assert!(offenders.is_empty(), "{offenders:?}");
+    }
+
+    /// Стенд принадлежит проекту, который первым завёл его каталог: метка владельца переживает
+    /// снятие записи о процессе. Другой проект того же `localPath` назван, его `prepare` —
+    /// отказ, метка цела; копия метки в другом каталоге ничего не значит и заменяется своей.
+    #[test]
+    fn the_owner_of_a_stand_outlives_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let own_local = local(&dir.path().join("a"));
+        let own = ServicePaths::new(&own_local, "origin", StandService::Postgres);
+        own.prepare().unwrap();
+        assert!(!own.record().exists());
+        assert_eq!(stand_of_another_project(&own_local, "origin"), None);
+
+        let shared = LocalDir::new(&dir.path().join("a").join(".local"), &dir.path().join("c"));
+        let refusal = stand_of_another_project(&shared, "origin").expect("another project");
+        assert_eq!(refusal.project, dir.path().join("a").display().to_string());
+        assert!(
+            refusal.to_string().contains("belongs to the project"),
+            "{refusal}"
+        );
+        let marker = own.managed().join(OWNER_FILE);
+        let before = std::fs::read(&marker).unwrap();
+        for service in StandService::ALL {
+            assert!(ServicePaths::new(&shared, "origin", service)
+                .prepare()
+                .is_err());
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+        assert!(!own.managed().join("standalone").exists());
+
+        let copy_local = local(&dir.path().join("b"));
+        let copy = ServicePaths::new(&copy_local, "origin", StandService::Postgres);
+        std::fs::create_dir_all(copy.managed()).unwrap();
+        std::fs::copy(&marker, copy.managed().join(OWNER_FILE)).unwrap();
+        assert_eq!(
+            stand_of_another_project(&copy_local, "origin"),
+            None,
+            "a copy is not shared"
+        );
+        copy.prepare().unwrap();
+        assert_eq!(
+            read_json::<ServiceLocation>(&copy.managed().join(OWNER_FILE)),
+            Some(location_of(copy.managed(), &copy_local))
+        );
+    }
+
+    /// Запись помнит своё место: в другом `localPath` или проекте она устаревшая, и её процесс,
+    /// даже живой и совпавший во всём остальном, не свой.
+    #[test]
+    fn a_record_copied_to_another_place_names_a_foreign_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = ServicePaths::new(
+            &local(&dir.path().join("a")),
+            "origin",
+            StandService::Postgres,
+        );
+        own.prepare().unwrap();
+        let mut written = record();
+        written.location = own.location();
+        write_json(&own.record(), &written).unwrap();
+        let alive = |_| Some(facts(10, "postgres.exe"));
+        assert!(matches!(
+            observe_service(&own, Some("m"), &alive, &|_| false),
+            Observed::Own(_)
+        ));
+        assert!(record_names_own_process(&own, Some("m"), &alive));
+
+        // Копия `.local` в другой проект.
+        let copy = ServicePaths::new(
+            &local(&dir.path().join("b")),
+            "origin",
+            StandService::Postgres,
+        );
+        copy.prepare().unwrap();
+        std::fs::copy(own.record(), copy.record()).unwrap();
+        assert_eq!(
+            observe_service(&copy, Some("m"), &alive, &|_| true),
+            Observed::Stale
+        );
+        assert!(!record_names_own_process(&copy, Some("m"), &alive));
+        assert_eq!(copy.own_record(), None);
+
+        // Тот же `localPath`, другой проект: общий абсолютный каталог.
+        let shared = LocalDir::new(&dir.path().join("a").join(".local"), &dir.path().join("c"));
+        let elsewhere = ServicePaths::new(&shared, "origin", StandService::Postgres);
+        assert!(!record_names_own_process(&elsewhere, Some("m"), &alive));
+        assert_eq!(elsewhere.own_record(), None);
+
+        // Запись без места у службы стенда — тоже не своя.
+        let mut unplaced = written.clone();
+        unplaced.location = None;
+        write_json(&own.record(), &unplaced).unwrap();
+        assert_eq!(
+            observe_service(&own, Some("m"), &alive, &|_| true),
+            Observed::Stale
         );
     }
 }

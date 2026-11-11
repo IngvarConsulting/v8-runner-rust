@@ -3,6 +3,7 @@ pub mod authority;
 pub mod edt_project;
 pub mod error;
 pub mod fs;
+pub mod local_dir;
 pub mod logging;
 pub mod machine;
 pub mod path;

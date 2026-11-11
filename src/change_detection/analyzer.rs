@@ -6,12 +6,13 @@ use thiserror::Error;
 use crate::change_detection::file_state::mtime_nanos;
 use crate::change_detection::git_ignore::{dump_samples, HiddenBy, IgnoreRules};
 use crate::change_detection::git_tree::{
-    BlobHashError, BlobHasher, GitSource, ObserveError, ObservedFile, Spelling,
+    in_runner_dir, BlobHashError, BlobHasher, GitSource, ObserveError, ObservedFile, Spelling,
 };
 use crate::change_detection::hash_storage::{
     HashKind, HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary,
     StoredFileState,
 };
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use crate::change_detection::scanner::{self, ScanError, ScanScope};
 use crate::domain::git_worktree::{ChangeDetection, GitWorktree, ScanReason};
 use crate::domain::source_set::SourceSetContext;
@@ -210,7 +211,8 @@ fn analyze_snapshot(
     let reason = match source {
         ChangeSource::Scan(reason) => reason,
         ChangeSource::Git(mut git) => {
-            if let Some(hidden) = hidden_by_git(git.view, &git.root, snapshot) {
+            let runner_dirs = runner_dirs_below(context, work_path);
+            if let Some(hidden) = hidden_by_git(git.view, &git.root, snapshot, &runner_dirs) {
                 return Found::early(Err(ChangeDetectionError::HiddenByGit {
                     source_set: context.name().to_owned(),
                     hidden: Box::new(hidden),
@@ -218,7 +220,14 @@ fn analyze_snapshot(
             }
             let detection = ChangeDetection::git(git.view.fsmonitor);
             let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
-            match observe_by_git(context, snapshot, &spelling, &mut git, interrupted) {
+            match observe_by_git(
+                context,
+                snapshot,
+                &spelling,
+                &runner_dirs,
+                &mut git,
+                interrupted,
+            ) {
                 // Память хешей байтов — например, записанная до того, как каталог стал
                 // рабочей копией git, — сравнивается тем же хешером, чтением файлов: полная
                 // загрузка из-за смены хешера была бы ложной. Хешами git её заменит полная
@@ -266,14 +275,27 @@ fn analyze_snapshot(
 }
 
 /// The rule of an ignore file that can hide a file of the set: one of the remembered files —
-/// those a dump wrote — or, with nothing remembered, one of the files a dump writes.
-fn hidden_by_git(view: &GitWorktree, root: &str, snapshot: &StorageSnapshot) -> Option<HiddenBy> {
+/// those a dump wrote — or, with nothing remembered, one of the files a dump writes. Files in
+/// the runner directories `runner_dirs` are no sources: the rule `*` that `localPath` hides
+/// itself with hides nothing of the set.
+fn hidden_by_git(
+    view: &GitWorktree,
+    root: &str,
+    snapshot: &StorageSnapshot,
+    runner_dirs: &[String],
+) -> Option<HiddenBy> {
     let rules = IgnoreRules::read(&view.ignore_sources, view.ignore_case);
+    let source = |path: &&str| !in_runner_dir(path, runner_dirs, view.ignore_case);
     if snapshot.entries.is_empty() {
         let samples = dump_samples();
-        rules.hiding(root, samples.iter().map(String::as_str))
+        rules.hiding(root, samples.iter().map(String::as_str).filter(source))
     } else {
-        let mut remembered: Vec<&str> = snapshot.entries.keys().map(String::as_str).collect();
+        let mut remembered: Vec<&str> = snapshot
+            .entries
+            .keys()
+            .map(String::as_str)
+            .filter(source)
+            .collect();
         remembered.sort_unstable();
         rules.hiding(root, remembered)
     }
@@ -298,7 +320,12 @@ pub fn hidden_by_git_rules(
                 .flatten()
         })
         .unwrap_or_default();
-    match hidden_by_git(view, root, &snapshot) {
+    match hidden_by_git(
+        view,
+        root,
+        &snapshot,
+        &runner_dirs_below(context, work_path),
+    ) {
         Some(hidden) => Err(ChangeDetectionError::HiddenByGit {
             source_set: context.name().to_owned(),
             hidden: Box::new(hidden),
@@ -308,11 +335,13 @@ pub fn hidden_by_git_rules(
 }
 
 /// The set's files as git lists them, checked against the memory: a remembered file git does
-/// not list but the disk still holds means git's answer misses it, and the set is read.
+/// not list but the disk still holds means git's answer misses it, and the set is read. A
+/// remembered file in a runner directory is no source: it is gone, as for the walk.
 fn observe_by_git(
     context: &SourceSetContext,
     snapshot: &StorageSnapshot,
     spelling: &Spelling<'_>,
+    runner_dirs: &[String],
     git: &mut GitSource<'_, '_>,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<ObservedFile>, ObserveError> {
@@ -326,7 +355,9 @@ fn observe_by_git(
         })
         .collect();
     for relative in snapshot.entries.keys() {
-        if seen.contains(relative.as_str()) {
+        if seen.contains(relative.as_str())
+            || in_runner_dir(relative, runner_dirs, git.view.ignore_case)
+        {
             continue;
         }
         let path = context.path().join(relative);
@@ -447,8 +478,8 @@ fn scan_snapshot(
     snapshot: &StorageSnapshot,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Found {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    let scan = match scan_sources(context, context.path(), excluded.as_deref(), interrupted) {
+    let excluded = runner_dirs(context, work_path);
+    let scan = match scan_sources(context, context.path(), &excluded, interrupted) {
         Ok(scan) => scan,
         Err(ScanError::Interrupted) => return Found::early(Err(ChangeDetectionError::Interrupted)),
         Err(error) => {
@@ -794,8 +825,8 @@ pub fn prepare_source_snapshot(
     context: &SourceSetContext,
     work_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    prepare_snapshot(context, context.path(), excluded)
+    let excluded = runner_dirs(context, work_path);
+    prepare_snapshot(context, context.path(), &excluded)
 }
 
 /// Hash an exported tree before publishing it; does not open or mutate storage.
@@ -803,17 +834,17 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    prepare_snapshot(context, source_path, None)
+    prepare_snapshot(context, source_path, &[])
 }
 
 fn prepare_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
-    excluded: Option<std::path::PathBuf>,
+    excluded: &[std::path::PathBuf],
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scan_sources(context, source_path, excluded.as_deref(), &mut || false)
+    let scan = scan_sources(context, source_path, excluded, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -869,10 +900,33 @@ pub fn commit_full_snapshot(
         .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
+/// Каталоги раннера под корнем набора: `workPath` запуска и `localPath` проекта набора.
+fn runner_dirs(context: &SourceSetContext, work_path: &Path) -> Vec<std::path::PathBuf> {
+    runner_dirs_inside(
+        context.path(),
+        RunnerDirs::new(work_path, context.local_path()),
+    )
+}
+
+/// [`runner_dirs`] from the set root, `/`-separated: how git's answer names them (#575).
+pub(crate) fn runner_dirs_below(context: &SourceSetContext, work_path: &Path) -> Vec<String> {
+    runner_dirs(context, work_path)
+        .iter()
+        .filter_map(|dir| dir.strip_prefix(context.path()).ok())
+        .map(|below| {
+            below
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
+}
+
 fn scan_sources(
     context: &SourceSetContext,
     path: &Path,
-    excluded: Option<&Path>,
+    excluded: &[std::path::PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<scanner::ScanSnapshot, ScanError> {
     scanner::scan_in_scope(path, excluded, interrupted, scan_scope(context))
@@ -926,10 +980,10 @@ pub fn watch_before_dump(
     if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
         return None;
     }
-    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let excluded = runner_dirs(context, work_path);
     let listed = scanner::list_in_scope(
         context.path(),
-        excluded.as_deref(),
+        &excluded,
         &mut || false,
         scan_scope(context),
     );
@@ -978,10 +1032,10 @@ pub fn list_after_dump(
     work_path: &Path,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpListing, ChangeDetectionError> {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let excluded = runner_dirs(context, work_path);
     scanner::list_in_scope(
         context.path(),
-        excluded.as_deref(),
+        &excluded,
         &mut || interrupted(),
         scan_scope(context),
     )
@@ -1440,6 +1494,30 @@ mod tests {
         rescan_and_commit_full(&context, &work_path).expect("snapshot");
 
         std::fs::write(work_path.join("state.txt"), "after").expect("state");
+
+        assert!(matches!(
+            analyze_context(&context, &work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Файлы `localPath` внутри набора — стенды и база — тоже не исходники, как бы каталог ни
+    /// назывался.
+    #[test]
+    fn a_personal_file_in_a_local_path_inside_the_set_is_not_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work_path = dir.path().join("work");
+        let local_path = root.join("personal");
+        std::fs::create_dir_all(local_path.join("db")).expect("local");
+        std::fs::write(root.join("Configuration.xml"), "<xml />").expect("config");
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "before").expect("base");
+        let context =
+            SourceSetContext::new("main", root, "designer-main").with_local_path(&local_path);
+        rescan_and_commit_full(&context, &work_path).expect("snapshot");
+
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "after").expect("base");
+        std::fs::write(local_path.join("record.json"), "{}").expect("record");
 
         assert!(matches!(
             analyze_context(&context, &work_path, &mut || false).outcome,

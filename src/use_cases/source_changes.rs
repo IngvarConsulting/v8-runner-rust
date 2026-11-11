@@ -16,7 +16,6 @@ use crate::change_detection::analyzer::{
     self, ChangeDetectionError, ChangeSource, ContextAnalysis,
 };
 use crate::change_detection::git_tree::{BlobHashError, BlobHasher, GitSource};
-use crate::change_detection::scanner;
 use crate::domain::git_worktree::{GitIndexEntry, GitWorktree, ScanReason};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::git::{self, GitQueryError, Placement};
@@ -32,7 +31,8 @@ enum Choice {
     Git {
         repo: usize,
         root: String,
-        work_path: Option<String>,
+        /// Каталоги раннера под корнем набора, от корня набора.
+        runner_dirs: Vec<String>,
     },
     Scan(ScanReason),
 }
@@ -51,14 +51,14 @@ impl Lookup {
             Choice::Git {
                 repo,
                 root,
-                work_path,
+                runner_dirs,
             } => {
                 let view = &self.repos[*repo];
                 let mut hasher = blob_hasher(&view.toplevel, &view.index);
                 f(ChangeSource::Git(GitSource {
                     view,
                     root: root.clone(),
-                    work_path: work_path.clone(),
+                    runner_dirs: runner_dirs.clone(),
                     hash_blobs: &mut hasher,
                 }))
             }
@@ -366,8 +366,7 @@ fn lookup(
             choices.push(Choice::Scan(ScanReason::GitFailed));
             continue;
         };
-        let work = scanner::work_path_inside(context.path(), work_path)
-            .and_then(|inside| inside.strip_prefix(context.path()).ok().map(slashed));
+        let runner_dirs = analyzer::runner_dirs_below(context, work_path);
         let key = toplevel.canonicalize().unwrap_or_else(|_| toplevel.clone());
         let repo = *by_toplevel.entry(key).or_insert_with(|| {
             repos.push(Repo {
@@ -379,13 +378,13 @@ fn lookup(
             repos.len() - 1
         });
         repos[repo].roots.push(root.clone());
-        if let Some(work) = &work {
-            repos[repo].excluded.push(join(&root, work));
-        }
+        repos[repo]
+            .excluded
+            .extend(runner_dirs.iter().map(|dir| join(&root, dir)));
         choices.push(Choice::Git {
             repo,
             root,
-            work_path: work,
+            runner_dirs,
         });
     }
 
@@ -966,7 +965,7 @@ mod tests {
     /// Сторож повторного появления (#575): git и обход выбирают одни и те же файлы набора и дают
     /// им одни и те же хеши — на дереве, которое задевает каждый предикат обхода: служебные и
     /// порождённые каталоги на любой глубине, опись версий и её временный файл, зонд выгрузки,
-    /// `workPath` внутри корня и файл вне индекса.
+    /// `workPath` и `localPath` внутри корня, `.local` по имени и файл вне индекса.
     #[test]
     fn git_and_scan_snapshots_agree() {
         let project = Project::new(&[
@@ -980,6 +979,7 @@ mod tests {
             (".gradle/x", "service"),
             (".build/x", "service"),
             (".yaxunit/x", "service"),
+            (".local/db/Stand.xml", "<s/>"),
             ("Forms/Form.xml", "<f/>"),
             ("Catalogs/Номенклатура.xml", "<n/>"),
         ]);
@@ -997,7 +997,10 @@ mod tests {
             "atomic",
         );
         project.write(".work-inside/state", "work");
-        let set = project.set();
+        project.write("personal/db/Stand.xml", "<s/>");
+        let set = project
+            .set()
+            .with_local_path(&project.root().join("personal"));
         let work = project.root().join(".work-inside");
 
         rescan_and_commit_full(&set, &work).expect("by git");
@@ -1013,9 +1016,11 @@ mod tests {
         assert_eq!(by_git, by_scan);
         assert!(by_git.contains_key("Untracked.bsl"));
         assert!(by_git.contains_key("Catalogs/Items/Ext/ObjectModule.bsl"));
-        assert!(!by_git
-            .keys()
-            .any(|path| path.starts_with("Catalogs/build/")));
+        assert!(!by_git.keys().any(|path| {
+            path.starts_with("Catalogs/build/")
+                || path.starts_with("personal/")
+                || path.starts_with(".local/")
+        }));
 
         let execution = ExecutionContext::cli(CommandName::Status);
         let analysis = analyze(&execution, std::slice::from_ref(&set), &work, false, true)
@@ -1056,6 +1061,54 @@ mod tests {
         .expect("remembered");
 
         let execution = ExecutionContext::cli(CommandName::Status);
+        let analysis = analyze(&execution, std::slice::from_ref(&set), &work, false, true)
+            .expect("analysis")
+            .remove(0);
+        assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
+        assert_eq!(changes(&analysis), BTreeMap::new());
+    }
+
+    /// `localPath` внутри набора по пути git — не исходник (#596): его `.gitignore` со строкой
+    /// `*`, даже закоммиченный, не прячет файлов набора и отказа `source_set_ignored_by_git` не
+    /// даёт — и когда память, записанная без `localPath`, помнит его файлы, — а новый файл в нём
+    /// не изменение.
+    #[test]
+    fn a_local_path_inside_the_set_is_not_a_source_under_git() {
+        let project = Project::new(&[("Module.bsl", "m")]);
+        project.write("personal/.gitignore", "*\n");
+        project.write("personal/db/Stand.xml", "<s/>");
+        // Закоммиченный `.gitignore` каталога git читает: правило `*` в силе.
+        run_git(
+            project.dir.path(),
+            &["add", "-f", "src/cf/personal/.gitignore"],
+        );
+        run_git(project.dir.path(), &["commit", "-qm", "local"]);
+        // Память, которая помнит файл `localPath`: так его помнил обход до #596.
+        crate::change_detection::analyzer::rescan_and_commit_full(&project.set(), &project.work())
+            .expect("memory");
+        assert!(remembered(&project.set(), &project.work()).contains_key("personal/db/Stand.xml"));
+
+        let set = project
+            .set()
+            .with_local_path(&project.root().join("personal"));
+        let work = project.work();
+        let execution = ExecutionContext::cli(CommandName::Status);
+        let analysis = analyze(&execution, std::slice::from_ref(&set), &work, false, true)
+            .expect("the local directory hides no file of the set")
+            .remove(0);
+        // Память хешей байтов сравнивается чтением файлов: файл `localPath` из неё ушёл.
+        assert_eq!(
+            changes(&analysis),
+            BTreeMap::from([
+                (".gitignore".to_owned(), ChangeKind::Deleted),
+                ("Stand.xml".to_owned(), ChangeKind::Deleted),
+            ])
+        );
+        refuse_hidden_sets(std::slice::from_ref(&set), &work)
+            .expect("a full pull is not refused either");
+
+        rescan_and_commit_full(&set, &work).expect("memory");
+        project.write("personal/db/Other.xml", "<o/>");
         let analysis = analyze(&execution, std::slice::from_ref(&set), &work, false, true)
             .expect("analysis")
             .remove(0);

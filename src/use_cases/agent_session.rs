@@ -7,6 +7,7 @@
 //! `generation-id`: токен поколения конфигурации, записанный после успешной загрузки
 //! или выгрузки и сравниваемый перед следующей выгрузкой.
 
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -781,7 +782,7 @@ pub(crate) fn expose_dir(
     user_dir: &Path,
     relative: &str,
     target: &Path,
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
 ) -> Result<String, AppError> {
     let link = user_dir.join(relative);
     if let Some(parent) = link.parent() {
@@ -800,7 +801,7 @@ pub(crate) fn expose_dir(
     })?;
     let _ = crate::support::fs::remove_path_if_exists(&link);
     if link_dir(&target, &link).is_err() {
-        copy_for_the_agent(&target, user_dir, work_path, &link).map_err(|error| {
+        copy_for_the_agent(&target, user_dir, dirs, &link).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to expose '{}' to the agent at '{}': {error}",
                 target.display(),
@@ -894,13 +895,13 @@ fn junction_dir(_target: &Path, _link: &Path) -> std::io::Result<()> {
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
-/// Набор в корне рабочей области держит каталог агента и `workPath` внутри себя: копия не
-/// должна входить в собственное назначение и нести служебные каталоги, а метаданным с именем
+/// Набор в корне рабочей области держит каталог агента, `workPath` и `localPath` внутри себя:
+/// копия не должна входить в собственное назначение и нести служебные каталоги, а метаданным с именем
 /// вроде `build` глубже верхнего уровня в ней место.
 fn copy_for_the_agent(
     target: &Path,
     user_dir: &Path,
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
     link: &Path,
 ) -> std::io::Result<()> {
     let agent_dir = user_dir.canonicalize()?;
@@ -914,9 +915,7 @@ fn copy_for_the_agent(
         return copy_dir_recursively(target, link);
     }
     let mut excluded = vec![agent_dir];
-    excluded.extend(crate::change_detection::scanner::work_path_inside(
-        target, work_path,
-    ));
+    excluded.extend(runner_dirs_inside(target, dirs));
     std::fs::create_dir_all(link)?;
     for entry in crate::change_detection::scanner::top_level_source_entries(target, excluded) {
         let entry = entry?;
@@ -1114,10 +1113,10 @@ pub(crate) fn stage_dir(
     exchange: &Exchange,
     relative: &str,
     local: &Path,
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
 ) -> Result<String, AppError> {
     match exchange {
-        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local, work_path),
+        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local, dirs),
         Exchange::Sftp => handle
             .ssh()?
             .sftp_put_dir(local, relative)
@@ -1135,10 +1134,10 @@ pub(crate) fn stage_dir_partially(
     relative: &str,
     local: &Path,
     files: &[PathBuf],
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
 ) -> Result<String, AppError> {
     let Exchange::Sftp = exchange else {
-        return stage_dir(handle, exchange, relative, local, work_path);
+        return stage_dir(handle, exchange, relative, local, dirs);
     };
     use crate::change_detection::partial_load::{
         relative_paths, root_dependencies, CONFIGURATION_XML,
@@ -1941,9 +1940,12 @@ mod tests {
         std::fs::create_dir_all(&root).expect("root");
         let root = root.canonicalize().expect("canonical root");
         let work = root.join("service-area");
+        let local = root.join("personal");
         let user_dir = work.join("agent").join("0");
         std::fs::create_dir_all(&user_dir).expect("agent dir");
         std::fs::write(work.join("state.txt"), "state").expect("state");
+        std::fs::create_dir_all(local.join("db")).expect("local");
+        std::fs::write(local.join("db").join("1Cv8.1CD"), "base").expect("personal base");
         std::fs::create_dir_all(root.join(".build")).expect("service dir");
         std::fs::write(root.join(".build").join("lock"), "lock").expect("lock");
         let form = root
@@ -1957,11 +1959,18 @@ mod tests {
         let link = user_dir.join("run").join("main");
         std::fs::create_dir_all(link.parent().expect("parent")).expect("parent");
 
-        copy_for_the_agent(&root, &user_dir, &work, &link).expect("copy");
+        copy_for_the_agent(
+            &root,
+            &user_dir,
+            RunnerDirs::new(&work, Some(&local)),
+            &link,
+        )
+        .expect("copy");
 
         assert!(link.join("Configuration.xml").is_file());
         assert!(link.join("Catalogs/Item/Forms/build/Form.xml").is_file());
         assert!(!link.join("service-area").exists());
+        assert!(!link.join("personal").exists());
         assert!(!link.join(".build").exists());
     }
 
@@ -1973,8 +1982,13 @@ mod tests {
         std::fs::create_dir_all(&sources).expect("sources");
         std::fs::write(sources.join("Configuration.xml"), "<x/>").expect("marker");
 
-        let relative =
-            expose_dir(&user_dir, "build/run/main", &sources, root.path()).expect("expose");
+        let relative = expose_dir(
+            &user_dir,
+            "build/run/main",
+            &sources,
+            RunnerDirs::new(root.path(), None),
+        )
+        .expect("expose");
         assert_eq!(relative, "build/run/main");
         assert!(user_dir.join("build/run/main/Configuration.xml").is_file());
 

@@ -6,12 +6,14 @@ check:
   - tests/cli_config_init.rs::init_with_the_address_already_in_origin_changes_nothing
   - src/use_cases/config_init.rs::a_declared_project_redirects_origin_and_keeps_the_previous_section_as_upstream
   - src/use_cases/config_init.rs::force_rewrites_the_project_file_and_redirects_origin_as_without_it
+  - src/use_cases/config_init.rs::a_declared_project_keeps_its_project_file_and_declares_the_default_origin
 ---
 
 # `init` в готовом проекте не трогает проектный файл
 
 В проекте, где `v8project.yaml` уже есть, `init` без `--force` его не трогает. Без
-`--infobase` он объявляет `origin` базой `File=build/ib`, если `origin` ещё нет. С
+`--infobase` он объявляет `origin` базой `File=<localPath>/db` (`File=.local/db` по умолчанию), если
+`origin` ещё нет; объявленный `origin`, например `File=build/ib`, остаётся. С
 `--infobase <адрес>` он отдаёт `origin` новый адрес, а прежнюю секцию сохраняет под именем
 `upstream` вместе с учётными данными; ответ называет заменённый адрес. Адрес, который уже
 стоит в `origin`, ничего не меняет. `--force` переписывает только проектный файл: с местным

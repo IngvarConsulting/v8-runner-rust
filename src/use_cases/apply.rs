@@ -665,6 +665,7 @@ mod tests {
         fs::write(base.join("main").join("Configuration.xml"), "<x/>").expect("marker");
         fs::create_dir_all(base.join("epf")).expect("epf");
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base,
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

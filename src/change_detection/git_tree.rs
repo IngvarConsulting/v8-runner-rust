@@ -34,8 +34,9 @@ pub struct GitSource<'v, 'h> {
     pub view: &'v GitWorktree,
     /// The set root from the root of the working tree, `/`-separated; empty — the root itself.
     pub root: String,
-    /// `workPath` below the set root, `/`-separated, when it lies there.
-    pub work_path: Option<String>,
+    /// The runner directories below the set root — `workPath` and `localPath` — `/`-separated
+    /// (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    pub runner_dirs: Vec<String>,
     pub hash_blobs: &'h mut BlobHasher<'h>,
 }
 
@@ -57,9 +58,25 @@ pub(super) enum ObserveError {
     Unusable { reason: ScanReason, detail: String },
 }
 
+/// Whether `below` — a path below the set root, `/`-separated — lies inside one of `dirs`, the
+/// runner directories below the same root, compared the way the working tree compares names.
+pub(super) fn in_runner_dir(below: &str, dirs: &[String], ignore_case: bool) -> bool {
+    dirs.iter().any(|dir| {
+        below.len() > dir.len()
+            && below.as_bytes()[dir.len()] == b'/'
+            && below.get(..dir.len()).is_some_and(|head| {
+                if ignore_case {
+                    head.eq_ignore_ascii_case(dir)
+                } else {
+                    head == dir
+                }
+            })
+    })
+}
+
 impl<'v, 'h> GitSource<'v, 'h> {
     /// The path below the set root of a path from the root of the working tree, if it lies
-    /// there and is not in `workPath`.
+    /// there and is not in a runner directory.
     pub(super) fn below_root<'p>(&self, path: &'p str) -> Option<&'p str> {
         let below = if self.root.is_empty() {
             path
@@ -75,16 +92,7 @@ impl<'v, 'h> GitSource<'v, 'h> {
             }
             &path[self.root.len() + 1..]
         };
-        let in_work_path = self.work_path.as_deref().is_some_and(|work| {
-            below.len() > work.len()
-                && below.as_bytes()[work.len()] == b'/'
-                && if self.view.ignore_case {
-                    below[..work.len()].eq_ignore_ascii_case(work)
-                } else {
-                    &below[..work.len()] == work
-                }
-        });
-        (!in_work_path).then_some(below)
+        (!in_runner_dir(below, &self.runner_dirs, self.view.ignore_case)).then_some(below)
     }
 
     fn in_toplevel(&self, below: &str) -> String {
