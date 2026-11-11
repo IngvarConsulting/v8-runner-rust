@@ -143,6 +143,17 @@ impl ManagedSpawnResult {
         }
     }
 
+    /// Снимает процесс со всеми потомками сразу и не ждёт его выхода
+    /// (`INV.PLATFORM.A-MANAGED-AGENT-IS-RELEASED-AND-REMOVED`). На Windows снимается
+    /// job-объект процесса (`TerminateJobObject`): система доводит снятие всего дерева сама, а
+    /// ручки закрываются тут же. На Unix группа получает `SIGKILL` без мягкой паузы, и
+    /// ожидание только подбирает снятого лидера, чтобы он не остался зомби.
+    pub fn remove(mut self) {
+        if let Some(mut spawned) = self.child.take() {
+            remove_child_group(&mut spawned);
+        }
+    }
+
     /// Снимает процесс по отмене команды и называет это отменой: ошибка несёт, был ли
     /// процесс работой команды.
     #[must_use]
@@ -1547,6 +1558,35 @@ fn terminate_child_group(spawned: &mut SpawnedChild) {
     #[cfg(unix)]
     {
         terminate_unix_process_group(spawned.child.id() as i32, libc::SIGKILL);
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = spawned.child.start_kill();
+    }
+}
+
+/// Снятие без ожидания выхода: см. [`ManagedSpawnResult::remove`].
+fn remove_child_group(spawned: &mut SpawnedChild) {
+    #[cfg(windows)]
+    {
+        // Управляемый процесс на Windows рождается в своём job-объекте, и его снятие
+        // асинхронно: ждать конца дерева не нужно. Без job-объекта (или если система отказала)
+        // дерево снимается прежним путём.
+        if let Err(error) = spawned.child.start_kill() {
+            tracing::debug!(
+                pid = spawned.child.id(),
+                %error,
+                "the job of the managed process was not terminated; terminating its tree"
+            );
+            terminate_windows_process_tree(spawned.child.id());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        terminate_unix_process_group(spawned.child.id() as i32, libc::SIGKILL);
+        let _ = spawned.child.wait();
     }
 
     #[cfg(all(not(unix), not(windows)))]
@@ -2987,6 +3027,56 @@ mod tests {
         assert!(started, "a started client is the command's work");
     }
 
+    /// Снятие без ожидания (#637): процесс, глухой к мягкому снятию, снимается сразу, без
+    /// мягкой паузы, и подобран — не остаётся ни живым, ни зомби; потомок группы снят с ним.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_managed_process_kills_its_group_at_once_without_a_graceful_wait() {
+        let dir = tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pid");
+        let child_pid_file = dir.path().join("child.pid");
+        let heard = dir.path().join("heard-term");
+        let script = dir.path().join("deaf.sh");
+        write_script(
+            &script,
+            &format!(
+                "trap 'touch \"{}\"' TERM\nsleep 30 &\necho $! > '{}'\necho $$ > '{}'\nwhile :; do wait $!; done",
+                heard.display(),
+                child_pid_file.display(),
+                pid_file.display()
+            ),
+        );
+        let managed = ProcessExecutor
+            .spawn_managed(&plain_request(script), ManagedSpawnMode::Wait, None)
+            .expect("spawn managed");
+        let pid = read_pid(&pid_file);
+        let child_pid = read_pid(&child_pid_file);
+
+        // Оболочка ждёт потомка встроенным `wait`, и ловушка `TERM` сработала бы сразу: мягкое
+        // снятие оставило бы метку. Порог — мягкая пауза прежнего пути (250 мс); `SIGKILL` с
+        // подбором укладывается в миллисекунды.
+        let began = std::time::Instant::now();
+        managed.remove();
+        let took = began.elapsed();
+
+        assert!(
+            took < Duration::from_millis(250),
+            "removal waited for a graceful exit: {took:?}"
+        );
+        assert!(
+            !process_exists(pid),
+            "the process was left running or unreaped"
+        );
+        assert!(
+            wait_for_process_exit(child_pid, Duration::from_secs(2)),
+            "the child of the group was left running"
+        );
+        assert!(
+            !heard.exists(),
+            "removal asked the process to exit instead of removing it"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn spawn_managed_cleans_process_group_when_startup_probe_detects_early_exit() {
@@ -3479,6 +3569,56 @@ mod tests {
             panic!(
                 "managed termination should terminate Windows job child {child_pid}; fallback cleanup: {cleanup:?}"
             );
+        }
+    }
+
+    /// Снятие без ожидания (#637): job-объект управляемого процесса снимается целиком — и сам
+    /// процесс, и его потомок — без `taskkill` и без ожидания выхода.
+    #[cfg(windows)]
+    #[test]
+    fn removing_a_managed_process_ends_its_whole_job_without_waiting() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("spawn-child.ps1");
+        let child_pid_path = dir.path().join("child.pid");
+        fs::write(
+            &script,
+            format!(
+                "$child = Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru\nSet-Content -LiteralPath {} -Value $child.Id\nStart-Sleep -Seconds 30\n",
+                powershell_literal(&child_pid_path)
+            ),
+        )
+        .expect("write script");
+        let managed = ProcessExecutor
+            .spawn_managed(
+                &ProcessRequest {
+                    program: PathBuf::from("powershell.exe"),
+                    args: vec![
+                        "-NoProfile".to_owned(),
+                        "-ExecutionPolicy".to_owned(),
+                        "Bypass".to_owned(),
+                        "-File".to_owned(),
+                        script.display().to_string(),
+                    ],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: Some(dir.path().join("stderr.log")),
+                    startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
+                },
+                ManagedSpawnMode::Wait,
+                None,
+            )
+            .expect("spawn managed");
+        let pid = managed.pid();
+        let child_pid = read_pid(&child_pid_path);
+
+        managed.remove();
+
+        for (who, pid) in [("process", pid), ("child", child_pid)] {
+            if !wait_for_process_exit(pid, Duration::from_secs(5)) {
+                let cleanup = terminate_windows_process_tree_for_test(pid);
+                panic!("the managed {who} {pid} was left running; fallback cleanup: {cleanup:?}");
+            }
         }
     }
 

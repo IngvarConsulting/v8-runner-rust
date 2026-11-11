@@ -1169,6 +1169,67 @@ mod tests {
         assert_eq!(ledger.read(), Recorded::Nothing);
     }
 
+    /// Загрузка спрашивает поколение после себя, только когда ответ что-то решает (#637): у
+    /// набора с журналом поколений ответ записывается
+    /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`), у набора без
+    /// журнала — исполнителю без восстановления файла версий — второй запрос не уходит.
+    #[test]
+    fn a_load_asks_the_generation_after_itself_only_when_the_answer_decides_something() {
+        use crate::domain::capability::Provider;
+        use crate::use_cases::agent_session::{GenerationLedger, Recorded};
+        use std::cell::Cell;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let remembered = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        let unremembered = remembered.clone().without_memory();
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+        let token = "2".repeat(40);
+
+        for (set, asked) in [(&unremembered, 0), (&remembered, 1)] {
+            let reads = Cell::new(0);
+            super::coordinator::guarded_load(
+                &gate,
+                set,
+                Provider::Ibcmd,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(Some(token.clone()))
+                },
+                || {
+                    Ok(super::helpers::Loaded {
+                        warnings: Vec::new(),
+                        apply: super::helpers::AfterLoad::Applied,
+                    })
+                },
+                || Ok(()),
+            )
+            .expect("load");
+            assert_eq!(reads.get(), asked, "{}", set.name());
+        }
+        let Recorded::Ours(record) = GenerationLedger::of(&remembered).expect("ledger").read()
+        else {
+            panic!("the generation after the load was not recorded");
+        };
+        assert_eq!(record.token, token);
+    }
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;

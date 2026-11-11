@@ -852,6 +852,13 @@ fn run_dump_selected(
                     .flatten();
                 // Перечень каталога не ждёт платформу: он идёт, пока она отвечает про
                 // поколение. `watch` есть, только когда поколение до выгрузки прочитано.
+                // Ответ, который ничего не решает, не спрашивается (#637).
+                let asks_after = set.is_some_and(|set| {
+                    crate::use_cases::exchange_guard::generation_after_dump_decides(
+                        set,
+                        watch.is_some(),
+                    )
+                });
                 let (generation_after, observed) = observe_dump_writes_while(
                     set,
                     &config.work_path,
@@ -860,7 +867,8 @@ fn run_dump_selected(
                     None,
                     &|| crate::use_cases::interruption::interruption_pending(context),
                     || {
-                        if context.external_full_pull().is_some() {
+                        // У внешнего полного `pull` набора здесь нет, и `asks_after` ложно.
+                        if !asks_after {
                             None
                         } else {
                             generation_before.as_ref().and_then(|_| {
