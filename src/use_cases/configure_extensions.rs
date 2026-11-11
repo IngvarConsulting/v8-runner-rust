@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
 use crate::domain::extensions::{ExtensionsResult, ExtensionsStep};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::ibcmd::{IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -307,7 +308,7 @@ fn log_extension_step(step: &ExtensionsStep) {
 fn log_extension_progress(target: &str, action: &str, status: &str, detail: &str) {
     let label = format!("{target}: {action}");
     if status == "running" {
-        log_live_stage(&label, detail);
+        log_live_stage(ProgressPhase::Extensions, None, &label, detail);
         return;
     }
 
@@ -437,6 +438,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "configuration".to_owned(),

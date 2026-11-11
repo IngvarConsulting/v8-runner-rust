@@ -3,6 +3,7 @@ use crate::change_detection::analyzer::{
     ChangeDetectionError, DumpFact, DumpStart, DumpWatch, DumpWrites, TreeBeforeDump,
 };
 use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use crate::use_cases::source_changes::DumpHashing;
@@ -916,7 +917,12 @@ fn run_dump_over_directory_designer(
         OverDirectory::ByVersionFile => ("dump: incremental", "incremental"),
         OverDirectory::Whole(_) => ("dump: full", "full"),
     };
-    log_live_stage(stage, "[Конфигуратор] exporting configuration files");
+    log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
+        stage,
+        "[Конфигуратор] exporting configuration files",
+    );
     let dsl = build_designer_dsl(
         context,
         config,
@@ -948,7 +954,12 @@ fn forecast_ibcmd(
     resolved: &ResolvedDumpTarget,
     dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
 ) -> Result<DumpForecast, AppError> {
-    log_live_stage("dump: forecast", "[ibcmd] asking what the dump will do");
+    log_live_stage(
+        ProgressPhase::Forecast,
+        Some(resolved.source_set_name.as_str()),
+        "dump: forecast",
+        "[ibcmd] asking what the dump will do",
+    );
     let result = dsl
         .config_export_status(
             &resolved.platform_target_path.join(VERSION_FILE_NAME),
@@ -978,7 +989,12 @@ fn run_full_dump_designer(
     let staging_dir = publication.staging_path().to_path_buf();
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
-    log_live_stage("dump: full", "[Конфигуратор] exporting configuration files");
+    log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
+        "dump: full",
+        "[Конфигуратор] exporting configuration files",
+    );
     let dump_result = match build_designer_dsl(
         context,
         config,
@@ -1054,7 +1070,12 @@ fn run_dump_over_directory_ibcmd(
             },
         ));
     }
-    log_live_stage("dump: incremental", "[ibcmd] exporting configuration files");
+    log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
+        "dump: incremental",
+        "[ibcmd] exporting configuration files",
+    );
     let dump_result = dsl
         .config_export_incremental(
             &resolved.platform_target_path,
@@ -1087,7 +1108,12 @@ fn run_whole_dump_through_stage_ibcmd(
         &resolved.platform_target_identity,
         DUMP_STAGE_PREFIX,
     )?;
-    log_live_stage("dump: full", "[ibcmd] exporting configuration files");
+    log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
+        "dump: full",
+        "[ibcmd] exporting configuration files",
+    );
     let dump_result = match dsl
         .config_export_full(publication.staging_path(), resolved.extension.as_deref())
         .map_err(map_ibcmd_error)
@@ -1120,7 +1146,12 @@ fn run_full_dump_ibcmd(
     let staging_dir = publication.staging_path().to_path_buf();
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
-    log_live_stage("dump: full", "[ibcmd] exporting configuration files");
+    log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
+        "dump: full",
+        "[ibcmd] exporting configuration files",
+    );
     let dump_result = match build_ibcmd_dsl(
         context,
         config,
@@ -1170,6 +1201,8 @@ fn run_partial_dump_designer(
 
     let list_file = create_dump_object_list_file(&config.work_path, objects)?;
     log_live_stage(
+        ProgressPhase::Dump,
+        Some(resolved.source_set_name.as_str()),
         "dump: partial",
         "[Конфигуратор] exporting selected configuration objects",
     );
@@ -1483,7 +1516,12 @@ fn finalize_edt_dump(
 
     let edt_dsl = build_edt_dsl(context, config, edt_binary, edt_runner)
         .map_err(|error| publication.cleanup_failure(error))?;
-    log_live_stage("dump: edt import", "[EDT] importing Designer snapshot");
+    log_live_stage(
+        ProgressPhase::Convert,
+        Some(resolved.source_set_name.as_str()),
+        "dump: edt import",
+        "[EDT] importing Designer snapshot",
+    );
     let import_result = match edt_dsl
         .import_configuration_files(
             &staging_dir,
@@ -2790,6 +2828,7 @@ exit 0"#,
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),

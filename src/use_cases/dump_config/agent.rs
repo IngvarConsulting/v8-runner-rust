@@ -10,6 +10,7 @@
 use super::*;
 use crate::domain::capability::Provider;
 use crate::domain::capability::{Operation, OperationSize};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::platform::locator::UtilityType;
@@ -93,7 +94,12 @@ pub(super) fn run_dump_agent(
     let wait = wait_policy(context);
     let transcript = transcript_log(config, &format!("dump-{}", resolved.source_set_name))?;
 
-    log_live_stage("dump: agent", "[агент] opening the Designer agent session");
+    log_live_stage(
+        ProgressPhase::Session,
+        Some(resolved.source_set_name.as_str()),
+        "dump: agent",
+        "[агент] opening the Designer agent session",
+    );
     let mut session = Some(connect(
         context,
         config,
@@ -227,7 +233,12 @@ fn dump_through(
                 ),
                 extension,
             );
-            log_live_stage(stage, "[агент] exporting configuration files");
+            log_live_stage(
+                ProgressPhase::Dump,
+                Some(resolved.source_set_name.as_str()),
+                stage,
+                "[агент] exporting configuration files",
+            );
             let transcript = run_command(handle, &command, wait);
             // Результат забирается к раннеру под workPath и уже оттуда публикуется
             // ступенчато; на стороне точки входа следа не остаётся.
@@ -280,7 +291,12 @@ fn dump_through(
                         ),
                         extension,
                     );
-                    log_live_stage(stage, "[агент] exporting configuration files");
+                    log_live_stage(
+                        ProgressPhase::Dump,
+                        Some(resolved.source_set_name.as_str()),
+                        stage,
+                        "[агент] exporting configuration files",
+                    );
                     let (outcome, prepared) = beside(
                         "dump-hashing",
                         || watch.as_ref().and(set).map(DumpHashing::of),
@@ -317,7 +333,12 @@ fn dump_through(
                         ),
                         extension,
                     );
-                    log_live_stage(stage, "[агент] exporting changed configuration files");
+                    log_live_stage(
+                        ProgressPhase::Dump,
+                        Some(resolved.source_set_name.as_str()),
+                        stage,
+                        "[агент] exporting changed configuration files",
+                    );
                     let outcome = run_command(handle, &command, wait);
                     let collected = outcome.as_ref().ok().map(|_| {
                         collect_into_dir(
@@ -370,7 +391,12 @@ fn dump_through(
                         ),
                         extension,
                     );
-                    log_live_stage(stage, "[агент] exporting selected configuration objects");
+                    log_live_stage(
+                        ProgressPhase::Dump,
+                        Some(resolved.source_set_name.as_str()),
+                        stage,
+                        "[агент] exporting selected configuration objects",
+                    );
                     let outcome = run_command(handle, &command, wait);
                     withdraw_dir(user_dir, &target);
                     outcome
@@ -385,7 +411,12 @@ fn dump_through(
                         ),
                         extension,
                     );
-                    log_live_stage(stage, "[агент] exporting selected configuration objects");
+                    log_live_stage(
+                        ProgressPhase::Dump,
+                        Some(resolved.source_set_name.as_str()),
+                        stage,
+                        "[агент] exporting selected configuration objects",
+                    );
                     let outcome = run_command(handle, &command, wait);
                     let collected = outcome.as_ref().ok().map(|_| {
                         collect_into_dir(

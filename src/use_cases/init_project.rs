@@ -12,6 +12,7 @@ use crate::domain::capability::{
     Operation, Provider, ProviderPlan, ProviderReceipt, SkippedProvider, TargetKind,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::connection::ClusterInfobaseCreation;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -92,7 +93,12 @@ fn run_init(
     if args.dry_run {
         // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
         // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
-        log_live_stage("init: preview", "[Init] preview only, nothing created");
+        log_live_stage(
+            ProgressPhase::Preview,
+            None,
+            "init: preview",
+            "[Init] preview only, nothing created",
+        );
     }
     answer
 }
@@ -827,7 +833,12 @@ fn ensure_file_infobase(
         .as_ref()
         .map_or(&[], |assembly| assembly.warnings.as_slice());
 
-    log_live_stage("init: infobase create", "[Platform] creating infobase");
+    log_live_stage(
+        ProgressPhase::Infobase,
+        None,
+        "init: infobase create",
+        "[Platform] creating infobase",
+    );
     let settled = collecting_deferrals(|deferrals| {
         let created = create_file_infobase(
             context, config, utilities, provider, import, &marker, deferrals,
@@ -1174,6 +1185,8 @@ impl<'a> ClusterCreation<'a> {
         deferrals: &mut Deferrals,
     ) -> Result<(), AppError> {
         log_live_stage(
+            ProgressPhase::Infobase,
+            None,
             "init: infobase create",
             "[Конфигуратор] creating the infobase in the cluster",
         );
@@ -1395,6 +1408,8 @@ fn ensure_edt_workspace(
         }
         debug!("[EDT] Импорт проекта: {}", project.name);
         log_live_stage(
+            ProgressPhase::Convert,
+            None,
             "init: edt import",
             &format!("[EDT] importing source-set project '{}'", project.name),
         );
@@ -1692,6 +1707,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: vec![
                 SourceSetConfig {
                     name: "ext".to_owned(),

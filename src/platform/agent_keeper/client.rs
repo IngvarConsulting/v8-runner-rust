@@ -2095,6 +2095,51 @@ mod tests {
         );
     }
 
+    /// Промежуточный кадр сторожа доходит до команды, пока агент ещё работает: сторож пишет
+    /// итог только после того, как команда увидела ход. Копи клиент кадры до итога, ответ
+    /// не пришёл бы вовсе (`INV.USE-CASES.A-LONG-AGENT-COMMAND-SHOWS-ITS-PROGRESS`).
+    #[test]
+    fn a_progress_frame_reaches_the_command_before_the_reply_ends() {
+        let runtime = runtime().unwrap();
+        runtime.block_on(async {
+            let (mut keeper, client) = tokio::io::duplex(1024);
+            let mut reader = BufReader::new(client);
+            let cancellation = CancellationToken::new();
+            let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+            let writer = async move {
+                write_line(
+                    &mut keeper,
+                    &Frame::Batch {
+                        messages: serde_json::from_str(
+                            r#"[{"type":"progress","body":{"message":"load","percent":50}}]"#,
+                        )
+                        .unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+                let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx).await;
+                write_line(&mut keeper, &Frame::Done).await.unwrap();
+                seen.is_ok()
+            };
+            let mut seen_tx = Some(seen_tx);
+            let mut on_batch = |_: &[AgentMessage]| {
+                if let Some(seen) = seen_tx.take() {
+                    let _ = seen.send(());
+                }
+            };
+            let (reply, streamed) = tokio::join!(
+                await_reply(&mut reader, &cancellation, false, None, &mut on_batch),
+                writer
+            );
+            assert!(
+                streamed,
+                "the progress frame reached the command before the end"
+            );
+            assert!(matches!(reply, Ok(reply) if reply.messages.len() == 1));
+        });
+    }
+
     /// Отмена критической команды посреди кадра его не рвёт: чтение кадра переживает отмену,
     /// и ответ, дописанный после неё, приходит целым.
     #[test]

@@ -17,6 +17,10 @@ check:
   - src/config/loader.rs::config_route_move_witness_stays_invalid_after_rechecking
   - src/config/loader.rs::declared_infobases_keep_a_stable_pair_with_both_declarations
   - src/config/loader.rs::declared_infobases_hold_the_windows_route_and_captured_files_against_mutation
+  - src/config/loader.rs::declared_infobases_read_the_project_file_named_by_the_config
+  - src/config/loader.rs::the_loaded_config_names_its_project_file
+  - src/use_cases/infobase_owner.rs::an_owner_declaring_the_base_in_a_config_named_by_config_stays_alive
+  - tests/cli_infobase_owner.rs::an_owner_loaded_by_config_with_another_file_name_is_found_like_with_v8project_yaml
 ---
 
 # Ушедшего владельца сменяют и называют
@@ -29,7 +33,12 @@ MCP это обещает `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`. Ж�
 (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). Машину называет её идентификатор, который
 переживает смену имени хоста, а объявленный путь базы сравнивается канонически от каталога
 владельца — поэтому проект, скопированный целиком вместе с меткой, прежнего владельца живым не
-оставляет. Команды записи и чтения определены в
+оставляет. Объявления копии раннер читает из её местного слоя и из проектного файла под тем
+именем, которым загружен конфиг этой команды (`--config` / `V8TR_CONFIG`, по умолчанию
+`v8project.yaml`), а также из её `v8project.yaml`: копия, загруженная `--config other.yaml`,
+держит базу так же, как копия с `v8project.yaml`. Метка имени файла не хранит, поэтому прежний
+ключ `infobase:` в проектном файле под третьим именем копию не держит — держит её объявление в
+местном слое. Команды записи и чтения определены в
 `INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY`.
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies).

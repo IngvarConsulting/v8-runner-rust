@@ -40,6 +40,11 @@ pub fn progress_mark(status: &str) -> (&'static str, &'static str) {
 
 const DETAIL_INDENT: &str = "   ";
 
+/// Строка хода агента под узлом этапа: связка, отступ глубже подробности, знак и вид
+/// сообщения агента — `│     ↳ progress: 45%`. Рисует её журнал живой ленты.
+pub const AGENT_LINE_INDENT: &str = "     ";
+pub const AGENT_LINE_MARK: &str = "↳";
+
 /// Словарь формы и путь её артефакта существуют ради проверки
 /// `generated_text_output_grammar_is_current`, которую называет `check:` у активного
 /// контракта `CTR.CLI.TEXT-OUTPUT`. В рантайме их никто не зовёт, поэтому они собираются
@@ -155,11 +160,14 @@ fn is_fact(line: &str) -> bool {
 /// контрактная проверка `generated_text_output_grammar_is_current`.
 #[cfg(test)]
 pub fn text_output_grammar() -> Value {
+    let agent_kinds = crate::domain::progress::AgentProgressKind::ALL
+        .map(crate::domain::progress::AgentProgressKind::as_str)
+        .join("|");
     json!({
         "_comment": "Порождается UPDATE_TEXT_OUTPUT_GRAMMAR=1 cargo test generated_text_output_grammar_is_current; руками не правится.",
         "version": 1,
         "streams": {
-            "stdout": ["node", "detail", "separator", "bare"],
+            "stdout": ["node", "detail", "agent", "separator", "bare"],
             "stderr": ["error"]
         },
         "node_marks": {
@@ -179,6 +187,12 @@ pub fn text_output_grammar() -> Value {
             "detail": {
                 "pattern": format!("^{PIPE}{DETAIL_INDENT}\\S.*$"),
                 "description": "Подробность узла."
+            },
+            "agent": {
+                "pattern": format!(
+                    "^{PIPE}{AGENT_LINE_INDENT}{AGENT_LINE_MARK} ({agent_kinds}): \\S.*$"
+                ),
+                "description": "Строка хода агента под узлом этапа: вид сообщения агента и его текст с маской учётных данных."
             },
             "separator": {
                 "pattern": format!("^{PIPE}$"),
@@ -425,7 +439,16 @@ fn bracketed_prefix(value: &str) -> Option<(&str, &str)> {
 pub struct JsonPresenter;
 
 impl JsonPresenter {
+    /// Конверт ответа. При `--events -` — одной строкой, последней в потоке событий
+    /// (`CTR.WIRE.PROGRESS-EVENTS`); иначе — с отступами, как прежде.
     pub fn print<T: Serialize>(&self, envelope: &Envelope<T>) {
+        if crate::output::events::is_open() {
+            match serde_json::to_string(envelope) {
+                Ok(s) => crate::output::events::finish(&s),
+                Err(e) => eprintln!("JSON serialization error: {e}"),
+            }
+            return;
+        }
         match serde_json::to_string_pretty(envelope) {
             Ok(s) => println!("{}", response_json(&s)),
             Err(e) => eprintln!("JSON serialization error: {e}"),

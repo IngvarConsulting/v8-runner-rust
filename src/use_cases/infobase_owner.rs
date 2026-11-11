@@ -13,6 +13,7 @@
 //! кроме этой копии, записывает свою копию в метку. Команда чтения метку только читает; превью
 //! читает её без замка и ничего не пишет.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::loader::{load_declared_infobases, ConfigLoadError};
-use crate::config::model::{AppConfig, InfobaseConfig};
+use crate::config::model::{default_project_file, AppConfig, InfobaseConfig};
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
 use crate::support::machine::{host_name, machine_hash, machine_id};
@@ -90,6 +91,9 @@ pub(crate) struct ThisCopy {
     /// Каталог проекта, когда копию называет `working-copy`: прежняя запись проекции под
     /// своим именем — это она же до ключа.
     projection: Option<PathBuf>,
+    /// Имя проектного файла, которым загружен конфиг этой команды (`--config` /
+    /// `V8TR_CONFIG`): под ним читаются объявления баз других копий того же проекта.
+    project_file: OsString,
 }
 
 impl ThisCopy {
@@ -98,12 +102,16 @@ impl ThisCopy {
     fn of(config: &AppConfig) -> Self {
         let host = host_name();
         let identity = machine_id().or_else(|| host.as_ref().map(|host| format!("host:{host}")));
-        match config.working_copy.as_deref() {
+        let this = match config.working_copy.as_deref() {
             Some(copy) => Self {
                 projection: Some(canonical(&config.base_path)),
                 ..Self::on(identity.as_deref(), host, copy)
             },
             None => Self::on(identity.as_deref(), host, &config.base_path),
+        };
+        Self {
+            project_file: config.project_file.clone(),
+            ..this
         }
     }
 
@@ -114,6 +122,7 @@ impl ThisCopy {
             host,
             project: canonical(project),
             projection: None,
+            project_file: default_project_file(),
         }
     }
 
@@ -178,7 +187,7 @@ fn check_as(
         return Ok(Vec::new());
     };
     if let Some(copy) = config.working_copy.as_deref() {
-        named_copy_declares(copy, &base_dir)?;
+        named_copy_declares(copy, &config.project_file, &base_dir)?;
     }
     let beside = marker_path.parent().unwrap_or(&base_dir).to_path_buf();
     if !writes {
@@ -343,7 +352,7 @@ pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::Holde
     if let Some(error) = config
         .working_copy
         .as_deref()
-        .and_then(|copy| named_copy_declares(copy, &base_dir).err())
+        .and_then(|copy| named_copy_declares(copy, &config.project_file, &base_dir).err())
     {
         return Some(HoldersStatus {
             marker,
@@ -400,7 +409,11 @@ fn declares<'a>(
 /// Копия, которую называет `working-copy`, должна быть живой копией той же базы: её
 /// каталог есть и объявляет эту базу. Иначе назваться можно было бы любой копией и
 /// перехватить чужую базу.
-fn named_copy_declares(copy: &Path, base_dir: &Path) -> Result<(), UseCaseError> {
+fn named_copy_declares(
+    copy: &Path,
+    project_file: &OsStr,
+    base_dir: &Path,
+) -> Result<(), UseCaseError> {
     let refusal = |why: &str| {
         UseCaseError::new(
             UseCaseErrorKind::Validation,
@@ -418,7 +431,7 @@ fn named_copy_declares(copy: &Path, base_dir: &Path) -> Result<(), UseCaseError>
         Err(error) if error.kind() == ErrorKind::NotFound => return Err(refusal("does not exist")),
         Err(error) => return Err(refusal(&format!("cannot be read: {}", error.kind()))),
     };
-    match copy_declares(&canonical, base_dir) {
+    match copy_declares(&canonical, project_file, base_dir) {
         Err(error) => Err(refusal(&format!(
             "cannot be checked: {}",
             unreadable_declarations_reason(&error)
@@ -430,9 +443,27 @@ fn named_copy_declares(copy: &Path, base_dir: &Path) -> Result<(), UseCaseError>
 
 /// Объявляет ли проект в каталоге `project` файловую базу `base_dir`. Объявленный путь
 /// разрешается от каталога проекта: у проекта, скопированного целиком, `File=build/ib`
-/// указывает на его собственную базу.
-fn copy_declares(project: &Path, base_dir: &Path) -> Result<bool, ConfigLoadError> {
-    load_declared_infobases(project).map(|declared| declares(declared.values(), project, base_dir))
+/// указывает на его собственную базу. Проектный файл копии ищется под именем файла конфига
+/// этой команды (`project_file`: копии одного проекта загружаются одним именем) и под
+/// `v8project.yaml`: копию держит объявление в любом из них, а файл, который не прочитать, —
+/// ошибка, и копия остаётся живой.
+fn copy_declares(
+    project: &Path,
+    project_file: &OsStr,
+    base_dir: &Path,
+) -> Result<bool, ConfigLoadError> {
+    let default = default_project_file();
+    let mut names = vec![project_file];
+    if project_file != default.as_os_str() {
+        names.push(default.as_os_str());
+    }
+    for name in names {
+        let declared = load_declared_infobases(project, name)?;
+        if declares(declared.values(), project, base_dir) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Где копия-владелец по отношению к этой команде.
@@ -526,7 +557,7 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
             )))
         }
     }
-    match copy_declares(&owner.project, base_dir) {
+    match copy_declares(&owner.project, &this.project_file, base_dir) {
         // Текст ошибки разбора цитирует файл, а в местном слое лежат пароли: причина
         // называется без него.
         Err(error) => Standing::Alive(Alive::Unreadable(unreadable_declarations_reason(&error))),
@@ -767,6 +798,7 @@ mod tests {
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
             working_copy: None,
+            project_file: crate::config::model::default_project_file(),
             source_sets: Vec::new(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
@@ -787,7 +819,10 @@ mod tests {
     }
 
     fn on(machine: &str, host: &str, config: &AppConfig) -> ThisCopy {
-        ThisCopy::on(Some(machine), Some(host.to_owned()), &config.base_path)
+        ThisCopy {
+            project_file: config.project_file.clone(),
+            ..ThisCopy::on(Some(machine), Some(host.to_owned()), &config.base_path)
+        }
     }
 
     /// Непроверяемую копию не сменяют; предупреждение называет рабочий способ убрать
@@ -1411,6 +1446,61 @@ mod tests {
         let validator =
             jsonschema::validator_for(&generated_owner_marker_schema()).expect("schema");
         assert!(validator.is_valid(&written), "{written}");
+    }
+
+    /// Копия, чей конфиг загружен `--config other.yaml` со старым ключом `infobase:`, держит
+    /// базу так же, как копия с `v8project.yaml`: её объявления читаются из файла под именем
+    /// конфига команды, а также из `v8project.yaml`, и запись другой копии идёт с
+    /// предупреждением, не сменяя её (#638).
+    #[test]
+    fn an_owner_declaring_the_base_in_a_config_named_by_config_stays_alive() {
+        for (name, command_file) in [
+            ("v8project.yaml", "v8project.yaml"),
+            ("other.yaml", "other.yaml"),
+            ("v8project.yaml", "other.yaml"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let base = base(dir.path());
+            let owner = dir.path().join("first");
+            fs::create_dir_all(&owner).expect("owner project");
+            fs::write(
+                owner.join(name),
+                format!("infobase:\n  connection: 'File={}'\n", base.display()),
+            )
+            .expect("owner config");
+            let owner = fs::canonicalize(owner).expect("canonical owner");
+            let mut config = project(&dir.path().join("second"), &base);
+            config.project_file = command_file.into();
+            let marker_path = owner_marker_path(&base).expect("marker path");
+            let marker = serde_json::json!({
+                "version": 2,
+                "owners": [
+                    {"machine": super::machine_hash("machine"), "host": "host", "project": owner, "since": "2026-10-01T00:00:00Z"}
+                ]
+            })
+            .to_string();
+            fs::write(&marker_path, &marker).expect("marker");
+
+            let warned = check_as(
+                &on("machine", "host", &config),
+                &config,
+                "push",
+                BaseAccess::Writes,
+                OwnerCheck::Run,
+            )
+            .expect("the write runs");
+
+            assert_eq!(warned.len(), 1, "{name}: {warned:?}");
+            assert!(
+                warned[0].contains(&format!("the working copy '{}'", owner.display())),
+                "{name}: {warned:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&marker_path).expect("marker"),
+                marker,
+                "{name}: the live owner stays in the marker"
+            );
+        }
     }
 
     /// Метка с несколькими владельцами — обычный случай: если среди них есть другая живая
