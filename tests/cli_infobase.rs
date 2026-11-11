@@ -2463,9 +2463,8 @@ fn a_taken_port_of_the_managed_agent_is_named() {
         "{message}"
     );
     let argv = fs::read_to_string(&calls).expect("calls");
-    assert!(
-        argv.lines().all(|line| line.contains("/AgentMode")),
-        "{argv}"
-    );
+    let launches: Vec<_> = argv.lines().collect();
+    assert_eq!(launches.len(), 1, "an explicit port is tried once: {argv}");
+    assert!(launches[0].contains("/AgentMode"), "{argv}");
     drop(holder);
 }
