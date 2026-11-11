@@ -1201,19 +1201,12 @@ mod tests {
             stdout: String,
             stderr: String,
         },
-        FatalProcessExitAfter {
-            delay: Duration,
-        },
         /// Процесс сеанса падает, когда тест отпустит `release`: тест успевает поставить в
         /// очередь следующий вызов, как бы ни был загружен прогон.
-        FatalProcessExitWhenReleased {
-            release: Arc<AtomicBool>,
-        },
+        FatalProcessExitWhenReleased { release: Arc<AtomicBool> },
         /// Предел команды истекает не по часам, а когда тест отпустит `release`: так тест
         /// успевает поставить в очередь следующий вызов, как бы ни был загружен прогон.
-        TimeOutWhenReleased {
-            release: Arc<AtomicBool>,
-        },
+        TimeOutWhenReleased { release: Arc<AtomicBool> },
         /// Команда кончается успехом, когда тест отпустит `release`: тест успевает посмотреть
         /// на состояние посреди неё, как бы ни был загружен прогон.
         CompleteWhenReleased {
@@ -1222,9 +1215,7 @@ mod tests {
         },
         /// Команда не слышит снятия и кончается, только когда тест отпустит `release`: так
         /// выглядит процесс, который снять не удалось.
-        HangUntilReleased {
-            release: Arc<AtomicBool>,
-        },
+        HangUntilReleased { release: Arc<AtomicBool> },
     }
 
     struct FakeSession {
@@ -1464,20 +1455,6 @@ mod tests {
                     };
                     Err(InteractiveProcessError::ProcessExited {
                         exit_code,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    })
-                }
-                CommandBehavior::FatalProcessExitAfter { delay } => {
-                    if sleep_until_finished_or_killed(self.killed.as_ref(), delay) {
-                        return Err(InteractiveProcessError::ProcessExited {
-                            exit_code: 9,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                        });
-                    }
-                    Err(InteractiveProcessError::ProcessExited {
-                        exit_code: 17,
                         stdout: String::new(),
                         stderr: String::new(),
                     })
