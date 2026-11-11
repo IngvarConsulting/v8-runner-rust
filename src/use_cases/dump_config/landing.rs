@@ -69,19 +69,39 @@ pub(super) fn dump_over_directory<T>(
         },
     );
     let dumped = dumped.map_err(|error| stage.cleanup_failure(error))?;
-    let message = land(context, config, resolved, &stage, &output, before, version)?;
+    let message = land(
+        context,
+        config,
+        resolved,
+        &stage,
+        &output,
+        description.is_some(),
+        before,
+        version,
+    )?;
     Ok((dumped, message))
 }
 
+/// Узнал ли раннер, какие элементы пропали из базы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removals {
+    /// Удаления перенесены или их не было; у полной выгрузки их не переносят вовсе.
+    Known,
+    /// Одна из описей не разобрана или новая пуста при непустой прежней.
+    Unknown,
+}
+
 /// Посадка написанного: удаления по двум описям, перенос поверх каталога, новая копия, уборка
-/// стадии. `before` — элементы прежней описи; `None` — выгрузка полная или прежняя опись не
-/// разобрана: удалений нет.
+/// стадии. `by_changes` — выгрузка шла по копии описи; `before` — элементы прежней описи,
+/// `None` — она не разобрана. Пока удаления не известны, копия не меняется.
+#[allow(clippy::too_many_arguments)]
 fn land(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     stage: &StagedPublication,
     output: &Path,
+    by_changes: bool,
     before: Option<HashSet<String>>,
     version: Option<&RunnerVersionFile>,
 ) -> Result<Option<String>, AppError> {
@@ -89,13 +109,18 @@ fn land(
         return Err(stage.cleanup_failure(error));
     }
     let description = output.join(VERSION_FILE_NAME);
-    if let Some(before) = before {
-        let inventory = SourceSetInventory::new(config);
-        if let Some(set) = inventory.designer_context(&resolved.source_set_name) {
-            remove_dropped_elements(context, config, set, &description, &before)
-                .map_err(|error| stage.cleanup_failure(error))?;
+    let removals = match (by_changes, before) {
+        (false, _) => Removals::Known,
+        (true, None) => Removals::Unknown,
+        (true, Some(before)) => {
+            let inventory = SourceSetInventory::new(config);
+            match inventory.designer_context(&resolved.source_set_name) {
+                Some(set) => remove_dropped_elements(context, config, set, &description, &before)
+                    .map_err(|error| stage.cleanup_failure(error))?,
+                None => Removals::Known,
+            }
         }
-    }
+    };
     stage.lay_over_dir(
         context,
         "failed to lay the staged dump over the directory",
@@ -103,6 +128,12 @@ fn land(
         VERSION_FILE_NAME,
     )?;
     let copy_warning = match version {
+        // Какие элементы пропали, не узнать: новая опись копией не становится, иначе следующая
+        // выгрузка уже не увидела бы их удаления. Прежняя копия старше дерева и безопасна.
+        Some(_) if removals == Removals::Unknown => Some(format!(
+            "the removals of the dump of source-set '{}' are not known: a description was not read; the runner's copy was not updated, so the next pull dumps the same changes again",
+            resolved.source_set_name
+        )),
         Some(version) if description.is_file() => version.record_from(&description),
         Some(_) => Some(format!(
             "the dump of source-set '{}' left no {VERSION_FILE_NAME}; the runner's copy was not updated, so the next pull may dump more than changed",
@@ -118,8 +149,9 @@ fn land(
 }
 
 /// Элементы описи `path` — прежней (`side` = `before`) или новой; `None`, если её нет или она
-/// не разобрана: по такой описи не сказать, что пропало.
-pub(super) fn description_elements(path: &Path, side: &str) -> Option<HashSet<String>> {
+/// не разобрана: по такой описи не сказать, что пропало. Удаления по ней не переносятся, а
+/// новая опись копией не становится.
+fn description_elements(path: &Path, side: &str) -> Option<HashSet<String>> {
     crate::platform::dump_format::read_dump_elements(path)
         .inspect_err(|error| {
             debug!(
@@ -139,29 +171,29 @@ pub(super) fn description_elements(path: &Path, side: &str) -> Option<HashSet<St
 /// не удаляется ничего: такая опись не описывает базу. Пропавших элементов нет — каталог не
 /// перечисляется. Неудачное удаление — отказ с перечнем оставшегося: каталог тогда не равен
 /// базе, и молчать об этом нельзя.
-pub(super) fn remove_dropped_elements(
+fn remove_dropped_elements(
     context: &ExecutionContext,
     config: &AppConfig,
     set: &SourceSetContext,
     description: &Path,
     before: &HashSet<String>,
-) -> Result<(), AppError> {
+) -> Result<Removals, AppError> {
     let Some(after) = description_elements(description, "after") else {
-        return Ok(());
+        return Ok(Removals::Unknown);
     };
     if after.is_empty() && !before.is_empty() {
         debug!(
             path = %description.display(),
             "the new dump description names no element; no removal is carried over"
         );
-        return Ok(());
+        return Ok(Removals::Unknown);
     }
     let caseless_after: HashSet<String> = after.iter().map(|name| name.to_lowercase()).collect();
     if before
         .iter()
-        .all(|name| caseless_after.contains(&name.to_lowercase()))
+        .all(|name| after.contains(name) || caseless_after.contains(&name.to_lowercase()))
     {
-        return Ok(());
+        return Ok(Removals::Known);
     }
     let dropped = crate::change_detection::analyzer::files_of_dropped_elements(
         set,
@@ -177,12 +209,12 @@ pub(super) fn remove_dropped_elements(
             set.name()
         ))
     })?;
-    remove_files(set, &dropped)
+    remove_files(set, &dropped).map(|()| Removals::Known)
 }
 
 /// Удаляет файлы `files` из каталога набора `set` и каталоги, опустевшие от этого; непустой
 /// каталог не удаляется. Что удалить не удалось, называет отказ.
-pub(super) fn remove_files(set: &SourceSetContext, files: &[PathBuf]) -> Result<(), AppError> {
+fn remove_files(set: &SourceSetContext, files: &[PathBuf]) -> Result<(), AppError> {
     let mut left = Vec::new();
     for file in files {
         if let Err(error) = std::fs::remove_file(file) {

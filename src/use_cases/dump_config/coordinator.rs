@@ -530,6 +530,17 @@ fn run_dump_selected(
         )
     });
     let requested = mode;
+    // Выборка Конфигуратора и агента пишет прямо в каталог набора, и пишет ли она опись версий,
+    // не замерено. Опись, которой до выборки в каталоге не было, раннер после неё убирает:
+    // в каталог исходников он описи не кладёт (#646). Оставшийся от прежних версий файл не
+    // трогается.
+    let version_file_before_partial = matches!(plan, DumpPlan::Partial)
+        && provider != Provider::Ibcmd
+        && config.format == SourceFormat::Designer
+        && !resolved
+            .platform_target_path
+            .join(VERSION_FILE_NAME)
+            .exists();
 
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
@@ -868,6 +879,14 @@ fn run_dump_selected(
         let losses = discarded.report();
         (platform_log_path, message, losses, evidence)
     });
+    if version_file_before_partial && result.is_ok() {
+        let written = resolved.platform_target_path.join(VERSION_FILE_NAME);
+        if let Err(error) = std::fs::remove_file(&written) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                debug!(path = %written.display(), %error, "the version file of a partial dump was not removed");
+            }
+        }
+    }
     drop(lock_guard);
 
     match result {
@@ -1019,7 +1038,7 @@ fn dump_size(
 
 /// План превью: тот же [`plan_dump`], что у выгрузки, по копии описи раннера, которую
 /// выгрузка сочтёт годной. Ничего не пишет.
-pub(super) fn preview_plan(
+fn preview_plan(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     mode: &DumpMode,

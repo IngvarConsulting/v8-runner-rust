@@ -135,7 +135,7 @@ pub fn remember_version_file_of_an_earlier_runner(
 }
 
 /// Копия описи версий набора, как её оставляет удачная выгрузка: опись, тождество пары и
-/// свидетельство каталога набора (`<устройство>:<узел>`). Возвращает путь копии.
+/// свидетельство каталога набора (`unix:<устройство>:<узел>:<рождение>`, как у раннера). Возвращает путь копии.
 #[cfg(unix)]
 pub fn remember_version_file(
     project: &Path,
@@ -147,9 +147,14 @@ pub fn remember_version_file(
     use std::os::unix::fs::MetadataExt;
     let copy = remember_version_file_of_an_earlier_runner(project, key, base, set, content);
     let metadata = std::fs::metadata(set.root).expect("set root");
+    let born = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "-".to_owned(), |since| since.as_nanos().to_string());
     std::fs::write(
         copy.with_file_name("tree"),
-        format!("{}:{}", metadata.dev(), metadata.ino()),
+        format!("unix:{}:{}:{born}", metadata.dev(), metadata.ino()),
     )
     .expect("tree witness");
     copy

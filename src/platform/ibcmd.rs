@@ -799,8 +799,6 @@ fn invocation_too_long(error: &std::io::Error) -> bool {
     }
 }
 
-/// `config export` with both `--sync` and `--force`: when the platform falls back to a full
-/// export it deletes everything in the target directory, foreign files and `.git` included.
 /// Отказ `config export --base`, которым `ibcmd` просит полную выгрузку: код `-1` и «Требуется
 /// экспортировать конфигурацию полностью» (замер #646, удаление объекта). Другой отказ — не
 /// просьба, и полной выгрузкой он не заменяется.
@@ -809,6 +807,8 @@ pub fn asks_for_a_full_export(process: &crate::platform::process::ProcessResult)
     process.exit_code != 0 && (process.stdout.contains(ASKS) || process.stderr.contains(ASKS))
 }
 
+/// `config export` with both `--sync` and `--force`: when the platform falls back to a full
+/// export it deletes everything in the target directory, foreign files and `.git` included.
 fn wipes_the_export_directory(args: &[String]) -> bool {
     let has = |flag: &str| {
         args.iter().any(|arg| {

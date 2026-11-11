@@ -102,6 +102,9 @@ impl RunnerVersionFile {
 
     /// Переход со старой памяти ([`Self::usable`]).
     fn adopt_left_behind(&self, adoption: Adoption) -> Result<Option<&Path>, AppError> {
+        let Some(witness) = tree_witness(&self.tree) else {
+            return Ok(None);
+        };
         let left = self.tree.join(VERSION_FILE_NAME);
         let (Some(left_file), Some(copy_file)) =
             (open_optional(&left)?, open_optional(&self.copy)?)
@@ -111,9 +114,6 @@ impl RunnerVersionFile {
         if !same_bytes((left_file, &left), (copy_file, &self.copy))? {
             return Ok(None);
         }
-        let Some(witness) = tree_witness(&self.tree) else {
-            return Ok(None);
-        };
         if adoption == Adoption::Record {
             write_file_atomically(&self.tree_file, |file| io::Write::write_all(file, &witness))
                 .map_err(|error| io_error("write", &self.tree_file, &error))?;
@@ -224,10 +224,12 @@ enum Adoption {
     Answer,
 }
 
-/// Свидетельство каталога набора: его идентификатор в файловой системе. `None` — его не
-/// узнать; тогда копия не годится.
+/// Свидетельство каталога набора: его идентификатор в файловой системе и время рождения.
+/// `None` — идентификатор не узнать; тогда копия не годится. Время рождения отличает новый
+/// каталог, которому файловая система отдала номер удалённого (inode на ext4 и xfs).
 ///
-/// Вид записи — `<устройство>:<узел>` на Unix и `<том>:<индекс файла>` на Windows.
+/// Вид записи — `unix:<устройство>:<узел>:<рождение>` и `windows:<том>:<индекс>:<рождение>`;
+/// рождение — наносекунды от эпохи или `-`, если файловая система его не хранит.
 fn tree_witness(tree: &Path) -> Option<Vec<u8>> {
     use crate::support::path::FilesystemObjectIdentity;
     let identity = crate::support::path::filesystem_object_identity(tree)
@@ -235,14 +237,19 @@ fn tree_witness(tree: &Path) -> Option<Vec<u8>> {
             debug!(path = %tree.display(), %error, "the identity of the source directory is unknown");
         })
         .ok()?;
+    let born = fs::metadata(tree)
+        .and_then(|metadata| metadata.created())
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "-".to_owned(), |since| since.as_nanos().to_string());
     let witness = match identity {
         #[cfg(unix)]
-        FilesystemObjectIdentity::Unix { device, inode } => format!("{device}:{inode}"),
+        FilesystemObjectIdentity::Unix { device, inode } => format!("unix:{device}:{inode}:{born}"),
         #[cfg(windows)]
         FilesystemObjectIdentity::Windows {
             volume_serial,
             file_index,
-        } => format!("{volume_serial}:{file_index}"),
+        } => format!("windows:{volume_serial}:{file_index}:{born}"),
         #[cfg(not(any(unix, windows)))]
         FilesystemObjectIdentity::Portable { .. } => return None,
     };
@@ -263,8 +270,8 @@ pub(crate) fn check_load_format(
     check_load_format_against(context, platform, written)
 }
 
-/// Сверка с известной версией формата платформы. Версия читается из копии раннера той же
-/// пары; файл в каталоге набора не читается. Новее — отказ до запуска платформы, называющий
+/// Сверка с известной версией формата платформы. Версия читается из годной копии раннера
+/// той же пары ([`RunnerVersionFile::would_be_usable`]); файл в каталоге набора не читается. Новее — отказ до запуска платформы, называющий
 /// обе версии. Копии нет или версия в ней не распознана — сверки нет, и возвращается
 /// примечание о пропуске для ответа.
 fn check_load_format_against(
@@ -273,8 +280,8 @@ fn check_load_format_against(
     written: FormatVersion,
 ) -> Result<Option<String>, AppError> {
     let copy = match RunnerVersionFile::of(context) {
-        Some(copy) if copy.copy_is_ours()? => Some(copy.copy),
-        Some(_) | None => None,
+        Some(copy) => copy.would_be_usable()?.map(Path::to_path_buf),
+        None => None,
     };
     let recorded = match &copy {
         Some(copy) => read_format(copy)?,
@@ -395,9 +402,25 @@ fn same_bytes(left: (File, &Path), right: (File, &Path)) -> Result<bool, AppErro
 }
 
 /// Переносит `from` на место `to` одним переименованием; с другого тома — атомарной копией.
+/// Опись сбрасывается на диск до переименования: свидетельство, которое пишется после, не
+/// должно подтверждать обрезанную копию.
 fn move_atomically(from: &Path, to: &Path) -> Result<(), AppError> {
-    if fs::rename(from, to).is_ok() {
-        return Ok(());
+    File::open(from)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| io_error("sync", from, &error))?;
+    match fs::rename(from, to) {
+        Ok(()) => {
+            if let Some(dir) = to.parent() {
+                let _ = best_effort_fsync_dir(dir);
+            }
+            return Ok(());
+        }
+        Err(error) => debug!(
+            from = %from.display(),
+            to = %to.display(),
+            %error,
+            "the description is copied instead of renamed"
+        ),
     }
     write_file_atomically(to, |file| {
         io::copy(&mut File::open(from)?, file).map(|_| ())

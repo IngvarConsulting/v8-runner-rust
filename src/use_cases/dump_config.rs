@@ -544,7 +544,6 @@ fn publish_full_dump(
             })
             .map_err(|error| publication.cleanup_failure(error))?;
     if let Some(external) = context.external_full_pull() {
-        let version_snapshot = Some(Ok::<_, AppError>(version_snapshot));
         let binding = external_binding.expect("external publication captured its binding");
         binding.validate_stage(publication.staging_path())?;
         let published_source = crate::change_detection::source_sets::SourceSetsService::new(config)
@@ -617,8 +616,8 @@ fn publish_full_dump(
         }
         let published_version =
             published_source.and_then(super::version_file::RunnerVersionFile::of);
-        if let (Some(version), Some(prepared)) = (published_version, version_snapshot) {
-            match prepared.and_then(|prepared| version.record_prepared(prepared)) {
+        if let Some(version) = published_version {
+            match version.record_prepared(version_snapshot) {
                 Ok(()) => {}
                 Err(error) => warnings.push(format!(
                     "sources published but the runner version copy was not updated: {error}"
@@ -4707,9 +4706,11 @@ exit 0"#,
         .path()
         .to_path_buf();
         assert_eq!(
-            fs::read_to_string(copy).expect("the description became the runner copy"),
-            // Поддельный `ibcmd` пишет кавычки с обратной косой чертой.
-            "<ConfigDumpInfo version=\\\"2.20\\\"/>\n"
+            // `printf` у `dash` оставляет `\"` как есть, у `bash` — нет.
+            fs::read_to_string(copy)
+                .expect("the description became the runner copy")
+                .replace('\\', ""),
+            "<ConfigDumpInfo version=\"2.20\"/>\n"
         );
         assert_eq!(
             fs::read_to_string(target.join("stray.txt")).expect("stray"),
@@ -5395,7 +5396,7 @@ exit 0"#,
 
     /// Выгрузка Конфигуратора по изменившемуся идёт в стадию по копии описи раннера
     /// (`-update -configDumpInfoForChanges`): написанное ложится поверх каталога, опись в
-    /// каталог не попадает и становится новой копией, стадия убрана (#646).
+    /// каталог не попадает, а неразобранная новая опись копией не становится; стадия убрана (#646).
     #[cfg(unix)]
     #[test]
     fn a_dump_by_changes_lands_from_the_stage_and_keeps_the_description_in_memory() {
@@ -5442,10 +5443,19 @@ exit 0"#,
             "kept"
         );
         assert!(!base.join("main/ConfigDumpInfo.xml").exists());
+        // Опись, которую поддельный Конфигуратор пишет текстом, не разобрать: какие элементы
+        // пропали, не узнать, и копия остаётся прежней, а ответ это называет.
         assert_eq!(
             fs::read_to_string(&copy).expect("copy"),
-            "from the base\n",
-            "the new description became the copy"
+            "<ConfigDumpInfo version=\"2.20\"/>"
+        );
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("removals of the dump")),
+            "{:?}",
+            result.message
         );
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
     }
