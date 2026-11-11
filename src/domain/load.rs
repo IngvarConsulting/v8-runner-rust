@@ -16,6 +16,31 @@ pub enum LoadMode {
     Update,
 }
 
+/// Upload adds the vendor update type to the existing artifact wire values.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum UploadArtifactType {
+    Package(ArtifactBuildMode),
+    VendorUpdate(VendorUpdateType),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorUpdateType {
+    VendorUpdateCfu,
+}
+
+impl UploadArtifactType {
+    pub const VENDOR_UPDATE_CFU: Self = Self::VendorUpdate(VendorUpdateType::VendorUpdateCfu);
+
+    pub const fn file_extension(self) -> &'static str {
+        match self {
+            Self::Package(mode) => mode.file_extension(),
+            Self::VendorUpdate(VendorUpdateType::VendorUpdateCfu) => "cfu",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadTargetKind {
@@ -70,7 +95,7 @@ pub struct LoadResult {
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: PathBuf,
-    pub artifact_type: ArtifactBuildMode,
+    pub artifact_type: UploadArtifactType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
     pub duration_ms: u64,
@@ -79,7 +104,10 @@ pub struct LoadResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind};
+    use super::{
+        CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
+        UploadArtifactType,
+    };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
     use std::path::PathBuf;
@@ -91,7 +119,7 @@ mod tests {
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("/tmp/main.cf"),
-            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            artifact_type: UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf),
             extension: None,
             duration_ms: 10,
             execution: ExecutionOutcome::new(ExecutionStatus::Succeeded).with_payload(

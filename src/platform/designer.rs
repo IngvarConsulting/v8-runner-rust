@@ -237,6 +237,33 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/UpdateCfg <package> -Settings <settings>`.
+    pub fn update_cfg(
+        &self,
+        package: &Path,
+        settings: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        self.run(&self.update_cfg_args(package, settings))
+    }
+
+    pub fn preview_update_cfg(&self, package: &Path, settings: &Path) -> String {
+        crate::platform::secrets::render_masked_command(
+            &self.binary,
+            &self.update_cfg_args(package, settings),
+        )
+    }
+
+    fn update_cfg_args(&self, package: &Path, settings: &Path) -> Vec<String> {
+        let mut args = self.base_args();
+        args.extend([
+            "/UpdateCfg".to_owned(),
+            package.display().to_string(),
+            "-Settings".to_owned(),
+            settings.display().to_string(),
+        ]);
+        args
+    }
+
     /// `/CompareCfg ... -ReportType Brief -ReportFormat txt -ReportFile <file>`
     pub fn compare_cfg(
         &self,

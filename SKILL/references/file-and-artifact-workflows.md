@@ -121,18 +121,21 @@ It is not a `pull` alias:
 
 ## Upload
 
-`upload` applies existing `.cf` or `.cfe` artifacts to an infobase.
+`upload` applies existing `.cf` or `.cfe` artifacts and installs vendor updates in a supported main configuration.
 
 ```bash
-v8-runner upload --path <FILE>
-v8-runner upload --path <FILE> --mode combine --settings <FILE>
-v8-runner upload --path <FILE> --extension <NAME>
+v8-runner upload <FILE>
+v8-runner upload <FILE> --mode combine --settings <FILE>
+v8-runner upload <FILE.cfe> --ref <NAME>
+v8-runner upload <VENDOR_PACKAGE> --mode update --settings <FILE>
 ```
 
 Rules:
 
 - supported only for `format=DESIGNER`, and `upload` is Designer-only;
-- `.cfe` requires `--extension`;
+- `.cfe` requires `--ref <NAME>`, the extension name in the base. An extension source-set
+  is named by its set name, as in `push`; its `Configuration.xml` is not read.
+  `--extension` remains a hidden alias.
 - `--mode combine` requires `--settings`;
 - use `--mode load` for the first installation of an extension; JSON reports
   `compatibility_state: "absent"` when the infobase does not list it yet, read from
@@ -143,7 +146,9 @@ Rules:
 - `not_established` permits nothing — neither a load nor a combine. An authorization
   failure, an unreachable infobase and an unreadable extension list all land here,
   because the platform reports them with a non-zero exit code;
-- `upload --mode update` is rejected by the current command contract.
+- `upload --mode update` requires a vendor distribution `.cf` or update `.cfu` and
+  readable merge-settings XML. It runs `/UpdateDBCfg` only after the working configuration
+  reports a changed version. Use `--dry-run` to inspect the `/UpdateCfg` arguments.
 
 ## Make And Artifacts
 

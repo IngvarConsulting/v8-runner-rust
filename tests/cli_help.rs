@@ -434,6 +434,8 @@ fn upload_help_shows_the_package_file_as_required_positional() {
         "{stdout}"
     );
     assert!(!stdout.contains("--path"), "{stdout}");
+    assert!(stdout.contains("--ref <NAME>"), "{stdout}");
+    assert!(!stdout.contains("--extension"), "{stdout}");
 }
 
 /// Набор у `pull` и `make` называет позиционный аргумент: прежний ключ `--source-set`

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config::model::{SourceFormat, SourceSetConfig, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
 use crate::support::edt_project;
 use crate::support::error::AppError;
 
@@ -43,6 +43,23 @@ pub fn source_extension_name(
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty()),
     )
+}
+
+/// Имя расширения в базе для `upload --ref <NAME>`.
+///
+/// Набор `EXTENSION` с именем `NAME` называет расширение так же, как у `push`, — по
+/// имени набора ([`platform_extension_name`]); `Name` из его `Configuration.xml` не читается.
+/// Без такого набора `NAME` и есть имя расширения в базе.
+pub(super) fn upload_extension_name(config: &AppConfig, reference: String) -> String {
+    config
+        .source_sets
+        .iter()
+        .find(|source_set| {
+            source_set.purpose == SourceSetPurpose::Extension && source_set.name == reference
+        })
+        .map_or(reference, |source_set| {
+            platform_extension_name(source_set).to_owned()
+        })
 }
 
 #[cfg(test)]
