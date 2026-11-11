@@ -314,30 +314,54 @@ fn a_file_base_open_in_the_designer_refuses_the_load() {
     );
 }
 
-/// Кластер: `--sessions force` после отказа повторяет применение с `-SessionTerminate force`,
-/// а ответ называет завершённые сеансы из списка первого отказа.
+/// Кластер не раннера: `rac` его раннер не спрашивает, а у пакетного Конфигуратора улики нет —
+/// rc=1 общий с любым отказом, и текст ничего не решает. `--sessions force` не повторяет
+/// применение и ключ завершения платформе не отдаёт: отказ доходит как отказ платформы, а
+/// исхода `sessions` в ответе нет (#613).
 #[test]
-fn force_on_a_cluster_ends_the_sessions_and_names_them() {
+fn force_on_a_cluster_without_evidence_keeps_the_platform_refusal() {
     let project = Project::new("Srvr=server;Ref=main");
     succeeded(&project.run(&["push", "--force"]));
     project.mark("sessions");
     let _ = fs::remove_file(project.root().join("calls.log"));
 
-    let applied = succeeded(&project.run(&["apply", "--sessions", "force"]));
+    let refused = project.run(&["apply", "--sessions", "force"]);
+    let payload = envelope(&refused);
 
-    let sessions = &applied["data"]["sessions"];
-    assert_eq!(sessions["lock"]["state"], "unknown", "{applied}");
-    assert_eq!(sessions["message_delivered"], false, "{applied}");
-    let terminated = sessions["terminated"].as_array().expect("terminated");
-    assert_eq!(terminated.len(), 2, "{applied}");
-    assert_eq!(terminated[1]["application_title"], "Толстый клиент");
+    assert!(!refused.status.success(), "{payload}");
+    assert_ne!(payload["error"]["code"], "infobase_sessions", "{payload}");
+    assert!(payload["data"]["sessions"].is_null(), "{payload}");
     let calls = project.calls();
     let updates = calls
         .lines()
         .filter(|line| line.contains("/UpdateDBCfg"))
         .collect::<Vec<_>>();
-    assert_eq!(updates.len(), 2, "{calls}");
-    assert!(updates[1].ends_with("-SessionTerminate force"), "{calls}");
+    assert_eq!(updates.len(), 1, "{calls}");
+    assert!(!updates[0].contains("-SessionTerminate"), "{calls}");
+}
+
+/// Кластер, `--sessions force`, а применению никто не мешал: ключ завершения платформе не
+/// отдаётся, и ответ `push` и `apply` несёт поле `sessions` — пустой список завершённых,
+/// `lock.state: unknown`, сообщения не было.
+#[test]
+fn force_nobody_held_names_no_terminated_sessions() {
+    let project = Project::new("Srvr=server;Ref=main");
+    succeeded(&project.run(&["push", "--force"]));
+    let _ = fs::remove_file(project.root().join("calls.log"));
+
+    project.edit();
+    let pushed = succeeded(&project.run(&["push", "--sessions", "force"]));
+    let applied = succeeded(&project.run(&["apply", "--sessions", "force"]));
+
+    for answer in [&pushed, &applied] {
+        let sessions = &answer["data"]["sessions"];
+        assert_eq!(sessions["terminated"], serde_json::json!([]), "{answer}");
+        assert_eq!(sessions["lock"]["state"], "unknown", "{answer}");
+        assert_eq!(sessions["message_delivered"], false, "{answer}");
+    }
+    let calls = project.calls();
+    assert!(calls.contains("/UpdateDBCfg"), "{calls}");
+    assert!(!calls.contains("-SessionTerminate"), "{calls}");
 }
 
 /// Сообщение без `force` некому отдать: это ошибка вызова, платформу она не запускает.
