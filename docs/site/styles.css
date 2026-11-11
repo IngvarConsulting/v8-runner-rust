@@ -588,3 +588,12 @@ a.mode-label:hover { color: var(--link); text-decoration: underline; }
 .output-format label:hover span { color: var(--ink); }
 .output-format + .command-variant { margin-top: 28px; }
 @media (prefers-reduced-motion: reduce) { .output-format span { transition: none; } }
+
+/* Якорь заголовка раздела: значок ссылки, щелчок копирует адрес раздела. */
+.heading-anchor { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-left: 6px; vertical-align: middle; border-radius: 4px; color: var(--ink-3); opacity: 0; text-decoration: none; transition: opacity .12s ease, color .12s ease, background-color .12s ease; }
+h2:hover > .heading-anchor, h3:hover > .heading-anchor, .heading-anchor:focus-visible, h2:target > .heading-anchor, h3:target > .heading-anchor { opacity: 1; }
+.heading-anchor:hover { color: var(--accent); background: var(--accent-soft); }
+@media (hover: none) { .heading-anchor { opacity: .6; } }
+.heading-anchor-status { position: fixed; z-index: 60; padding: 4px 8px; border-radius: 4px; background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.4; pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity .15s ease, transform .15s ease; }
+.heading-anchor-status.shown { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .heading-anchor, .heading-anchor-status { transition: none; } }
