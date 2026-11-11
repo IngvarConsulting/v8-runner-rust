@@ -189,6 +189,45 @@ class SetupTest(unittest.TestCase):
             describe.load_stand(r"..\stands\ka")
 
 
+class RestoreTest(unittest.TestCase):
+    """The stand goes back to the original modules whatever state a failure left."""
+
+    def bench(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        stand = describe.load_stand("ssl321", stands_root=d.name)
+        b = bench.Bench(stand, "runner.exe", os.path.join(d.name, "r.jsonl"), trace=False, verify=True)
+        calls = []
+        b.runner = mock.Mock()
+        b.runner.must.side_effect = lambda label, *args: (calls.append(args[0]) or ({"seconds": 1.0}, {}))
+        self.originals = {"CommonModules/М/Ext/Module.bsl": b"original"}
+        return b, calls
+
+    def run_restore(self, b):
+        with mock.patch.object(bench, "commit"), mock.patch("builtins.print"):
+            b.restore(list(self.originals), self.originals, "s")
+        with open(b.project_file(list(self.originals)[0]), "rb") as f:
+            self.assertEqual(f.read(), b"original")
+        self.assertFalse(b.base_marked or b.needs_resync)
+
+    def test_nothing_reached_the_base(self):
+        b, calls = self.bench()
+        self.run_restore(b)
+        self.assertEqual(calls, [])
+
+    def test_marker_in_the_base_is_pushed_back_even_when_git_is_clean(self):
+        b, calls = self.bench()
+        b.base_marked = True
+        self.run_restore(b)
+        self.assertEqual(calls, ["push"])
+
+    def test_a_base_changed_behind_the_memory_is_pulled_first(self):
+        b, calls = self.bench()
+        b.base_marked = b.needs_resync = True
+        self.run_restore(b)
+        self.assertEqual(calls, ["pull", "push"])
+
+
 class CommandTest(unittest.TestCase):
     def test_no_executor_allows_the_dynamic_update(self):
         stand = describe.load_stand("ka", stands_root=r"X:\s")

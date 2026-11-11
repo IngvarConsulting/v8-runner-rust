@@ -5,6 +5,7 @@ agent's user directory under `AgentBaseDir` (`<base_dir>/0` for the empty user):
 refuses absolute paths outside it.
 """
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -30,6 +31,9 @@ class BareAgent:
     def start(self, start_timeout=180):
         import paramiko  # noqa: PLC0415 - only this executor needs it
 
+        # Connection attempts while the agent is starting are refused or reset; they are retried
+        # below, and paramiko's own error lines about them are noise.
+        logging.getLogger("paramiko").setLevel(logging.CRITICAL)
         os.makedirs(self.base_dir, exist_ok=True)
         port = free_port()
         t0 = time.perf_counter()

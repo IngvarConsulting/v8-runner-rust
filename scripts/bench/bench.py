@@ -217,6 +217,7 @@ class Bench:
         self.base_marked = True  # set before the call: a failed push may have loaded part of it
         row, _ = self.runner.run(f"push-{scn.name}-{executor}", "push", self.stand.source_set, *scn.runner_args)
         if row["rc"]:
+            self.needs_resync = True  # the load may have reached the base before the failure
             raise ex.StepFailed(f"push rc={row['rc']} {row['error']}: {row['message']}")
         commit(self.stand.project, f"bench {marker}")
         if self.verify:
@@ -329,17 +330,21 @@ class Bench:
 
     # -- the stand back to where it was: the base and the project hold the original modules
     def restore(self, rels, originals, scenario):
+        if not (self.base_marked or self.needs_resync):
+            # Nothing reached the base since the last restore: the committed text is the original.
+            ex.write_files(self.stand.src, originals)
+            return
+        # Commit whatever the tree holds first: the runner's pull refuses to overwrite uncommitted work.
+        commit(self.stand.project, f"bench {self.run_id} {scenario}: before restore")
         if self.needs_resync:
             self.runner.must("restore-pull", "pull", self.stand.source_set)
             self.needs_resync = False
+            commit(self.stand.project, f"bench {self.run_id} {scenario}: the base state pulled")
         ex.write_files(self.stand.src, originals)
-        dirty = git(self.stand.project, "status", "--porcelain", "--", ".").stdout.strip()
-        # Without a marker in the base nothing reached it since the last restore: the originals
-        # written back are the committed text, and there is nothing to push.
-        if dirty and self.base_marked:
-            row, _ = self.runner.must("restore-push", "push", self.stand.source_set)
-            commit(self.stand.project, f"bench {self.run_id} {scenario}: originals back")
-            self.record(event="restore", scenario=scenario, seconds=row["seconds"])
+        # Always push: the runner compares the files with its memory of the base, not with git.
+        row, _ = self.runner.must("restore-push", "push", self.stand.source_set)
+        commit(self.stand.project, f"bench {self.run_id} {scenario}: originals back")
+        self.record(event="restore", scenario=scenario, seconds=row["seconds"])
         self.base_marked = False
 
     def run_scenario(self, scn, executors, reps):
