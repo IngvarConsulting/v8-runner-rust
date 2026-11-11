@@ -161,6 +161,10 @@ def setup(stand, runner_exe, owner_text, recreate, runner_016=None):
         if os.path.exists(stand.config):
             ex.Runner(runner_exe, stand, "").stop_agents()
         remove_own_stand(stand.work)
+    # Before anything long: a missing binary would fail only after the template load.
+    for exe in (runner_exe, runner_016):
+        if exe and not os.path.exists(exe):
+            raise SystemExit(f"not found: {exe}")
     write_owner(stand.work, owner_text, f"bench stand {stand.name}: {stand.title}", created=True)
     out = os.path.join(stand.work, "designer.out")
 
