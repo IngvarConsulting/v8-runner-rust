@@ -988,6 +988,38 @@ impl<'a> GenerationGate<'a> {
         self.failed_load.borrow_mut().take().into_iter().collect()
     }
 
+    /// Решает ли что-нибудь поколение после удачной загрузки набора: его ответ нужен записи
+    /// поколения (у набора есть журнал) и восстановлению потерянного файла версий
+    /// ([`Self::restore_version_file`]; `restore` — загрузка и сверка перед ней у
+    /// исполнителя, который его восстанавливает). Иначе второй запрос не уходит (#637).
+    pub(crate) fn generation_after_load_decides(
+        &self,
+        set: &SourceSetContext,
+        restore: Option<(LoadExtent, &BeforeLoad)>,
+    ) -> bool {
+        GenerationLedger::of(set).is_some()
+            || restore
+                .is_some_and(|(extent, before)| self.may_restore_version_file(set, extent, before))
+    }
+
+    /// Можно ли выгрузить один файл версий набора после загрузки: его нет в каталоге, совпадение
+    /// каталога и базы доказано, и отмены не было.
+    fn may_restore_version_file(
+        &self,
+        set: &SourceSetContext,
+        extent: LoadExtent,
+        before: &BeforeLoad,
+    ) -> bool {
+        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
+        proven
+            && !set.path().join(VERSION_FILE_NAME).exists()
+            && crate::use_cases::interruption::pending_interruption_error(
+                self.context,
+                "the configuration generation",
+            )
+            .is_none()
+    }
+
     /// Восстановление потерянного файла версий без полной выгрузки
     /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
     ///
@@ -1005,19 +1037,11 @@ impl<'a> GenerationGate<'a> {
         token: Option<&str>,
         dump_and_reread: impl FnOnce() -> Option<Result<Option<String>, AppError>>,
     ) -> Option<String> {
-        let file = set.path().join(VERSION_FILE_NAME);
-        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
         let token = token?;
-        if file.exists()
-            || !proven
-            || crate::use_cases::interruption::pending_interruption_error(
-                self.context,
-                "the configuration generation",
-            )
-            .is_some()
-        {
+        if !self.may_restore_version_file(set, extent, before) {
             return None;
         }
+        let file = set.path().join(VERSION_FILE_NAME);
         match dump_and_reread()? {
             Ok(Some(after)) if after == token && file.is_file() => Some(format!(
                 "{VERSION_FILE_NAME} was missing from source-set '{}' and was dumped alone, without a full dump: the directory matches the infobase",
@@ -1108,6 +1132,13 @@ pub(crate) fn unchanged_since_the_record(
         )
         },
     )
+}
+
+/// Решает ли что-нибудь поколение после выгрузки набора `set`: его ответ нужен только записи
+/// поколения ([`record_after_dump`]) и хеш-памяти записанного (`watched` — выгрузку
+/// стерегут). У набора без журнала поколений и без сторожа второй запрос не уходит (#637).
+pub(crate) fn generation_after_dump_decides(set: &SourceSetContext, watched: bool) -> bool {
+    watched || GenerationLedger::of(set).is_some()
 }
 
 /// Поколение у выгрузки: до и после. Совпало — запись после выгрузки. Изменилось — базу
@@ -1366,6 +1397,53 @@ mod tests {
             &SourceSetsService::new(config).designer_contexts(),
             None,
         )
+    }
+
+    /// Второй запрос поколения после выгрузки уходит, только когда ответ что-то решает
+    /// (#637): у набора с журналом поколений — всегда
+    /// (`INV.USE-CASES.A-BASE-CHANGED-DURING-A-DUMP-IS-NAMED-AND-NOT-REMEMBERED`); у набора без
+    /// журнала — только ради хеш-памяти стерегомой выгрузки.
+    #[test]
+    fn the_generation_after_a_dump_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+        assert!(GenerationLedger::of(&unremembered).is_none());
+
+        assert!(generation_after_dump_decides(remembered, false));
+        assert!(generation_after_dump_decides(remembered, true));
+        assert!(generation_after_dump_decides(&unremembered, true));
+        assert!(!generation_after_dump_decides(&unremembered, false));
+    }
+
+    /// Второй запрос поколения после загрузки уходит, только когда ответ что-то решает (#637):
+    /// у набора с журналом — всегда, его ответ записывается
+    /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`); у набора без журнала
+    /// — только ради восстановления потерянного файла версий
+    /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
+    #[test]
+    fn the_generation_after_a_load_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+        let whole = Some((LoadExtent::Whole, &BeforeLoad::Unchecked));
+        let unproven = Some((LoadExtent::Partial, &BeforeLoad::Unchecked));
+
+        // Файла версий нет: полная загрузка может его восстановить, частичная без сверки — нет.
+        assert!(gate.generation_after_load_decides(remembered, None));
+        assert!(gate.generation_after_load_decides(remembered, unproven));
+        assert!(gate.generation_after_load_decides(&unremembered, whole));
+        assert!(!gate.generation_after_load_decides(&unremembered, unproven));
+        assert!(!gate.generation_after_load_decides(&unremembered, None));
+
+        // Файл версий на месте: восстанавливать нечего.
+        std::fs::write(unremembered.path().join(VERSION_FILE_NAME), "").expect("version file");
+        assert!(!gate.generation_after_load_decides(&unremembered, whole));
+        assert!(gate.generation_after_load_decides(remembered, whole));
     }
 
     #[test]

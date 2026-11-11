@@ -450,6 +450,11 @@ fn dump_through(
         {
             // Перечень каталога идёт, пока агент отвечает про поколение (#571), а сторож
             // закрывает сессию команды (#574): ни поколению, ни памяти сессия больше не нужна.
+            // Ответ, который ничего не решает, не спрашивается (#637).
+            let asks_after = crate::use_cases::exchange_guard::generation_after_dump_decides(
+                set,
+                watch.is_some(),
+            );
             let (after, observed) = observe_dump_writes_while(
                 Some(set),
                 &config.work_path,
@@ -461,15 +466,28 @@ fn dump_through(
                     let mut handle = session
                         .take()
                         .expect("the session is open until the dump is observed");
-                    let after = generation_id(&mut handle, extension, wait).ok();
-                    handle.finish(context, wait);
-                    debug!("the agent session of the dump was closed");
-                    // Выгрузка удалась: копия файла версий пишется, пока перечисляется каталог.
-                    version_copy = version_file.map(|version_file| {
-                        let warning = version_file.record();
-                        debug!("the runner copy of the version file was recorded");
-                        VersionCopy { warning }
-                    });
+                    let after = if asks_after {
+                        generation_id(&mut handle, extension, wait).ok()
+                    } else {
+                        None
+                    };
+                    // Выгрузка удалась: копия файла версий пишется, пока перечисляется каталог и
+                    // агент отключается от базы (#637).
+                    let ((), copy) = beside(
+                        "version-copy",
+                        || {
+                            version_file.map(|version_file| {
+                                let warning = version_file.record();
+                                debug!("the runner copy of the version file was recorded");
+                                VersionCopy { warning }
+                            })
+                        },
+                        || {
+                            handle.finish(context, wait);
+                            debug!("the agent session of the dump was closed");
+                        },
+                    );
+                    version_copy = copy;
                     after
                 },
             );
