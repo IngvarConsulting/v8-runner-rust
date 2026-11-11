@@ -2,8 +2,8 @@
 //!
 //! Поддельный Конфигуратор отвечает `/GetConfigGenerationID` токеном из файла `token` рядом
 //! с собой (у расширения `ext` — из `token-ext`, если он есть); тест меняет его, как меняла
-//! бы базу правка в Конфигураторе. Загрузка файла версий не пишет — так видно восстановление
-//! `-configDumpInfoOnly`; при файле `fail` она падает, сдвинув поколение на `drift`.
+//! бы базу правка в Конфигураторе. Загрузка файла версий не пишет; при файле `fail` она падает,
+//! сдвинув поколение на `drift`.
 #![cfg(unix)]
 
 mod support;
@@ -45,10 +45,6 @@ case "$*" in
       if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
       exit 1
     fi ;;
-  *'-configDumpInfoOnly'*)
-    printf '<ConfigDumpInfo version="2.17" info-only="1"/>\n' > "$target/ConfigDumpInfo.xml"
-    if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
-    exit 0 ;;
   *'/DumpConfigToFiles'*)
     mkdir -p "$target"
     printf '<Configuration/>\n' > "$target/Configuration.xml"
@@ -519,57 +515,23 @@ fn a_pull_all_records_the_generation_of_each_set() {
     succeeded(&project.run(&["push"]));
 }
 
-/// Потерянный файл версий восстанавливается одной выгрузкой `-configDumpInfoOnly` сразу после
-/// полной отправки, когда поколение до и после неё одно и то же.
+/// Отправка файла версий не пишет и отдельно его не выгружает (#646): ни
+/// `-configDumpInfoOnly`, ни описи в каталоге набора, ни копии раннера.
 #[test]
-fn a_lost_version_file_is_dumped_alone_after_a_full_push() {
+fn a_full_push_dumps_no_version_file_alone() {
     let project = Project::new("File=ib");
     project.base_generation(FIRST);
-
-    let pushed = succeeded(&project.run(&["push", "--force"]));
-
-    assert!(
-        project.calls().contains("-configDumpInfoOnly"),
-        "{}",
-        project.calls()
-    );
-    assert!(project.sources.join("ConfigDumpInfo.xml").is_file());
-    let message = pushed["data"]["steps"][0]["message"]
-        .as_str()
-        .expect("message");
-    assert!(message.contains("dumped alone"), "{message}");
-}
-
-/// Поколение изменилось во время выгрузки файла версий — файл не остаётся: совпадение
-/// каталога и базы не доказано.
-#[test]
-fn a_version_file_dumped_while_the_base_changed_is_removed() {
-    let project = Project::new("File=ib");
-    project.base_generation(FIRST);
-    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
-
-    let pushed = succeeded(&project.run(&["push", "--force"]));
-
-    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
-    let message = pushed["data"]["steps"][0]["message"]
-        .as_str()
-        .expect("message");
-    assert!(message.contains("was not restored"), "{message}");
-}
-
-/// Без ответа о поколении файл версий отдельно не выгружается.
-#[test]
-fn without_an_answer_the_version_file_is_not_dumped_alone() {
-    let project = Project::new("File=ib");
 
     succeeded(&project.run(&["push", "--force"]));
 
-    assert!(
-        !project.calls().contains("-configDumpInfoOnly"),
-        "{}",
-        project.calls()
-    );
+    let calls = project.calls();
+    assert!(!calls.contains("-configDumpInfoOnly"), "{calls}");
+    assert!(!calls.contains("-updateConfigDumpInfo"), "{calls}");
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert!(!project
+        .root()
+        .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+        .exists());
 }
 
 /// `ibcmd` отвечает поколением в последней непустой строке stdout после приглашения ввести
@@ -617,8 +579,7 @@ exit 0"#,
 }
 
 /// Поддельный `ibcmd`: поколение основной конфигурации из файла `token`, расширения `ext` —
-/// из `token-ext`, если он есть; `config export info` пишет файл версий в каталог `--out` и,
-/// при файле `drift`, сдвигает поколение.
+/// из `token-ext`, если он есть; `config export` пишет в каталог из командной строки.
 fn ibcmd(root: &Path) -> String {
     format!(
         r#"printf '%s\n' "$*" >> '{calls}'
@@ -627,12 +588,6 @@ case "$*" in
     if [ -f '{token}-ext' ]; then cat '{token}-ext'; else cat '{token}'; fi
     exit 0 ;;
   *'generation-id'*) cat '{token}'; exit 0 ;;
-  *'export info'*)
-    for arg in "$@"; do case "$arg" in --out=*) out="${{arg#--out=}}" ;; esac; done
-    mkdir -p "$out"
-    printf '<ConfigDumpInfo version="2.20" by="ibcmd"/>\n' > "$out/ConfigDumpInfo.xml"
-    if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
-    exit 0 ;;
   *'config export status'*) exit 0 ;;
   *'config export'*)
     for arg in "$@"; do target="$arg"; done
@@ -644,7 +599,6 @@ esac
 exit 0"#,
         calls = root.join("calls.log").display(),
         token = root.join("token").display(),
-        drift = root.join("drift").display(),
     )
 }
 
@@ -788,106 +742,29 @@ fn project_without_a_push_key() -> Project {
     project
 }
 
-/// `ibcmd config import` файла версий не пишет: после полной отправки через `ibcmd` раннер
-/// выгружает его `config export info`, кладёт в каталог набора и делает копией раннера, если
-/// поколение до и после одно и то же, — и следующая выгрузка идёт по нему.
+/// Полная отправка через `ibcmd` файла версий не пишет и `config export info` не зовёт
+/// (#646): копии раннера нет, и следующий `pull` по изменившемуся становится полным.
 #[test]
-fn a_full_ibcmd_push_writes_the_version_file_and_the_next_pull_goes_by_it() {
+fn a_full_ibcmd_push_writes_no_version_file() {
     let project = project_without_a_push_key();
     project.base_generation(FIRST);
-    fs::write(
-        project.sources.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
-    )
-    .expect("stale version file");
 
     let pushed = succeeded(&project.run(&["push", "--force"]));
 
     assert_eq!(pushed["data"]["provider"]["selected"], "ibcmd", "{pushed}");
     assert_eq!(pushed["data"]["provider"]["reason"], "whole", "{pushed}");
     assert!(
-        project.calls().contains("export info"),
+        !project.calls().contains("export info"),
         "{}",
         project.calls()
     );
-    let written = "<ConfigDumpInfo version=\"2.20\" by=\"ibcmd\"/>\n";
-    assert_eq!(
-        fs::read_to_string(project.sources.join("ConfigDumpInfo.xml")).expect("version file"),
-        written
-    );
-    assert_eq!(
-        fs::read_to_string(
-            project
-                .root()
-                .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
-        )
-        .expect("runner copy"),
-        written
-    );
-
-    let preview = succeeded(&project.run(&["pull", "main", "--dry-run"]));
-
-    assert_eq!(preview["data"]["mode"], "INCREMENTAL", "{preview}");
-    assert_eq!(
-        preview["data"]["provider"]["reason"], "by_changes",
-        "{preview}"
-    );
-    assert_eq!(
-        preview["data"]["provider"]["selected"], "agent",
-        "{preview}"
-    );
-}
-
-/// Поколение изменилось, пока `ibcmd` выгружал файл версий: опись не доказана, прежний файл
-/// из каталога и копия раннера убираются, ответ говорит, что следующая выгрузка пойдёт
-/// полной, — и настоящая выгрузка идёт полной.
-#[test]
-fn a_version_file_the_base_moved_under_is_removed_after_an_ibcmd_push() {
-    let project = project_without_a_push_key();
-    project.ignore_version_files();
-    support::commit_sources(project.root());
-    project.base_generation(FIRST);
-    let runner_copy = project
-        .root()
-        .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml");
-    fs::create_dir_all(runner_copy.parent().expect("copy dir")).expect("copy dir");
-    fs::write(
-        &runner_copy,
-        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
-    )
-    .expect("stale runner copy");
-    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
-    fs::write(
-        project.sources.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
-    )
-    .expect("stale version file");
-
-    let pushed = succeeded(&project.run(&["push", "--force"]));
-
-    assert_eq!(pushed["data"]["provider"]["selected"], "ibcmd", "{pushed}");
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
-    let message = pushed["data"]["steps"][0]["message"]
-        .as_str()
-        .expect("message");
-    assert!(message.contains("next pull runs full"), "{message}");
-
-    assert!(!runner_copy.exists(), "the runner's copy is dropped too");
 
     let preview = succeeded(&project.run(&["pull", "main", "--dry-run"]));
-    assert_eq!(preview["data"]["mode"], "FULL", "{preview}");
-    assert_eq!(preview["data"]["provider"]["reason"], "whole", "{preview}");
-    assert_eq!(
-        preview["data"]["provider"]["selected"], "ibcmd",
-        "{preview}"
-    );
 
-    fs::remove_file(project.root().join("drift")).expect("drift");
-    support::commit_sources(project.root());
-    let pulled = succeeded(&project.run(&["pull", "main"]));
-    assert_eq!(pulled["data"]["mode"], "FULL", "{pulled}");
-    assert_eq!(pulled["data"]["provider"]["selected"], "ibcmd", "{pulled}");
-    assert_eq!(pulled["data"]["provider"]["reason"], "whole", "{pulled}");
+    assert_eq!(preview["data"]["mode"], "FULL", "{preview}");
+    assert_eq!(preview["data"]["mode_reason"], "version_file", "{preview}");
+    assert_eq!(preview["data"]["provider"]["reason"], "whole", "{preview}");
 }
 
 /// Первый `pull` без памяти о базе, во время которого базу правили: ответ это называет, а
@@ -1016,7 +893,9 @@ fn a_designer_pull_with_an_unchanged_generation_dumps_nothing() {
     support::commit_sources(project.root());
     project.base_generation(FIRST);
     succeeded(&project.run(&["push", "--force"]));
-    assert!(project.sources.join("ConfigDumpInfo.xml").is_file());
+    // Копию описи раннера кладёт выгрузка, а не отправка (#646).
+    succeeded(&project.run(&["pull", "main", "--force"]));
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
     support::commit_sources(project.root());
     project.forget_calls();
 
@@ -1054,9 +933,11 @@ fn an_ibcmd_pull_with_an_unchanged_generation_dumps_nothing() {
             r#"printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *'generation-id'*) cat '{token}'; exit 0 ;;
-  *'export info'*)
-    for arg in "$@"; do case "$arg" in --out=*) out="${{arg#--out=}}" ;; esac; done
-    printf '<ConfigDumpInfo version="2.17"/>\n' > "$out/ConfigDumpInfo.xml"
+  *'config export'*)
+    for arg in "$@"; do target="$arg"; done
+    mkdir -p "$target"
+    printf '<Configuration/>\n' > "$target/Configuration.xml"
+    printf '<ConfigDumpInfo version="2.17"/>\n' > "$target/ConfigDumpInfo.xml"
     exit 0 ;;
 esac
 exit 0"#,
@@ -1072,15 +953,12 @@ exit 0"#,
         ),
     )
     .expect("config");
-    fs::write(
-        project.sources.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.17\"/>\n",
-    )
-    .expect("version file");
-    project.ignore_version_files();
     support::commit_sources(project.root());
     project.base_generation(FIRST);
     succeeded(&project.run(&["push", "--force"]));
+    // Копию описи раннера кладёт выгрузка, а не отправка (#646).
+    succeeded(&project.run(&["pull", "main", "--force"]));
+    support::commit_sources(project.root());
     assert_eq!(project.ledger()["main"]["tool"], "ibcmd");
     project.forget_calls();
 

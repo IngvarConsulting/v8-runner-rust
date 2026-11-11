@@ -171,6 +171,19 @@ fn setup_project() -> (
     )
 }
 
+/// Копия описи раннера для набора `main` проекта из [`setup_project`], как её оставляет удачная
+/// выгрузка (#646): база `infobase:` — файловая `<dir>/ib`, проект — `<dir>`.
+fn remember_the_runner_copy(base_path: &Path, content: &str) -> PathBuf {
+    let dir = base_path.parent().expect("project root");
+    support::memory::remember_version_file(
+        dir,
+        "origin",
+        support::memory::Base::File(&dir.join("ib")),
+        &support::memory::Set::configuration("main", &base_path.join("main")),
+        content,
+    )
+}
+
 fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
     let expected_fragment = format!("infobase --data {}", work_path.join("ibcmd-data").display());
     assert!(
@@ -521,11 +534,7 @@ fn dump_ibcmd_incremental_json_success() {
     let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
     fs::remove_dir_all(base_path.join("main")).expect("remove target");
     fs::create_dir_all(base_path.join("main")).expect("target");
-    fs::write(
-        base_path.join("main/ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.17\"/>",
-    )
-    .expect("version file");
+    let copy = remember_the_runner_copy(&base_path, "<ConfigDumpInfo version=\"2.17\"/>");
 
     let output = v8_runner_command()
         .args([
@@ -543,15 +552,20 @@ fn dump_ibcmd_incremental_json_success() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--sync"));
+    assert!(
+        calls.contains(&format!("--base={}", copy.display())),
+        "{calls}"
+    );
+    assert!(!calls.contains("--sync"), "{calls}");
     assert_ibcmd_data_path(&calls, &work_path);
-    assert!(calls.contains(base_path.join("main").display().to_string().as_str()));
+    assert!(calls.contains(".dump-stage-"), "{calls}");
+    assert!(!base_path.join("main/ConfigDumpInfo.xml").exists());
 }
 
 #[test]
 fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
     let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) =
-        setup_project_in_a_repository();
+        setup_project_with_a_version_file_in_a_repository();
 
     let output = v8_runner_command()
         .args([
@@ -578,8 +592,41 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
         .expect("message")
         .contains("IBCMD does not support object-scoped partial dump"));
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--sync"));
+    assert!(calls.contains("--base="), "{calls}");
     assert_ibcmd_data_path(&calls, &work_path);
+}
+
+/// Выборка `ibcmd` без копии описи раннера идёт полной выгрузкой, и ответ называет режим
+/// `FULL` с причиной `version_file`.
+#[test]
+fn an_ibcmd_partial_dump_without_a_runner_copy_is_full() {
+    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) =
+        setup_project_in_a_repository();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--source-set",
+            "main",
+            "--object",
+            "Catalog.Items",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["requested_mode"], "PARTIAL", "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    assert_eq!(payload["data"]["mode_reason"], "version_file", "{payload}");
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(
+        calls.contains("--force") && !calls.contains("--base="),
+        "{calls}"
+    );
 }
 
 #[test]
@@ -611,7 +658,7 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
 fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
     let (_dir, config_path, binary_path, _work_path, _base_path, calls_log) =
         setup_project_in_a_repository();
-    write_ibcmd_script(&binary_path, &calls_log, Some("--sync"));
+    write_ibcmd_script(&binary_path, &calls_log, Some("--force"));
 
     let output = v8_runner_command()
         .args([
@@ -777,7 +824,7 @@ fn setup_project_in_a_repository() -> (
     parts
 }
 
-/// Проект в репозитории с годным файлом версий в игноре: `pull` идёт по изменившемуся.
+/// Проект в репозитории с годной копией описи раннера: `pull` идёт по изменившемуся.
 fn setup_project_with_a_version_file_in_a_repository() -> (
     tempfile::TempDir,
     PathBuf,
@@ -788,12 +835,7 @@ fn setup_project_with_a_version_file_in_a_repository() -> (
 ) {
     let parts = setup_project();
     let base_path = parts.4.clone();
-    fs::write(base_path.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
-    fs::write(
-        base_path.join("main").join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.17\"/>",
-    )
-    .expect("version file");
+    remember_the_runner_copy(&base_path, "<ConfigDumpInfo version=\"2.17\"/>");
     git(&base_path, &["init", "-q", "-b", "main", "."]);
     git(&base_path, &["config", "user.email", "test@example.com"]);
     git(&base_path, &["config", "user.name", "Test"]);
@@ -838,8 +880,9 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     );
 }
 
-/// Опись версий штатно лежит в игноре, а полная выгрузка пишет её заново: её
-/// прежнее содержимое не потеря, и выгрузка идёт без `--force`.
+/// Опись версий, оставшаяся в игноре от прежних версий раннера, — такой же игнорируемый файл,
+/// как любой другой: полная выгрузка заменяет каталог без `--force`, а описи в новое дерево не
+/// кладёт (#646).
 #[test]
 fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
@@ -867,12 +910,9 @@ fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
         "an ignored version file must not stop a full dump: {}",
         answer.envelope
     );
-    // Поддельная платформа описи не пишет: в заменённом каталоге файла с прежним
-    // содержимым остаться не должно.
-    assert_ne!(
-        fs::read_to_string(&version_file).ok().as_deref(),
-        Some("<info previous=\"yes\"/>\n"),
-        "the previous version file must be replaced, not kept"
+    assert!(
+        !version_file.exists(),
+        "the replaced directory carries no version file"
     );
 }
 
@@ -1037,7 +1077,7 @@ fn a_pull_lays_the_dump_over_the_directory_and_force_brings_it_to_the_base() {
     assert!(
         fs::read_to_string(&calls_log)
             .expect("calls")
-            .contains("--sync"),
+            .contains("--base="),
         "{rendered}"
     );
     assert!(
@@ -1240,93 +1280,41 @@ fn an_edt_project_is_replaced_only_by_the_same_confirmation_rules() {
     );
 }
 
-/// Запускает полную выгрузку набора `main` и отдаёт выход вместе с выводом.
-fn pull_main(config_path: &Path, extra: &[&str]) -> (std::process::Output, String) {
-    let config = config_path.display().to_string();
-    let mut args = vec![
-        "--config",
-        config.as_str(),
-        "pull",
-        "--force",
-        "--source-set",
-        "main",
-    ];
-    args.extend_from_slice(extra);
-    let output = v8_runner_command().args(&args).output().expect("run pull");
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    (output, rendered)
-}
-
-/// Опись версий в индексе — состояние чужой базы, которое `checkout` и `merge`
-/// подменяют молча. Выгрузка останавливается до платформы, называет путь и рецепт,
-/// а превью отказывает так же, как боевой прогон.
+/// Опись версий в каталоге набора раннер больше не читает и не пишет (#646): файл, оставшийся
+/// там от прежних версий, даже в индексе гита, `pull` не останавливает и не трогает — ни в
+/// превью, ни в боевом прогоне.
 #[test]
-fn a_pull_refuses_when_the_version_file_is_tracked_by_git() {
+fn a_version_file_tracked_in_the_sources_is_left_alone() {
     let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
-    fs::write(
-        base_path.join("main").join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo/>\n",
-    )
-    .expect("version file");
+    let version_file = base_path.join("main").join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("version file");
     git(&base_path, &["init", "-q", "-b", "main", "."]);
     git(&base_path, &["config", "user.email", "test@example.com"]);
     git(&base_path, &["config", "user.name", "Test"]);
     git(&base_path, &["add", "-A"]);
     git(&base_path, &["commit", "-qm", "committed sources"]);
 
+    let config = config_path.display().to_string();
     for extra in [&["--dry-run"][..], &[][..]] {
-        let (output, rendered) = pull_main(&config_path, extra);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "a tracked version file is a validation refusal ({extra:?}): {rendered}"
+        let mut args = vec!["--config", config.as_str(), "pull", "--source-set", "main"];
+        args.extend_from_slice(extra);
+        let output = v8_runner_command().args(&args).output().expect("run pull");
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        assert!(output.status.success(), "{extra:?}: {rendered}");
         assert!(
-            rendered.contains("git rm --cached main/ConfigDumpInfo.xml && git commit"),
-            "the refusal names the file and carries the recipe ({extra:?}): {rendered}"
+            !rendered.contains("git rm --cached"),
+            "{extra:?}: {rendered}"
         );
     }
-    assert!(
-        !calls_log.exists(),
-        "the platform must not start: {:?}",
-        fs::read_to_string(&calls_log).ok()
+    assert!(calls_log.exists(), "the platform ran");
+    assert_eq!(
+        fs::read_to_string(&version_file).expect("left in place"),
+        "<ConfigDumpInfo/>\n"
     );
-}
-
-/// Описи в индексе нет — выгрузка идёт как обычно.
-#[test]
-fn a_pull_proceeds_when_the_version_file_is_not_tracked() {
-    let (_dir, config_path, _binary, _work, _base_path, calls_log) =
-        setup_project_in_a_repository();
-
-    let (output, rendered) = pull_main(&config_path, &[]);
-
-    assert!(output.status.success(), "pull must proceed: {rendered}");
-    assert!(calls_log.exists(), "the platform must run: {rendered}");
-}
-
-/// Вне репозитория ответа нет: работа идёт молча, без отказа и без предупреждения.
-#[test]
-fn a_pull_proceeds_silently_when_tracking_is_unknown() {
-    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
-    fs::write(
-        base_path.join("main").join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo/>\n",
-    )
-    .expect("version file");
-
-    let (output, rendered) = pull_main(&config_path, &[]);
-
-    assert!(output.status.success(), "pull must proceed: {rendered}");
-    assert!(
-        !rendered.contains("ConfigDumpInfo.xml"),
-        "an unknown answer is silent: {rendered}"
-    );
-    assert!(calls_log.exists(), "the platform must run: {rendered}");
 }
 
 /// Команда `v8-runner …` из совета отказа, разобранная на слова так, как её разобрала бы

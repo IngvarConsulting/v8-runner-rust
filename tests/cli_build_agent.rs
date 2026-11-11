@@ -509,7 +509,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     assert!(
         lines.get(2).is_some_and(|line| line
             .starts_with("config load-config-from-files --dir=build/")
-            && line.ends_with("--update-config-dump-info")),
+            && !line.contains("--update-config-dump-info")),
         "{lines:?}"
     );
     assert_eq!(

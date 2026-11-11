@@ -40,7 +40,6 @@ use crate::use_cases::agent_session::{
     ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded, TokenScope,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 use crate::use_cases::request::PushMode;
 use crate::use_cases::result::{Generations, UseCaseError, UseCaseErrorKind};
 
@@ -576,15 +575,6 @@ pub(crate) fn predict(
     }
 }
 
-/// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoadExtent {
-    /// Набор загружен целиком.
-    Whole,
-    /// Загружены изменившиеся файлы.
-    Partial,
-}
-
 /// Что показало поколение перед загрузкой.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeforeLoad {
@@ -986,61 +976,6 @@ impl<'a> GenerationGate<'a> {
     /// Что ответ неудачной загрузки говорит о поколении: строка [`Self::after_failed_load`].
     pub(crate) fn failed_load_note(&self) -> Vec<String> {
         self.failed_load.borrow_mut().take().into_iter().collect()
-    }
-
-    /// Восстановление потерянного файла версий без полной выгрузки
-    /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
-    ///
-    /// Сразу после удачной загрузки, если файла версий в каталоге набора нет, а совпадение
-    /// каталога и базы доказано — загрузка была полной или поколение перед частичной совпало
-    /// с записанным, — выгружается один файл версий: `dump_and_reread` выгружает его и
-    /// читает поколение снова, а `None` значит, что инструмент этого не умеет. Поколение после
-    /// загрузки и после выгрузки сравнивается тем же инструментом: изменилось или ответа нет
-    /// — файл убирается. Возвращает строку для ответа.
-    pub(crate) fn restore_version_file(
-        &self,
-        set: &SourceSetContext,
-        extent: LoadExtent,
-        before: &BeforeLoad,
-        token: Option<&str>,
-        dump_and_reread: impl FnOnce() -> Option<Result<Option<String>, AppError>>,
-    ) -> Option<String> {
-        let file = set.path().join(VERSION_FILE_NAME);
-        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
-        let token = token?;
-        if file.exists()
-            || !proven
-            || crate::use_cases::interruption::pending_interruption_error(
-                self.context,
-                "the configuration generation",
-            )
-            .is_some()
-        {
-            return None;
-        }
-        match dump_and_reread()? {
-            Ok(Some(after)) if after == token && file.is_file() => Some(format!(
-                "{VERSION_FILE_NAME} was missing from source-set '{}' and was dumped alone, without a full dump: the directory matches the infobase",
-                set.name()
-            )),
-            Ok(_) | Err(_) => Some(match std::fs::remove_file(&file) {
-                Ok(()) => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged while it was dumped; the next pull runs full",
-                    set.name()
-                ),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged; the next pull runs full",
-                    set.name()
-                ),
-                // Оставшийся файл объявил бы каталог совпадающим с базой: его называют, чтобы
-                // его убрали до следующей выгрузки по изменившемуся.
-                Err(error) => format!(
-                    "{VERSION_FILE_NAME} was dumped alone into source-set '{}' while the configuration generation did not confirm that the infobase stayed unchanged, and it could not be removed: {error}; delete '{}' before the next pull, otherwise it claims that the directory matches the infobase",
-                    set.name(),
-                    file.display()
-                ),
-            }),
-        }
     }
 }
 

@@ -307,10 +307,9 @@ fn load_and_update(
     // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
     // перестраивает таблицы; загрузка идёт через `run_critical`, применение — через
     // владельца акта (`apply::act`), который зовёт тот же `run_critical`.
-    let mut load = format!(
-        "config load-config-from-files --dir={} --update-config-dump-info",
-        argument(exposed)
-    );
+    // Без `--update-config-dump-info`: файл версий раннер держит у себя, а не в каталоге
+    // загрузки (#646).
+    let mut load = format!("config load-config-from-files --dir={}", argument(exposed));
     if let Some(paths) = partial_paths {
         // Список относительных путей — тот же файл, что для Конфигуратора, только
         // лежит в каталоге пользователя агента; пути в нём — относительно каталога

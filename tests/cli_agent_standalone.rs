@@ -487,27 +487,35 @@ EndProcedure",
     );
 }
 
+/// Копия описи раннера, как её оставляет удачная выгрузка: первая выгрузка набора без копии
+/// идёт полной поверх каталога и делает опись двойника `description` копией раннера (#646).
+/// Каталог фиксируется, а база сдвигается, чтобы следующую выгрузку не пропустить по поколению.
+fn record_the_runner_copy(harness: &Harness, description: &str) {
+    *harness.dump_info.lock().expect("dump info") = Some(description.to_owned());
+    let project = harness.dir.path().join("project");
+    support::commit_sources(&project);
+    let (code, payload) = run(harness, &["dump"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    support::commit_sources(&project);
+    harness.generation.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Инкрементальная выгрузка по SFTP не возит цель целиком: на сервер уходит только
-/// опись выгрузки, обратно приходят изменённые файлы поверх локальной цели.
+/// опись выгрузки из памяти раннера, обратно приходят изменённые файлы — в стадию раннера, и
+/// оттуда поверх локальной цели; опись в каталог набора не попадает.
 #[test]
 fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     let harness = harness_with_channel(Channel::Sftp);
     let target = harness.dir.path().join("project").join("configuration");
-    fs::write(
-        target.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.17\"/>",
-    )
-    .expect("dump info");
     fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
-    // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
-    let project = harness.dir.path().join("project");
-    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
-    support::commit_sources(&project);
+    record_the_runner_copy(&harness, "<ConfigDumpInfo version=\"2.17\"/>");
+    let before = sftp_lines(&harness).len();
 
     let (code, payload) = run(&harness, &["dump"]);
 
     assert_eq!(code, 0, "{payload}");
-    let sftp = sftp_lines(&harness);
+    let sftp: Vec<String> = sftp_lines(&harness).into_iter().skip(before).collect();
     let writes: Vec<&String> = sftp
         .iter()
         .filter(|line| line.starts_with("sftp write "))
@@ -529,6 +537,10 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
         target.join("Untouched.xml").is_file(),
         "files the server did not touch stay"
     );
+    assert!(
+        !target.join("ConfigDumpInfo.xml").exists(),
+        "the description stays in the runner's memory"
+    );
 }
 
 /// Опись выгрузки с элементами `names`, как её пишет платформа.
@@ -542,20 +554,17 @@ fn dump_info(names: &[&str]) -> String {
     )
 }
 
-/// Каталог набора с прежней описью `before` и файлами `files`, зафиксированный в гите; выгрузка
-/// двойника напишет опись `after`.
+/// Каталог набора с файлами `files` и копией раннера `before`, зафиксированный в гите;
+/// следующая выгрузка двойника напишет опись `after`.
 fn sftp_target(harness: &Harness, before: &str, after: &[&str], files: &[&str]) -> PathBuf {
     let target = harness.dir.path().join("project").join("configuration");
-    fs::write(target.join("ConfigDumpInfo.xml"), before).expect("dump info before");
     for file in files {
         let path = target.join(file);
         fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
         fs::write(&path, file).expect("file");
     }
+    record_the_runner_copy(harness, before);
     *harness.dump_info.lock().expect("dump info") = Some(dump_info(after));
-    let project = harness.dir.path().join("project");
-    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
-    support::commit_sources(&project);
     target
 }
 

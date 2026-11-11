@@ -3,9 +3,8 @@ use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::progress::ProgressPhase;
 use crate::use_cases::context::shell_word;
-use crate::use_cases::exchange_guard::{GenerationGate, LoadExtent};
+use crate::use_cases::exchange_guard::GenerationGate;
 use crate::use_cases::request::ApplyPolicy;
-use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
 ///
@@ -26,18 +25,6 @@ pub(super) trait SourceSetLoader {
         source_set: &SourceSetConfig,
         step_index: usize,
     ) -> Result<Option<String>, AppError>;
-
-    /// Один файл версий набора в каталог загрузки; `None` — инструмент этого не умеет.
-    fn dump_version_file(
-        &mut self,
-        _context: &ExecutionContext,
-        _config: &AppConfig,
-        _source_set: &SourceSetConfig,
-        _source_context: &SourceSetContext,
-        _step_index: usize,
-    ) -> Option<Result<(), AppError>> {
-        None
-    }
 
     #[allow(clippy::too_many_arguments)]
     fn load(
@@ -118,27 +105,6 @@ impl SourceSetLoader for DesignerLoader {
             source_set,
             step_index,
         )
-    }
-
-    fn dump_version_file(
-        &mut self,
-        context: &ExecutionContext,
-        config: &AppConfig,
-        source_set: &SourceSetConfig,
-        source_context: &SourceSetContext,
-        step_index: usize,
-    ) -> Option<Result<(), AppError>> {
-        Some(self.binary().and_then(|binary| {
-            dump_designer_version_file(
-                context,
-                config,
-                &binary,
-                self.utilities.runner_for(UtilityType::V8),
-                source_set,
-                source_context,
-                step_index,
-            )
-        }))
     }
 
     fn load(
@@ -453,40 +419,6 @@ fn run_build_with(
                 }
 
                 let step_started = Instant::now();
-                // Загрузка переписывает файл версий в каталоге набора: сначала там должен
-                // лежать файл раннера, а не подменённый, иначе частичная загрузка обновит
-                // чужую опись и раннер примет её за свою. Временные файлы прошлых замен
-                // убираются в любом случае.
-                let prepared = remove_left_candidates(source_context.path()).and_then(|()| {
-                    RunnerVersionFile::of(&source_context)
-                        .map(|version_file| {
-                            let before = version_file
-                                .restore()
-                                .and_then(|()| version_file.fingerprint_in_directory());
-                            before.map(|before| (version_file, before))
-                        })
-                        .transpose()
-                });
-                let version_file = match prepared {
-                    Err(error) => {
-                        let result = fail_from_source_set_index(
-                            started,
-                            steps,
-                            &ordered_source_sets,
-                            index,
-                            source_set,
-                            mode,
-                            append_warnings(error.to_string(), &gate.failed_load_note()),
-                        );
-                        return Err(BuildExecutionFailure::with_payload(error, result));
-                    }
-                    Ok(version_file) => version_file,
-                };
-                let extent = if partial_paths.is_none() {
-                    LoadExtent::Whole
-                } else {
-                    LoadExtent::Partial
-                };
                 let tool = loader.tool();
                 let loaded = gate
                     .before_load(&source_context, tool, || {
@@ -513,7 +445,7 @@ fn run_build_with(
                             .map(|(warnings, token)| (before, warnings, token, apply))
                     });
                 match loaded {
-                    Ok((before, mut warnings, token, apply)) => {
+                    Ok((_, mut warnings, token, apply)) => {
                         let recorded = gate.after_load(
                             &source_context,
                             loader.tool(),
@@ -543,33 +475,6 @@ fn run_build_with(
                                 return Err(BuildExecutionFailure::with_payload(error, result));
                             }
                         }
-                        warnings.extend(gate.restore_version_file(
-                            &source_context,
-                            extent,
-                            &before,
-                            token.as_deref(),
-                            || {
-                                loader
-                                    .dump_version_file(
-                                        context,
-                                        config,
-                                        source_set,
-                                        &source_context,
-                                        index,
-                                    )
-                                    .map(|dumped| {
-                                        dumped.and_then(|()| {
-                                            loader
-                                                .read_generation(context, config, source_set, index)
-                                        })
-                                    })
-                            },
-                        ));
-                        warnings.extend(version_file.as_ref().and_then(
-                            |(version_file, before)| {
-                                version_file.record_if_rewritten(before.as_ref())
-                            },
-                        ));
                         match settle_loaded(context, &source_set.name, warnings, apply) {
                             Ok((warnings, applied)) => push_loaded_step(
                                 &mut steps,
@@ -825,61 +730,32 @@ pub(super) fn run_build_ibcmd(
                 }
 
                 let step_started = Instant::now();
-                // Загрузка `ibcmd` файл версий не пишет (после полной его выгружает
-                // `version_file_after_ibcmd_load`); временные файлы прошлых замен убираются и
-                // здесь.
                 let runner = utilities.runner_for(UtilityType::Ibcmd);
                 let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
-                match remove_left_candidates(source_context.path())
-                    .and_then(|()| {
-                        guarded_load(
-                            &gate,
+                match guarded_load(
+                    &gate,
+                    &source_context,
+                    Provider::Ibcmd,
+                    read,
+                    || {
+                        execute_source_set_step_ibcmd(
+                            context,
+                            config,
+                            &binary,
+                            runner,
+                            source_set,
                             &source_context,
-                            Provider::Ibcmd,
-                            read,
-                            || {
-                                execute_source_set_step_ibcmd(
-                                    context,
-                                    config,
-                                    &binary,
-                                    runner,
-                                    source_set,
-                                    &source_context,
-                                    &source_context,
-                                    partial_paths.as_deref(),
-                                    &commit,
-                                    args.apply,
-                                )
-                            },
-                            || {
-                                commit_step_state(
-                                    source_set,
-                                    &source_context,
-                                    &config.work_path,
-                                    &commit,
-                                )
-                            },
+                            &source_context,
+                            partial_paths.as_deref(),
+                            &commit,
+                            args.apply,
                         )
-                    })
-                    .map(|mut loaded| {
-                        // Загрузка `ibcmd` файл версий не пишет: после полной его пишет
-                        // `config export info`, иначе в каталоге осталась бы опись прежней
-                        // базы (#559).
-                        if partial_paths.is_none() {
-                            loaded.warnings.extend(version_file_after_ibcmd_load(
-                                context,
-                                config,
-                                &binary,
-                                runner,
-                                source_set,
-                                &source_context,
-                            ));
-                        }
-                        loaded
-                    })
-                    .and_then(|Loaded { warnings, apply }| {
-                        settle_loaded(context, &source_set.name, warnings, apply)
-                    }) {
+                    },
+                    || commit_step_state(source_set, &source_context, &config.work_path, &commit),
+                )
+                .and_then(|Loaded { warnings, apply }| {
+                    settle_loaded(context, &source_set.name, warnings, apply)
+                }) {
                     Ok((warnings, applied)) => push_loaded_step(
                         &mut steps,
                         &source_set.name,
@@ -914,123 +790,6 @@ pub(super) fn run_build_ibcmd(
         duration_ms: started.elapsed().as_millis() as u64,
         sessions: None,
     })
-}
-
-/// Файл версий после удачной полной загрузки основной конфигурации через `ibcmd`
-/// (`INV.USE-CASES.THE-RUNNER-COPY-TAKES-THE-PLATFORM-FILE-AFTER-SUCCESS`).
-///
-/// `ibcmd config import` файла версий в каталоге не пишет, и там осталась бы опись прежней
-/// базы. Поэтому опись выгружается `config export info` во временный каталог под `workPath`,
-/// и поколение читается до выгрузки и после: одно и то же — опись описывает загруженное,
-/// ложится в каталог набора и становится копией раннера; иначе, без ответа или при сбое
-/// прежний файл из каталога убирается, и следующая выгрузка идёт полной. У набора
-/// расширения файл версий не трогается: `export info` расширения не замерен. Строка — для
-/// ответа; загрузка уже прошла, и сбой здесь её не отменяет.
-fn version_file_after_ibcmd_load(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-    source_set: &SourceSetConfig,
-    source_context: &SourceSetContext,
-) -> Option<String> {
-    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
-    if source_set.purpose != crate::config::model::SourceSetPurpose::Configuration {
-        return None;
-    }
-    let file = source_context.path().join(VERSION_FILE_NAME);
-    let why = match export_version_file(context, config, binary, runner, source_set, &file) {
-        Ok(None) => return RunnerVersionFile::of(source_context).and_then(|copy| copy.record()),
-        Ok(Some(why)) => format!(": {why}"),
-        Err(error) => format!(": {error}"),
-    };
-    // Копия раннера описывала базу до загрузки: и она не должна вернуться в каталог.
-    let copy = RunnerVersionFile::of(source_context)
-        .map_or(Ok(()), |copy| copy.forget())
-        .err()
-        .map(|error| format!("; the runner's copy was not removed: {error}"))
-        .unwrap_or_default();
-    match std::fs::remove_file(&file) {
-        Ok(()) => Some(format!(
-            "{VERSION_FILE_NAME} of source-set '{}' was not rewritten after the ibcmd load{why}; the old one is removed, so the next pull runs full{copy}",
-            source_set.name
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            (!copy.is_empty()).then(|| copy.trim_start_matches("; ").to_owned())
-        }
-        Err(error) => Some(format!(
-            "{VERSION_FILE_NAME} of source-set '{}' was not rewritten after the ibcmd load{why}, and the old one could not be removed: {error}; delete '{}' before the next pull{copy}",
-            source_set.name,
-            file.display()
-        )),
-    }
-}
-
-/// Файл версий основной конфигурации после полной загрузки `ibcmd`: `config export info` во
-/// временный каталог под `workPath`, поколение до и после. `None` — поколение то же, и файл
-/// лёг в каталог набора `file`; иначе — почему он не лёг: отмена, нет ответа, выгрузка не
-/// удалась или база изменилась.
-fn export_version_file(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-    source_set: &SourceSetConfig,
-    file: &Path,
-) -> Result<Option<String>, AppError> {
-    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
-    let read = || read_ibcmd_generation(context, config, binary, runner, source_set);
-    if crate::use_cases::interruption::pending_interruption_error(
-        context,
-        "the version file after the load",
-    )
-    .is_some()
-    {
-        return Ok(Some("the command was cancelled".to_owned()));
-    }
-    let Some(before) = read()? else {
-        return Ok(Some("ibcmd gave no configuration generation".to_owned()));
-    };
-    std::fs::create_dir_all(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to create '{}': {error}",
-            config.work_path.display()
-        ))
-    })?;
-    let stage = tempfile::Builder::new()
-        .prefix("ibcmd-dump-info-")
-        .tempdir_in(&config.work_path)
-        .map_err(|error| {
-            AppError::Runtime(format!("failed to create a temporary directory: {error}"))
-        })?;
-    let exported = build_ibcmd_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        InterruptionSafetyClass::GracefulThenKill,
-    )?
-    .config_export_info(stage.path())
-    .map_err(map_ibcmd_error)?;
-    let staged = stage.path().join(VERSION_FILE_NAME);
-    if let Err(error) = exported.process.outcome() {
-        return Ok(Some(format!("`ibcmd config export info` failed: {error}")));
-    }
-    if !staged.is_file() {
-        return Ok(Some(format!(
-            "`ibcmd config export info` wrote no {VERSION_FILE_NAME}"
-        )));
-    }
-    if read()?.as_deref() != Some(before.as_str()) {
-        return Ok(Some(
-            "the configuration generation changed while it was written".to_owned(),
-        ));
-    }
-    crate::support::fs::write_file_atomically(file, |out| {
-        std::io::copy(&mut std::fs::File::open(&staged)?, out).map(|_| ())
-    })
-    .map_err(|error| AppError::Runtime(format!("failed to write '{}': {error}", file.display())))?;
-    Ok(None)
 }
 
 /// Утилита, которая загрузит файлы конфигуратора в базу. Кэш тот же, что у боевого
@@ -1905,9 +1664,8 @@ pub(super) fn run_build_edt(
 }
 
 /// Загрузка набора под сверкой поколения: до неё — отказ, если база ушла вперёд записанного
-/// сравнимым инструментом; после — запись поколения. Файла версий здесь нет: после полной
-/// загрузки `ibcmd` его выгружает `version_file_after_ibcmd_load`, а снимок EDT пишет его
-/// полной выгрузкой.
+/// сравнимым инструментом; после — запись поколения. Файл версий загрузка не пишет: копия
+/// раннера устаревает на загруженное, и следующий `pull` его выгрузит (#646).
 fn guarded_load(
     gate: &GenerationGate<'_>,
     set: &SourceSetContext,

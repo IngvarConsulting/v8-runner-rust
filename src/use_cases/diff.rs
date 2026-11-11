@@ -18,13 +18,13 @@ use crate::support::error::AppError;
 use crate::support::temp::{platform_logs_dir, temp_root};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 use crate::use_cases::infobase_export::validate_platform_artifact;
 use crate::use_cases::interruption::pending_interruption_error;
 use crate::use_cases::provider_selection::{self, SelectedProvider};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::version_file::RunnerVersionFile;
+use crate::use_cases::version_file::VERSION_FILE_NAME;
 
 /// Caller holds the workspace and has passed the file infobase owner boundary.
 pub(crate) fn execute(
@@ -90,7 +90,7 @@ fn version_file(config: &AppConfig) -> Result<PathBuf, AppError> {
         .and_then(RunnerVersionFile::of);
     if let Some(file) = file
         .as_ref()
-        .map(RunnerVersionFile::file_after_restore)
+        .map(RunnerVersionFile::would_be_usable)
         .transpose()?
         .flatten()
     {

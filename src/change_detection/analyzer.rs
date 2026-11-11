@@ -1092,15 +1092,17 @@ impl DumpListing {
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
 /// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
 /// dump and no name of the description `after` it matches, letter case aside. A file the dump
-/// wrote (stamped no earlier than `start`) is never named: on a case-insensitive file system an
-/// element renamed only in letter case keeps its files under the old spelling. Files without a
+/// wrote (stamped no earlier than `start`, when the dump wrote into the tree itself) is never
+/// named: on a case-insensitive file system an element renamed only in letter case keeps its
+/// files under the old spelling. A dump through a stage is listed before its files arrive
+/// (`start` is `None`). Files without a
 /// recognized owner and files of elements that stayed are not named either. Listed in the set's
 /// walk scope, links never followed; this listing precedes the one the dump's mode comes from,
 /// because what it names is gone before that one.
 pub fn files_of_dropped_elements(
     context: &SourceSetContext,
     work_path: &Path,
-    start: DumpStart,
+    start: Option<DumpStart>,
     before: &HashSet<String>,
     after: &HashSet<String>,
     interrupted: &(dyn Fn() -> bool + Sync),
@@ -1113,7 +1115,7 @@ pub fn files_of_dropped_elements(
     Ok(listing
         .files
         .into_iter()
-        .filter(|file| file.mtime_ns < start.started_ns)
+        .filter(|file| start.is_none_or(|start| file.mtime_ns < start.started_ns))
         .filter(|file| {
             crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
                 .map(|owner| owner.to_lowercase())
@@ -1937,7 +1939,7 @@ mod tests {
         let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept", "Document.ЗАКАЗ"]);
 
         let mut dropped: Vec<String> =
-            files_of_dropped_elements(&context, &work, start, &before, &after, &|| false)
+            files_of_dropped_elements(&context, &work, Some(start), &before, &after, &|| false)
                 .expect("listing")
                 .iter()
                 .map(|path| {
@@ -1958,9 +1960,16 @@ mod tests {
             ]
         );
         assert!(
-            files_of_dropped_elements(&context, &work, start, &HashSet::new(), &after, &|| false)
-                .expect("listing")
-                .is_empty(),
+            files_of_dropped_elements(
+                &context,
+                &work,
+                Some(start),
+                &HashSet::new(),
+                &after,
+                &|| false
+            )
+            .expect("listing")
+            .is_empty(),
             "nothing was in the description before"
         );
     }

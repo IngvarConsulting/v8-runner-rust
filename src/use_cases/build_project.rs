@@ -29,7 +29,6 @@ use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
-use crate::use_cases::ignored_files::refuse_tracked_version_file;
 use crate::use_cases::request::{ApplyPolicy, BuildRequest as BuildArgs, PushMode};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
@@ -44,11 +43,11 @@ mod helpers;
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
     apply_subject, build_designer_dsl, change_detection_failure, commit_step_state,
-    designer_log_file, dump_designer_version_file, extension_name, fail_from_source_set_index,
-    interruption_before_safe_point, loads_whole, map_ibcmd_error, plan_configurator_load_step,
-    plan_edt_export_step, plan_generated_designer_load_step, push_build_step, push_loaded_step,
-    read_designer_generation, read_ibcmd_generation, remove_storage_path, AfterLoad,
-    AnalysisByName, Loaded, StepCommit, StepPlan,
+    designer_log_file, extension_name, fail_from_source_set_index, interruption_before_safe_point,
+    loads_whole, map_ibcmd_error, plan_configurator_load_step, plan_edt_export_step,
+    plan_generated_designer_load_step, push_build_step, push_loaded_step, read_designer_generation,
+    read_ibcmd_generation, remove_storage_path, AfterLoad, AnalysisByName, Loaded, StepCommit,
+    StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -201,9 +200,8 @@ fn run_build_branch(
 
 /// Разбор изменений до выбора исполнителя — там, где объём выбирает исполнителя: у исходников
 /// Конфигуратора, у отправки по изменившемуся и у цепочки, которую раннер упорядочивает по
-/// объёму. Иначе `None`, и разбирает, как прежде, сам исполнитель. Неверно названный набор и
-/// опись версий в индексе гита тоже дают `None`: их отказ — дело исполнителя, а разбор до
-/// него был бы лишней работой.
+/// объёму. Иначе `None`, и разбирает, как прежде, сам исполнитель. Неверно названный набор
+/// тоже даёт `None`: его отказ — дело исполнителя, а разбор до него был бы лишней работой.
 fn analysis_before_selection(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -212,7 +210,6 @@ fn analysis_before_selection(
     if config.format != SourceFormat::Designer
         || args.load.is_whole()
         || !config.orders_by_size(Operation::Build)
-        || refuse_tracked_version_files(config, args).is_err()
     {
         return Ok(None);
     }
@@ -367,9 +364,7 @@ fn run_build_selected(
         return run_build_edt(context, config, args, provider);
     }
 
-    if let Some(error) = validate_designer_supported_matrix(config, provider)
-        .or_else(|| refuse_tracked_version_files(config, args).err())
-    {
+    if let Some(error) = validate_designer_supported_matrix(config, provider) {
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
@@ -472,25 +467,6 @@ fn validate_designer_supported_matrix(config: &AppConfig, provider: Provider) ->
             SUPPORTED_DESIGNER_BUILD_ERROR.to_owned(),
         ))
     }
-}
-
-/// Загрузка из файлов переписывает опись версий в каталоге набора
-/// (`-updateConfigDumpInfo` у Конфигуратора и агента), поэтому опись в индексе
-/// гита останавливает сборку до платформы при любом исполнителе — и в превью
-/// тоже: проверка ничего не пишет.
-///
-/// Неверно названный набор здесь пропускается: отказ о нём — дело плана сборки.
-fn refuse_tracked_version_files(config: &AppConfig, args: &BuildArgs) -> Result<(), AppError> {
-    let inventory = SourceSetInventory::new(config);
-    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
-    else {
-        return Ok(());
-    };
-    source_sets
-        .iter()
-        .filter(|source_set| !source_set.purpose.is_external())
-        .filter_map(|source_set| inventory.designer_context(&source_set.name))
-        .try_for_each(|context| refuse_tracked_version_file(context.path()))
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig, provider: Provider) -> Option<AppError> {
@@ -4115,11 +4091,7 @@ mod tests {
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(
-            &script,
-            &calls,
-            Some("-updateConfigDumpInfo -Extension ext"),
-        );
+        write_designer_script(&script, &calls, Some("ext -Extension ext"));
         let config = build_config(
             &base,
             &work,

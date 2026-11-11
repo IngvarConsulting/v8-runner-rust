@@ -677,15 +677,6 @@ impl<'a> IbcmdDsl<'a> {
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
-    /// `config export info --out=<каталог>`: один файл версий `ConfigDumpInfo.xml` основной
-    /// конфигурации в каталог `out_dir`. `--out` — каталог, не файл; файл тот же, что пишет
-    /// полная выгрузка и Конфигуратор (замер «Версия формата файла версий», #403). Чтение базы.
-    pub fn config_export_info(&self, out_dir: &Path) -> Result<PlatformCommandResult, IbcmdError> {
-        let mut args = self.authenticated_infobase_args(&["config", "export", "info"]);
-        args.push(format!("--out={}", out_dir.display()));
-        self.run_with(&args, &self.execution_policy.for_reading())
-    }
-
     /// The same answer as a file: unlike stdout, it is UTF-8 with a BOM in any console code page.
     pub fn config_export_status_to_file(
         &self,
@@ -698,18 +689,20 @@ impl<'a> IbcmdDsl<'a> {
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
-    /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
-    /// target directory.
-    pub fn config_export_incremental(
+    /// `config export --base=<файл версий> <каталог>`: только изменённое относительно описи
+    /// `version_file` и новая полная опись — в каталог, которого ещё нет (замер #646). Когда
+    /// нужна полная выгрузка, `ibcmd` отказывает ([`asks_for_a_full_export`]) вместо неё.
+    pub fn config_export_for_changes(
         &self,
         target_dir: &Path,
+        version_file: &Path,
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        args.push("--sync".to_owned());
+        args.push(format!("--base={}", version_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
     }
@@ -808,6 +801,14 @@ fn invocation_too_long(error: &std::io::Error) -> bool {
 
 /// `config export` with both `--sync` and `--force`: when the platform falls back to a full
 /// export it deletes everything in the target directory, foreign files and `.git` included.
+/// Отказ `config export --base`, которым `ibcmd` просит полную выгрузку: код `-1` и «Требуется
+/// экспортировать конфигурацию полностью» (замер #646, удаление объекта). Другой отказ — не
+/// просьба, и полной выгрузкой он не заменяется.
+pub fn asks_for_a_full_export(process: &crate::platform::process::ProcessResult) -> bool {
+    const ASKS: &str = "Требуется экспортировать конфигурацию полностью";
+    process.exit_code != 0 && (process.stdout.contains(ASKS) || process.stderr.contains(ASKS))
+}
+
 fn wipes_the_export_directory(args: &[String]) -> bool {
     let has = |flag: &str| {
         args.iter().any(|arg| {
@@ -1174,7 +1175,7 @@ mod tests {
 
         for extension in [None, Some("ext")] {
             dsl.config_export_full(&target, extension).expect("full");
-            dsl.config_export_incremental(&target, extension)
+            dsl.config_export_for_changes(&target, &dir.path().join("cdi.xml"), extension)
                 .expect("incremental");
         }
         dsl.config_export_file(&dir.path().join("package.cf"), &target)
@@ -1606,7 +1607,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn config_export_incremental_builds_expected_args() {
+    fn config_export_for_changes_builds_expected_args() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("ibcmd");
         let args_log = dir.path().join("args.log");
@@ -1623,11 +1624,20 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_export_incremental(dir.path(), None)
+        let base = dir.path().join("ConfigDumpInfo.xml");
+        dsl.config_export_for_changes(&dir.path().join("out"), &base, None)
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export\n--sync\n"), "{args}");
+        assert!(
+            args.contains(&format!(
+                "--base={}\n{}\n",
+                base.display(),
+                dir.path().join("out").display()
+            )),
+            "{args}"
+        );
+        assert!(!args.contains("--sync"), "{args}");
         assert!(!args.contains("--threads"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }

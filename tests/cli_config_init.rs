@@ -1185,17 +1185,14 @@ fn init_ignores_project_local_files_once() {
     }
 
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-    assert_eq!(
-        gitignore,
-        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
-    );
+    assert_eq!(gitignore, "v8project.local.yaml\n.dump-*.lock*\n");
 }
 
 /// Конфиг во вложенном каталоге, наборы — в `src/…`: `.gitignore` рядом с конфигом
 /// до наборов не дотягивается, поэтому шаблоны уходят в корневой `.gitignore`
 /// рабочей копии, и ответ называет именно его.
 #[test]
-fn init_with_a_nested_config_ignores_the_version_file_of_every_source_set() {
+fn init_with_a_nested_config_ignores_the_lock_of_every_source_set() {
     let dir = temp_workspace();
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -1235,7 +1232,6 @@ fn init_with_a_nested_config_ignores_the_version_file_of_every_source_set() {
     );
     assert!(!dir.path().join("config").join(".gitignore").exists());
     for probe in [
-        "src/configuration/ConfigDumpInfo.xml",
         "src/configuration/.dump-main.lock",
         "src/configuration/.dump-main.lock.system",
         "config/v8project.local.yaml",
@@ -1248,4 +1244,18 @@ fn init_with_a_nested_config_ignores_the_version_file_of_every_source_set() {
             .expect("run git");
         assert!(status.success(), "{probe} must be ignored");
     }
+    // Описи версий в каталогах наборов нет: раннер держит её в своей памяти (#646).
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args([
+            "check-ignore",
+            "-q",
+            "--no-index",
+            "--",
+            "src/configuration/ConfigDumpInfo.xml",
+        ])
+        .status()
+        .expect("run git");
+    assert!(!status.success(), "the version file pattern is not written");
 }
