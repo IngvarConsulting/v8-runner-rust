@@ -139,6 +139,8 @@ pub enum SessionSource<'a> {
 
 /// `ibcmd session list`: сеансы автономного сервера блоками `ключ : значение`, как у `rac`
 /// (`session`, `app-id`, `hibernate`, `host`, `user-name`, `started-at`; замер #188, #613).
+/// Каталога данных (`--data`) этот режим не берёт: он только спрашивает работающий сервер, и на
+/// замере #613 отвечал без него за 0,1–0,2 с.
 pub fn session_list(utility: &Path, source: SessionSource<'_>) -> ProcessRequest {
     let source = match source {
         SessionSource::Pid(pid) => format!("--pid={pid}"),

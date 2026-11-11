@@ -642,16 +642,28 @@ pub(super) fn sessions(
             .path;
         ibsrv::session_list(&ibcmd, ibsrv::SessionSource::Gate(gate))
     };
-    let answer = runner
-        .run_with_policy(
-            &request,
-            &context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                Some(SESSIONS_TIMEOUT),
-            ),
-        )
-        .ok()?;
-    answer.outcome().ok()?;
+    let answer = match runner.run_with_policy(
+        &request,
+        &context.process_policy(
+            InterruptionSafetyClass::GracefulThenKill,
+            Some(SESSIONS_TIMEOUT),
+        ),
+    ) {
+        Ok(answer) => answer,
+        Err(error) => {
+            tracing::debug!(%error, "ibcmd session list did not run: no evidence of sessions");
+            return None;
+        }
+    };
+    if answer.outcome().is_err() {
+        tracing::debug!(
+            code = answer.exit_code,
+            stderr = answer.stderr.trim(),
+            stdout = answer.stdout.trim(),
+            "ibcmd session list refused: no evidence of sessions"
+        );
+        return None;
+    }
     Some(crate::platform::rac::sessions(&answer.stdout))
 }
 

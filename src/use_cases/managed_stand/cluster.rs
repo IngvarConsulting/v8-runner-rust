@@ -1411,11 +1411,15 @@ pub(super) fn sessions(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Option<Vec<rac::Session>> {
-    registration(context, config, runner, host)
-        .ok()?
-        .open_sessions(context, runner)
-        .ok()
-        .map(Option::unwrap_or_default)
+    let listed = registration(context, config, runner, host)
+        .and_then(|registered| registered.open_sessions(context, runner));
+    match listed {
+        Ok(sessions) => Some(sessions.unwrap_or_default()),
+        Err(error) => {
+            tracing::debug!(%error, "rac gave no session list: no evidence of sessions");
+            None
+        }
+    }
 }
 
 /// Регистрация базы у работающего кластера раннера: `rac`, адрес `ras`, кластер и

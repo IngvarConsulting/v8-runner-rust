@@ -1047,9 +1047,10 @@ pub(crate) fn cluster_base(
 /// исполнитель его не дал (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`, замер #613):
 /// у кластера раннера — `rac session list`, у автономного сервера — `ibcmd session list` (свой
 /// `ibsrv` по pid, чужой — через объявленный шлюз). Не в счёт спящие сеансы (`hibernate : yes`,
-/// обновлению они не мешают) и сеансы Конфигуратора: это сам раннер — агент, ещё подключённый
-/// к базе, — а чужой Конфигуратор держит блокировку конфигурирования, и загрузка отказывает
-/// раньше применения. `None` — цель файловая, кластер не раннера, источник не ответил или
+/// обновлению они не мешают), сеансы Конфигуратора — это сам раннер, агент, ещё подключённый
+/// к базе, а чужой Конфигуратор держит блокировку конфигурирования, и загрузка отказывает
+/// раньше применения, — и сеанс сервера администрирования (`app-id : RAS`, замер #469): это
+/// вопрос самого раннера к кластеру. `None` — цель файловая, кластер не раннера, источник не ответил или
 /// живых сеансов нет.
 pub(crate) fn awake_server_sessions(
     context: &ExecutionContext,
@@ -1079,13 +1080,18 @@ fn foreign_awake(
 ) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
     let awake: Vec<_> = sessions
         .into_iter()
-        .filter(|session| !session.asleep && session.application != DESIGNER_APP_ID)
+        .filter(|session| {
+            !session.asleep
+                && session.application != RAS_APP_ID
+                && crate::platform::session_list::application_of_rac(&session.application)
+                    != Some(crate::domain::sessions::ApplicationCode::Designer)
+        })
         .collect();
     (!awake.is_empty()).then(|| session_entries(awake))
 }
 
-/// `app-id` Конфигуратора в списке сеансов сервера.
-const DESIGNER_APP_ID: &str = "Designer";
+/// `app-id` сеанса сервера администрирования `ras` в списке сеансов кластера.
+const RAS_APP_ID: &str = "RAS";
 
 /// Сеансы сервера в форме списка `error.sessions`: код приложения даёт `app-id`.
 fn session_entries(
@@ -1202,6 +1208,66 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
 
+    /// Без своего сервера списка нет, и процессов для него раннер не запускает: у файловой базы,
+    /// у кластера без `cluster.managed` и у автономного сервера без `managed` и без шлюза.
+    #[test]
+    fn a_target_without_its_own_server_list_gives_no_evidence() {
+        use crate::platform::process::{
+            ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
+            SpawnResult, WorkGiven,
+        };
+        struct Never;
+        impl ProcessRunner for Never {
+            fn run_with_policy(
+                &self,
+                request: &ProcessRequest,
+                _policy: &ProcessExecutionPolicy,
+            ) -> Result<ProcessResult, ProcessError> {
+                panic!("no list to ask: {:?}", request.args)
+            }
+            fn spawn(
+                &self,
+                _request: &ProcessRequest,
+                _work: &WorkGiven,
+            ) -> Result<SpawnResult, ProcessError> {
+                unreachable!("nothing is spawned")
+            }
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let context = crate::use_cases::context::ExecutionContext::cli(
+            crate::use_cases::context::CommandName::Apply,
+        );
+        let mut config = crate::config::model::AppConfig {
+            local_path: dir.path().join(".local"),
+            base_path: dir.path().to_path_buf(),
+            work_path: dir.path().join("work"),
+            format: crate::config::model::SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: Some("origin".to_owned()),
+            working_copy: None,
+            source_sets: Vec::new(),
+            tools: Default::default(),
+            mcp: Default::default(),
+            tests: Default::default(),
+        };
+        let ask = |config: &crate::config::model::AppConfig| {
+            super::awake_server_sessions_with(&context, config, &Never, &super::RealHost)
+        };
+        assert_eq!(ask(&config), None);
+        config.infobase = crate::config::model::InfobaseConfig::file("Srvr=host;Ref=ib");
+        assert_eq!(ask(&config), None);
+        config.infobase.standalone = Some(crate::config::model::StandaloneConfig {
+            managed: None,
+            gate: None,
+            host_fingerprint: None,
+            exchange: None,
+        });
+        assert_eq!(ask(&config), None);
+    }
+
     /// Признак сервера — только чужие живые сеансы: спящий сеанс (убитого клиента у кластера)
     /// обновлению не мешает, а сеанс Конфигуратора — сам раннер или уже не причина отказа
     /// обновления (замер #613). Список приходит с кодом приложения из `app-id`.
@@ -1219,6 +1285,7 @@ mod tests {
             session("client", "1CV8C", false),
             session("killed", "1CV8C", true),
             session("agent", "Designer", false),
+            session("ras", "RAS", false),
         ])
         .expect("held");
         assert_eq!(held.len(), 1);

@@ -6,6 +6,7 @@ check:
   - src/use_cases/apply/act.rs::a_forced_apply_nobody_held_terminates_nothing
   - src/use_cases/apply/act.rs::a_cluster_refusal_without_executor_evidence_names_the_awake_rac_sessions
   - src/use_cases/apply/act.rs::a_forced_apply_refused_for_another_reason_neither_repeats_nor_terminates
+  - src/use_cases/apply/act.rs::an_ibcmd_refusal_is_never_blamed_on_the_sessions_of_the_server
   - src/use_cases/apply/act.rs::a_file_base_held_by_a_session_is_refused_with_its_list_even_with_force
   - src/use_cases/apply/act.rs::a_file_base_open_in_the_designer_is_refused_as_designer_busy
   - src/use_cases/apply/act.rs::an_agent_update_always_forbids_dynamic_update
@@ -23,6 +24,7 @@ check:
   - src/platform/rac.rs::an_infobase_id_and_its_sessions_are_read_from_the_answers
   - src/platform/ibsrv.rs::the_sessions_of_a_server_are_asked_by_its_pid_or_its_gate
   - src/use_cases/managed_stand/mod.rs::only_foreign_awake_sessions_of_a_server_hold_it
+  - src/use_cases/managed_stand/mod.rs::a_target_without_its_own_server_list_gives_no_evidence
   - src/platform/file_base_hold.rs::a_foreign_lock_names_its_message
   - tests/cli_apply_sessions.rs::a_file_base_held_by_a_session_is_refused_with_the_session_list
   - tests/cli_apply_sessions.rs::force_does_not_end_sessions_of_a_file_base
@@ -59,11 +61,19 @@ pid из записи, чужой — через объявленный шлюз
   мешают, и платформа их в отказе не называет (замер #613);
 - сеансы Конфигуратора (`app-id: Designer`): это сам раннер — агент, ещё подключённый к базе;
   сеанс вышедшего пакетного Конфигуратора к моменту вопроса уже снят, — а чужой Конфигуратор
-  держит блокировку конфигурирования, и загрузка отказывает раньше применения (замер #613).
+  держит блокировку конфигурирования, и загрузка отказывает раньше применения (замер #613);
+- сеанс сервера администрирования (`app-id: RAS`): это вопрос самого раннера к кластеру.
+
+Признак говорит, что базу держат живые сеансы, а не что отказ вызван именно ими: если
+применение отказало по другой причине, пока открыт чужой сеанс, ответ — `infobase_sessions` с
+текстом отказа исполнителя в конце, а `--sessions force` завершит этот сеанс и повторит
+применение, и повтор откажет той же причиной. После `ibcmd` список сервера не спрашивают:
+с прямым доступом к БД он сеансов сервера не видит и применяет мимо них (замер #613).
 
 Список, который не получен (кластер не раннера, источник не ответил — у `ibsrv` над файловой
-базой, где сеансов ещё не было, `ibcmd` отвечает rc=−1), признаком не служит: отказ остаётся
-отказом исполнителя. Так у пакетного Конфигуратора и `ibcmd` (общий код возврата) и у агента
+базой, где сеансов ещё не было, `ibcmd` отвечает rc=−1; через шлюз `ibcmd` сверяет ключ
+хоста с `~/.ssh/known_hosts`, и с незнакомым ключом на Linux падает — замер #188, на Windows
+путь через шлюз не замерен), признаком не служит: отказ остаётся отказом исполнителя. Так у пакетного Конфигуратора и `ibcmd` (общий код возврата) и у агента
 SSH-шлюза автономного сервера, который отказывает из-за сеансов итогом `canceled` без
 `error-type` (замер #613 на 8.3.27, 8.5.1 и 8.5.4.2028): `canceled` признаком не служит.
 

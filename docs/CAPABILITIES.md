@@ -1066,8 +1066,8 @@ v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [
   `canceled` агента SSH-шлюза признаком не служат: отказ остаётся отказом платформы. Отказ `infobase_sessions` (род `workspace`, выход 3) несёт
   `error.sessions`: `base` без пароля, `list` — компьютер, `application` (`1CV8C`, `1CV8`,
   `Designer`, `BackgroundJob`, `WebClient`, `COMConnection` или `null`),
-  `application_title`, `started`, `user`, `id`; `null`, если текст платформы не разобран
-  целиком, — `from_this_machine`, `terminable` и `lock: {state: none|own|foreign|unknown,
+  `application_title`, `started`, `user`, `id`; `null`, если список не получен или текст
+  платформы не разобран целиком, — `from_this_machine`, `terminable` и `lock: {state: none|own|foreign|unknown,
   message}`. `next` — тот же вызов, с `--sessions force`, если сеансы можно завершить.
   Чужой Конфигуратор файловой базы — отдельный отказ `infobase_designer_busy` (`push`
   отказывает уже на загрузке; `list: null`, `terminable: false`, `next` — тот же вызов).

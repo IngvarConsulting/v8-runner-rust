@@ -124,15 +124,24 @@ pub(crate) fn apply(
     })
 }
 
-/// [`apply`] с данным источником сеансов кластера.
+/// [`apply`] с данным источником сеансов сервера.
 fn apply_with(
     context: &ExecutionContext,
     config: &AppConfig,
     mut applier: Applier<'_>,
     subject: &Subject<'_>,
     deferrals: &mut Deferrals,
-    cluster_sessions: &dyn Fn() -> Option<Vec<SessionEntry>>,
+    server_sessions: &dyn Fn() -> Option<Vec<SessionEntry>>,
 ) -> Result<(), AppError> {
+    // `ibcmd` с прямым доступом к БД серверной базы сеансов сервера не видит и применяет мимо
+    // них (замер #613): его отказ сеансами не объясняется, и список сервера для него не улика.
+    let no_list = || None;
+    let server_sessions: &dyn Fn() -> Option<Vec<SessionEntry>> =
+        if matches!(applier, Applier::Ibcmd { .. }) {
+            &no_list
+        } else {
+            server_sessions
+        };
     let (verb, executor) = match &applier {
         Applier::Designer { .. } => ("update_db_cfg", "Конфигуратор"),
         Applier::Ibcmd { .. } => ("ibcmd apply", "ibcmd"),
@@ -192,7 +201,7 @@ fn apply_with(
         config,
         refused.executor,
         &refused.evidence(),
-        cluster_sessions,
+        server_sessions,
     );
     let Some(message) = force else {
         return Err(refuse(gate, config, holder, refused.error));
@@ -233,7 +242,7 @@ fn apply_with(
             config,
             refused.executor,
             &refused.evidence(),
-            cluster_sessions,
+            server_sessions,
         );
         refuse(gate, config, holder, refused.error)
     })
@@ -748,6 +757,50 @@ mod tests {
             "{error:?}"
         );
         assert!(context.sessions().outcome().is_none(), "nothing terminated");
+    }
+
+    /// `ibcmd` с прямым доступом к БД сеансов сервера не видит (замер #613): его отказ при живых
+    /// сеансах в списке сервера — отказ `ibcmd` как есть, без второго запуска с ключом и без
+    /// исхода `sessions`.
+    #[test]
+    fn an_ibcmd_refusal_is_never_blamed_on_the_sessions_of_the_server() {
+        let dir = tempdir().expect("tempdir");
+        let config = server_config(dir.path());
+        let runner = Scripted::new(vec![(1, ""), (0, "")]);
+        let context = forced("apply");
+
+        let error = collecting_deferrals(|deferrals| {
+            apply_with(
+                &context,
+                &config,
+                Applier::Ibcmd {
+                    binary: &PathBuf::from("/tmp/fake-ibcmd"),
+                    runner: &runner,
+                },
+                &Subject {
+                    kind: SubjectKind::SourceSet,
+                    name: "main",
+                    extension: None,
+                    timeline: "main",
+                },
+                deferrals,
+                &|| Some(vec![rac_session()]),
+            )
+        })
+        .expect_err("refused");
+
+        let calls = runner.calls();
+        assert!(calls.len() <= 1, "no second run: {calls:?}");
+        assert!(!calls
+            .iter()
+            .flatten()
+            .any(|arg| arg == "--session-terminate=force"));
+        let refusal = crate::use_cases::result::UseCaseError::from(error);
+        assert_ne!(
+            refusal.kind(),
+            crate::use_cases::result::UseCaseErrorKind::InfobaseSessions
+        );
+        assert!(context.sessions().outcome().is_none());
     }
 
     /// Без `force` отказ сервера у Конфигуратора без улики `rac` признака «держат сеансы» не
