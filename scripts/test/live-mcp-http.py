@@ -6,7 +6,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Optional, Tuple
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,7 +68,7 @@ def extract_sse_json(body: str) -> dict:
     raise RuntimeError(f"No JSON SSE payload found in response body:\n{body}")
 
 
-def http_post(url: str, payload: dict, session_id: Optional[str] = None) -> tuple[int, dict, str]:
+def http_post(url: str, payload: dict, session_id: Optional[str] = None) -> Tuple[int, dict, str]:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -103,7 +103,7 @@ def get_header_ci(headers: dict, name: str) -> Optional[str]:
     return None
 
 
-def initialize_session(url: str) -> tuple[str, dict]:
+def initialize_session(url: str) -> Tuple[str, dict]:
     status, headers, body = http_post(
         url,
         {
@@ -159,21 +159,30 @@ def call_tool(url: str, session_id: str, request_id: int, name: str, arguments: 
 
 
 def expect_tool_success(payload: dict, tool_name: str) -> dict:
-    content = payload.get("result", {}).get("structuredContent")
+    if "error" in payload:
+        error = json.dumps(payload["error"], ensure_ascii=False)
+        raise RuntimeError(f"{tool_name}: JSON-RPC error: {error}")
+
+    result = payload.get("result", {})
+    content = result.get("structuredContent")
     assert_true(
         isinstance(content, dict),
         f"{tool_name}: missing structuredContent in payload {json.dumps(payload, ensure_ascii=False)}",
     )
+    if content.get("ok") is False:
+        error = json.dumps(content.get("error", content), ensure_ascii=False)
+        raise RuntimeError(f"{tool_name}: command failed: {error}")
+
     assert_true(
-        content.get("status") == "success",
-        f"{tool_name}: MCP tool status is not success: {json.dumps(content, ensure_ascii=False)}",
+        content.get("ok") is True and result.get("isError") is not True,
+        f"{tool_name}: expected a successful tool result: {json.dumps(result, ensure_ascii=False)}",
     )
-    result = content.get("result")
+    data = content.get("data")
     assert_true(
-        isinstance(result, dict),
-        f"{tool_name}: missing result object in structuredContent {json.dumps(content, ensure_ascii=False)}",
+        isinstance(data, dict),
+        f"{tool_name}: missing data object in structuredContent {json.dumps(content, ensure_ascii=False)}",
     )
-    return result
+    return data
 
 
 def main() -> int:
@@ -238,10 +247,10 @@ def main() -> int:
                 "build_project",
                 {"fullRebuild": False},
             )
-            build_result = expect_tool_success(build_payload, "build_project")
+            build_data = expect_tool_success(build_payload, "build_project")
             assert_true(
-                build_result.get("success") is True,
-                f"build_project result.success is not true: {json.dumps(build_result, ensure_ascii=False)}",
+                build_data.get("ok") is True,
+                f"build_project data.ok is not true: {json.dumps(build_data, ensure_ascii=False)}",
             )
 
             syntax_payload = call_tool(
@@ -251,11 +260,10 @@ def main() -> int:
                 "check_syntax_edt",
                 {"projectName": EDT_PROJECT},
             )
-            syntax_result = expect_tool_success(syntax_payload, "check_syntax_edt")
+            syntax_data = expect_tool_success(syntax_payload, "check_syntax_edt")
             assert_true(
-                syntax_result.get("check_result") in {"clean", "issues_found"},
-                "check_syntax_edt returned unexpected check_result: "
-                f"{json.dumps(syntax_result, ensure_ascii=False)}",
+                syntax_data.get("status") in ("clean", "issues_found"),
+                f"check_syntax_edt returned unexpected data.status: {json.dumps(syntax_data, ensure_ascii=False)}",
             )
 
             tests_payload = call_tool(
@@ -265,10 +273,10 @@ def main() -> int:
                 "run_module_tests",
                 {"moduleName": SMOKE_MODULE},
             )
-            tests_result = expect_tool_success(tests_payload, "run_module_tests")
+            tests_data = expect_tool_success(tests_payload, "run_module_tests")
             assert_true(
-                tests_result.get("success") is True,
-                f"run_module_tests result.success is not true: {json.dumps(tests_result, ensure_ascii=False)}",
+                tests_data.get("ok") is True,
+                f"run_module_tests data.ok is not true: {json.dumps(tests_data, ensure_ascii=False)}",
             )
 
             print("Live MCP HTTP smoke completed successfully.")
