@@ -117,15 +117,6 @@ jobs:
         run: |
           V8_RUNNER_CI_SCOPE=contract bash scripts/test/ci-rust.sh
 
-      # ВРЕМЕННО (#653): тесты гонки подряд 30 раз; убрать до готовности PR.
-      - name: TEMP loop of the #653 tests
-        if: matrix.os != 'windows-latest'
-        run: |
-          for i in $(seq 1 30); do
-            echo "round $i"
-            cargo test --locked --test cli_build_agent an_extension_recorded_by_ibcmd -- --test-threads=1 || exit 1
-          done
-
   # Имя джобы входит в список обязательных проверок ветки master — не переименовывать.
   happy-path:
     name: Happy Path (${{ matrix.os }})
