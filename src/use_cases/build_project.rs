@@ -2484,6 +2484,9 @@ mod tests {
                     let script = dir.path().join(utility);
                     create_source_tree(&base);
                     fs::write(&script, "").expect("utility");
+                    // Превью утилиту не запускает, но поиск на unix берёт только исполняемый файл.
+                    #[cfg(unix)]
+                    make_executable(&script);
                     let mut config = build_config(
                         &base,
                         &dir.path().join("work"),
