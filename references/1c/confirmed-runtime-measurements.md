@@ -956,6 +956,21 @@ $P/ibcmd session list --pid=<pid ibsrv>
 нужно завершить отдельно, например `ibcmd session terminate --remote=ssh://…` (см. раздел
 о сеансах).
 
+## Локализованный журнал `/CheckConfig` файловой базы на Windows
+
+Замер 13.11.2026, 1С 8.3.27.2342, временная файловая ИБ с
+`tests/fixtures/designer/configuration` ([#657](https://github.com/IngvarConsulting/v8-runner-rust/issues/657),
+[#678](https://github.com/IngvarConsulting/v8-runner-rust/issues/678)).
+Оба режима выполнены через CLI `check` и MCP `check_syntax_designer_config`.
+
+| Режим Конфигуратора | Язык | Код платформы | Строка `/Out` (UTF-8 с BOM) |
+| --- | --- | --- | --- |
+| `/CheckConfig -EmptyHandlers` | RU | 101 | `ОбщаяКоманда.ОбщаяКоманда1.МодульКоманды Пустой обработчик: "ОбработкаКоманды"` |
+| `/CheckConfig -ConfigLogIntegrity` | EN | 0 | `No errors found` |
+
+Английский журнал получен с `SystemLanguage=EN` в `bin/conf/conf.cfg` отдельной
+копии выпуска. Установленный экземпляр платформы использовался для русского прогона.
+
 ## Сеансы автономного сервера через SSH-шлюз
 
 Замер 06.10.2026. Задача: [#188](https://github.com/IngvarConsulting/v8-runner-rust/issues/188). Платформа 8.3.27.2074, macOS.
