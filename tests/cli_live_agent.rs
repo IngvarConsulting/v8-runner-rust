@@ -640,8 +640,11 @@ fn a_pull_the_guard_refuses_answers_alike_and_sends_the_platform_no_work() {
         "{early}"
     );
     let commands = harness.commands();
+    // Поколение по годной копии описи спрашивается раньше сторожа (#683): это вопрос, не работа.
     assert!(
-        commands.iter().all(|line| !line.starts_with("config ")),
+        commands
+            .iter()
+            .all(|line| !line.starts_with("config ") || line.starts_with("config generation-id")),
         "no work command reached the platform: {commands:?}"
     );
 

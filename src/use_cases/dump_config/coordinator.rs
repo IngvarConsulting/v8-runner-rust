@@ -6,7 +6,7 @@ use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::agent_session::EarlyAgent;
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
-    Losses, WaysOut,
+    GuardStop, Losses, WaysOut,
 };
 use crate::use_cases::version_file::RunnerVersionFile;
 use std::fmt::Write as _;
@@ -239,6 +239,23 @@ fn run_dump_selected(
         .as_ref()
         .map(|found| found.path.clone())
         .unwrap_or_default();
+    // Отказ до выгрузки несёт форму ответа без исполнения: без неё конверт `--json-message` не
+    // печатается.
+    let refused = |error: AppError| {
+        let message = error.to_string();
+        DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                selectors.clone(),
+                Some(resolved.target_path.clone()),
+                Some(message),
+            ),
+        )
+    };
     let edt_binary = if config.format == SourceFormat::Edt {
         Some(match utilities.locate(UtilityType::EdtCli) {
             Ok(location) => location.path,
@@ -279,19 +296,7 @@ fn run_dump_selected(
         let plan = match preview_plan(config, &resolved, &mode, location.as_ref()) {
             Ok(plan) => plan,
             Err(error) => {
-                let message = error.to_string();
-                return Err(DumpExecutionFailure::with_payload(
-                    error,
-                    empty_result(
-                        mode,
-                        started,
-                        Some(resolved.source_set_name.clone()),
-                        resolved.extension.clone(),
-                        selectors.clone(),
-                        Some(resolved.target_path.clone()),
-                        Some(message),
-                    ),
-                ));
+                return Err(refused(error));
             }
         };
         let planned = plan.mode();
@@ -330,6 +335,11 @@ fn run_dump_selected(
             &resolved.consent,
             &losses,
             how,
+            if super::by_version_file(context, &plan, partial_objects.as_deref()) {
+                GuardStop::AfterTheGeneration
+            } else {
+                GuardStop::BeforeThePlatform
+            },
         ) {
             let _ = write!(message, "; {note}");
         }
@@ -366,24 +376,7 @@ fn run_dump_selected(
             ))
         })
     };
-    let lock_guard = match target_lock {
-        Ok(lock_guard) => lock_guard,
-        Err(app_error) => {
-            let message = app_error.to_string();
-            return Err(DumpExecutionFailure::with_payload(
-                app_error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
-                    Some(message),
-                ),
-            ));
-        }
-    };
+    let lock_guard = target_lock.map_err(refused)?;
 
     if let Err(error) = if context.external_full_pull().is_none() {
         cleanup_orphan_dirs(&resolved)
@@ -427,35 +420,11 @@ fn run_dump_selected(
     }
 
     if let Err(error) = validate_publish_target(&resolved) {
-        let message = error.to_string();
-        return Err(DumpExecutionFailure::with_payload(
-            error,
-            empty_result(
-                mode,
-                started,
-                Some(resolved.source_set_name.clone()),
-                resolved.extension.clone(),
-                selectors.clone(),
-                Some(resolved.target_path.clone()),
-                Some(message),
-            ),
-        ));
+        return Err(refused(error));
     }
     if resolved.platform_target_path != resolved.target_path {
         if let Err(error) = validate_platform_target(&resolved) {
-            let message = error.to_string();
-            return Err(DumpExecutionFailure::with_payload(
-                error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
-                    Some(message),
-                ),
-            ));
+            return Err(refused(error));
         }
     }
 
@@ -477,51 +446,15 @@ fn run_dump_selected(
     let plan = copy
         .and_then(|copy| plan_dump(&mode, copy, platform_of(location.as_ref())))
         .and_then(|plan| {
-            // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
-            // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
-            // безвозвратное останавливает работу здесь, пока ничего не тронуто.
-            let (how, regenerated) = destruction_of(config, &plan);
-            match (how, &resolved.consent) {
-                (_, DestructionConsent::AskFirst(_)) => {
-                    guard_replacement(
-                        context,
-                        &resolved.target_path,
-                        &resolved.consent,
-                        regenerated,
-                        how,
-                    )?;
-                }
-                // Замену с согласием сторож спрашивает при публикации: там он и называет
-                // уничтоженное.
-                (Destruction::Replace, DestructionConsent::Granted) => {}
-                // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
-                // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
-                // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
-                // попасть — `--force` делает выгрузку полной, то есть заменой.
-                (Destruction::Overwrite, DestructionConsent::Granted) => {}
-                // Каталог раннера спрашивать не о чем.
-                (_, DestructionConsent::RunnerOwned) => {}
+            // Каталог человека сторож спрашивает до первой рабочей команды платформе при любом
+            // плане. Выгрузку по изменившемуся по годной копии описи — после поколения
+            // (`generation_then_guard`): неизменившееся поколение дерево не трогает (#683).
+            if !super::by_version_file(context, &plan, partial_objects.as_deref()) {
+                ask_the_guard(context, config, &resolved, &plan)?;
             }
             Ok(plan)
         });
-    let plan = match plan {
-        Ok(plan) => plan,
-        Err(error) => {
-            let message = error.to_string();
-            return Err(DumpExecutionFailure::with_payload(
-                error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
-                    Some(message),
-                ),
-            ));
-        }
-    };
+    let plan = plan.map_err(refused)?;
     let whole_note = plan.whole_reason().map(|reason| {
         format!(
             "{}: the dump ran full instead of incremental{}",
@@ -589,23 +522,17 @@ fn run_dump_selected(
             external.generation_before(provider, generation_before.clone());
         }
         // Как у агента: поколение до выгрузки по изменившемуся совпало с записанным тем же
-        // инструментом — выгружать нечего, и платформа больше не запускается.
-        let unchanged = generation_before
-            .as_deref()
-            .filter(|_| {
-                matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
-                    && partial_objects.is_none()
-            })
-            .and_then(|token| {
-                SourceSetInventory::new(config)
-                    .designer_context(&resolved.source_set_name)
-                    .and_then(|set| {
-                        crate::use_cases::exchange_guard::unchanged_since_the_record(
-                            config, set, provider, token,
-                        )
-                    })
-            });
-        if let Some(unchanged) = unchanged {
+        // инструментом — выгружать нечего, и платформа больше не запускается; иначе — сторож.
+        let decided = generation_then_guard(
+            context,
+            config,
+            &resolved,
+            &plan,
+            partial_objects,
+            provider,
+            generation_before.as_deref(),
+        );
+        if let GenerationDecision::UpToDate(unchanged) = decided.map_err(refused)? {
             (
                 // Платформа не запускалась: журнала у пропуска нет.
                 Ok((None, DumpNotes::message(Some(unchanged)))),
@@ -960,6 +887,88 @@ fn destruction_of(config: &AppConfig, plan: &DumpPlan) -> (Destruction, &'static
             (Destruction::Overwrite, &[VERSION_FILE_NAME])
         }
     }
+}
+
+/// Что решили поколение и сторож перед выгрузкой.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GenerationDecision {
+    /// Поколение не изменилось: выгружать нечего, дерево не трогается; сообщение для ответа.
+    UpToDate(String),
+    /// Выгрузка будет писать, и сторож её пропустил.
+    Dump,
+}
+
+/// Поколение до выгрузки и сторож — в этом порядке и одинаково у всех исполнителей (#683).
+/// Ждёт поколения только выгрузка, которую оно может пропустить: по изменившемуся по годной
+/// копии описи раннера, без выборки объектов ([`by_version_file`],
+/// `INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
+/// `generation` — поколение, которое исполнитель прочитал до выгрузки и так прочитал бы;
+/// второго чтения здесь нет. `Err` — отказ сторожа или отмена, пришедшая, пока читалось
+/// поколение: её Конфигуратор и `ibcmd` отдают как «поколения нет», и сторож над грязным
+/// деревом не должен её подменять. Выгрузку, которая поколения не ждёт, сторож уже спросил
+/// до платформы.
+pub(super) fn generation_then_guard(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+    provider: Provider,
+    generation: Option<&str>,
+) -> Result<GenerationDecision, AppError> {
+    if !super::by_version_file(context, plan, objects) {
+        return Ok(GenerationDecision::Dump);
+    }
+    let inventory = SourceSetInventory::new(config);
+    let set = inventory.designer_context(&resolved.source_set_name);
+    let unchanged = generation.zip(set).and_then(|(token, set)| {
+        crate::use_cases::exchange_guard::unchanged_since_the_record(config, set, provider, token)
+    });
+    if let Some(unchanged) = unchanged {
+        return Ok(GenerationDecision::UpToDate(unchanged));
+    }
+    if let Some(interrupted) = crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    ) {
+        return Err(interrupted);
+    }
+    ask_the_guard(context, config, resolved, plan)?;
+    Ok(GenerationDecision::Dump)
+}
+
+/// Сторож каталога человека перед выгрузкой: выгрузка поверх каталога переписывает его файлы
+/// на месте, замена — стирает лишнее. Без согласия безвозвратное останавливает работу, пока
+/// ничего не тронуто.
+fn ask_the_guard(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    plan: &DumpPlan,
+) -> Result<(), AppError> {
+    let (how, regenerated) = destruction_of(config, plan);
+    match (how, &resolved.consent) {
+        (_, DestructionConsent::AskFirst(_)) => {
+            guard_replacement(
+                context,
+                &resolved.target_path,
+                &resolved.consent,
+                regenerated,
+                how,
+            )?;
+        }
+        // Замену с согласием сторож спрашивает при публикации: там он и называет
+        // уничтоженное.
+        (Destruction::Replace, DestructionConsent::Granted) => {}
+        // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
+        // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
+        // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
+        // попасть — `--force` делает выгрузку полной, то есть заменой.
+        (Destruction::Overwrite, DestructionConsent::Granted) => {}
+        // Каталог раннера спрашивать не о чем.
+        (_, DestructionConsent::RunnerOwned) => {}
+    }
+    Ok(())
 }
 
 /// Файл версий набора и копия раннера: есть у набора с памятью базы.

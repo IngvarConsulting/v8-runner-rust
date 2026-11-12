@@ -24,7 +24,7 @@ use crate::support::path::{
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
-    WaysOut,
+    GuardStop, WaysOut,
 };
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, parse_external_descriptor, ExternalArtifactKind,
@@ -267,6 +267,7 @@ fn run_convert_with_context(
                     &resolved.consent,
                     &losses,
                     Destruction::Replace,
+                    GuardStop::BeforeThePlatform,
                 ) {
                     message.push_str("; ");
                     message.push_str(&note);

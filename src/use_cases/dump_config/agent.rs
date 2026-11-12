@@ -167,9 +167,9 @@ fn dump_through(
     let ledger = set.and_then(GenerationLedger::of);
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
-    // последней удачной операции и говорит, есть ли что выгружать. Пока агент отвечает,
-    // перечисляется дерево, в которое ляжет выгрузка (#574): сторож и отказы до платформы
-    // уже позади.
+    // последней удачной операции и говорит, есть ли что выгружать; выгрузку, которая будет
+    // писать, сторож спрашивает следом (#683). Пока агент отвечает, перечисляется дерево, в
+    // которое ляжет выгрузка (#574): отказы до платформы уже позади.
     let (asked, before) = list_before_dump_while(
         set,
         &config.work_path,
@@ -177,28 +177,20 @@ fn dump_through(
         &|| crate::use_cases::interruption::interruption_pending(context),
         || {
             let generation = generation_id(handle, extension, wait)?;
-            // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла
-            // версий: полная поверх каталога его пишет, и каталог без него не годится как «уже
-            // выгружено».
-            let unchanged = if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
-                && objects.is_none()
-            {
-                set.and_then(|set| {
-                    crate::use_cases::exchange_guard::unchanged_since_the_record(
-                        config,
-                        set,
-                        Provider::Agent,
-                        &generation,
-                    )
-                })
-            } else {
-                None
-            };
-            Ok::<_, AppError>((generation, unchanged))
+            let decision = super::coordinator::generation_then_guard(
+                context,
+                config,
+                resolved,
+                plan,
+                objects,
+                Provider::Agent,
+                Some(&generation),
+            )?;
+            Ok::<_, AppError>((generation, decision))
         },
-        |asked| matches!(asked, Ok((_, None))),
+        |asked| matches!(asked, Ok((_, super::coordinator::GenerationDecision::Dump))),
     );
-    let (generation, unchanged) = asked?;
+    let (generation, decision) = asked?;
     let recorded = ledger
         .as_ref()
         .map_or(Recorded::Nothing, GenerationLedger::read);
@@ -208,7 +200,7 @@ fn dump_through(
         )),
         Recorded::Nothing | Recorded::Ours(_) => None,
     };
-    if let Some(unchanged) = unchanged {
+    if let super::coordinator::GenerationDecision::UpToDate(unchanged) = decision {
         return Ok((String::new(), DumpNotes::message(Some(unchanged)), true));
     }
 
