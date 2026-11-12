@@ -167,7 +167,8 @@
 | `infobase-tools dump-ib --file` | **8.3.14** | — | V8U 8.3.14 | `infobase dump` |
 | `infobase-tools restore-ib --file` | **8.3.14** | **8.3.27: сеанс завершается, SSH разрывается, агент остаётся прежним, в JSON предупреждение только информативное. До этого агент перезапускался, а предупреждение было всегда интерактивным. Запуск: на 8.3.24 и 8.3.26 раннер отказывает, на 8.3.27 успешно** | V8U 8.3.14, 8.3.27; замер 06.11.2026 | `infobase restore` |
 | `config extensions create`, `delete`, `properties get/set` | **8.3.14** | Создание, удаление, чтение и запись свойств доступны только агенту; имена команд в записи не приведены | V8U 8.3.14 | `extensions` |
-| `… properties get --all-extensions`, `set --safe-mode --unsafe-action-protection --active` | не подтверждено (замер 8.3.27) | — | `capability.rs`, прогон 15.09.2026 | `extensions` |
+| `… properties get --all-extensions` | **≤ 8.3.24** (замер 8.3.24, 8.3.27, 8.5.1) | Поля те же, что у `ibcmd config extension list`, префикса имени нет | замер: «Список расширений у агента и у `ibcmd`…» | `extensions`, `status --deep`, `pull --all` |
+| `… properties set --safe-mode --unsafe-action-protection --active` | не подтверждено (замер 8.3.27) | — | `capability.rs`, прогон 15.09.2026 | `extensions` |
 
 ### Утилита `ibcmd`
 

@@ -5447,3 +5447,72 @@ config dump-config-to-files --dir=src --update                                 #
   нейтральна или чуть дороже из-за переноса.
 - Решение о переходе — за владельцем (#646). Не мерены: удаление объекта на КА (полная выгрузка
   в стадию и публикация дерева), пара с `update-db-cfg`, `ibcmd` на КА, перенос кодом раннера.
+
+## Список расширений у агента и у `ibcmd` на 8.3.24, 8.3.27, 8.5.1 (#631)
+
+Замер 12.11.2026, Windows 11, 8.3.24.1819, 8.3.27.2342 и 8.5.1.1529. На каждой платформе
+своя новая пустая файловая база без пользователей (`CREATEINFOBASE`). В ней `ibcmd` создал два
+расширения: `Проба1` (префикс `П1_`) и `Проба2` (префикс `П2_`, назначение `patch`). У
+`Проба2` выключены активность, безопасный режим и защита от опасных действий. Агент —
+голый, без раннера (`scripts/bench/bare_agent.py`): SSH-оболочка без терминала,
+`options set --show-prompt=no --output-format=json`.
+
+```text
+1cv8 CREATEINFOBASE File=<ib>
+ibcmd infobase config extension create --db-path=<ib> --name=Проба1 --name-prefix=П1_
+ibcmd infobase config extension create --db-path=<ib> --name=Проба2 --name-prefix=П2_ --purpose=patch
+ibcmd infobase config extension update --db-path=<ib> --name=Проба2 --active=no --safe-mode=no --unsafe-action-protection=no
+ibcmd infobase config extension list --db-path=<ib>                  # три раза
+1cv8 DESIGNER /F <ib> /AgentMode /AgentPort <p> /AgentListenAddress 127.0.0.1 /AgentSSHHostKeyAuto /AgentBaseDir <dir>
+# в одной сессии: config extensions properties get --all-extensions (три раза);
+#                 config extensions properties get --extension=Проба2; config generation-id
+ibcmd infobase config extension list --db-path=<ib>                  # пока агент подключён
+```
+
+**Поля.** На всех трёх платформах агент отдал те же записи, что `ibcmd`, и столько же: `name`,
+`version`, `active`, `purpose`, `safe-mode`, `security-profile-name`,
+`unsafe-action-protection`, `used-in-distributed-infobase`, `scope`, `hash-sum`. Значения
+совпали, в том числе `hash-sum` побайтно. Порядок записей тоже совпал. У агента логические
+поля приходят JSON-логическими значениями, у `ibcmd` — `yes`/`no`. Пустые `version` и
+`security-profile-name` — пустая строка у обоих. Префикса имени (`name-prefix`) нет ни у
+агента, ни у `ibcmd config extension list`, ни на одной из трёх платформ. `extensions list`
+раннера подтверждает префикс у `ibcmd` отдельно, снимком применённого расширения, а у
+агента такого снимка нет. Поэтому `name_prefix` у агента — `null`
+([`CTR.WIRE.EXTENSIONS-INVENTORY-DATA`](../../spec/rules/wire/extensions-inventory-data.md)).
+
+Форма ответа агента та же, что в замере #187: на `--all-extensions` — одно сообщение `success`,
+записи в его `body`; на `--extension=<имя>` — сообщение `extension-properties` без `success`.
+
+**Время**, секунды:
+
+| | 8.3.24.1819 | 8.3.27.2342 | 8.5.1.1529 |
+| --- | ---: | ---: | ---: |
+| `ibcmd config extension list`, процесс | 2,37–2,46 | 2,43–2,53 | 2,44–2,59 |
+| агент: `properties get --all-extensions` в открытой сессии | 0,011 | 0,011–0,012 | 0,011 |
+| агент: `config generation-id` в той же сессии | 0,011 | 0,011 | 0,011 |
+| агент: запуск и первая сессия | 1,5 | 1,9 | 1,3 |
+
+Пока агент подключён к базе, `ibcmd config extension list` той же базы отказывает за
+0,4–0,6 с: `rc=−1`, «Ошибка исключительной блокировки информационной базы.» (cp866,
+8.3.27). После `common disconnect-ib` тот же вызов проходит за 2,5 с. Поэтому раннер,
+выбрав `ibcmd`, сначала отключает живого агента от базы
+(`release_for_another_executor`, #644), а `status --deep` на КА платил за список 14–20 с
+(«Фазы `status --deep` на файловой КА 2.6.2.59 (#603)»).
+
+**Вывод.** Агент Конфигуратора на 8.3.24, 8.3.27 и 8.5.1 отдаёт список расширений базы со всеми
+полями `ibcmd config extension list` одной командой в уже открытой сессии, за сотые доли
+секунды. Список для `status --deep` и `pull --all` можно брать у агента без второго процесса.
+Префикс имени для `extensions list` агент не даёт.
+
+**`status --deep` на КА со списком у агента.** Тот же день, стенд `scripts/bench` (КА на
+8.3.27.2342, проект `p-new`, 113 тыс. файлов, база без расширений), release-сборка ветки #631.
+Команда `v8-runner --json-message --log-level debug status --deep`, `live: true`, исполнители по
+умолчанию, два вызова подряд без живого агента перед первым:
+
+| Вызов | Вся команда | Подготовка агента | `generation-id` | Список расширений | `extensions.provider` |
+| --- | ---: | ---: | ---: | ---: | --- |
+| первый | 17,95 с | 12,77 с | 0,26 с | 0,39 с | `agent`, `reused: false`, `kept: true` |
+| второй | 3,40 с | 0,05 с | 0,26 с | 0,40 с | `agent`, `reused: true`, `kept: true` |
+
+Процесс `ibcmd` не запускался. Живой агент после второго вызова остался подключённым и снят
+`agent stop`. Прежде список занимал 13,9–20,3 с, а второй вызов — 31,9 с.
