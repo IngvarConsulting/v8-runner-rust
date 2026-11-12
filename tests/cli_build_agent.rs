@@ -1046,7 +1046,8 @@ fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness 
 /// Агент грузит основную конфигурацию и расширение, а запись расширения сделал `ibcmd`:
 /// поколение расширения спрашивает `ibcmd` первым проходом — раньше, чем открыта сессия
 /// агента, которая держала бы файловую базу, — и расширение, ушедшее вперёд, отказывает
-/// `non_fast_forward` до загрузки.
+/// `non_fast_forward` до загрузки. Агент, поднятый заранее, к базе не подключается ни в каком
+/// порядке событий (#653): он мог успеть подняться и выставить режим ответа — и только.
 #[test]
 fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
     let second = "2".repeat(40);
@@ -1074,11 +1075,45 @@ fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
         ibcmd_calls.lines().all(|line| line.contains("--extension")),
         "{ibcmd_calls}"
     );
+    let agent_commands = commands(&harness);
     assert!(
-        commands(&harness).is_empty(),
-        "no agent session was opened before the refusal: {:?}",
-        commands(&harness)
+        agent_commands
+            .iter()
+            .all(|line| line == "options set --show-prompt=no --output-format=json"),
+        "no agent session was opened and the agent was not connected to the infobase before the refusal: {agent_commands:?}"
     );
+}
+
+/// Поколение расширения, записанное `ibcmd`, совпало: агент, поднятый заранее без подключения
+/// к базе, подключает сессия команды после сверки (#653), и наборы грузятся в ней. `ibcmd`
+/// спрашивается один раз — до сессии; поколение после загрузки читает уже агент.
+#[test]
+fn an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check() {
+    let recorded = "1".repeat(40);
+    let harness = harness_with_an_extension_recorded_by_ibcmd(Some(&recorded));
+
+    let (code, payload) = run(&harness, &["push"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let ibcmd_calls = read_or_empty(&harness.dir.path().join("ibcmd-calls.log"));
+    assert_eq!(
+        ibcmd_calls
+            .lines()
+            .filter(|line| line.contains("generation-id"))
+            .count(),
+        1,
+        "only the record tool's read of the extension: {ibcmd_calls}"
+    );
+    let agent_commands = commands(&harness);
+    let connect = agent_commands
+        .iter()
+        .position(|line| line == "common connect-ib")
+        .unwrap_or_else(|| panic!("the session connects the agent: {agent_commands:?}"));
+    let load = agent_commands
+        .iter()
+        .position(|line| line.starts_with("config load-config-from-files"))
+        .unwrap_or_else(|| panic!("the sets are loaded: {agent_commands:?}"));
+    assert!(connect < load, "{agent_commands:?}");
 }
 
 /// Инструмент записи поколением не ответил — здесь `ibcmd` нет в установке: сверить нечем,

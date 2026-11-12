@@ -46,14 +46,42 @@ pub(super) fn start_early(
     let platform = crate::platform::locator::platform_version_of(location.utility, &location.path);
     let inventory = SourceSetInventory::new(config);
     let source_sets = selected_ordered_source_sets(&inventory, args.source_set.as_deref()).ok()?;
-    for source_set in source_sets
+    let contexts = source_sets
         .iter()
         .filter(|source_set| !source_set.purpose.is_external())
+        .map(|source_set| {
+            let set = inventory.designer_context(&source_set.name)?;
+            crate::use_cases::version_file::check_load_format(set, platform.as_ref()).ok()?;
+            Some(set)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    EarlyAgent::start(
+        context,
+        config,
+        &location.path,
+        early_session(context, config, args.load, &contexts),
+    )
+}
+
+/// Подключать ли агента к базе, пока идёт разбор. Нет, если поколение какого-то набора до
+/// загрузки спросит другой инструмент своим процессом (#653): подключённый агент держал бы
+/// файловую базу, а прочесть вместо `ibcmd` загруженное, но не применённое расширение он не
+/// может — отдаёт применённое, как пакетный Конфигуратор (замер #653). Такой агент поднимается
+/// без подключения, и подключает его сессия команды, открытая после сверки. Наборы берутся
+/// все выбранные: какие из них грузятся, скажет только разбор.
+fn early_session(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    mode: PushMode,
+    sets: &[&SourceSetContext],
+) -> EarlySession {
+    if crate::use_cases::exchange_guard::GenerationGate::new(context, config, mode)
+        .asks_the_record_tool(sets, Provider::Agent)
     {
-        let context = inventory.designer_context(&source_set.name)?;
-        crate::use_cases::version_file::check_load_format(context, platform.as_ref()).ok()?;
+        EarlySession::AfterRecordCheck
+    } else {
+        EarlySession::Later
     }
-    EarlyAgent::start(context, config, &location.path, EarlySession::Later)
 }
 
 pub(super) struct AgentLoader {

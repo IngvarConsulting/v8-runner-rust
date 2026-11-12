@@ -747,12 +747,9 @@ impl<'a> GenerationGate<'a> {
         }
         let mut utilities = None;
         for set in sets {
-            let Some(record) = recorded_generation(set) else {
+            let Some(record) = self.record_to_ask(set, tool) else {
                 continue;
             };
-            if !self.foreign(&record, tool, token_scope(self.config, set)) {
-                continue;
-            }
             let utilities =
                 utilities.get_or_insert_with(|| PlatformUtilities::from_config(self.config));
             let before = self
@@ -763,6 +760,25 @@ impl<'a> GenerationGate<'a> {
                 .insert(set.name().to_owned(), before);
         }
         Ok(())
+    }
+
+    /// Спросит ли [`Self::check_foreign`] поколение инструментом записи хоть у одного из `sets`:
+    /// тот же выбор, что у сверки, без вопроса платформе. По нему `push` не подключает к базе
+    /// живого агента, поднятого заранее, пока сверка не прошла (#653).
+    pub(crate) fn asks_the_record_tool(&self, sets: &[&SourceSetContext], tool: Provider) -> bool {
+        sets.iter()
+            .any(|set| self.record_to_ask(set, tool).is_some())
+    }
+
+    /// Запись набора, о которой [`Self::check_foreign`] спрашивает инструмент записи, когда
+    /// набор грузит `tool`; `None` — не спрашивает. Единственное место этого выбора: по нему же
+    /// `push` решает о раннем подключении агента ([`Self::asks_the_record_tool`]).
+    fn record_to_ask(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
+        if self.mode == PushMode::Force {
+            return None;
+        }
+        recorded_generation(set)
+            .filter(|record| self.foreign(record, tool, token_scope(self.config, set)))
     }
 
     /// Запись сделал другой известный инструмент, и с токеном загрузчика её токен несравним.
@@ -1350,6 +1366,61 @@ mod tests {
 
         assert!(gate.generation_after_load_decides(remembered));
         assert!(!gate.generation_after_load_decides(&unremembered));
+    }
+
+    /// Поколение расширения, записанное `ibcmd`, у отправки агентом спрашивает `ibcmd` своим
+    /// процессом, и об этом известно до разбора: по этому ответу `push` не подключает к базе
+    /// агента, поднятого заранее, пока сверка не прошла (#653). Запись самого агента, запись
+    /// основной конфигурации файловой базы (токены сравнимы) и `push --force` сверки не дают.
+    #[test]
+    fn a_push_knows_before_the_analysis_that_the_record_tool_will_be_asked() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut config = project(root.path());
+        std::fs::create_dir_all(root.path().join("ext")).expect("extension sources");
+        config.source_sets.push(SourceSetConfig {
+            name: "ext".to_owned(),
+            purpose: SourceSetPurpose::Extension,
+            path: PathBuf::from("ext"),
+        });
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let (main, ext) = (&contexts[0], &contexts[1]);
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let token = "1".repeat(40);
+        let record = |set: &SourceSetContext, tool: Provider| {
+            GenerationLedger::of(set)
+                .expect("ledger")
+                .record(tool, &token, GenerationAfter::Build)
+                .expect("generation record");
+        };
+
+        assert!(
+            !gate.asks_the_record_tool(&[main, ext], Provider::Agent),
+            "nothing recorded"
+        );
+
+        record(main, Provider::Ibcmd);
+        assert!(
+            !gate.asks_the_record_tool(&[main, ext], Provider::Agent),
+            "the main configuration of a file base compares tokens of any tool"
+        );
+
+        record(ext, Provider::Agent);
+        assert!(!gate.asks_the_record_tool(&[main, ext], Provider::Agent));
+
+        record(ext, Provider::Ibcmd);
+        assert!(gate.asks_the_record_tool(&[main, ext], Provider::Agent));
+        assert!(gate.asks_the_record_tool(&[ext], Provider::Agent));
+        assert!(!gate.asks_the_record_tool(&[main], Provider::Agent));
+        assert!(
+            !gate.asks_the_record_tool(&[ext], Provider::Ibcmd),
+            "the record tool loads the set itself"
+        );
+        assert!(
+            !GenerationGate::new(&context, &config, PushMode::Force)
+                .asks_the_record_tool(&[ext], Provider::Agent),
+            "push --force checks no generation"
+        );
     }
 
     #[test]
