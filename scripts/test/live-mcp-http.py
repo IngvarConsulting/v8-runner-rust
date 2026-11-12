@@ -262,7 +262,7 @@ def main() -> int:
             )
             syntax_data = expect_tool_success(syntax_payload, "check_syntax_edt")
             assert_true(
-                syntax_data.get("status") in ("clean", "issues_found"),
+                syntax_data.get("status") == "clean",
                 f"check_syntax_edt returned unexpected data.status: {json.dumps(syntax_data, ensure_ascii=False)}",
             )
 

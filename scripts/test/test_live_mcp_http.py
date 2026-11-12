@@ -57,21 +57,19 @@ class LiveMcpHttpTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_successful_sequence_with_no_changes_to_build(self):
-        for status in ("clean", "issues_found"):
-            with self.subTest(status=status):
-                responses = [
-                    tool_result("push", {
-                        "ok": True, "provider_dispatched": False, "steps": [], "duration_ms": 0,
-                    }),
-                    tool_result("check", {"status": status}),
-                    tool_result("test", {"ok": True}),
-                ]
-                with patch.object(smoke, "call_tool", side_effect=responses) as call:
-                    self.assertEqual(smoke.main(), 0)
-                self.assertEqual(
-                    [invocation.args[3] for invocation in call.call_args_list],
-                    ["build_project", "check_syntax_edt", "run_module_tests"],
-                )
+        responses = [
+            tool_result("push", {
+                "ok": True, "provider_dispatched": False, "steps": [], "duration_ms": 0,
+            }),
+            tool_result("check", {"status": "clean"}),
+            tool_result("test", {"ok": True}),
+        ]
+        with patch.object(smoke, "call_tool", side_effect=responses) as call:
+            self.assertEqual(smoke.main(), 0)
+        self.assertEqual(
+            [invocation.args[3] for invocation in call.call_args_list],
+            ["build_project", "check_syntax_edt", "run_module_tests"],
+        )
 
     def test_protocol_error_stops_smoke_with_tool_and_server_reason(self):
         response = {
@@ -84,13 +82,18 @@ class LiveMcpHttpTest(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
 
     def test_business_failure_stops_smoke_with_tool_and_server_reason(self):
-        response = tool_result("push", {}, {
-            "code": "runtime_failure", "kind": "runtime", "message": "Workspace is busy",
-        })
-        with patch.object(smoke, "call_tool", return_value=response) as call:
-            with self.assertRaisesRegex(RuntimeError, "build_project: command failed.*runtime_failure.*Workspace is busy"):
+        responses = [
+            tool_result("push", {"ok": True}),
+            tool_result("check", {"status": "issues_found"}, {
+                "code": "runtime_failure",
+                "kind": "runtime",
+                "message": "syntax check 'edt' finished with status IssuesFound (exit code 0)",
+            }),
+        ]
+        with patch.object(smoke, "call_tool", side_effect=responses) as call:
+            with self.assertRaisesRegex(RuntimeError, "check_syntax_edt: command failed.*runtime_failure.*IssuesFound"):
                 smoke.main()
-        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_count, 2)
 
 
 class LiveMcpHttpStartupTest(unittest.TestCase):
