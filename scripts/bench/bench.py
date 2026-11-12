@@ -285,6 +285,9 @@ class Bench:
         stage_dir = self.path("base-edit")
         listing = ex.stage(stage_dir, {rel: ex.marked(originals[rel], marker) for rel in rels})
         self.base_marked = self.needs_resync = True
+        # A live agent stays connected between commands (#644) and holds the base for configuring:
+        # the other editor gets in only after it is released, as a real one would have to wait.
+        self.runner.release_agents()
         ex.designer(self.stand, ex.batch_push_args(stage_dir, listing), self.path("designer.out"))
 
     # -- push: edit the module, load it into the base, update the database configuration
