@@ -707,7 +707,7 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
-    // Копию описи кладёт выгрузка, а не сборка (#646): здесь она как после прежнего `pull`.
+    // Копия описи — как после прежнего `pull`, что бы ни оставило освежение после сборки (#646).
     support::memory::remember_version_file(
         harness.dir.path(),
         "origin",
@@ -718,6 +718,15 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
     let project = harness.sources.parent().expect("project dir");
     support::commit_sources(project);
+
+    // Полная сборка сама освежает опись (`--config-dump-info-only`, #646): смотрим только команды выгрузки.
+    let before_dump = commands(&harness).len();
+    assert!(
+        commands(&harness)
+            .iter()
+            .any(|line| line.contains("--config-dump-info-only")),
+        "a full build refreshes the version file"
+    );
 
     let (dump, payload) = run(&harness, &["dump"]);
 
@@ -730,7 +739,7 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
         "{payload}"
     );
     assert!(
-        !commands(&harness)
+        !commands(&harness)[before_dump..]
             .iter()
             .any(|line| line.starts_with("config dump-config-to-files")),
         "nothing may be dumped for an unchanged generation"
