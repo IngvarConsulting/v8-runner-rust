@@ -1130,7 +1130,17 @@ fn run_dump_over_directory_ibcmd(
             if crate::platform::ibcmd::asks_for_a_full_export(&result.process) {
                 ensure_interruption_clear(context, "before the full dump the platform asked for")?;
                 let evidence = Some(ModeEvidence::Forecast(DumpForecast::Full));
-                return full_into(into.output).map(|result| (result, evidence));
+                let refused = result.process.stderr.trim().to_owned();
+                return full_into(into.output)
+                    .map(|result| (result, evidence))
+                    .map_err(|error| match error {
+                        AppError::Platform(message) if !refused.is_empty() => {
+                            AppError::Platform(format!(
+                                "{message}; the dump by changes was refused before it: {refused}"
+                            ))
+                        }
+                        other => other,
+                    });
             }
             ensure_platform_success("dump", resolved, &result)?;
             Ok((result, evidence))

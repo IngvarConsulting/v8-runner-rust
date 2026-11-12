@@ -45,3 +45,15 @@ title = "push --no-apply двух общих модулей и следующи�
 kind = "pair"
 modules = "common2"
 executors = ["runner-live"]
+
+[pair-common30]
+title = "push --no-apply 30 общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common30"
+executors = ["runner-live"]
+
+[pair-common300]
+title = "push --no-apply 300 общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common300"
+executors = ["runner-live"]

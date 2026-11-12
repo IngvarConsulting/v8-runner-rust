@@ -401,6 +401,24 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/DumpConfigToFiles <dir> -configDumpInfoOnly [-Extension <name>]`: только файл версий —
+    /// свежая опись после крупной загрузки (#646).
+    pub fn dump_config_dump_info_only(
+        &self,
+        target_dir: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpConfigToFiles".to_owned());
+        args.push(target_dir.display().to_string());
+        args.push("-configDumpInfoOnly".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
     /// `/DumpConfigToFiles <dir> -update -configDumpInfoForChanges <file> [-Extension <name>]`:
     /// в каталог, которого ещё нет, — только изменённое относительно описи `version_file` и
     /// новая полная опись; после удаления элемента — всё (замер «-configDumpInfoForChanges», #646).

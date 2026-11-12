@@ -164,7 +164,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [применение — отдельный шаг](../rules/cli/apply-is-a-separate-step.md),
 [загрузка без применения помнится непринятой](../rules/use-cases/a-load-without-apply-is-remembered-as-unapplied.md),
 [`reset` отбрасывает непринятое](../rules/cli/reset-discards-the-unapplied.md),
-[загрузка не пишет файл версий](../rules/use-cases/a-push-writes-no-version-file.md),
+[свежий файл версий — после полной или крупной загрузки](../rules/use-cases/a-push-refreshes-the-version-file-only-when-it-pays.md),
 [изменения ищет та команда, которой нужен ответ](../rules/use-cases/changes-are-detected-on-demand.md),
 [у EDT две ступени состояния](../rules/use-cases/edt-keeps-two-change-contexts.md),
 [изменение вне корня набора делает загрузку полной](../rules/use-cases/a-change-outside-the-source-root-turns-the-load-full.md),

@@ -1261,8 +1261,10 @@ impl DumpListing {
 }
 
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
-/// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
-/// dump and no name of the description `after` it matches, letter case aside. A file the dump
+/// file by its path ([`partial_load::dump_element_of`]), or the part of it under its `Ext`
+/// directory ([`part_of_element`]: a module, help, predefined data, rights), was in the
+/// description `before` the dump and no name of the description `after` it matches, letter
+/// case aside. A file the dump
 /// wrote (stamped no earlier than `start`, when the dump wrote into the tree itself) is never
 /// named: on a case-insensitive file system an element renamed only in letter case keeps its
 /// files under the old spelling. A dump through a stage is listed before its files arrive
@@ -1288,12 +1290,33 @@ pub fn files_of_dropped_elements(
         .into_iter()
         .filter(|file| start.is_none_or(|start| file.mtime_ns < start.started_ns))
         .filter(|file| {
-            crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
+            let path = Path::new(&file.rel_path);
+            let dropped = |name: &str| before.contains(name) && !after.contains(name);
+            crate::change_detection::partial_load::dump_element_of(path)
                 .map(|owner| owner.to_lowercase())
-                .is_some_and(|owner| before.contains(&owner) && !after.contains(&owner))
+                .is_some_and(|owner| {
+                    dropped(&owner)
+                        || part_of_element(path, &owner).is_some_and(|part| dropped(&part))
+                })
         })
         .map(|file| file.path)
         .collect())
+}
+
+/// Part of the element `owner` a file under its `Ext` directory belongs to, as the version file
+/// names it: `Ext/ObjectModule.bsl` — `<owner>.objectmodule`, `Ext/Help.xml` and `Ext/Help/…` —
+/// `<owner>.help`, a form's `Ext/Form.xml` and `Ext/Form/Module.bsl` — `<owner>.form`. Such a
+/// part drops out of the version file when only it is removed and the element stays: a dump over
+/// the tree removed its files itself (#646, measured on 8.3.27). A name the version file never
+/// had matches nothing, so nothing is removed by it.
+fn part_of_element(path: &Path, owner: &str) -> Option<String> {
+    let components: Vec<_> = path.components().collect();
+    let ext = components
+        .iter()
+        .rposition(|component| component.as_os_str().eq_ignore_ascii_case("Ext"))?;
+    let part = components.get(ext + 1)?;
+    let part = Path::new(part.as_os_str()).file_stem()?.to_str()?;
+    Some(format!("{owner}.{}", part.to_lowercase()))
 }
 
 /// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
@@ -2052,6 +2075,71 @@ mod tests {
             vec![
                 ("Ahead.bsl".into(), ChangeKind::Modified),
                 ("Mine.bsl".into(), ChangeKind::Modified)
+            ]
+        );
+    }
+
+    /// Часть оставшегося элемента — модуль, справка, предопределённые, — пропавшая из описи,
+    /// уносит свои файлы, а сам элемент и его прочие части остаются: так выгрузка `-update`
+    /// поверх дерева убирала модуль удалённой команды (замер #646, 8.3.27). Файл части, которой
+    /// не было в прежней описи, не трогается.
+    #[test]
+    fn a_dropped_part_of_a_staying_element_takes_its_files() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        for file in [
+            "CommonCommands/К.xml",
+            "CommonCommands/К/Ext/CommandModule.bsl",
+            "Catalogs/Items.xml",
+            "Catalogs/Items/Ext/ObjectModule.bsl",
+            "Catalogs/Items/Ext/Help.xml",
+            "Catalogs/Items/Ext/Help/ru.html",
+            "Catalogs/Items/Ext/Predefined.xml",
+            "Catalogs/Items/Ext/Stray.bsl",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, file).expect("file");
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main");
+        let names = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let before = names(&[
+            "CommonCommand.К",
+            "CommonCommand.К.CommandModule",
+            "Catalog.Items",
+            "Catalog.Items.ObjectModule",
+            "Catalog.Items.Help",
+            "Catalog.Items.Predefined",
+        ]);
+        let after = names(&[
+            "CommonCommand.К",
+            "Catalog.Items",
+            "Catalog.Items.ObjectModule",
+            "Catalog.Items.Predefined",
+        ]);
+
+        let mut dropped: Vec<String> =
+            files_of_dropped_elements(&context, &work, None, &before, &after, &|| false)
+                .expect("listing")
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&root)
+                        .expect("inside the set")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+        dropped.sort();
+
+        assert_eq!(
+            dropped,
+            [
+                "Catalogs/Items/Ext/Help.xml",
+                "Catalogs/Items/Ext/Help/ru.html",
+                "CommonCommands/К/Ext/CommandModule.bsl",
             ]
         );
     }

@@ -515,23 +515,47 @@ fn a_pull_all_records_the_generation_of_each_set() {
     succeeded(&project.run(&["push"]));
 }
 
-/// Отправка файла версий не пишет и отдельно его не выгружает (#646): ни
-/// `-configDumpInfoOnly`, ни описи в каталоге набора, ни копии раннера.
+/// После полной отправки раннер получает свежий файл версий отдельной выгрузкой
+/// `-configDumpInfoOnly` во временный каталог и делает его копией, если поколение после загрузки
+/// и после выгрузки одно и то же (#646): в каталог набора опись не попадает, ключа обновления
+/// описи у загрузки нет.
 #[test]
-fn a_full_push_dumps_no_version_file_alone() {
+fn a_full_push_refreshes_the_runner_copy() {
     let project = Project::new("File=ib");
     project.base_generation(FIRST);
 
     succeeded(&project.run(&["push", "--force"]));
 
     let calls = project.calls();
-    assert!(!calls.contains("-configDumpInfoOnly"), "{calls}");
+    assert!(calls.contains("-configDumpInfoOnly"), "{calls}");
     assert!(!calls.contains("-updateConfigDumpInfo"), "{calls}");
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert!(project
+        .root()
+        .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+        .is_file());
+}
+
+/// Поколение изменилось, пока выгружалась опись: копия не обновляется, и ответ это называет.
+#[test]
+fn a_version_file_dumped_while_the_base_changed_is_not_recorded() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
     assert!(!project
         .root()
         .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
         .exists());
+    let message = pushed["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(
+        message.contains("was not refreshed after the load"),
+        "{message}"
+    );
 }
 
 /// `ibcmd` отвечает поколением в последней непустой строке stdout после приглашения ввести
@@ -589,6 +613,11 @@ case "$*" in
     exit 0 ;;
   *'generation-id'*) cat '{token}'; exit 0 ;;
   *'config export status'*) exit 0 ;;
+  *'export info'*)
+    for arg in "$@"; do case "$arg" in --out=*) out="${{arg#--out=}}" ;; esac; done
+    mkdir -p "$out"
+    printf '<ConfigDumpInfo version="2.20" by="ibcmd"/>\n' > "$out/ConfigDumpInfo.xml"
+    exit 0 ;;
   *'config export'*)
     for arg in "$@"; do target="$arg"; done
     mkdir -p "$target"
@@ -745,7 +774,7 @@ fn project_without_a_push_key() -> Project {
 /// Полная отправка через `ibcmd` файла версий не пишет и `config export info` не зовёт
 /// (#646): копии раннера нет, и следующий `pull` по изменившемуся становится полным.
 #[test]
-fn a_full_ibcmd_push_writes_no_version_file() {
+fn a_full_ibcmd_push_refreshes_the_runner_copy_and_the_next_pull_goes_by_it() {
     let project = project_without_a_push_key();
     project.base_generation(FIRST);
 
@@ -754,17 +783,28 @@ fn a_full_ibcmd_push_writes_no_version_file() {
     assert_eq!(pushed["data"]["provider"]["selected"], "ibcmd", "{pushed}");
     assert_eq!(pushed["data"]["provider"]["reason"], "whole", "{pushed}");
     assert!(
-        !project.calls().contains("export info"),
+        project.calls().contains("export info"),
         "{}",
         project.calls()
     );
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert_eq!(
+        fs::read_to_string(
+            project
+                .root()
+                .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+        )
+        .expect("runner copy"),
+        "<ConfigDumpInfo version=\"2.20\" by=\"ibcmd\"/>\n"
+    );
 
     let preview = succeeded(&project.run(&["pull", "main", "--dry-run"]));
 
-    assert_eq!(preview["data"]["mode"], "FULL", "{preview}");
-    assert_eq!(preview["data"]["mode_reason"], "version_file", "{preview}");
-    assert_eq!(preview["data"]["provider"]["reason"], "whole", "{preview}");
+    assert_eq!(preview["data"]["mode"], "INCREMENTAL", "{preview}");
+    assert_eq!(
+        preview["data"]["provider"]["reason"], "by_changes",
+        "{preview}"
+    );
 }
 
 /// Первый `pull` без памяти о базе, во время которого базу правили: ответ это называет, а

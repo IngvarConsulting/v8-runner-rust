@@ -887,7 +887,7 @@ fn run_dump_selected(
         let losses = discarded.report();
         (platform_log_path, message, losses, evidence)
     });
-    if version_file_before_partial && result.is_ok() {
+    if version_file_before_partial {
         let written = resolved.platform_target_path.join(VERSION_FILE_NAME);
         if let Err(error) = std::fs::remove_file(&written) {
             if error.kind() != std::io::ErrorKind::NotFound {

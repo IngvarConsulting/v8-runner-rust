@@ -755,8 +755,9 @@ fn a_failed_pull_does_not_change_the_runner_copy() {
     assert_eq!(format!("{}\n", last_seen(&project)), ours);
 }
 
-/// `push` ключа обновления описи не передаёт и копию раннера не трогает (#646): копия
-/// устаревает только на загруженное, и следующая выгрузка по изменившемуся идёт от неё.
+/// Небольшой `push` по изменившемуся ключа обновления описи не передаёт и копию раннера не
+/// трогает (#646): копия устаревает только на загруженное, и следующая выгрузка по
+/// изменившемуся идёт от неё.
 #[test]
 fn a_push_leaves_the_runner_copy_and_passes_no_update_key() {
     for provider in ["designer", "ibcmd"] {
@@ -770,7 +771,6 @@ fn a_push_leaves_the_runner_copy_and_passes_no_update_key() {
         .expect("edit");
 
         succeeded(run(&project, &["push"]));
-        succeeded(run(&project, &["push", "--force"]));
 
         let calls = read(&project.calls);
         assert!(

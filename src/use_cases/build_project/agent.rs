@@ -14,9 +14,9 @@ use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
-    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, EarlyAgent, EarlySession,
-    Exchange,
+    argument, collect_into_dir, connect, generation_id, make_output_dir, run_critical, run_id,
+    stage_dir, stage_dir_partially, tidy, transcript_log, unstage, wait_policy, write_bytes,
+    AgentHandle, EarlyAgent, EarlySession, Exchange,
 };
 use crate::use_cases::interruption::Deferrals;
 
@@ -260,6 +260,41 @@ impl SourceSetLoader for AgentLoader {
             warnings.extend(format_notice);
             Loaded { warnings, apply }
         })
+    }
+
+    fn dump_version_file(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        _step_index: usize,
+        into: &Path,
+    ) -> Result<(), AppError> {
+        let run = self.run.clone();
+        let (handle, wait) = self.handle(context, config)?;
+        let exchange = handle.exchange(config)?;
+        // Опись пишется в каталог пользователя агента и уходит к раннеру в `into`, в каталог
+        // набора — никогда (#646).
+        let relative = format!("dump-info/{run}-{}", source_set.name);
+        make_output_dir(handle, &exchange, &relative)?;
+        let mut command = format!(
+            "config dump-config-to-files --dir={} --config-dump-info-only",
+            argument(&relative)
+        );
+        if let Some(extension) = extension_name(source_set) {
+            command.push_str(&format!(" --extension={}", argument(extension)));
+        }
+        let dumped = handle
+            .run(&command, &wait)
+            .map_err(AppError::from)
+            .and_then(|reply| reply.outcome().map(|_| ()).map_err(AppError::from));
+        let collected = dumped
+            .as_ref()
+            .ok()
+            .map(|_| collect_into_dir(handle, &exchange, &relative, into));
+        tidy(handle, &exchange, &relative);
+        dumped?;
+        collected.transpose().map(|_| ())
     }
 
     fn apply_only(

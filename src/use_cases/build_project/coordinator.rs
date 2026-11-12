@@ -3,8 +3,9 @@ use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::progress::ProgressPhase;
 use crate::use_cases::context::shell_word;
-use crate::use_cases::exchange_guard::GenerationGate;
+use crate::use_cases::exchange_guard::{BeforeLoad, GenerationGate};
 use crate::use_cases::request::ApplyPolicy;
+use crate::use_cases::version_file::{RunnerVersionFile, VERSION_FILE_NAME};
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
 ///
@@ -38,6 +39,16 @@ pub(super) trait SourceSetLoader {
         commit: &StepCommit,
         apply: ApplyPolicy,
     ) -> Result<Loaded, AppError>;
+
+    /// Один файл версий набора в каталог `into` — свежая опись после крупной загрузки (#646).
+    fn dump_version_file(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        step_index: usize,
+        into: &Path,
+    ) -> Result<(), AppError>;
 
     /// Только применение: отправка, которой нечего грузить, применяет непринятое своей
     /// прежней загрузки (`INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED`).
@@ -132,6 +143,30 @@ impl SourceSetLoader for DesignerLoader {
             commit,
             apply,
         )
+    }
+
+    fn dump_version_file(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        step_index: usize,
+        into: &Path,
+    ) -> Result<(), AppError> {
+        let binary = self.binary()?;
+        let result = build_designer_dsl(
+            context,
+            config,
+            &binary,
+            self.utilities.runner_for(UtilityType::V8),
+            &source_set.name,
+            step_index,
+            "dump-info",
+            InterruptionSafetyClass::GracefulThenKill,
+        )?
+        .dump_config_dump_info_only(into, extension_name(source_set))
+        .map_err(AppError::from)?;
+        ensure_platform_success("dump_info", source_set, &result)
     }
 
     fn apply_only(
@@ -450,7 +485,21 @@ fn run_build_with(
                             .map(|(warnings, token)| (before, warnings, token, apply))
                     });
                 match loaded {
-                    Ok((_, mut warnings, token, apply)) => {
+                    Ok((before, mut warnings, token, apply)) => {
+                        if refreshes_the_version_file(partial_paths.as_deref(), &before) {
+                            warnings.extend(refresh_version_file(
+                                context,
+                                config,
+                                &source_context,
+                                token.as_deref(),
+                                |into| {
+                                    loader.dump_version_file(
+                                        context, config, source_set, index, into,
+                                    )?;
+                                    loader.read_generation(context, config, source_set, index)
+                                },
+                            ));
+                        }
                         let recorded = gate.after_load(
                             &source_context,
                             loader.tool(),
@@ -737,11 +786,38 @@ pub(super) fn run_build_ibcmd(
                 let step_started = Instant::now();
                 let runner = utilities.runner_for(UtilityType::Ibcmd);
                 let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
-                match guarded_load(
+                // `config export info` замерен только у основной конфигурации (#403).
+                let main_configuration =
+                    source_set.purpose == crate::config::model::SourceSetPurpose::Configuration;
+                match guarded_load_then(
                     &gate,
                     &source_context,
                     Provider::Ibcmd,
                     read,
+                    |before, token| {
+                        (main_configuration
+                            && refreshes_the_version_file(partial_paths.as_deref(), before))
+                        .then(|| {
+                            refresh_version_file(context, config, &source_context, token, |into| {
+                                let exported = build_ibcmd_dsl(
+                                    context,
+                                    config,
+                                    &binary,
+                                    runner,
+                                    InterruptionSafetyClass::GracefulThenKill,
+                                )?
+                                .config_export_info(into)
+                                .map_err(map_ibcmd_error)?;
+                                exported.process.outcome().map_err(|error| {
+                                    AppError::Runtime(format!(
+                                        "`ibcmd config export info` failed: {error}"
+                                    ))
+                                })?;
+                                read()
+                            })
+                        })
+                        .flatten()
+                    },
                     || {
                         execute_source_set_step_ibcmd(
                             context,
@@ -1679,19 +1755,110 @@ pub(super) fn guarded_load(
     load: impl FnOnce() -> Result<Loaded, AppError>,
     commit: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<Loaded, AppError> {
-    gate.before_load(set, tool, &read)?;
+    guarded_load_then(gate, set, tool, read, |_, _| None, load, commit)
+}
+
+/// [`guarded_load`] с шагом `after` после удачной загрузки: он видит сверку перед ней и токен
+/// поколения после неё и возвращает строку для ответа (свежий файл версий, #646).
+fn guarded_load_then(
+    gate: &GenerationGate<'_>,
+    set: &SourceSetContext,
+    tool: Provider,
+    read: impl Fn() -> Result<Option<String>, AppError>,
+    after: impl FnOnce(&BeforeLoad, Option<&str>) -> Option<String>,
+    load: impl FnOnce() -> Result<Loaded, AppError>,
+    commit: impl FnOnce() -> Result<(), AppError>,
+) -> Result<Loaded, AppError> {
+    let before = gate.before_load(set, tool, &read)?;
     let Loaded { warnings, apply } =
         load().inspect_err(|error| gate.after_failed_load(set, error))?;
     // Ответ, который ничего не решает, не спрашивается (#637).
-    let read = if gate.generation_after_load_decides(set) {
+    let read_after = if gate.generation_after_load_decides(set) {
         read()
     } else {
         Ok(None)
     };
-    let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read)?;
+    let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read_after)?;
     let recorded = gate.after_load(set, tool, token.as_deref(), apply.mark());
+    warnings.extend(after(&before, token.as_deref()));
     warnings.extend(remember_unapplied(&apply, recorded, commit)?);
     Ok(Loaded { warnings, apply })
+}
+
+/// С какого числа загруженных файлов отправка по изменившемуся сразу получает свежий файл
+/// версий (#646). Порог консервативный: запрос описи делается, только когда обратная выгрузка
+/// загруженного следующим `pull` однозначно дороже. Замер на КА 8.3.27 с живым агентом: запрос
+/// одной описи стоит отправке 1,6–1,7 с, а `pull` после отправки 2, 30 и 300 общих модулей без
+/// него дороже лишь на 1,1–1,7 с — разница в пределах разброса; выгрузка дерева КА идёт около
+/// 5 мс на файл, и тысяча файлов — не меньше 5 с против 1,6 с. Раздел «Свежий файл версий
+/// после крупной загрузки (#646)» в `references/1c/confirmed-runtime-measurements.md`.
+const VERSION_FILE_REFRESH_FILES: usize = 1000;
+
+/// Получает ли загрузка свежий файл версий: полная — всегда, по изменившемуся — с порога
+/// [`VERSION_FILE_REFRESH_FILES`] и только если поколение перед ней совпало с записанным. Иначе
+/// база могла нести правки, которых нет в каталоге, и свежая опись заявила бы их выгруженными.
+fn refreshes_the_version_file(partial_paths: Option<&[PathBuf]>, before: &BeforeLoad) -> bool {
+    match partial_paths {
+        None => true,
+        Some(paths) => *before == BeforeLoad::Matched && paths.len() >= VERSION_FILE_REFRESH_FILES,
+    }
+}
+
+/// Свежий файл версий после удачной загрузки (#646): `dump_and_reread` пишет одну опись во
+/// временный каталог под `workPath` и читает поколение снова. Поколение то же, что после загрузки
+/// (`token`), — опись становится копией раннера; иначе, без ответа или при сбое копия остаётся
+/// прежней, и ответ это называет. В каталог набора опись не попадает. Загрузка уже прошла:
+/// сбой здесь её не отменяет.
+fn refresh_version_file(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: &SourceSetContext,
+    token: Option<&str>,
+    dump_and_reread: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
+) -> Option<String> {
+    let version = RunnerVersionFile::of(set)?;
+    let token = token?;
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the version file after the load",
+    )
+    .is_some()
+    {
+        return None;
+    }
+    let stage = config.work_path.join("stage");
+    let refreshed = std::fs::create_dir_all(&stage)
+        .and_then(|()| {
+            tempfile::Builder::new()
+                .prefix("version-file-")
+                .tempdir_in(&stage)
+        })
+        .map_err(|error| AppError::Runtime(format!("failed to prepare '{}': {error}", stage.display())))
+        .and_then(|dir| {
+            let reread = dump_and_reread(dir.path())?;
+            let staged = dir.path().join(VERSION_FILE_NAME);
+            if reread.as_deref() != Some(token) {
+                return Ok(Err(
+                    "the configuration generation did not confirm that the infobase stayed unchanged".to_owned(),
+                ));
+            }
+            if !staged.is_file() {
+                return Ok(Err(format!("the platform wrote no {VERSION_FILE_NAME}")));
+            }
+            Ok(Ok(version.record_from(&staged)))
+        });
+    match refreshed {
+        Ok(Ok(warning)) => warning,
+        Ok(Err(why)) => Some(not_refreshed(set, &why)),
+        Err(error) => Some(not_refreshed(set, &error.to_string())),
+    }
+}
+
+fn not_refreshed(set: &SourceSetContext, why: &str) -> String {
+    format!(
+        "the runner's copy of {VERSION_FILE_NAME} for source-set '{}' was not refreshed after the load: {why}; the next pull dumps the loaded objects again",
+        set.name()
+    )
 }
 
 /// Загрузка без применения помнится памятью исходников только вместе с записью поколения
@@ -2132,4 +2299,33 @@ fn generated_copy_loads(
                         Ok(analyzer::AnalysisOutcome::NoChanges)
                     )
             })
+}
+
+#[cfg(test)]
+mod version_refresh_tests {
+    use super::{refreshes_the_version_file, VERSION_FILE_REFRESH_FILES};
+    use crate::use_cases::exchange_guard::BeforeLoad;
+    use std::path::PathBuf;
+
+    /// Полная загрузка получает свежий файл версий всегда; по изменившемуся — только с порога
+    /// и только при совпавшем перед загрузкой поколении (#646).
+    #[test]
+    fn a_full_or_a_large_matched_load_refreshes_the_version_file() {
+        let files = |count: usize| vec![PathBuf::from("Module.bsl"); count];
+        let large = files(VERSION_FILE_REFRESH_FILES);
+        let small = files(VERSION_FILE_REFRESH_FILES - 1);
+        assert!(refreshes_the_version_file(None, &BeforeLoad::Unchecked));
+        assert!(refreshes_the_version_file(
+            Some(&large),
+            &BeforeLoad::Matched
+        ));
+        assert!(!refreshes_the_version_file(
+            Some(&small),
+            &BeforeLoad::Matched
+        ));
+        assert!(!refreshes_the_version_file(
+            Some(&large),
+            &BeforeLoad::Unchecked
+        ));
+    }
 }

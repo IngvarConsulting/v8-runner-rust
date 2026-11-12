@@ -228,7 +228,8 @@ enum Adoption {
 /// `None` — идентификатор не узнать; тогда копия не годится. Время рождения отличает новый
 /// каталог, которому файловая система отдала номер удалённого (inode на ext4 и xfs).
 ///
-/// Вид записи — `unix:<устройство>:<узел>:<рождение>` и `windows:<том>:<индекс>:<рождение>`;
+/// Вид записи — `unix:<узел>:<рождение>` и `windows:<индекс файла>:<рождение>`: без устройства и
+/// тома, которые меняются при перемонтировании (NFS, контейнер, внешний диск);
 /// рождение — наносекунды от эпохи или `-`, если файловая система его не хранит.
 fn tree_witness(tree: &Path) -> Option<Vec<u8>> {
     use crate::support::path::FilesystemObjectIdentity;
@@ -244,12 +245,11 @@ fn tree_witness(tree: &Path) -> Option<Vec<u8>> {
         .map_or_else(|| "-".to_owned(), |since| since.as_nanos().to_string());
     let witness = match identity {
         #[cfg(unix)]
-        FilesystemObjectIdentity::Unix { device, inode } => format!("unix:{device}:{inode}:{born}"),
+        FilesystemObjectIdentity::Unix { inode, .. } => format!("unix:{inode}:{born}"),
         #[cfg(windows)]
-        FilesystemObjectIdentity::Windows {
-            volume_serial,
-            file_index,
-        } => format!("windows:{volume_serial}:{file_index}:{born}"),
+        FilesystemObjectIdentity::Windows { file_index, .. } => {
+            format!("windows:{file_index}:{born}")
+        }
         #[cfg(not(any(unix, windows)))]
         FilesystemObjectIdentity::Portable { .. } => return None,
     };
@@ -405,7 +405,10 @@ fn same_bytes(left: (File, &Path), right: (File, &Path)) -> Result<bool, AppErro
 /// Опись сбрасывается на диск до переименования: свидетельство, которое пишется после, не
 /// должно подтверждать обрезанную копию.
 fn move_atomically(from: &Path, to: &Path) -> Result<(), AppError> {
-    File::open(from)
+    // На Windows сброс на диск (`FlushFileBuffers`) требует права записи.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(from)
         .and_then(|file| file.sync_all())
         .map_err(|error| io_error("sync", from, &error))?;
     match fs::rename(from, to) {

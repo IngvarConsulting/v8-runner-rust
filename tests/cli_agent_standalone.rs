@@ -614,6 +614,29 @@ fn an_sftp_dump_removes_the_files_of_removed_elements() {
     assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
 }
 
+/// Модуль, удалённый у оставшегося объекта, уходит из каталога: опись больше не называет часть
+/// `Catalog.Items.ObjectModule`, а сам объект остаётся (#646; так делала выгрузка `-update`
+/// поверх дерева).
+#[test]
+fn a_dump_removes_the_file_of_a_dropped_part_and_keeps_the_object() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&["Catalog.Items", "Catalog.Items.ObjectModule"]),
+        &["Catalog.Items"],
+        &["Catalogs/Items.xml", "Catalogs/Items/Ext/ObjectModule.bsl"],
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        !target.join("Catalogs/Items/Ext/ObjectModule.bsl").exists(),
+        "{payload}"
+    );
+    assert!(target.join("Catalogs/Items.xml").is_file(), "{payload}");
+}
+
 /// Посторонний файл в каталоге оставшегося объекта, файл вида, которого раннер не знает, и
 /// элемент, которого не было в прежней описи, удаление не трогает.
 #[test]
@@ -717,9 +740,14 @@ fn the_memory_forgets_the_files_an_sftp_dump_removed() {
         &["Catalog.Items"],
         &["Catalogs/Gone.xml", "Catalogs/Gone/Ext/ObjectModule.bsl"],
     );
+    // Полная загрузка кладёт в базу всё дерево, `Catalog.Gone` с ним: свежая опись после неё
+    // его ещё называет (#646).
+    *harness.dump_info.lock().expect("dump info") =
+        Some(dump_info(&["Catalog.Items", "Catalog.Gone"]));
     let (code, payload) = run(&harness, &["push", "main", "--force"]);
     assert_eq!(code, 0, "{payload}");
-    // База изменилась после загрузки: выгрузку по поколению не пропустить.
+    // Потом `Catalog.Gone` удалили в базе: выгрузку по поколению не пропустить.
+    *harness.dump_info.lock().expect("dump info") = Some(dump_info(&["Catalog.Items"]));
     harness.generation.fetch_add(1, Ordering::SeqCst);
 
     let (code, payload) = run(&harness, &["dump"]);

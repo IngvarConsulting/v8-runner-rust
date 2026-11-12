@@ -70,14 +70,7 @@ pub(super) fn dump_over_directory<T>(
     );
     let dumped = dumped.map_err(|error| stage.cleanup_failure(error))?;
     let message = land(
-        context,
-        config,
-        resolved,
-        &stage,
-        &output,
-        description.is_some(),
-        before,
-        version,
+        context, config, resolved, &stage, &output, how, before, version,
     )?;
     Ok((dumped, message))
 }
@@ -92,7 +85,7 @@ enum Removals {
 }
 
 /// Посадка написанного: удаления по двум описям, перенос поверх каталога, новая копия, уборка
-/// стадии. `by_changes` — выгрузка шла по копии описи; `before` — элементы прежней описи,
+/// стадии. `how` — шла ли выгрузка по копии описи; `before` — элементы прежней описи,
 /// `None` — она не разобрана. Пока удаления не известны, копия не меняется.
 #[allow(clippy::too_many_arguments)]
 fn land(
@@ -101,7 +94,7 @@ fn land(
     resolved: &ResolvedDumpTarget,
     stage: &StagedPublication,
     output: &Path,
-    by_changes: bool,
+    how: &OverDirectory,
     before: Option<HashSet<String>>,
     version: Option<&RunnerVersionFile>,
 ) -> Result<Option<String>, AppError> {
@@ -109,10 +102,10 @@ fn land(
         return Err(stage.cleanup_failure(error));
     }
     let description = output.join(VERSION_FILE_NAME);
-    let removals = match (by_changes, before) {
-        (false, _) => Removals::Known,
-        (true, None) => Removals::Unknown,
-        (true, Some(before)) => {
+    let removals = match (how, before) {
+        (OverDirectory::Whole(_), _) => Removals::Known,
+        (OverDirectory::ByVersionFile, None) => Removals::Unknown,
+        (OverDirectory::ByVersionFile, Some(before)) => {
             let inventory = SourceSetInventory::new(config);
             match inventory.designer_context(&resolved.source_set_name) {
                 Some(set) => remove_dropped_elements(context, config, set, &description, &before)
@@ -131,8 +124,9 @@ fn land(
         // Какие элементы пропали, не узнать: новая опись копией не становится, иначе следующая
         // выгрузка уже не увидела бы их удаления. Прежняя копия старше дерева и безопасна.
         Some(_) if removals == Removals::Unknown => Some(format!(
-            "the removals of the dump of source-set '{}' are not known: a description was not read; the runner's copy was not updated, so the next pull dumps the same changes again",
-            resolved.source_set_name
+            "the removals of the dump of source-set '{}' are not known: a description was not read; the runner's copy was not updated, so the next pull dumps the same changes again; run {} to replace the directory with the base and the copy with its description",
+            resolved.source_set_name,
+            context.advised_pull_force(&resolved.source_set_name)
         )),
         Some(version) if description.is_file() => version.record_from(&description),
         Some(_) => Some(format!(
