@@ -157,7 +157,8 @@ class DescriptionTest(unittest.TestCase):
             source = stand.template_cf or stand.template_dt or stand.project
             by.setdefault(os.path.dirname(source), set()).add(stand.platform)
         self.assertEqual(by[r"E:\1c\tmplts\1c\accountingkz\3_0_75_1"], {"8.3.27.2342", "8.5.1.1529"})
-        self.assertEqual(by[r"E:\1c\tmplts\1c\smallbusiness\3_0_14_187"], {"8.3.27.2342", "8.5.1.1529"})
+        # УНФ 3.0.14.187 требует платформу не ниже 8.5.1: стенда на 8.3 у неё нет.
+        self.assertEqual(by[r"E:\1c\tmplts\1c\smallbusiness\3_0_14_187"], {"8.5.1.1529"})
         self.assertEqual(by[r"E:\1c\tmplts\1c\ARAutomation20\2_6_2_72"], {"8.5.1.1529"})
         self.assertEqual(describe.load_stand("ka").platform, "8.3.27.2342")
 
