@@ -845,6 +845,19 @@ fn a_full_push_after_a_pull_with_unknown_removals_refreshes_the_copy_and_clears_
 #[test]
 fn a_partial_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so() {
     let project = project_without_a_push_key();
+    // Частичную отправку по умолчанию ведёт живой агент, а заглушка `1cv8` им не стартует:
+    // `ibcmd` назначен явно, и освежение после загрузки было бы его `config export info`.
+    fs::write(
+        &project.config,
+        fs::read_to_string(&project.config)
+            .expect("config")
+            .replacen(
+                "format: DESIGNER\n",
+                "format: DESIGNER\nproviders:\n  push: ibcmd\n",
+                1,
+            ),
+    )
+    .expect("config");
     project.base_generation(FIRST);
     succeeded(&project.run(&["push", "--force"]));
     let memory = project
