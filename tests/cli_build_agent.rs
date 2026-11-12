@@ -707,9 +707,16 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
+    // Копию описи кладёт выгрузка, а не сборка (#646): здесь она как после прежнего `pull`.
+    support::memory::remember_version_file(
+        harness.dir.path(),
+        "origin",
+        support::memory::Base::File(&harness.dir.path().join("ib")),
+        &support::memory::Set::configuration("main", &harness.sources),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    );
     // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
     let project = harness.sources.parent().expect("project dir");
-    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
     support::commit_sources(project);
 
     let (dump, payload) = run(&harness, &["dump"]);
