@@ -3801,6 +3801,109 @@ exit 0"#,
         assert!(!target.join("new.xml").exists());
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_interrupted_link_replacement_waits_for_the_original_lock_and_restores_the_link() {
+        use crate::support::fs::{
+            swap_dir_atomically, try_acquire_advisory_lock, AFTER_DIR_BACKUP_TEST_HOOK,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("project");
+        let referent = dir.path().join("old-source");
+        let target = base.join("main");
+        let stage = dir.path().join("stage");
+        for path in [&base, &referent, &stage] {
+            fs::create_dir(path).expect("directory");
+        }
+        fs::write(referent.join("old.txt"), "old content").expect("old tree");
+        fs::write(stage.join("new.txt"), "new content").expect("new tree");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../old-source", &target).expect("link");
+        #[cfg(windows)]
+        junction::create(&referent, &target).expect("junction");
+        let config = build_config(&base, &dir.path().join("work"), &dir.path().join("1cv8"));
+        let before = resolve_target(&config, &incremental_main()).expect("resolve old link");
+        let original_lock = try_acquire_advisory_lock(&before.lock_path).expect("original lock");
+
+        // An older marker with a retargeted link must not shadow the latest backup.
+        let stale = base.join(".dump-backup-older-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../stage", &stale).expect("stale link");
+        #[cfg(windows)]
+        junction::create(&stage, &stale).expect("stale junction");
+        write_temp_dir_metadata(
+            &stale,
+            TempDirKind::Backup,
+            "older-link",
+            &target,
+            &before.target_identity,
+        )
+        .expect("older marker");
+
+        AFTER_DIR_BACKUP_TEST_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(|| {
+                std::panic::panic_any("interrupted link swap")
+            })));
+        });
+        let panic = std::panic::catch_unwind(|| {
+            swap_dir_atomically(
+                &stage,
+                &target,
+                "interrupted-link",
+                &before.target_identity,
+                DUMP_BACKUP_PREFIX,
+            )
+        })
+        .expect_err("stopped after the first rename");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"interrupted link swap"));
+
+        let missing = resolve_target(&config, &incremental_main()).expect("resolve missing link");
+        assert_ne!(before.lock_path, missing.lock_path);
+        let _retry_lock = try_acquire_advisory_lock(&missing.lock_path).expect("retry lock");
+        let busy = cleanup_orphan_dirs(&missing).expect_err("the old lock is held");
+        assert!(busy.to_string().contains("lock"), "{busy}");
+        assert!(
+            fs::symlink_metadata(&target).is_err(),
+            "leave the target alone"
+        );
+        drop(original_lock);
+
+        #[cfg(windows)]
+        {
+            let mut differently_spelled =
+                resolve_target(&config, &incremental_main()).expect("resolve missing link");
+            differently_spelled.target_path = base.join("MAIN");
+            let refused = cleanup_orphan_dirs(&differently_spelled)
+                .expect_err("ambiguous spelling must not create a new target");
+            assert!(
+                refused.to_string().contains("recorded target spelling"),
+                "{refused}"
+            );
+            assert!(fs::symlink_metadata(&target).is_err());
+        }
+
+        let retry =
+            cleanup_orphan_dirs(&missing).expect_err("the restored link needs re-resolution");
+        assert!(retry.to_string().contains("retry"), "{retry}");
+        assert!(fs::symlink_metadata(&target)
+            .expect("restored link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(target.join("old.txt")).unwrap(),
+            "old content"
+        );
+        assert!(stage.join("new.txt").is_file());
+        assert!(stale.exists(), "older backup left alone");
+        assert_eq!(
+            resolve_target(&config, &incremental_main())
+                .expect("resolve restored link")
+                .lock_path,
+            before.lock_path
+        );
+    }
+
     /// Резерв, оставшийся от завершённой замены, старше удалённой цели: вернуть его значило
     /// бы выдать устаревшее дерево за каталог набора.
     #[test]

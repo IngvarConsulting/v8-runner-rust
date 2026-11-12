@@ -12,6 +12,7 @@ check:
   - src/support/fs.rs::a_failed_stage_rename_restores_the_whole_previous_directory
   - src/support/fs.rs::a_backup_metadata_collision_leaves_the_old_and_staged_trees
   - src/use_cases/dump_config.rs::an_interruption_after_the_first_rename_leaves_a_recoverable_tree
+  - src/use_cases/dump_config.rs::an_interrupted_link_replacement_waits_for_the_original_lock_and_restores_the_link
   - src/use_cases/dump_config.rs::a_backup_marker_left_before_the_first_rename_is_removed
   - tests/architecture_guardrails.rs::a_full_pull_records_the_staged_tree_it_publishes
   - src/platform/backup_removal.rs::a_process_that_is_not_the_runner_does_not_spawn_the_removal
@@ -25,7 +26,10 @@ check:
 оборванный процесс возвращает её на место, как и раньше. Отмена до подмены ведёт себя как
 прежде. Метаданные резерва создаются до первого переименования. Если процесс прервётся
 после переноса цели в резерв, следующая команда сможет его опознать и восстановить.
-Если каталог ещё не был перенесён, уборка удалит оставшиеся метаданные.
+Если каталог ещё не был перенесён, уборка удалит оставшиеся метаданные. Для корня
+набора, заданного ссылкой, восстановление сверяет имя пути и прежнюю цель ссылки,
+берёт замок прежней цели без ожидания и возвращает саму ссылку. Команда просит
+повторить запуск, чтобы заново разрешить восстановленную цель.
 
 После подмены резервная копия `.dump-backup-<прогон>` помечена `superseded`, а файл
 `.gitignore` в ней прячет её от git до удаления. Её удаляет отделённый процесс раннера —
