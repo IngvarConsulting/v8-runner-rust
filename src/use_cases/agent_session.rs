@@ -953,6 +953,35 @@ fn live_start_failure(
     }
 }
 
+/// Жив ли уже агент этой рабочей копии под утилитой `v8` (#631): `live` включён, управляемая
+/// точка входа файловой или кластерной базы, а сторож ключа есть и жив. Ничего не создаёт и не
+/// поднимает: без каталога состояния, соли учётной записи или сторожа живого агента нет.
+pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
+    if !config.tools.designer_agent.live_enabled()
+        || config.infobase.standalone.is_some()
+        || !matches!(
+            config.tools.designer_agent.mode(),
+            Ok(DesignerAgentMode::Managed { .. })
+        )
+    {
+        return false;
+    }
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return false;
+    };
+    match existing_live_key(&state, config, v8) {
+        Ok(Some(key)) => matches!(
+            crate::platform::agent_keeper::client::KeeperClient::attach(&state, &key),
+            Ok(Some(_))
+        ),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "the live agent of this working copy cannot be keyed");
+            false
+        }
+    }
+}
+
 /// Снимает живого агента этой рабочей копии, если он есть: с `live: false` его не остаётся.
 /// Отказ снятия команду не останавливает: она работает с разовым агентом и так.
 /// Каталога состояния и соли учётной записи она не создаёт: без них живого агента нет.

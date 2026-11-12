@@ -301,8 +301,10 @@ v8-runner infobase create
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security
   properties of the configured extension source-sets". For `ibcmd`, a successful read
-  reports `name_prefix` from the applied DB configuration; for the standalone agent it is
-  `null` until that provider can attest the applied prefix. Never fill it from source files
+  reports `name_prefix` from the applied DB configuration; for the agent it is `null` (not
+  attested, unlike `""`). With a live agent of the working copy up, `extensions list` on a file
+  base reads through it (`provider.selected: agent`, `ibcmd` in `skipped`), so `name_prefix` is
+  `null`; need the prefix — `agent stop` first or set `providers.extensions: ibcmd`. Never fill it from source files
   or the working configuration after `upload` without `apply`. A read that fails after the
   platform got the request answers `ok: false` with an empty `extensions`: the composition is
   unknown, not empty — check `ok` first.

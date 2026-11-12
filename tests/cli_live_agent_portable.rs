@@ -674,6 +674,65 @@ fn status_deep_lists_the_extensions_in_the_generation_agent_session() {
     assert_eq!(extensions["installed"], through_agent, "{payload}");
 }
 
+/// `extensions list` при живом агенте рабочей копии берёт список у него (#631): квитанция
+/// называет агента, `ibcmd`, первый в цепочке файловой базы, пропущен с причиной и не
+/// запускается, `name_prefix` — `null`. Остальные поля те же, что у ответа `ibcmd` той же базы,
+/// который префикс подтверждает (`INV.USE-CASES.EXTENSIONS-LIST-TAKES-THE-LIVE-AGENT`). Без
+/// живого агента список читает `ibcmd`, как прежде.
+#[test]
+fn extensions_list_takes_the_live_agent_and_reports_no_prefix() {
+    let bench = Bench::new(
+        "    live: true
+",
+    );
+    bench.with_ibcmd();
+
+    let (code, through_ibcmd) = bench.run(&["extensions", "list"]);
+    assert_eq!(code, 0, "{through_ibcmd}");
+    assert_eq!(
+        through_ibcmd["data"]["provider"]["selected"], "ibcmd",
+        "no live agent yet: {through_ibcmd}"
+    );
+    assert_eq!(
+        through_ibcmd["data"]["extensions"][0]["name_prefix"], "Зо_",
+        "{through_ibcmd}"
+    );
+    let ibcmd_calls = bench.ibcmd_calls().len();
+
+    // Живой агент рабочей копии поднимает `status --deep`.
+    let (code, payload) = bench.run(&["status", "--deep"]);
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+
+    let (code, through_agent) = bench.run(&["extensions", "list"]);
+
+    assert_eq!(code, 0, "{through_agent}");
+    let provider = &through_agent["data"]["provider"];
+    assert_eq!(provider["selected"], "agent", "{through_agent}");
+    assert_eq!(
+        provider["skipped"][0]["provider"], "ibcmd",
+        "{through_agent}"
+    );
+    assert_eq!(
+        provider["endpoint"]["live"]["reused"], true,
+        "{through_agent}"
+    );
+    assert_eq!(bench.ibcmd_calls().len(), ibcmd_calls, "no ibcmd process");
+    let mut by_agent = through_agent["data"]["extensions"][0].clone();
+    assert!(by_agent["name_prefix"].is_null(), "{through_agent}");
+    let mut by_ibcmd = through_ibcmd["data"]["extensions"][0].clone();
+    by_agent["name_prefix"] = Value::Null;
+    by_ibcmd["name_prefix"] = Value::Null;
+    assert_eq!(by_agent, by_ibcmd, "the other fields agree");
+    assert_eq!(
+        through_agent["data"]["extensions"].as_array().map(Vec::len),
+        Some(1),
+        "{through_agent}"
+    );
+}
+
 /// `pull --all` по изменившемуся читает состав расширений своим исполнителем — агентом; `ibcmd`,
 /// первый в цепочке `extensions` файловой базы, состав не читает (#631). Набор `main` без памяти
 /// выгружается целиком, и это уже дело его собственного исполнителя.

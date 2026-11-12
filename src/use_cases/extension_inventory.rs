@@ -73,7 +73,7 @@ fn run_read(
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let action = match request.scope {
-        ExtensionInventoryScope::All => ExtensionAction::List,
+        ExtensionInventoryScope::All => ExtensionAction::ListWithTheLiveAgent,
         ExtensionInventoryScope::Named { .. } => ExtensionAction::RequiresAgentOrIbcmd("info"),
     };
     let selected = select_executor(config, &mut utilities, action)
@@ -525,8 +525,15 @@ fn ensure_requested_record(
 
 pub(crate) enum ExtensionAction<'a> {
     List,
+    /// Список `extensions list`: уже живой агент рабочей копии ведёт цепочку умолчаний (#631).
+    ListWithTheLiveAgent,
     RequiresAgentOrIbcmd(&'a str),
 }
+
+/// Причина, по которой исполнитель цепочки `extensions` до агента не спрошен: живой агент
+/// рабочей копии уже поднят.
+const THE_LIVE_AGENT_LISTS: &str =
+    "the live agent of this working copy is up and lists the extensions";
 
 pub(crate) fn select_executor(
     config: &AppConfig,
@@ -534,8 +541,22 @@ pub(crate) fn select_executor(
     action: ExtensionAction<'_>,
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     let mut plan = config.provider_plan(Operation::Extensions);
-    let ExtensionAction::RequiresAgentOrIbcmd(action) = action else {
-        return provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+    let action = match action {
+        ExtensionAction::List => {
+            return provider_selection::select_from(config, utilities, Operation::Extensions, plan)
+        }
+        ExtensionAction::ListWithTheLiveAgent => {
+            let ahead = lead_with_the_live_agent(config, utilities, &mut plan);
+            let mut selected =
+                provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+            if let Ok(selected) = &mut selected {
+                if selected.provider == Provider::Agent {
+                    selected.receipt.skipped.splice(0..0, ahead);
+                }
+            }
+            return selected;
+        }
+        ExtensionAction::RequiresAgentOrIbcmd(action) => action,
     };
     let skip_designer = || SkippedProvider {
         provider: Provider::Designer,
@@ -564,6 +585,41 @@ pub(crate) fn select_executor(
         receipt.skipped.push(skip_designer());
     }
     selected
+}
+
+/// Ставит агента первым в цепочку умолчаний, если живой агент рабочей копии уже поднят: тогда
+/// список отдаёт он, без процесса `ibcmd` (#631). Ключ `providers.extensions` не трогается.
+/// Ответ — исполнители, стоявшие до агента: квитанция называет их пропущенными с причиной.
+fn lead_with_the_live_agent(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    plan: &mut ProviderPlan,
+) -> Vec<SkippedProvider> {
+    let ProviderPlan::Default { chain } = plan else {
+        return Vec::new();
+    };
+    let Some(agent) = chain
+        .iter()
+        .position(|provider| *provider == Provider::Agent)
+        .filter(|agent| *agent > 0)
+    else {
+        return Vec::new();
+    };
+    let Ok(v8) = utilities.locate(UtilityType::V8) else {
+        return Vec::new();
+    };
+    if !crate::use_cases::agent_session::live_agent_is_up(config, &v8.path) {
+        return Vec::new();
+    }
+    let ahead: Vec<Provider> = chain.drain(..agent).collect();
+    chain.extend(ahead.iter().copied());
+    ahead
+        .into_iter()
+        .map(|provider| SkippedProvider {
+            provider,
+            reason: THE_LIVE_AGENT_LISTS.to_owned(),
+        })
+        .collect()
 }
 
 pub(crate) fn designer_refusal(action: &str) -> AppError {
