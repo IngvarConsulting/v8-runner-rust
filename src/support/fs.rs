@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING};
 
 use crate::support::machine::{host_name, is_process_running};
 use crate::support::path::{filesystem_object_identity, open_file_identity};
@@ -325,6 +327,17 @@ fn lock_named_system_file(path: &Path, system_path: &Path) -> std::io::Result<Fi
         {
             Ok(file) => file,
             Err(error) if is_pending_removal(&error) => {
+                // Windows also denies a file open when the name is a directory.
+                // Only a confirmed directory rules out a pending file removal.
+                #[cfg(windows)]
+                if error.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok()
+                    && std::fs::metadata(system_path).is_ok_and(|metadata| metadata.is_dir())
+                {
+                    return Err(std::io::Error::new(
+                        ErrorKind::IsADirectory,
+                        format!("system lock path is a directory: {}", system_path.display()),
+                    ));
+                }
                 if !retry_allowed {
                     return Err(system_lock_pending_removal(path, error));
                 }
@@ -370,8 +383,6 @@ fn file_still_named_by(file: &File, path: &Path) -> std::io::Result<bool> {
 /// taken for a pending removal.
 #[cfg(windows)]
 fn is_pending_removal(error: &std::io::Error) -> bool {
-    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING};
-
     error.raw_os_error().is_some_and(|code| {
         [ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING]
             .into_iter()
@@ -1829,6 +1840,45 @@ mod tests {
             candidates[0].starts_with(".dump-0123.lock.candidate-"),
             "{seen:?}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_delete_pending_system_file_is_busy_until_the_last_handle_closes() {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let lock = dir.path().join("pending.lock");
+        let system_path = advisory_system_lock_path(&lock).expect("system lock path");
+        // Keep a shared handle open while marking the name for legacy deletion.
+        let file = fs::File::create(&system_path).expect("open system lock file");
+        let deletion = fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .open(&system_path)
+            .expect("open with delete access");
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: the handle and the correctly sized disposition buffer live through the call.
+        let marked = unsafe {
+            SetFileInformationByHandle(
+                deletion.as_raw_handle(),
+                FileDispositionInfo,
+                (&raw const disposition).cast(),
+                size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        assert_ne!(marked, 0, "{}", std::io::Error::last_os_error());
+        drop(deletion);
+
+        let error = try_acquire_advisory_lock(&lock).expect_err("deletion is pending");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock, "{error}");
+        assert!(is_system_lock_pending_removal(&error), "{error}");
+        drop(file);
+
+        drop(try_acquire_advisory_lock(&lock).expect("the name can be reopened"));
+        assert!(directory_entries(dir.path()).is_empty());
     }
 
     #[test]
