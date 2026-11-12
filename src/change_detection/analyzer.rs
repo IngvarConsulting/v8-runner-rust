@@ -1261,8 +1261,8 @@ impl DumpListing {
 }
 
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
-/// file by its path ([`partial_load::dump_element_of`]), or the part of it under its `Ext`
-/// directory ([`partial_load::part_of_dump_element`]: a module, help, predefined data,
+/// file by its path, or the part of it under its `Ext` directory
+/// ([`partial_load::dump_element_and_part`]: a module, help, predefined data,
 /// rights), was in the description `before` the dump and no name of the description `after` it
 /// matches, letter case aside. A file the dump
 /// wrote (stamped no earlier than `start`, when the dump wrote into the tree itself) is never
@@ -1292,13 +1292,12 @@ pub fn files_of_dropped_elements(
         .filter(|file| {
             let path = Path::new(&file.rel_path);
             let dropped = |name: &str| before.contains(name) && !after.contains(name);
-            crate::change_detection::partial_load::dump_element_of(path)
-                .map(|owner| owner.to_lowercase())
-                .is_some_and(|owner| {
-                    dropped(&owner)
-                        || crate::change_detection::partial_load::part_of_dump_element(path)
-                            .is_some_and(|part| dropped(&part.to_lowercase()))
-                })
+            crate::change_detection::partial_load::dump_element_and_part(path).is_some_and(
+                |(owner, part)| {
+                    dropped(&owner.to_lowercase())
+                        || part.is_some_and(|part| dropped(&part.to_lowercase()))
+                },
+            )
         })
         .map(|file| file.path)
         .collect())

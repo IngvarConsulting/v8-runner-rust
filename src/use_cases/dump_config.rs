@@ -3637,6 +3637,49 @@ exit 0"#,
         path
     }
 
+    /// Опись `version-file-*`, оставленная снятым процессом, убирается только в
+    /// `workPath/stage`: одноимённые каталог и файл пользователя рядом с целью остаются (#646).
+    #[test]
+    fn a_left_version_file_dir_is_removed_only_from_the_stage_root() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let old = std::time::SystemTime::now() - ORPHAN_TTL - Duration::from_secs(60);
+        let age = |path: &Path| {
+            let mut options = fs::File::options();
+            if path.is_dir() {
+                options.read(true);
+            } else {
+                options.write(true);
+            }
+            // Каталог на Windows открывается только с FILE_FLAG_BACKUP_SEMANTICS.
+            #[cfg(windows)]
+            std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0200_0000);
+            #[cfg(windows)]
+            options.write(true);
+            options
+                .open(path)
+                .and_then(|file| file.set_modified(old))
+                .expect("age");
+        };
+        let left = resolved.stage_root.join("version-file-run");
+        fs::create_dir_all(&left).expect("left dir");
+        fs::write(left.join("ConfigDumpInfo.xml"), "<x/>").expect("left file");
+        let notes = dir.path().join("version-file-notes");
+        fs::create_dir_all(&notes).expect("user dir");
+        fs::write(notes.join("note.txt"), "keep").expect("user note");
+        let text = dir.path().join("version-file-x.txt");
+        fs::write(&text, "keep").expect("user file");
+        for path in [&left, &notes, &text] {
+            age(path);
+        }
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(!left.exists());
+        assert!(notes.join("note.txt").is_file());
+        assert!(text.is_file());
+    }
+
     #[test]
     fn cleanup_orphan_dirs_ignores_malformed_metadata() {
         let dir = tempdir().expect("tempdir");

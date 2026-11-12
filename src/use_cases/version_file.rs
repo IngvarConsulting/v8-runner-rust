@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(file.usable().expect("usable"), Some(file.copy.as_path()));
     }
 
-    /// Каталог набора, созданный заново (новый клон), копию не подтверждает: выгрузка полная.
+    /// Отметка неизвестных удалений переживает команду и снимается следующей записанной копией.
     #[test]
     fn unknown_removals_are_remembered_until_the_next_copy_is_recorded() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -560,6 +560,7 @@ mod tests {
         );
     }
 
+    /// Каталог набора, созданный заново (новый клон), копию не подтверждает: выгрузка полная.
     #[test]
     fn a_recreated_source_directory_does_not_confirm_the_copy() {
         let root = tempfile::tempdir().expect("root");

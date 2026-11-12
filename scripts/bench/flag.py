@@ -26,6 +26,8 @@ def holder(path):
 def acquire(path, text, *, wait=True, poll=60.0, timeout=None, say=print, sleep=time.sleep):
     """Create the flag with `text`; wait while another flag stands.
 
+    An empty or whitespace-only flag file counts as free and is taken over.
+
     A flag that already holds our own text is refused rather than taken over: it is either a
     parallel run with the same text or a leftover of a crashed run, and only a person can tell.
     """
@@ -43,6 +45,14 @@ def acquire(path, text, *, wait=True, poll=60.0, timeout=None, say=print, sleep=
         current = holder(path)
         if current is None:
             continue  # removed between our two looks: try again at once
+        if not current:
+            # An empty or whitespace-only file is a free flag: other scripts release it by
+            # truncating the file. Take it over, then look again: whoever wrote last holds it.
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            if holder(path) == text:
+                return
+            continue
         if current == text:
             raise FlagBusy(f"the flag {path} already holds our text {text!r}: another run with this text is going, "
                            "or a run crashed; remove the file by hand only if no such run is going")

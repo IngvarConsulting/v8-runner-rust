@@ -1874,7 +1874,9 @@ fn version_file_after_load(
     {
         return Some(not_refreshed(set, "the command was cancelled"));
     }
-    if version.removals_unknown() {
+    // После полной загрузки база равна каталогу целиком, и свежая опись верна: удалений,
+    // которых выгрузка не узнала, в ней уже нет. Запись копии снимает отметку.
+    if load.partial_paths.is_some() && version.removals_unknown() {
         return Some(not_refreshed(
             set,
             &format!(

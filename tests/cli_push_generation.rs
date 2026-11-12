@@ -807,10 +807,10 @@ fn a_full_ibcmd_push_refreshes_the_runner_copy_and_the_next_pull_goes_by_it() {
     );
 }
 
-/// Последняя выгрузка не узнала удалений (#646): отправка копию не освежает — свежая опись
-/// забыла бы пропавшие элементы, чьи файлы остались в каталоге, — и ответ это называет.
+/// Последняя выгрузка не узнала удалений (#646), а полная отправка грузит каталог целиком:
+/// база ему равна, свежая опись верна, и её запись снимает отметку.
 #[test]
-fn a_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so() {
+fn a_full_push_after_a_pull_with_unknown_removals_refreshes_the_copy_and_clears_the_mark() {
     let project = project_without_a_push_key();
     project.base_generation(FIRST);
     let memory = project
@@ -822,11 +822,54 @@ fn a_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so() {
     let pushed = succeeded(&project.run(&["push", "--force"]));
 
     assert!(
-        !project.calls().contains("export info"),
+        project.calls().contains("export info"),
         "{}",
         project.calls()
     );
-    assert!(!memory.join("ConfigDumpInfo.xml").exists());
+    assert!(memory.join("ConfigDumpInfo.xml").is_file(), "{pushed}");
+    assert!(
+        !pushed
+            .to_string()
+            .contains("did not learn which elements the infobase dropped"),
+        "{pushed}"
+    );
+    assert!(
+        !memory.join("removals-unknown").exists(),
+        "the mark is cleared"
+    );
+}
+
+/// Последняя выгрузка не узнала удалений (#646): отправка по изменившемуся, которой опись
+/// полагалась бы (правка `Configuration.xml`), копию не освежает — свежая опись забыла бы
+/// пропавшие элементы, чьи файлы остались в каталоге, — и ответ это называет.
+#[test]
+fn a_partial_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so() {
+    let project = project_without_a_push_key();
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    let memory = project
+        .root()
+        .join(".local/infobases/origin/dump-info/main");
+    let copy = fs::read(memory.join("ConfigDumpInfo.xml")).expect("copy after the full push");
+    fs::write(memory.join("removals-unknown"), "").expect("mark");
+    let before = project.calls().len();
+    fs::write(
+        project.sources.join("Configuration.xml"),
+        "<Configuration edited=\"1\"/>
+",
+    )
+    .expect("edit the root");
+
+    let pushed = succeeded(&project.run(&["push"]));
+
+    let calls = project.calls();
+    assert!(calls.len() > before, "the push loaded: {calls}");
+    assert!(!calls[before..].contains("export info"), "{calls}");
+    assert!(!calls[before..].contains("-configDumpInfoOnly"), "{calls}");
+    assert_eq!(
+        fs::read(memory.join("ConfigDumpInfo.xml")).expect("copy"),
+        copy
+    );
     assert!(
         pushed
             .to_string()

@@ -14,7 +14,9 @@ check:
   - src/change_detection/partial_load.rs::but_not_a_changed_object_description
   - src/change_detection/partial_load.rs::but_not_a_changed_module_or_form
   - src/use_cases/version_file.rs::unknown_removals_are_remembered_until_the_next_copy_is_recorded
-  - tests/cli_push_generation.rs::a_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so
+  - tests/cli_push_generation.rs::a_partial_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so
+  - tests/cli_push_generation.rs::a_full_push_after_a_pull_with_unknown_removals_refreshes_the_copy_and_clears_the_mark
+  - src/use_cases/dump_config.rs::a_left_version_file_dir_is_removed_only_from_the_stage_root
   - tests/cli_push_generation.rs::a_push_without_the_generation_after_the_load_says_the_copy_was_not_refreshed
   - tests/cli_push_generation.rs::a_full_push_refreshes_the_runner_copy
   - tests/cli_push_generation.rs::a_version_file_dumped_while_the_base_changed_is_not_recorded
@@ -51,9 +53,10 @@ check:
 Во втором и третьем случае поколение набора перед загрузкой должно совпасть с записанным: иначе
 база могла нести правки, которых нет в каталоге, и свежая опись заявила бы их выгруженными.
 Поколение читается до выгрузки описи и после, тем же инструментом, и должно совпасть. Иначе —
-сдвиг поколения, нет ответа, сбой, отмена, или последняя выгрузка не узнала удалений (отметка в
-памяти набора, её снимает следующая записанная копия) — копия остаётся прежней, ответ это
-называет, а загрузка остаётся удачной; молчит только набор без журнала поколений. У расширения
+сдвиг поколения, нет ответа, сбой, отмена, или перед загрузкой по изменившемуся последняя
+выгрузка не узнала удалений (отметка в памяти набора, её снимает следующая записанная копия;
+после полной загрузки база равна каталогу, свежая опись верна, и отметку снимает её запись) —
+копия остаётся прежней, ответ это называет, а загрузка остаётся удачной; молчит только набор без журнала поколений. У расширения
 отдельная выгрузка описи не замерена ни у одного исполнителя, и его копия загрузкой не
 трогается. Прочая загрузка копию не трогает: копия старше базы ровно на загруженное, и следующая
 выгрузка по изменившемуся выгрузит эти объекты заново, ничего не пропустив.

@@ -39,6 +39,16 @@ class FlagTest(unittest.TestCase):
         self.assertTrue(flag.release(self.path, OURS, say=lambda _: None))
         self.assertFalse(os.path.exists(self.path))
 
+    def test_an_empty_or_blank_flag_is_free(self):
+        for left in ("", "  \r\n"):
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(left)
+            looks = []
+            flag.acquire(self.path, OURS, poll=0, say=looks.append, sleep=lambda _: None)
+            self.assertEqual(flag.holder(self.path), OURS)
+            self.assertEqual(looks, [], "no waiting on a free flag")
+            self.assertTrue(flag.release(self.path, OURS, say=lambda _: None))
+
     def test_foreign_flag_is_not_overwritten_without_waiting(self):
         for other in (FOREIGN, SIBLING):
             self.put(other)
