@@ -248,7 +248,9 @@ v8-runner infobase create
   discard the data of an existing infobase, `--create` to create an absent one. A mode that does
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
-  provider and the planned input without touching the infobase.
+  provider and the planned input without touching the infobase. For a new file infobase,
+  Designer skips the separate `user` and `password` fields until subsequent commands can
+  sign in with the users from the restored image.
 - `pull` modes come from dictionary keys: no key — incremental dump over the directory;
   `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
   `--mode incremental|partial` means no key; `--mode full` is refused and names `pull [SET] --force` for the same set.

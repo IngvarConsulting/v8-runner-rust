@@ -29,8 +29,9 @@ fn main() {
     }
 
     let checking = arguments.iter().any(|arg| arg == "/CheckConfig");
+    let restoring = arguments.iter().any(|arg| arg == "/RestoreIB");
     if std::env::var_os("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD").is_some()
-        && (directory_output.is_some() || checking)
+        && (directory_output.is_some() || checking || restoring)
     {
         let password = arguments
             .windows(2)
@@ -57,6 +58,13 @@ fn main() {
             eprintln!("Designer stderr rejected [{password}]");
             std::process::exit(101);
         }
+        if restoring {
+            let user = &arguments
+                .windows(2)
+                .find(|pair| pair[0] == "/N")
+                .expect("user from Designer argv")[1];
+            eprintln!("Designer rejected user {}", user.to_string_lossy());
+        }
         write_artifact(
             Path::new(log),
             format!(
@@ -67,6 +75,12 @@ fn main() {
         println!("Designer stdout rejected [{password}]");
         eprintln!("Designer stderr rejected [{password}]");
         std::process::exit(1);
+    }
+    if restoring {
+        if let Some(platform_log) = platform_log {
+            write_artifact(Path::new(platform_log), b"platform log");
+        }
+        return;
     }
 
     let ibcmd_generation = arguments

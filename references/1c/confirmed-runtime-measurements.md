@@ -2992,6 +2992,26 @@ DT остался неизменным. После закрытия клиент
 Замена этой базы завершилась с кодом 0 за 100,88 с, `target_state: replaced`.
 Итоговый `1Cv8.1CD` — 2 009 254 400 байт, входной DT — 969 311 493 байта.
 
+## Designer: восстановление отсутствующей файловой базы с пользователями из DT (#663)
+
+13.11.2026, Windows x64, Designer 8.3.27.2342. Входной DT (969 311 475 байт)
+ранее снят с копии DemoTrd. Каждый прогон шёл в отдельном временном проекте
+с отсутствующим `new-db` и отдельными `user: Администратор`, `password: ''`
+в `v8project.local.yaml`.
+
+```text
+v8-runner --json-message infobase restore --create --input <demo.dt>
+1cv8.exe DESIGNER /F <new-db> /N Администратор /GetConfigGenerationID /Out <log> /DisableStartupDialogs /DisableStartupMessages
+```
+
+С `/N Администратор` при создании Designer сообщил «Пользователь ИБ не идентифицирован».
+Раннер вернул код 4, `restored: false`, `target_state: uncertain`; файл `1Cv8.1CD`
+уже появился. При запуске `/RestoreIB` без отдельных реквизитов раннер вернул код 0,
+`restored: true`, `target_state: created`. После загрузки Designer прочитал поколение
+базы с `/N Администратор` (код 0); с несуществующим пользователем вернул код 1.
+Повторный `--create` на восстановленной базе был отклонён раннером до запуска
+платформы с кодом 2.
+
 ## Откат непринятого: `/RollbackCfg` и `ibcmd config reset`
 
 Замер 08.10.2026. Задача: [#235](https://github.com/IngvarConsulting/v8-runner-rust/issues/235)
