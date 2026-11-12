@@ -1992,7 +1992,10 @@ mod tests {
         assert_eq!(config.work_path, config.base_path.join("work"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -2356,7 +2359,10 @@ source-set:
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
         assert_eq!(config.infobases.len(), 2, "{:?}", config.infobases.keys());
         assert_eq!(
@@ -2365,7 +2371,10 @@ source-set:
         );
         assert_eq!(
             config.infobases["test"].connection,
-            format!("File={}", config.base_path.join("build/test-ib").display()),
+            format!(
+                "File={}",
+                config.base_path.join("build").join("test-ib").display()
+            ),
             "every declared section is normalized against the config dir"
         );
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
@@ -3047,7 +3056,10 @@ source-set:
         assert_eq!(config.work_path, config.base_path.join("build"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -3566,7 +3578,8 @@ source-set:
             config.v8_connection().file_path(),
             Some(
                 canonical(&config_dir)
-                    .join("build/my ib")
+                    .join("build")
+                    .join("my ib")
                     .to_string_lossy()
                     .as_ref()
             )
@@ -3951,11 +3964,12 @@ source-set:
         let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
             .map(|loaded| loaded.config)
             .expect("load config");
-        let config_dir = std::fs::canonicalize(dir.path()).expect("canonical config dir");
+        let config_dir = canonical(dir.path());
+        let expected = config_dir.join("platform").join("bin");
 
         assert_eq!(
-            config.tools.platform.path.as_deref(),
-            Some(config_dir.join("platform/bin").as_path())
+            config.tools.platform.path.as_deref().map(Path::as_os_str),
+            Some(expected.as_os_str())
         );
     }
 

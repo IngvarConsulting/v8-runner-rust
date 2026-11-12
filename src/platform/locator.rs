@@ -1837,6 +1837,8 @@ fn default_edt_roots() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::consts::EXE_SUFFIX;
+
     use super::{
         normalize_path_roots, normalize_windows_verbatim_path, EdtVersion, Locator, LocatorError,
         PlatformChoice, PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement,
@@ -2292,14 +2294,13 @@ mod tests {
 
     #[test]
     fn empty_path_component_is_captured_as_current_directory() {
-        let current = PathBuf::from("/captured/current-directory");
+        let dir = tempdir().expect("tempdir");
+        let current = dir.path().join("current-directory");
+        let configured = dir.path().join("configured").join("bin");
 
         assert_eq!(
-            normalize_path_roots(
-                vec![PathBuf::new(), PathBuf::from("/configured/bin")],
-                &current,
-            ),
-            vec![current, PathBuf::from("/configured/bin")]
+            normalize_path_roots(vec![PathBuf::new(), configured.clone()], &current),
+            vec![current, configured]
         );
     }
 
@@ -2990,8 +2991,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) \
-             but has no full client; full client found in 8.5.4.1306"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) \
+             but has no full client; full client found in 8.5.4.1306")
         );
     }
 
@@ -3017,8 +3018,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: no installation matches version 8.6; \
+            format!(
+                "utility '1cv8{EXE_SUFFIX}' was not found: no installation matches version 8.6; \
              full client found in 8.3.27.2074"
+            )
         );
     }
 
@@ -3043,8 +3046,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: no installation matches version 8.6; \
+            format!(
+                "utility '1cv8{EXE_SUFFIX}' was not found: no installation matches version 8.6; \
              installed: 8.5.1.1519; no version has full client"
+            )
         );
     }
 
@@ -3066,8 +3071,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility 'ibcmd' was not found: no installation has server tools; \
+            format!(
+                "utility 'ibcmd{EXE_SUFFIX}' was not found: no installation has server tools; \
              installed: 8.3.27.2074"
+            )
         );
     }
 
@@ -3092,8 +3099,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility 'webinst' was not found: no installation has web server extensions; \
-             installed: 8.3.27.2074"
+            format!("utility 'webinst{EXE_SUFFIX}' was not found: no installation has web server extensions; \
+             installed: 8.3.27.2074")
         );
     }
 
@@ -3116,7 +3123,7 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "utility '1cv8' was not found: no 1C platform installation was found in {}",
+                "utility '1cv8{EXE_SUFFIX}' was not found: no 1C platform installation was found in {}",
                 root.display()
             )
         );
@@ -3144,8 +3151,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519) \
-             but has no full client; full client found in 8.3.27.2074"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519) \
+             but has no full client; full client found in 8.3.27.2074")
         );
     }
 
@@ -3177,8 +3184,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519) \
-             but has no full client; full client found in 8.5.4.1306"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519) \
+             but has no full client; full client found in 8.5.4.1306")
         );
     }
 
@@ -3193,7 +3200,10 @@ mod tests {
             .expect_err("no edt cli")
             .to_string();
 
-        assert_eq!(message, "utility '1cedtcli' was not found");
+        assert_eq!(
+            message,
+            format!("utility '1cedtcli{EXE_SUFFIX}' was not found")
+        );
     }
 
     #[test]

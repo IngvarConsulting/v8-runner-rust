@@ -1143,9 +1143,28 @@ fn source_sets_relative_to_config_dir(
         .map(|source_set| ConfigInitSourceSet {
             name: source_set.name.clone(),
             source_type: source_set.source_type.clone(),
-            path: relative_path(config_dir, &project_dir.join(&source_set.path)),
+            path: project_source_path(relative_path(
+                config_dir,
+                &project_dir.join(&source_set.path),
+            )),
         })
         .collect()
+}
+
+/// Relative paths written to the shared project file use the same separator on every host.
+fn project_source_path(path: String) -> String {
+    #[cfg(windows)]
+    {
+        let native = Path::new(&path);
+        if !native.has_root() && !matches!(native.components().next(), Some(Component::Prefix(_))) {
+            return native
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+        }
+    }
+    path
 }
 
 fn source_set_name(
@@ -3257,7 +3276,10 @@ mod tests {
             config.infobase.connection,
             format!(
                 "File={}",
-                canonical(dir.path()).join(".local").join("db").display()
+                crate::support::path::normalize_windows_verbatim_path(&canonical(dir.path()))
+                    .join(".local")
+                    .join("db")
+                    .display()
             )
         );
     }

@@ -477,13 +477,22 @@ fn tools_download_sources_writes_source_set_and_local_tool_settings() {
         .exists());
 
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
-    assert!(local.contains("epf_path:"));
-    assert!(local.contains("epf_path: work/tools/vanessa-automation-single.epf"));
-    assert!(local.contains("client_mcp:"));
-    assert!(local.contains("source:"));
-    assert!(local.contains("path: work/tools/onec-client-mcp-devkit/exts/client-mcp"));
-    assert!(local.contains("format: EDT"));
-    assert!(!local.contains(&dir.path().display().to_string()));
+    let local: serde_yaml::Value = serde_yaml::from_str(&local).expect("local YAML");
+    let tools = Path::new("work").join("tools");
+    assert_eq!(
+        local["tools"]["va"]["epf_path"].as_str(),
+        tools.join("vanessa-automation-single.epf").to_str()
+    );
+    let source = &local["tools"]["client_mcp"]["extension"]["source"];
+    assert_eq!(
+        source["path"].as_str(),
+        tools
+            .join("onec-client-mcp-devkit")
+            .join("exts")
+            .join("client-mcp")
+            .to_str()
+    );
+    assert_eq!(source["format"].as_str(), Some("EDT"));
 }
 
 #[test]
@@ -644,9 +653,14 @@ fn tools_download_repairs_pending_vanessa_configuration() {
         String::from_utf8_lossy(&output.stderr)
     );
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
-    assert!(local.contains("epf_path:"));
-    assert!(local.contains("epf_path: work/tools/vanessa-automation-single.epf"));
-    assert!(!local.contains(&dir.path().display().to_string()));
+    let local: serde_yaml::Value = serde_yaml::from_str(&local).expect("local YAML");
+    assert_eq!(
+        local["tools"]["va"]["epf_path"].as_str(),
+        Path::new("work")
+            .join("tools")
+            .join("vanessa-automation-single.epf")
+            .to_str()
+    );
 }
 
 /// Выпуски Vanessa для выбора (#160): флаг latest (файл `latest`) стоит на 1.2.043.1; в
