@@ -2320,6 +2320,218 @@ mod tests {
         assert!(calls_text.contains("config apply"));
     }
 
+    /// Наборы внешних обработок и отчётов рядом с основной конфигурацией и расширением; корень
+    /// набора отчётов назван `report_root` — чужой корень делает его исходники ошибочными.
+    fn add_external_sets(base: &Path, config: &mut AppConfig, report_root: &str) {
+        for (name, purpose, root) in [
+            (
+                "processors",
+                SourceSetPurpose::ExternalDataProcessors,
+                "ExternalDataProcessor",
+            ),
+            ("reports", SourceSetPurpose::ExternalReports, report_root),
+        ] {
+            let dir = base.join(name);
+            fs::create_dir_all(&dir).expect("external dir");
+            fs::write(
+                dir.join("One.xml"),
+                format!("<{root}><Properties><Name>One</Name></Properties></{root}>"),
+            )
+            .expect("external descriptor");
+            config.source_sets.push(SourceSetConfig {
+                name: name.to_owned(),
+                purpose,
+                path: PathBuf::from(name),
+            });
+        }
+    }
+
+    /// Ключ `providers.push: ibcmd` и умолчание без ключа: у полной отправки файловой базы
+    /// оба выбирают `ibcmd` (`INV.USE-CASES.THE-AGENT-LEADS-A-DEFAULT-CHAIN`).
+    fn ibcmd_by_key_and_by_default() -> [(
+        &'static str,
+        std::collections::BTreeMap<
+            crate::domain::capability::Operation,
+            crate::domain::capability::Provider,
+        >,
+    ); 2] {
+        [
+            ("key", crate::domain::capability::ibcmd_for_every_choice()),
+            ("default", Default::default()),
+        ]
+    }
+
+    /// Шаги внешних наборов — успешный пропуск с подготовкой к упаковке, а исполнитель —
+    /// `selected`.
+    fn assert_external_sets_skipped(
+        result: &crate::domain::build::BuildResult,
+        selected: crate::domain::capability::Provider,
+        case: &str,
+    ) {
+        let receipt = result.provider.as_ref().expect("receipt");
+        assert_eq!(receipt.selected, Some(selected), "{case}: {receipt:?}");
+        assert!(result.ok, "{case}: {result:?}");
+        for name in ["processors", "reports"] {
+            let step = result
+                .steps
+                .iter()
+                .find(|step| step.source_set == name)
+                .unwrap_or_else(|| panic!("{case}: no step of '{name}': {result:?}"));
+            assert_eq!(step.mode, BuildMode::Skipped, "{case}: {step:?}");
+            assert!(step.ok && !step.applied, "{case}: {step:?}");
+            assert_eq!(
+                step.message.as_deref(),
+                Some("prepared 1 external artifact(s) for packaging"),
+                "{case}: {step:?}"
+            );
+        }
+    }
+
+    /// `push --full` через `ibcmd` не передаёт внешние наборы в `ibcmd config import`:
+    /// конфигурация и расширение загружаются, внешние наборы получают успешный пропуск — и
+    /// при ключе `providers.push: ibcmd`, и при выборе умолчанием по объёму (#658,
+    /// `INV.USE-CASES.A-PUSH-NEVER-LOADS-AN-EXTERNAL-SET`).
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_ibcmd_push_never_imports_an_external_set() {
+        for (case, providers) in ibcmd_by_key_and_by_default() {
+            let dir = tempdir().expect("tempdir");
+            let base = dir.path().join("base");
+            let script = dir.path().join("ibcmd");
+            let calls = dir.path().join("calls.log");
+            create_source_tree(&base);
+            write_ibcmd_script(&script, &calls, None);
+            let mut config = build_config(
+                &base,
+                &dir.path().join("work"),
+                &script,
+                SourceFormat::Designer,
+                providers.clone(),
+            );
+            // Пустая карта у `build_config` — Конфигуратор; без ключей — цепочка умолчаний.
+            if providers.is_empty() {
+                config.providers.clear();
+            }
+            add_external_sets(&base, &mut config, "ExternalReport");
+
+            let result = run_build(&config, &build_args(true)).expect("build");
+
+            assert_external_sets_skipped(&result, crate::domain::capability::Provider::Ibcmd, case);
+            let imports: Vec<String> = fs::read_to_string(&calls)
+                .expect("calls")
+                .lines()
+                .filter(|line| line.contains("config import"))
+                .map(str::to_owned)
+                .collect();
+            assert!(!imports.is_empty(), "{case}: no import");
+            for import in &imports {
+                let from = base.join("processors").display().to_string();
+                assert!(!import.contains(&from), "{case}: {import}");
+                let from = base.join("reports").display().to_string();
+                assert!(!import.contains(&from), "{case}: {import}");
+            }
+        }
+    }
+
+    /// Конфигуратор при `push --full` тоже не грузит внешние наборы: их шаг — тот же
+    /// успешный пропуск, а `/LoadConfigFromFiles` получают только конфигурация и расширение
+    /// (`INV.USE-CASES.A-PUSH-NEVER-LOADS-AN-EXTERNAL-SET`).
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_designer_push_never_loads_an_external_set() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let platform = dir.path().join("platform").join("bin").join("1cv8");
+        let calls = dir.path().join("designer.calls.log");
+        create_source_tree(&base);
+        write_designer_script(&platform, &calls, None);
+        let mut config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("platform"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        add_external_sets(&base, &mut config, "ExternalReport");
+
+        let result = run_build(&config, &build_args(true)).expect("build");
+
+        assert_external_sets_skipped(
+            &result,
+            crate::domain::capability::Provider::Designer,
+            "designer",
+        );
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("/LoadConfigFromFiles"), "{calls_text}");
+        for name in ["processors", "reports"] {
+            let from = base.join(name).display().to_string();
+            assert!(!calls_text.contains(&from), "{calls_text}");
+        }
+    }
+
+    /// Превью той же отправки — `--full` и `--force` — планирует внешним наборам пропуск, а
+    /// не загрузку; ошибка в их исходниках — отказ проверки, как у Конфигуратора, а не план
+    /// импорта (#658).
+    #[test]
+    fn a_whole_ibcmd_push_preview_plans_no_load_of_an_external_set() {
+        let utility = if cfg!(windows) { "ibcmd.exe" } else { "ibcmd" };
+        for (by, providers) in ibcmd_by_key_and_by_default() {
+            for load in [PushMode::Full, PushMode::Force] {
+                for report_root in ["ExternalReport", "ExternalDataProcessor"] {
+                    let case = &format!("{by}, {load:?}, {report_root}");
+                    let dir = tempdir().expect("tempdir");
+                    let base = dir.path().join("base");
+                    let script = dir.path().join(utility);
+                    create_source_tree(&base);
+                    fs::write(&script, "").expect("utility");
+                    let mut config = build_config(
+                        &base,
+                        &dir.path().join("work"),
+                        &script,
+                        SourceFormat::Designer,
+                        providers.clone(),
+                    );
+                    // Пустая карта у `build_config` — Конфигуратор; без ключей — умолчание.
+                    if providers.is_empty() {
+                        config.providers.clear();
+                    }
+                    add_external_sets(&base, &mut config, report_root);
+                    let args = BuildArgs {
+                        dry_run: true,
+                        load,
+                        ..build_args(true)
+                    };
+
+                    let outcome = run_build(&config, &args);
+
+                    if report_root == "ExternalReport" {
+                        assert_external_sets_skipped(
+                            &outcome.expect("preview"),
+                            crate::domain::capability::Provider::Ibcmd,
+                            case,
+                        );
+                        continue;
+                    }
+                    let failure = outcome.expect_err("a report set holding a processor");
+                    assert_eq!(
+                        failure.error.kind(),
+                        UseCaseErrorKind::Validation,
+                        "{case}: {:?}",
+                        failure.error
+                    );
+                    let result = failure.payload.expect("payload");
+                    let step = result
+                        .steps
+                        .iter()
+                        .find(|step| step.source_set == "reports")
+                        .expect("step of the report set");
+                    assert!(!step.ok, "{case}: {step:?}");
+                    assert_eq!(step.mode, BuildMode::Skipped, "{case}: {step:?}");
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn build_prepares_client_mcp_cfe_tool_extension_after_project_sources() {
