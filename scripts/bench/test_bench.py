@@ -385,6 +385,102 @@ class Runner016Test(unittest.TestCase):
         self.assertEqual(ex.dumped_files(d.name), ["CommonModules/М/Ext/Module.bsl"])
 
 
+class FreeBaseTest(unittest.TestCase):
+    """Reintroduction guard (#585, #644): the live agent of the runner under test stays connected
+    to the base between its commands. Every step of another tool on the same base — batch
+    Designer, ibcmd, the bare agent, runner 0.16 — must come after that agent was released or
+    stopped, never right after a command of the runner under test."""
+
+    EXE = r"X:\bin-0.16\v8-runner.exe"
+
+    def bench(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        stand = describe.load_stand("ssl321", stands_root=d.name)
+        b = bench.Bench(stand, "runner.exe", os.path.join(d.name, "r.jsonl"), trace=False, verify=True,
+                        runner_016=self.EXE)
+        for files in stand.modules.values():
+            ex.write_files(stand.src, {rel: b"original" for rel in files})
+        events, rows = [], []
+        b.record = lambda **row: rows.append(row)
+
+        def runner(name, payload=None):
+            def call(label, *args):
+                events.append((name, " ".join(args[:1])))
+                return {"seconds": 1.0, "rc": 0, "live": []}, payload or {"changed_files": 0}
+            return call
+
+        b.runner = mock.Mock(stand=stand)
+        b.runner.run.side_effect = b.runner.must.side_effect = runner("runner")
+        b.runner.release_agents.side_effect = lambda: events.append(("free", "release"))
+        b.runner.stop_agents.side_effect = lambda: events.append(("free", "stop"))
+        b.runner_016 = mock.Mock(stand=b.runner_016.stand)
+        b.runner_016.run.side_effect = b.runner_016.must.side_effect = runner("other", None)
+
+        def designer(stand_, args, out):
+            events.append(("other", f"designer {args[0]}"))
+            if "-configDumpInfoOnly" in args:
+                ex.write_files(args[1], {"ConfigDumpInfo.xml": b"x"})
+            if "-getChanges" in args:
+                ex.write_files(os.path.dirname(args[args.index("-getChanges") + 1]), {"changes.txt": b""})
+            return 1.0
+
+        def ibcmd(stand_, args):
+            events.append(("other", f"ibcmd {' '.join(args[:4])}"))
+            for arg in args:
+                if arg.startswith("--out="):
+                    ex.write_files(os.path.dirname(arg[6:]), {os.path.basename(arg[6:]): b""})
+            return 1.0
+
+        def bare_agent_session(stand_, base_dir, prepare, commands):
+            events.append(("other", "bare agent"))
+            user = os.path.join(base_dir, "0")
+            prepare(user)
+            ex.write_files(user, {"ch.txt": b""})
+            return 1.0, {}, user
+
+        for name, fake in (("designer", designer), ("ibcmd", ibcmd), ("bare_agent_session", bare_agent_session)):
+            patcher = mock.patch.object(ex, name, side_effect=fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.object(bench, "commit"), mock.patch("builtins.print"),
+                        mock.patch.object(bench, "git", return_value=mock.Mock(stdout="", returncode=0))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return b, events, rows
+
+    def assert_free_before_others(self, events):
+        held = None  # the last command of the runner under test, while its agent may hold the base
+        for who, what in events:
+            if who == "runner":
+                held = what
+            elif who == "free":
+                held = None
+            else:
+                self.assertIsNone(held, f"{what} runs while the agent of `runner {held}` may hold the base")
+
+    def test_every_other_tool_waits_for_the_live_agent_to_let_the_base_go(self):
+        b, events, rows = self.bench()
+        for scn in describe.load_scenarios().values():
+            b.run_scenario(scn, scn.executors, 2)
+        failed = [(r.get("scenario"), r.get("executor"), r.get("error")) for r in rows if r.get("ok") is False]
+        self.assertEqual(failed, [])
+        others = {what.split(" ")[0] for who, what in events if who == "other"}
+        self.assertEqual(others, {"designer", "ibcmd", "bare", "pull", "push", "status"})
+        self.assert_free_before_others(events)
+
+    def test_the_restore_lets_the_base_go_before_runner_016_syncs(self):
+        """The failure on kz83: restore-push left the live agent connected and the sync by 0.16
+        that followed got `agent ... rejected the credentials of user ''`."""
+        b, events, _ = self.bench()
+        b.base_marked = b.used_016 = True
+        originals = {"CommonModules/М/Ext/Module.bsl": b"original"}
+        b.restore(list(originals), originals, "s")
+        self.assertIn(("runner", "push"), events)
+        self.assertIn(("other", "pull"), events)
+        self.assert_free_before_others(events)
+
+
 class CommandTest(unittest.TestCase):
     def test_no_executor_allows_the_dynamic_update(self):
         stand = describe.load_stand("ka", stands_root=r"X:\s")

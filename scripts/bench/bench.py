@@ -223,6 +223,10 @@ class Bench:
     def sync_016(self):
         """project-016 takes what the base got from others since its last command (not timed)."""
         r = self.runner_016
+        # The stand's live agent stays connected after its last command (#644), the restore's
+        # push included; runner 0.16 starts its own agent, which cannot open the held base and
+        # answers `rejected the credentials of user ''`.
+        self.runner.release_agents()
         commit(r.stand.project, f"bench {self.run_id}: before sync")
         r.must("sync-016", "pull", r.stand.source_set)
         commit(r.stand.project, f"bench {self.run_id}: synced with the base")
