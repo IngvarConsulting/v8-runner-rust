@@ -18,6 +18,7 @@ check:
   - tests/agent_keeper.rs::an_agent_started_idle_that_cannot_connect_is_removed
   - src/use_cases/exchange_guard.rs::a_push_knows_before_the_analysis_that_the_record_tool_will_be_asked
   - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens
+  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check
 ---
 
 # Живой агент поднимается, пока команда готовится
@@ -43,8 +44,8 @@ check:
 поколение агента. Живого агента этого ключа, оставшегося подключённым с прошлой команды, сверка
 отключает перед своим процессом, и сессия подключает его снова. Решение принимается до разбора
 по всем выбранным наборам: какие из них грузятся, скажет только разбор. У кластера это
-осторожность, а не замер: блокировку серверной базы подключённым агентом не мерили. Агент, уже
-подключённый к базе,
+осторожность, а не замер: блокировку серверной базы подключённым агентом не мерили. Вне этого
+исключения агент, уже подключённый к базе,
 подключения не повторяет (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`). Превью и
 выгрузка расширения агента заранее не поднимают; отправка, формат которой новее платформы,
 тоже: она отказывает до запуска платформы
