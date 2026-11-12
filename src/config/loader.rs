@@ -10,8 +10,8 @@ use crate::config::schema::{
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
-    validate_read_only, validate_tools_download_bootstrap, validate_without_infobase,
-    ConfigValidationError,
+    validate_read_only, validate_tools_download_bootstrap, validate_vanessa_download,
+    validate_without_infobase, ConfigValidationError,
 };
 use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
 
@@ -110,6 +110,19 @@ pub fn load_config_for_tools_download(
         workdir_override,
         selector,
         ConfigValidationMode::ToolsDownload,
+    )
+}
+
+pub fn load_config_for_vanessa_download(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::VanessaDownload,
     )
 }
 
@@ -288,6 +301,7 @@ enum ConfigValidationMode {
     InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
     ToolsDownload,
+    VanessaDownload,
     Launch,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
@@ -381,14 +395,24 @@ fn build_config(
     // отвергли выше, до границы.
     validate_main_config_schema_boundary(root.clone())
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
-    if matches!(
+    let has_selected_infobase = if matches!(
         validation_mode,
         ConfigValidationMode::WithoutInfobase { .. }
     ) {
         select_no_infobase(&mut root)?;
+        false
     } else {
-        select_infobase(&mut root, selector)?;
-    }
+        match select_infobase(&mut root, selector) {
+            Ok(()) => true,
+            Err(ConfigValidationError::OriginNotDeclared { .. })
+                if matches!(validation_mode, ConfigValidationMode::VanessaDownload) =>
+            {
+                select_no_infobase(&mut root)?;
+                false
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
@@ -407,8 +431,10 @@ fn build_config(
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
     crate::config::validate::validate_local_path(&config, config_dir)?;
-    project_managed_standalone(&mut config, &validation_mode)?;
-    project_managed_cluster(&mut config, &validation_mode)?;
+    if !matches!(validation_mode, ConfigValidationMode::VanessaDownload) {
+        project_managed_standalone(&mut config, &validation_mode)?;
+        project_managed_cluster(&mut config, &validation_mode)?;
+    }
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
@@ -419,6 +445,9 @@ fn build_config(
         }
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
+        ConfigValidationMode::VanessaDownload => {
+            validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
+        }
         ConfigValidationMode::Launch => validate_launch(&config)?,
         ConfigValidationMode::ManagedDbms => {
             crate::config::validate::validate_managed_dbms(&config)?
@@ -648,8 +677,7 @@ fn fold_push_synonym(
     )))
 }
 
-/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`, чтобы
-/// `AppConfig` собрался без сентинела: конфига без выбранной базы не бывает.
+/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`.
 fn select_infobase(
     root: &mut serde_yaml::Value,
     selector: &InfobaseSelector,
@@ -726,9 +754,8 @@ fn select_infobase(
     Ok(())
 }
 
-/// Команда, которой база проекта не нужна (`make`), базу не выбирает: в документ ложится
-/// пустая секция без адреса и без имени. Её никто не читает — сценарий работает во временной
-/// базе раннера, — а `origin` может быть и не объявлен.
+/// Оставляет в `AppConfig` пустую секцию без адреса и имени для сценариев, которые
+/// обходятся без выбранной базы проекта, например `make` или загрузки Vanessa без `origin`.
 fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidationError> {
     let mapping = root_mapping_mut(root)?;
     mapping.insert(

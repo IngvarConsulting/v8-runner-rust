@@ -6,7 +6,7 @@ use tracing::{debug, error};
 
 use crate::cli::args::{
     BootstrapArgs, Cli, Command, ConfigCommand, ConfigInitArgs, McpCommand, McpServeTransport,
-    ToolsCommand,
+    ToolsCommand, ToolsDownloadCommand,
 };
 use crate::cli::execute;
 use crate::cli::global_flags;
@@ -15,7 +15,7 @@ use crate::command_envelope::Envelope;
 use crate::config::loader::{
     load_config, load_config_for_infobase_export, load_config_for_launch,
     load_config_for_prepared_test, load_config_for_preview, load_config_for_tools_download,
-    resolve_primary_config_path,
+    load_config_for_vanessa_download, resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -378,13 +378,18 @@ pub(crate) fn load_cli_config(
     let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
     let config_path = cli.config.as_deref();
     let workdir = cli.workdir.as_deref();
-    if matches!(
-        &cli.command,
-        Command::Tools(crate::cli::args::ToolsArgs {
-            command: ToolsCommand::Download(_)
-        })
-    ) {
-        load_config_for_tools_download(config_path, workdir, &selector)
+    if let Command::Tools(crate::cli::args::ToolsArgs {
+        command: ToolsCommand::Download(download),
+    }) = &cli.command
+    {
+        match &download.command {
+            ToolsDownloadCommand::Vanessa(_) => {
+                load_config_for_vanessa_download(config_path, workdir, &selector)
+            }
+            ToolsDownloadCommand::Yaxunit(_) | ToolsDownloadCommand::ClientMcp(_) => {
+                load_config_for_tools_download(config_path, workdir, &selector)
+            }
+        }
     } else if let Some(operation) = execute::infobase_transfer_operation(&cli.command) {
         load_config_for_infobase_export(config_path, workdir, &selector, operation)
     } else if matches!(&cli.command, Command::Diff(args) if args.against.is_some()) {

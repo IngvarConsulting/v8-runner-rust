@@ -5,13 +5,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — Конфигуратор первым,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
@@ -317,16 +317,136 @@ fn make_zip(path: &Path, entries: &[(&str, &str)]) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("zip parent");
     }
-    let status = Command::new("python3")
-        .arg("-c")
-        .arg(
-            "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w') as z:\n    for pair in sys.argv[2:]:\n        name, value = pair.split('=', 1)\n        z.writestr(name, value)\n",
+    let mut zip = ZipWriter::new(fs::File::create(path).expect("create ZIP fixture"));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for &(name, value) in entries {
+        zip.start_file(name, options)
+            .expect("start ZIP fixture entry");
+        zip.write_all(value.as_bytes())
+            .expect("write ZIP fixture entry");
+    }
+    zip.finish().expect("finish ZIP fixture");
+}
+
+fn assert_vanessa_download_without_running_infobase(local_yaml: Option<&str>, extra_args: &[&str]) {
+    let dir = temp_workspace();
+    let config_path = dir.path().join("v8project.yaml");
+    let local_path = dir.path().join("v8project.local.yaml");
+    let project_yaml = "format: DESIGNER\nworkPath: work\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src/configuration\n";
+    fs::write(&config_path, project_yaml).expect("project config");
+    if let Some(local_yaml) = local_yaml {
+        fs::write(&local_path, local_yaml).expect("local config");
+    }
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+
+    let output = v8_runner_command()
+        .env(
+            "V8TR_GITHUB_API_BASE_URL",
+            format!("http://127.0.0.1:{port}"),
         )
-        .arg(path)
-        .args(entries.iter().map(|(name, value)| format!("{name}={value}")))
-        .status()
-        .expect("zip");
-    assert!(status.success());
+        .arg("--config")
+        .arg(&config_path)
+        .args(extra_args)
+        .args(["--json-message", "tools", "download", "vanessa"])
+        .output()
+        .expect("download Vanessa");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("JSON response");
+    assert_eq!(response["data"]["destinations"][0]["tag"], "1.2.043.1");
+    let epf_path = Path::new("work")
+        .join("tools")
+        .join("vanessa-automation-single.epf");
+    assert_eq!(
+        fs::read(dir.path().join(&epf_path)).expect("downloaded EPF"),
+        b"va epf"
+    );
+    let actual: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(local_path).expect("local config")).expect("local YAML");
+    let mut expected: serde_yaml::Value =
+        serde_yaml::from_str(local_yaml.unwrap_or("{}")).expect("initial local YAML");
+    expected["tools"]["va"]["epf_path"] = serde_yaml::to_value(epf_path).expect("EPF YAML path");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fs::read_to_string(config_path).expect("project config"),
+        project_yaml
+    );
+    assert!(
+        !dir.path().join(".local").exists(),
+        "managed service state must be absent"
+    );
+}
+
+#[test]
+fn tools_download_vanessa_without_an_origin() {
+    assert_vanessa_download_without_running_infobase(None, &[]);
+}
+
+#[test]
+fn tools_download_vanessa_with_a_stopped_managed_cluster() {
+    let local_yaml = "infobases:\n  origin:\n    cluster:\n      managed:\n        name: toolsbootstrap\n    dbms:\n      managed: {}\n      name: toolsbootstrap\n      locale: ru_RU\ntools:\n  edt_cli:\n    path: pending-edt\n";
+    assert_vanessa_download_without_running_infobase(Some(local_yaml), &[]);
+    assert_vanessa_download_without_running_infobase(Some(local_yaml), &["--infobase", "origin"]);
+}
+
+#[test]
+fn tools_download_vanessa_validates_declared_and_explicit_infobases() {
+    let dir = temp_workspace();
+    let config_path = dir.path().join("v8project.yaml");
+    fs::write(&config_path, "format: DESIGNER\n").expect("project config");
+    let local_path = dir.path().join("v8project.local.yaml");
+    let malformed = "infobases:\n  origin:\n    connection: 'ws=https://example.invalid/base'\n";
+    let cases: &[(&str, &[&str], &str)] = &[
+        (malformed, &[], "web-client address"),
+        (
+            "infobases:\n  other:\n    connection: 'ws=https://example.invalid/base'\n",
+            &[],
+            "web-client address",
+        ),
+        (
+            "{}",
+            &["--infobase", "missing"],
+            "infobase 'missing' is not declared",
+        ),
+        (
+            "{}",
+            &["--infobase", "ws=https://example.invalid/base"],
+            "web-client address",
+        ),
+    ];
+    for &(local_yaml, args, expected_message) in cases {
+        fs::write(&local_path, local_yaml).expect("local config");
+        let output = v8_runner_command()
+            .env("V8TR_GITHUB_API_BASE_URL", "http://127.0.0.1:0")
+            .arg("--config")
+            .arg(&config_path)
+            .args(args)
+            .args(["--json-message", "tools", "download", "vanessa"])
+            .output()
+            .expect("run Vanessa download command");
+        assert_eq!(output.status.code(), Some(2));
+        let response: Value = serde_json::from_slice(&output.stdout).expect("JSON response");
+        assert_eq!(response["error"]["code"], "invalid_argument");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains(expected_message),
+            "{response}"
+        );
+        assert_eq!(
+            fs::read_to_string(&local_path).expect("local config"),
+            local_yaml
+        );
+    }
 }
 
 #[test]

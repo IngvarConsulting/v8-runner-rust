@@ -135,6 +135,7 @@ v8-runner infobase create
   `.build/v8-runner/tools`; `yaxunit --sources` still unpacks into the `tests` set, its ownership mark goes to `localPath/tools`, an old mark in `build/` is still honoured) and the
   local layer is pointed there; an old `build/tools` is left alone. Tools come from the GitHub `releases/latest`;
   `tools download vanessa --prerelease` takes the highest version including pre-releases.
+  `tools download vanessa` also works without `origin` and with a stopped managed cluster.
 - Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
 - Extension security properties: use `extensions --name <SOURCE_SET>` or
   `extensions --installed-name <PLATFORM_NAME>` for a separately loaded CFE such as YAXUNIT.
