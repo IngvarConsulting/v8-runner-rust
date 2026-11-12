@@ -38,6 +38,8 @@ const FXP_NAME: u8 = 104;
 
 const FX_OK: u32 = 0;
 const FX_EOF: u32 = 1;
+/// Generic failure returned by the SFTP server.
+pub(crate) const FX_FAILURE: u32 = 4;
 
 const ATTR_SIZE: u32 = 0x0000_0001;
 const ATTR_UIDGID: u32 = 0x0000_0002;
