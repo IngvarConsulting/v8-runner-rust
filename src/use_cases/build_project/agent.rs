@@ -14,9 +14,9 @@ use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
-    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, EarlyAgent, EarlySession,
-    Exchange,
+    argument, collect_into_dir, connect, generation_id, make_output_dir, run_critical, run_id,
+    stage_dir, stage_dir_partially, tidy, transcript_log, unstage, wait_policy, write_bytes,
+    AgentHandle, EarlyAgent, EarlySession, Exchange,
 };
 use crate::use_cases::interruption::Deferrals;
 
@@ -25,8 +25,9 @@ use crate::use_cases::interruption::Deferrals;
 /// цепочку такого объёма. Формат каждого набора сверяется с платформой заранее: набор, формат
 /// которого новее, отказывает до запуска платформы
 /// (`INV.USE-CASES.A-LOAD-FROM-A-NEWER-FORMAT-IS-REFUSED-BEFORE-THE-PLATFORM-STARTS`), и такая
-/// отправка агента заранее не поднимает. Ошибка прогноза стоит поднятого живого агента без
-/// подключения к базе, который живёт по обычным правилам.
+/// отправка агента заранее не поднимает. Агент подключается к базе, пока идёт разбор (#644);
+/// ошибка прогноза стоит поднятого и подключённого живого агента, который живёт по обычным
+/// правилам.
 pub(super) fn start_early(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -45,14 +46,42 @@ pub(super) fn start_early(
     let platform = crate::platform::locator::platform_version_of(location.utility, &location.path);
     let inventory = SourceSetInventory::new(config);
     let source_sets = selected_ordered_source_sets(&inventory, args.source_set.as_deref()).ok()?;
-    for source_set in source_sets
+    let contexts = source_sets
         .iter()
         .filter(|source_set| !source_set.purpose.is_external())
+        .map(|source_set| {
+            let set = inventory.designer_context(&source_set.name)?;
+            crate::use_cases::version_file::check_load_format(set, platform.as_ref()).ok()?;
+            Some(set)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    EarlyAgent::start(
+        context,
+        config,
+        &location.path,
+        early_session(context, config, args.load, &contexts),
+    )
+}
+
+/// Подключать ли агента к базе, пока идёт разбор. Нет, если поколение какого-то набора до
+/// загрузки спросит другой инструмент своим процессом (#653): подключённый агент держал бы
+/// файловую базу, а прочесть вместо `ibcmd` загруженное, но не применённое расширение он не
+/// может — отдаёт применённое, как пакетный Конфигуратор (замер #653). Такой агент поднимается
+/// без подключения, и подключает его сессия команды, открытая после сверки. Наборы берутся
+/// все выбранные: какие из них грузятся, скажет только разбор.
+fn early_session(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    mode: PushMode,
+    sets: &[&SourceSetContext],
+) -> EarlySession {
+    if crate::use_cases::exchange_guard::GenerationGate::new(context, config, mode)
+        .asks_the_record_tool(sets, Provider::Agent)
     {
-        let context = inventory.designer_context(&source_set.name)?;
-        crate::use_cases::version_file::check_load_format(context, platform.as_ref()).ok()?;
+        EarlySession::AfterRecordCheck
+    } else {
+        EarlySession::Later
     }
-    EarlyAgent::start(context, config, &location.path, EarlySession::Later)
 }
 
 pub(super) struct AgentLoader {
@@ -64,8 +93,8 @@ pub(super) struct AgentLoader {
     /// команды, и сессия без неё означала бы ожидание без срока.
     session: Option<(AgentHandle, WaitPolicy)>,
     run: String,
-    /// Живой агент, поднятый в начале команды без подключения к базе (#574): сессия берёт его,
-    /// когда разбор нашёл работу; не взятый снимается вместе с загрузчиком.
+    /// Живой агент, поднятый в начале команды и подключённый к базе без сессии (#574, #644):
+    /// сессия берёт его, когда разбор нашёл работу; не взятый отпускается вместе с загрузчиком.
     early: Option<EarlyAgent>,
 }
 
@@ -261,6 +290,41 @@ impl SourceSetLoader for AgentLoader {
         })
     }
 
+    fn dump_version_file(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        _step_index: usize,
+        into: &Path,
+    ) -> Result<(), AppError> {
+        let run = self.run.clone();
+        let (handle, wait) = self.handle(context, config)?;
+        let exchange = handle.exchange(config)?;
+        // Опись пишется в каталог пользователя агента и уходит к раннеру в `into`, в каталог
+        // набора — никогда (#646).
+        let relative = format!("dump-info/{run}-{}", source_set.name);
+        make_output_dir(handle, &exchange, &relative)?;
+        let mut command = format!(
+            "config dump-config-to-files --dir={} --config-dump-info-only",
+            argument(&relative)
+        );
+        if let Some(extension) = extension_name(source_set) {
+            command.push_str(&format!(" --extension={}", argument(extension)));
+        }
+        let dumped = handle
+            .run(&command, &wait)
+            .map_err(AppError::from)
+            .and_then(|reply| reply.outcome().map(|_| ()).map_err(AppError::from));
+        let collected = dumped
+            .as_ref()
+            .ok()
+            .map(|_| collect_into_dir(handle, &exchange, &relative, into));
+        tidy(handle, &exchange, &relative);
+        dumped?;
+        collected.transpose().map(|_| ())
+    }
+
     fn apply_only(
         &mut self,
         context: &ExecutionContext,
@@ -307,10 +371,9 @@ fn load_and_update(
     // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
     // перестраивает таблицы; загрузка идёт через `run_critical`, применение — через
     // владельца акта (`apply::act`), который зовёт тот же `run_critical`.
-    let mut load = format!(
-        "config load-config-from-files --dir={} --update-config-dump-info",
-        argument(exposed)
-    );
+    // Без `--update-config-dump-info`: файл версий раннер держит у себя, а не в каталоге
+    // загрузки (#646).
+    let mut load = format!("config load-config-from-files --dir={}", argument(exposed));
     if let Some(paths) = partial_paths {
         // Список относительных путей — тот же файл, что для Конфигуратора, только
         // лежит в каталоге пользователя агента; пути в нём — относительно каталога

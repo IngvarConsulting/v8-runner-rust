@@ -14,8 +14,7 @@ use walkdir::WalkDir;
 ///
 /// Проба идёт с `--no-index`: без него гит объявляет отслеживаемый файл
 /// неигнорируемым даже под шаблоном, и генератор `.gitignore` дописывал бы шаблон
-/// при каждом запуске. Вопрос здесь — о шаблоне, а не об индексе; об индексе
-/// спрашивает [`tracking_of`].
+/// при каждом запуске. Вопрос здесь — о шаблоне, а не об индексе.
 ///
 /// Путь передаётся от `dir`, а не абсолютным: абсолютный путь гит сравнивает с
 /// корнем рабочей копии буквально, и ссылка в пути превращала бы ответ в «вне
@@ -99,70 +98,6 @@ fn match_comes_from_worktree_gitignore(stdout: &[u8]) -> bool {
         && !source
             .components()
             .any(|component| component.as_os_str() == ".git")
-}
-
-/// Лежит ли файл в индексе гита.
-///
-/// Состояний три, как и у [`UncommittedWork`]: незнание — самостоятельный ответ.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Tracking {
-    /// Гит отвечает: файла в индексе нет.
-    Untracked,
-    /// Файл в индексе. Путь дан от корня рабочей копии — в том виде, в каком его
-    /// принимает `git rm --cached`, запущенный из корня.
-    Tracked(PathBuf),
-    /// Ответа нет, причина названа: гита нет, путь вне рабочей копии, гит вернул
-    /// ошибку.
-    Unknown(String),
-}
-
-/// Спрашивает гит, лежит ли `path` в индексе.
-///
-/// Каталога файла может не быть на диске — например, до первой выгрузки. Гит
-/// запускается из ближайшего существующего предка, а путь передаётся от него:
-/// абсолютный путь гит сравнивает с корнем рабочей копии буквально, и ссылка в
-/// пути превращала бы ответ в «вне репозитория».
-pub fn tracking_of(path: &Path) -> Tracking {
-    let Some(anchor) = path.ancestors().skip(1).find(|dir| dir.is_dir()) else {
-        return Tracking::Unknown(format!("no existing directory above '{}'", path.display()));
-    };
-    let Ok(relative) = path.strip_prefix(anchor) else {
-        return Tracking::Unknown(format!(
-            "'{}' is not under '{}'",
-            path.display(),
-            anchor.display()
-        ));
-    };
-
-    let output = match Command::new("git")
-        // Имя файла — не шаблон: `*` или `[` в пути не должны ничего расширять.
-        .arg("--literal-pathspecs")
-        .arg("-C")
-        .arg(anchor)
-        .args(["ls-files", "-z", "--full-name", "--cached", "--"])
-        .arg(relative)
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) => return Tracking::Unknown(format!("git ls-files failed to run: {error}")),
-    };
-
-    if !output.status.success() {
-        return Tracking::Unknown(match output.status.code() {
-            Some(code) => format!("git ls-files exited with {code}"),
-            None => "git ls-files was terminated by a signal".to_owned(),
-        });
-    }
-
-    match output
-        .stdout
-        .split(|byte| *byte == 0)
-        .find(|entry| !entry.is_empty())
-    {
-        Some(entry) => Tracking::Tracked(path_from_bytes(entry)),
-        None => Tracking::Untracked,
-    }
 }
 
 /// Что в каталоге пропадёт безвозвратно, если его содержимое заменить.
@@ -762,9 +697,7 @@ pub fn worktree_under(
     optional_locks: bool,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<crate::domain::git_worktree::GitWorktree, GitQueryError> {
-    let mut view = ignore_view(toplevel, info_exclude, roots, interrupted)?;
-    view.index = index_entries_under(toplevel, roots, interrupted)?;
-
+    let started = std::time::Instant::now();
     let mut status = status_command(toplevel, optional_locks);
     status.args([
         "--porcelain=v2",
@@ -780,8 +713,55 @@ pub fn worktree_under(
     } else {
         OnCancel::Kill
     };
-    (view.worktree_changed, view.untracked) =
-        parse_status_v2(&run_git_query(status, None, on_cancel, interrupted)?)?;
+    // `git status` — самый долгий вопрос — идёт рядом с остальными (#645): они только читают
+    // индекс и настройки, а сведения о файлах, которые обновляет `status`, хешей индекса не
+    // меняют. Индекс читается первым: `status` заменяет его в самом конце, и на Windows замена
+    // файла, который ещё читают, откладывается. Отмену ему передаёт этот поток.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (others, answer) = std::thread::scope(|scope| {
+        let stop = &stop;
+        let status = scope.spawn(move || {
+            let mut stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+            let answer = run_git_query(status, None, on_cancel, &mut stopped);
+            (answer, started.elapsed().as_millis() as u64)
+        });
+        let others = index_entries_under(toplevel, roots, interrupted).and_then(|index| {
+            let index_ms = started.elapsed().as_millis() as u64;
+            let view = ignore_view(toplevel, info_exclude, roots, interrupted)?;
+            Ok((view, index, started.elapsed().as_millis() as u64, index_ms))
+        });
+        if others.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        while !status.is_finished() {
+            if interrupted() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            std::thread::sleep(GIT_INTERRUPTION_POLL);
+        }
+        let answer = status.join().unwrap_or_else(|_| {
+            (
+                Err(GitQueryError::failed("a thread asking git panicked")),
+                0,
+            )
+        });
+        (others, answer)
+    });
+    let (mut view, index, ignore_ms, index_ms) = others?;
+    let (answer, status_ms) = answer;
+    view.index = index;
+    (view.worktree_changed, view.untracked) = parse_status_v2(&answer?)?;
+    tracing::debug!(
+        toplevel = %toplevel.display(),
+        index = view.index.len(),
+        changed = view.worktree_changed.len(),
+        untracked = view.untracked.len(),
+        ignore_ms,
+        index_ms,
+        status_ms,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "git described the working tree"
+    );
     // Неотслеживаемый `.gitignore` внутри набора git применяет так же, как отслеживаемый.
     let untracked_gitignores: Vec<String> = view
         .untracked
@@ -1209,55 +1189,6 @@ mod tests {
         assert_eq!(
             uncommitted_work_in(root, &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
-        );
-    }
-
-    #[test]
-    fn a_committed_file_is_tracked_under_its_repository_path() {
-        let repo = repo_with_committed_source();
-        assert_eq!(
-            tracking_of(&source_dir(&repo).join("Configuration.xml")),
-            Tracking::Tracked(PathBuf::from("src/cf/Configuration.xml"))
-        );
-    }
-
-    #[test]
-    fn a_file_outside_the_index_is_untracked() {
-        let repo = repo_with_committed_source();
-        fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
-        assert_eq!(
-            tracking_of(&source_dir(&repo).join("hand-written.xml")),
-            Tracking::Untracked
-        );
-    }
-
-    /// Каталога ещё нет — гит спрашивают из ближайшего существующего предка.
-    #[test]
-    fn a_file_in_an_absent_directory_is_untracked() {
-        let repo = repo_with_committed_source();
-        assert_eq!(
-            tracking_of(&repo.path().join("never").join("was").join("file.xml")),
-            Tracking::Untracked
-        );
-    }
-
-    /// Имя файла — не шаблон: `*` не должен найти соседа.
-    #[test]
-    fn a_name_is_not_a_pattern() {
-        let repo = repo_with_committed_source();
-        assert_eq!(
-            tracking_of(&source_dir(&repo).join("*.xml")),
-            Tracking::Untracked
-        );
-    }
-
-    #[test]
-    fn a_file_outside_a_worktree_has_unknown_tracking() {
-        let dir = tempdir().expect("tempdir");
-        let answer = tracking_of(&dir.path().join("file.xml"));
-        assert!(
-            matches!(answer, Tracking::Unknown(_)),
-            "expected Unknown, got {answer:?}"
         );
     }
 

@@ -345,7 +345,7 @@ impl FileInfobase {
         match self.builder.provider {
             Provider::Designer => self
                 .designer(context, runner, log_file, safety)
-                .load_config_from_files_untouched(source_dir, extension)
+                .load_config_from_files_full(source_dir, extension)
                 .map_err(AppError::from),
             Provider::Ibcmd => self
                 .ibcmd(context, runner, safety)

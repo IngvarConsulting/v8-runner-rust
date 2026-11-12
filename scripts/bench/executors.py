@@ -18,16 +18,32 @@ MARK_PREFIX = "// bench "
 
 # ---- module texts and markers -------------------------------------------------------------
 
+EMPTY_COMMENT = b"<Comment/>"
+
+
+def xml_mark(marker):
+    """The marker of a metadata description: its own comment, which a dump writes back as is."""
+    return f"<Comment>bench {marker}</Comment>"
+
+
 def marked(original, marker):
-    """The original module bytes with one marker line on top (after the BOM)."""
+    """The original module bytes with one marker line on top (after the BOM); a description
+    (`.xml`) gets the marker as its own comment, in place of the first empty `<Comment/>`."""
     bom = original.startswith(b"\xef\xbb\xbf")
     body = original[3:] if bom else original
-    return (b"\xef\xbb\xbf" if bom else b"") + f"{MARK_PREFIX}{marker}\r\n".encode("utf-8") + body
+    prefix = b"\xef\xbb\xbf" if bom else b""
+    if body.lstrip().startswith(b"<?xml"):
+        if EMPTY_COMMENT not in body:
+            raise ValueError("a marked description needs an empty <Comment/>")
+        return prefix + body.replace(EMPTY_COMMENT, xml_mark(marker).encode("utf-8"), 1)
+    return prefix + f"{MARK_PREFIX}{marker}\r\n".encode("utf-8") + body
 
 
 def has_marker(path, marker):
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as f:
+            if path.lower().endswith(".xml"):
+                return xml_mark(marker) in f.read()
             return f"{MARK_PREFIX}{marker}" in f.read(400)
     except FileNotFoundError:
         return False
@@ -230,6 +246,12 @@ class Runner:
 
     def stop_agents(self):
         subprocess.run([self.exe, "--config", self.stand.config, "agent", "stop", "--all"], capture_output=True,
+                       stdin=subprocess.DEVNULL, cwd=self.stand.project)
+
+    def release_agents(self):
+        """A live agent stays connected between commands (#644) and holds the base for
+        configuring: batch Designer steps of the bench release it first (not timed)."""
+        subprocess.run([self.exe, "--config", self.stand.config, "agent", "release"], capture_output=True,
                        stdin=subprocess.DEVNULL, cwd=self.stand.project)
 
     def version(self):

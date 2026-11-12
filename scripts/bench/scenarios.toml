@@ -70,3 +70,39 @@ title = "push модуля объекта"
 kind = "push"
 modules = "object"
 executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
+
+[pair-common2]
+title = "push --no-apply двух общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common2"
+executors = ["runner-live"]
+
+[pair-common30]
+title = "push --no-apply 30 общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common30"
+executors = ["runner-live"]
+
+[pair-common300]
+title = "push --no-apply 300 общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common300"
+executors = ["runner-live"]
+
+[pair-objects30]
+title = "push --no-apply 30 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects30"
+executors = ["runner-live"]
+
+[pair-objects100]
+title = "push --no-apply 100 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects100"
+executors = ["runner-live"]
+
+[pair-objects300]
+title = "push --no-apply 300 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects300"
+executors = ["runner-live"]

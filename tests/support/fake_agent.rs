@@ -123,6 +123,9 @@ pub struct FakeAgent {
     pub connected: Arc<AtomicBool>,
     /// `common connect-ib` отвечает ошибкой платформы, пока флаг поднят.
     pub fail_connect: Arc<AtomicBool>,
+    /// Команды базы без подключения отвечают ошибкой платформы, пока флаг поднят: так тест
+    /// показывает подключение, которое устарело (сеанс завершили, сервер перезапустили).
+    pub require_connection: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -189,6 +192,7 @@ impl FakeAgent {
             dump_log: None,
             connected: Arc::new(AtomicBool::new(false)),
             fail_connect: Arc::new(AtomicBool::new(false)),
+            require_connection: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -362,6 +366,21 @@ impl FakeAgent {
                 );
             }
             return (success(), false);
+        }
+        if self.require_connection.load(Ordering::SeqCst) && !self.connected.load(Ordering::SeqCst)
+        {
+            // Долгая команда успевает прислать ход, прежде чем откажет.
+            let progress = if line.starts_with("config dump-config-to-files") {
+                "[{\"type\":\"progress\",\"body\":{\"message\":\"Выгрузка\",\"percent\":0}}]\n"
+            } else {
+                ""
+            };
+            return (
+                format!(
+                    "{progress}[{{\"type\":\"error\",\"error-type\":\"DesignerNotConnectedToInfoBase\",\"message\":\"Конфигуратор не подключен к информационной базе\"}}]\n"
+                ),
+                false,
+            );
         }
         if line.starts_with("config generation-id") {
             return (

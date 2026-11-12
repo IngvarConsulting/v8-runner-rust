@@ -110,10 +110,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     assert!(local.contains("path: '"));
     assert!(local.contains(platform_path.display().to_string().as_str()));
     let gitignore = fs::read_to_string(project_dir.join(".gitignore")).expect("gitignore");
-    assert_eq!(
-        gitignore,
-        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
-    );
+    assert_eq!(gitignore, "v8project.local.yaml\n.dump-*.lock*\n");
     assert!(project_dir
         .join("src/configuration/Configuration.xml")
         .exists());
@@ -1505,7 +1502,7 @@ fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
     );
     assert_eq!(
         fs::read_to_string(&project_gitignore).expect("project gitignore"),
-        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        "v8project.local.yaml\n.dump-*.lock*\n"
     );
 }
 

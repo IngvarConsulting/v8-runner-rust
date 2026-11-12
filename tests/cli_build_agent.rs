@@ -509,7 +509,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     assert!(
         lines.get(2).is_some_and(|line| line
             .starts_with("config load-config-from-files --dir=build/")
-            && line.ends_with("--update-config-dump-info")),
+            && !line.contains("--update-config-dump-info")),
         "{lines:?}"
     );
     assert_eq!(
@@ -615,32 +615,57 @@ fn a_build_without_changes_opens_no_session() {
     assert_eq!(read_or_empty(&harness.designer_args_log).lines().count(), 1);
 }
 
-/// Отправка, которой грузить нечего, может поднять живого агента заранее, пока идёт разбор, но
-/// к базе его не подключает: `common connect-ib` идёт, только когда разбор нашёл работу
-/// (`INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`,
+/// Отправка, которой грузить нечего, может поднять живого агента заранее и подключить его к базе,
+/// пока идёт разбор. Подключение живёт с агентом, а не с работой: оно остаётся, а работы агент не
+/// получает — кроме подключения, ему ничего не приходит (#644,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`,
 /// `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
 #[test]
-fn a_push_with_nothing_to_load_never_connects_an_early_agent() {
+fn a_push_with_nothing_to_load_leaves_the_early_agent_connected_without_work() {
     let harness = harness();
     let (first, payload) = run(&harness, &["build"]);
     assert_eq!(first, 0, "{payload}");
     let (stopped, payload) = run(&harness, &["agent", "stop"]);
     assert_eq!(stopped, 0, "{payload}");
-    let connects = || {
-        commands(&harness)
-            .iter()
-            .filter(|line| line.starts_with("common connect-ib"))
-            .count()
-    };
-    let before = connects();
+    let before = commands(&harness).len();
     // Поднимет ли вторая отправка агента, зависит от того, кончится ли её разбор раньше подъёма:
-    // проверяется обещание, верное в обоих случаях, — к базе её агент не подключается.
+    // проверяется обещание, верное в обоих случаях, — работы агент не получает.
 
     let (second, payload) = run(&harness, &["build"]);
 
     assert_eq!(second, 0, "{payload}");
     assert_eq!(payload["data"]["steps"][0]["mode"], "skipped", "{payload}");
-    assert_eq!(connects(), before, "{:?}", commands(&harness));
+    let after = commands(&harness);
+    assert!(
+        after[before..]
+            .iter()
+            .all(|line| line.starts_with("options set") || line == "common connect-ib"),
+        "{after:?}"
+    );
+}
+
+/// Вторая отправка берёт подключение живого агента к базе, оставшееся от первой: `common
+/// connect-ib` у живого агента идёт один раз (#644,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+#[test]
+fn a_second_push_does_not_connect_the_live_agent_again() {
+    let harness = harness();
+    let (first, payload) = run(&harness, &["build"]);
+    assert_eq!(first, 0, "{payload}");
+    fs::write(
+        harness.sources.join("Catalogs").join("Items.xml"),
+        "<Catalog changed='1'/>",
+    )
+    .expect("change");
+
+    let (second, payload) = run(&harness, &["build"]);
+
+    assert_eq!(second, 0, "{payload}");
+    let lines = commands(&harness);
+    let count = |prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
+    assert_eq!(count("config load-config-from-files"), 2, "{lines:?}");
+    assert_eq!(count("common connect-ib"), 1, "{lines:?}");
+    assert_eq!(count("common disconnect-ib"), 0, "{lines:?}");
 }
 
 /// Изменённый файл грузится частично, со списком путей относительно каталога загрузки.
@@ -682,10 +707,26 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
+    // Копия описи — как после прежнего `pull`, что бы ни оставило освежение после сборки (#646).
+    support::memory::remember_version_file(
+        harness.dir.path(),
+        "origin",
+        support::memory::Base::File(&harness.dir.path().join("ib")),
+        &support::memory::Set::configuration("main", &harness.sources),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    );
     // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
     let project = harness.sources.parent().expect("project dir");
-    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
     support::commit_sources(project);
+
+    // Полная сборка сама освежает опись (`--config-dump-info-only`, #646): смотрим только команды выгрузки.
+    let before_dump = commands(&harness).len();
+    assert!(
+        commands(&harness)
+            .iter()
+            .any(|line| line.contains("--config-dump-info-only")),
+        "a full build refreshes the version file"
+    );
 
     let (dump, payload) = run(&harness, &["dump"]);
 
@@ -698,7 +739,7 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
         "{payload}"
     );
     assert!(
-        !commands(&harness)
+        !commands(&harness)[before_dump..]
             .iter()
             .any(|line| line.starts_with("config dump-config-to-files")),
         "nothing may be dumped for an unchanged generation"
@@ -1005,7 +1046,8 @@ fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness 
 /// Агент грузит основную конфигурацию и расширение, а запись расширения сделал `ibcmd`:
 /// поколение расширения спрашивает `ibcmd` первым проходом — раньше, чем открыта сессия
 /// агента, которая держала бы файловую базу, — и расширение, ушедшее вперёд, отказывает
-/// `non_fast_forward` до загрузки.
+/// `non_fast_forward` до загрузки. Агент, поднятый заранее, к базе не подключается ни в каком
+/// порядке событий (#653): он мог успеть подняться и выставить режим ответа — и только.
 #[test]
 fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
     let second = "2".repeat(40);
@@ -1033,11 +1075,45 @@ fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
         ibcmd_calls.lines().all(|line| line.contains("--extension")),
         "{ibcmd_calls}"
     );
+    let agent_commands = commands(&harness);
     assert!(
-        commands(&harness).is_empty(),
-        "no agent session was opened before the refusal: {:?}",
-        commands(&harness)
+        agent_commands
+            .iter()
+            .all(|line| line == "options set --show-prompt=no --output-format=json"),
+        "no agent session was opened and the agent was not connected to the infobase before the refusal: {agent_commands:?}"
     );
+}
+
+/// Поколение расширения, записанное `ibcmd`, совпало: агент, поднятый заранее без подключения
+/// к базе, подключает сессия команды после сверки (#653), и наборы грузятся в ней. `ibcmd`
+/// спрашивается один раз — до сессии; поколение после загрузки читает уже агент.
+#[test]
+fn an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check() {
+    let recorded = "1".repeat(40);
+    let harness = harness_with_an_extension_recorded_by_ibcmd(Some(&recorded));
+
+    let (code, payload) = run(&harness, &["push"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let ibcmd_calls = read_or_empty(&harness.dir.path().join("ibcmd-calls.log"));
+    assert_eq!(
+        ibcmd_calls
+            .lines()
+            .filter(|line| line.contains("generation-id"))
+            .count(),
+        1,
+        "only the record tool's read of the extension: {ibcmd_calls}"
+    );
+    let agent_commands = commands(&harness);
+    let connect = agent_commands
+        .iter()
+        .position(|line| line == "common connect-ib")
+        .unwrap_or_else(|| panic!("the session connects the agent: {agent_commands:?}"));
+    let load = agent_commands
+        .iter()
+        .position(|line| line.starts_with("config load-config-from-files"))
+        .unwrap_or_else(|| panic!("the sets are loaded: {agent_commands:?}"));
+    assert!(connect < load, "{agent_commands:?}");
 }
 
 /// Инструмент записи поколением не ответил — здесь `ibcmd` нет в установке: сверить нечем,

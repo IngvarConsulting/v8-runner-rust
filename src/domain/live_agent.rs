@@ -28,6 +28,9 @@ pub struct AgentReleaseResult {
     pub released: bool,
     /// Держатели после `release`.
     pub holders: Vec<LiveAgentHolder>,
+    /// Отключён ли агент от базы этим `release` (#644): `false` — он не был подключён или занят
+    /// командой.
+    pub disconnected: bool,
     pub duration_ms: u64,
 }
 
@@ -72,8 +75,12 @@ pub struct LiveAgentEntry {
     pub holders: Vec<LiveAgentHolder>,
     /// Команда, которую агент выполняет сейчас или последней в открытой сессии.
     pub busy: Option<String>,
-    /// Подключён ли агент к базе сессией команды.
+    /// Идёт ли сессия команды.
     pub connected: bool,
+    /// Подключён ли агент к базе: в сессии команды или между командами, пока простой не снял
+    /// его (#644). Подключённый агент держит сеанс Конфигуратора базы; `agent release` его
+    /// отключает.
+    pub attached: bool,
     /// Сколько агент простаивает, мс; занятый — ноль.
     pub idle_ms: u64,
     /// Сторож уже решил снять агента.

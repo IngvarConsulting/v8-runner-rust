@@ -1593,21 +1593,22 @@ async fn mcp_stdio_dump_config_partial_ibcmd_returns_degraded_success() {
     assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["requested_mode"], "PARTIAL");
-    assert_eq!(payload["data"]["mode"], "INCREMENTAL");
+    // Без копии описи раннера выборка `ibcmd` идёт полной выгрузкой (#646).
+    assert_eq!(payload["data"]["mode"], "FULL");
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
         .contains("IBCMD does not support object-scoped partial dump"));
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
-        .contains("--sync"));
+        .contains("--force"));
 
     client.cancel().await.expect("cancel client");
 }
 
 #[tokio::test]
 async fn mcp_stdio_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() {
-    let (_dir, config_path, calls_log) = setup_ibcmd_dump_project(Some("--sync"));
+    let (_dir, config_path, calls_log) = setup_ibcmd_dump_project(Some("--force"));
     let transport = TokioChildProcess::new(
         tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
             cmd.arg("--config")
@@ -1648,7 +1649,7 @@ async fn mcp_stdio_dump_config_partial_ibcmd_preserves_partial_mode_on_failure()
         .contains("dump failed for source-set 'main' with exit code 17"));
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
-        .contains("--sync"));
+        .contains("--force"));
 
     client.cancel().await.expect("cancel client");
 }

@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STANDS_DIR = os.path.join(HERE, "stands")
 SCENARIOS_FILE = os.path.join(HERE, "scenarios.toml")
 
-KINDS = ("push", "pull", "status", "pull-none", "push-after-pull", "pull-full")
+KINDS = ("push", "pull", "status", "pull-none", "push-after-pull", "pull-full", "pair")
 # Kinds that change no module of a set: the scenario names no `modules`.
 NO_MODULES = {"status", "pull-none", "pull-full"}
 # runner-016: another runner binary (`--runner-016`, release 0.16) on its own project
@@ -26,8 +26,9 @@ RUNNERS = ("runner", "runner-live", "runner-016")
 CAN = {
     "runner": set(KINDS),
     # status asks no agent, a full pull of a file base goes through ibcmd (#559): nothing to keep alive.
-    "runner-live": {"push", "pull", "pull-none", "push-after-pull"},
-    "runner-016": set(KINDS),
+    "runner-live": {"push", "pull", "pull-none", "push-after-pull", "pair"},
+    # the pair (#646) is measured for the runner under test only
+    "runner-016": set(KINDS) - {"pair"},
     "agent": {"push", "pull", "status", "pull-none", "pull-full"},
     "batch": {"push", "pull", "status", "pull-none", "pull-full"},
     "ibcmd": {"push", "status", "pull-full"},
@@ -120,8 +121,8 @@ def load_stand(name, stands_root=None, platform_root=None):
         raise DescriptionError(f"{where}: exactly one of [create] and [existing]")
     modules = data.get("modules") or {}
     for set_name, files in modules.items():
-        if not isinstance(files, list) or not files or not all(isinstance(p, str) and p.endswith(".bsl") for p in files):
-            raise DescriptionError(f"{where}: module set {set_name!r} must be a non-empty list of .bsl paths")
+        if not isinstance(files, list) or not files or not all(isinstance(p, str) and p.endswith((".bsl", ".xml")) for p in files):
+            raise DescriptionError(f"{where}: module set {set_name!r} must be a non-empty list of .bsl or .xml paths")
     common = dict(
         name=name, title=data.get("title", name), platform=_require(data, "platform", where), work=work,
         source_set=data.get("source_set", "main"), source_path=data.get("source_path", "src/main"),

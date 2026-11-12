@@ -1,28 +1,25 @@
 ---
 id: INV.USE-CASES.THE-RUNNER-COPY-TAKES-THE-PLATFORM-FILE-AFTER-SUCCESS
 check:
-  - tests/cli_pull_memory.rs::a_foreign_version_file_between_commands_does_not_reach_the_dump
+  - tests/cli_pull_memory.rs::a_version_file_in_the_sources_never_reaches_the_dump
   - tests/cli_pull_memory.rs::a_failed_pull_does_not_change_the_runner_copy
-  - tests/cli_pull_memory.rs::a_failed_push_does_not_change_the_runner_copy
-  - tests/cli_pull_memory.rs::a_push_refreshes_the_runner_copy
-  - tests/cli_pull_memory.rs::a_push_that_writes_no_version_file_keeps_the_runner_copy
   - tests/cli_pull_memory.rs::a_designer_partial_pull_leaves_the_runner_copy_alone
-  - tests/cli_pull_memory.rs::an_agent_push_loads_over_the_runner_copy_and_records_the_new_one
+  - tests/cli_pull_memory.rs::an_ibcmd_partial_pull_dumps_from_the_runner_copy
   - tests/cli_pull_memory.rs::a_failed_copy_write_is_a_warning_not_a_refusal
-  - src/use_cases/version_file.rs::a_load_that_did_not_rewrite_the_file_keeps_the_copy
+  - src/use_cases/dump_config.rs::a_broken_overlay_keeps_the_runner_copy_as_it_was
 ---
 
-# Копия раннера перенимает файл платформы только после удачи
+# Копия раннера перенимает опись платформы только после удачи
 
-Файл версий в каталоге набора остаётся там после команды. Копия раннера
-(`INV.USE-CASES.A-REPLACED-VERSION-FILE-GIVES-WAY-TO-THE-RUNNER-COPY`) перенимает его после
-удачной полной выгрузки, удачной выгрузки по изменившемуся и удачной выборки `ibcmd`, а
-после удачной загрузки `push` — только если загрузка переписала файл в каталоге. Загрузка,
-которая файла в каталоге не переписала, копию не меняет: так у частичной загрузки `ibcmd` и у
-агента, которому каталог передан копией (по SFTP или в общий каталог без ссылки). После полной
-загрузки `ibcmd` файл в каталог пишет сам раннер
-(`INV.USE-CASES.AN-IBCMD-FULL-LOAD-WRITES-THE-VERSION-FILE`).
-Выборочная выгрузка Конфигуратора копию не меняет. Сбой команды оставляет копию прежней.
+Копия описи раннера (`INV.USE-CASES.THE-VERSION-FILE-LIVES-ONLY-IN-THE-RUNNER-MEMORY`)
+перенимает опись, которую платформа написала в стадию, только после удачной выгрузки: полной —
+после публикации дерева, по изменившемуся и выборки `ibcmd` — после удалений по двум описям и
+переноса написанного в каталог набора. Сбой платформы, удалений или переноса оставляет копию
+прежней: она старше дерева, и следующая выгрузка по ней выгрузит больше, а не меньше.
+Выборочная выгрузка Конфигуратора и агента копию не меняет. Загрузка `push` меняет её, только
+когда получает свежую опись — после полной загрузки или крупной по изменившемуся, если поколение
+во время выгрузки описи не сдвинулось
+(`INV.USE-CASES.A-PUSH-REFRESHES-THE-VERSION-FILE-ONLY-WHEN-IT-PAYS`).
 
 Если копию не удалось записать после удачной команды, ответ остаётся удачным и несёт
 предупреждение: прежняя копия ведёт к выгрузке лишнего, а не к пропуску изменений.

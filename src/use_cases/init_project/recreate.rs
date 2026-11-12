@@ -242,8 +242,12 @@ impl Recreation {
         context: &ExecutionContext,
         config: &AppConfig,
     ) -> Result<SetAside, (UseCaseError, Vec<RemovedEntry>)> {
-        let agents = settle_live_agents(config, "infobase create", true)
-            .map_err(|error| (UseCaseError::from(error), Vec::new()))?;
+        let agents = settle_live_agents(
+            config,
+            "infobase create",
+            crate::use_cases::infobase_lock::LiveAgents::Remove,
+        )
+        .map_err(|error| (UseCaseError::from(error), Vec::new()))?;
         let agents: Vec<RemovedEntry> = agents
             .into_iter()
             .map(|pid| {

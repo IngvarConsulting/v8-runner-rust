@@ -46,6 +46,24 @@ fn commit_project(harness: &Harness) {
     support::commit_sources(project);
 }
 
+/// Копия описи раннера для набора `main`, как её оставляет удачная выгрузка (#646).
+fn remember_the_runner_copy(harness: &Harness) -> PathBuf {
+    let root = harness.dir.path();
+    support::memory::remember_version_file(
+        root,
+        "origin",
+        support::memory::Base::File(&root.join("ib")),
+        &support::memory::Set::configuration("main", &harness.target),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+}
+
+/// Выгрузка агента по копии описи раннера: в стадию раннера, опись — файлом рядом.
+fn is_a_dump_by_the_runner_copy(line: &str) -> bool {
+    line.starts_with("config dump-config-to-files --dir=target/")
+        && line.contains(" --update --config-dump-info-for-changes=dump-info/")
+}
+
 fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     harness_with(with_designer, agent, attach, None, |_| String::new())
 }
@@ -444,15 +462,12 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
     );
 }
 
-/// Инкрементальная выгрузка обновляет цель на месте через ссылку в каталоге агента.
+/// Инкрементальная выгрузка идёт в стадию раннера, выставленную агенту ссылкой, по копии описи
+/// раннера, и ложится поверх цели; опись в цель не попадает (#646).
 #[test]
-fn incremental_mode_updates_the_target_in_place_through_a_link() {
+fn incremental_mode_dumps_into_a_stage_through_a_link_and_lays_over_the_target() {
     let harness = harness(true, Some(true), false);
-    fs::write(
-        harness.target.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\"/>",
-    )
-    .expect("version file");
+    remember_the_runner_copy(&harness);
     commit_project(&harness);
 
     let (code, payload) = run_dump(&harness, &[]);
@@ -461,18 +476,19 @@ fn incremental_mode_updates_the_target_in_place_through_a_link() {
     assert!(harness.target.join("Configuration.xml").is_file());
     assert!(
         harness.target.join("updated.txt").is_file(),
-        "the agent must have been asked to update the target itself"
+        "the agent must have been asked to dump by changes"
     );
     assert!(
         harness.target.join("old.txt").is_file(),
         "an incremental dump merges into the target, it does not replace it"
     );
+    assert!(
+        !harness.target.join("ConfigDumpInfo.xml").exists(),
+        "the description stays in the runner's memory"
+    );
     let lines = commands(&harness);
     assert!(
-        lines.iter().any(
-            |line| line.starts_with("config dump-config-to-files --dir=target/")
-                && line.ends_with("--update")
-        ),
+        lines.iter().any(|line| is_a_dump_by_the_runner_copy(line)),
         "{lines:?}"
     );
     let user_dir = PathBuf::from(read_or_empty(&harness.base_dir_file)).join("0");
@@ -527,17 +543,42 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
+/// Незакоммиченная работа в каталоге не мешает ответу «всё актуально»: агент сверяет поколение
+/// раньше сторожа, как Конфигуратор и `ibcmd`, и выгрузки, которой нет, сторож не спрашивает (#683).
+#[test]
+fn an_unchanged_generation_answers_up_to_date_over_uncommitted_work() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--force"]);
+    assert_eq!(first, 0, "{payload}");
+    commit_project(&harness);
+    let hand_written = harness.target.join("hand-written.txt");
+    fs::write(&hand_written, "exists nowhere else").expect("hand-written");
+
+    let (second, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(
+        commands(&harness)
+            .iter()
+            .filter(|line| line.starts_with("config dump-config-to-files"))
+            .count(),
+        1,
+        "only the first command dumps"
+    );
+    assert_eq!(
+        fs::read_to_string(&hand_written).expect("hand-written"),
+        "exists nowhere else"
+    );
+}
+
 /// Агент прогноза не спрашивает: перед `--update` нет `--get-changes`, а режим называет то,
 /// что выгрузка сделала с каталогом — файл, которого она не переписала, оставляет его
 /// `INCREMENTAL` (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
 #[test]
 fn the_agent_asks_no_forecast() {
     let harness = harness(true, Some(true), false);
-    fs::write(
-        harness.target.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\"/>",
-    )
-    .expect("version file");
+    remember_the_runner_copy(&harness);
     commit_project(&harness);
 
     let (code, payload) = run_dump(&harness, &[]);
@@ -552,9 +593,7 @@ fn the_agent_asks_no_forecast() {
         .map(|line| {
             if line.starts_with("config generation-id") {
                 "generation"
-            } else if line.starts_with("config dump-config-to-files --dir=target/")
-                && line.ends_with(" --update")
-            {
+            } else if is_a_dump_by_the_runner_copy(line) {
                 "dump --update"
             } else {
                 line.as_str()
@@ -655,7 +694,7 @@ fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_no
     assert_eq!(dumps(&harness), 2, "{payload}");
 }
 
-/// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —
+/// Без копии описи раннера выгрузка по изменившемуся идёт полной поверх каталога —
 /// агенту уходит команда без `--update`, ответ называет `FULL` и причину, а прежнее
 /// поколение не даёт её пропустить.
 #[test]
@@ -663,7 +702,13 @@ fn a_directory_without_a_version_file_is_dumped_full_without_the_generation_skip
     let harness = harness(true, Some(true), false);
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
-    let _ = fs::remove_file(harness.target.join("ConfigDumpInfo.xml"));
+    fs::remove_file(
+        harness
+            .dir
+            .path()
+            .join(".local/infobases/origin/dump-info/main/ConfigDumpInfo.xml"),
+    )
+    .expect("the runner copy the full dump recorded");
     commit_project(&harness);
 
     let (second, payload) = run_dump(&harness, &[]);

@@ -680,7 +680,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ),
     (
         "use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md",
-        "пяти",
+        "пяти,трёх",
     ),
     (
         "use-cases/an-untracked-directory-is-refused-not-replaced.md",

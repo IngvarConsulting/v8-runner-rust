@@ -40,7 +40,6 @@ use crate::use_cases::agent_session::{
     ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded, TokenScope,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 use crate::use_cases::request::PushMode;
 use crate::use_cases::result::{Generations, UseCaseError, UseCaseErrorKind};
 
@@ -576,15 +575,6 @@ pub(crate) fn predict(
     }
 }
 
-/// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoadExtent {
-    /// Набор загружен целиком.
-    Whole,
-    /// Загружены изменившиеся файлы.
-    Partial,
-}
-
 /// Что показало поколение перед загрузкой.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeforeLoad {
@@ -757,12 +747,9 @@ impl<'a> GenerationGate<'a> {
         }
         let mut utilities = None;
         for set in sets {
-            let Some(record) = recorded_generation(set) else {
+            let Some(record) = self.record_to_ask(set, tool) else {
                 continue;
             };
-            if !self.foreign(&record, tool, token_scope(self.config, set)) {
-                continue;
-            }
             let utilities =
                 utilities.get_or_insert_with(|| PlatformUtilities::from_config(self.config));
             let before = self
@@ -773,6 +760,25 @@ impl<'a> GenerationGate<'a> {
                 .insert(set.name().to_owned(), before);
         }
         Ok(())
+    }
+
+    /// Спросит ли [`Self::check_foreign`] поколение инструментом записи хоть у одного из `sets`:
+    /// тот же выбор, что у сверки, без вопроса платформе. По нему `push` не подключает к базе
+    /// живого агента, поднятого заранее, пока сверка не прошла (#653).
+    pub(crate) fn asks_the_record_tool(&self, sets: &[&SourceSetContext], tool: Provider) -> bool {
+        sets.iter()
+            .any(|set| self.record_to_ask(set, tool).is_some())
+    }
+
+    /// Запись набора, о которой [`Self::check_foreign`] спрашивает инструмент записи, когда
+    /// набор грузит `tool`; `None` — не спрашивает. Единственное место этого выбора: по нему же
+    /// `push` решает о раннем подключении агента ([`Self::asks_the_record_tool`]).
+    fn record_to_ask(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
+        if self.mode == PushMode::Force {
+            return None;
+        }
+        recorded_generation(set)
+            .filter(|record| self.foreign(record, tool, token_scope(self.config, set)))
     }
 
     /// Запись сделал другой известный инструмент, и с токеном загрузчика её токен несравним.
@@ -988,59 +994,11 @@ impl<'a> GenerationGate<'a> {
         self.failed_load.borrow_mut().take().into_iter().collect()
     }
 
-    /// Восстановление потерянного файла версий без полной выгрузки
-    /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
-    ///
-    /// Сразу после удачной загрузки, если файла версий в каталоге набора нет, а совпадение
-    /// каталога и базы доказано — загрузка была полной или поколение перед частичной совпало
-    /// с записанным, — выгружается один файл версий: `dump_and_reread` выгружает его и
-    /// читает поколение снова, а `None` значит, что инструмент этого не умеет. Поколение после
-    /// загрузки и после выгрузки сравнивается тем же инструментом: изменилось или ответа нет
-    /// — файл убирается. Возвращает строку для ответа.
-    pub(crate) fn restore_version_file(
-        &self,
-        set: &SourceSetContext,
-        extent: LoadExtent,
-        before: &BeforeLoad,
-        token: Option<&str>,
-        dump_and_reread: impl FnOnce() -> Option<Result<Option<String>, AppError>>,
-    ) -> Option<String> {
-        let file = set.path().join(VERSION_FILE_NAME);
-        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
-        let token = token?;
-        if file.exists()
-            || !proven
-            || crate::use_cases::interruption::pending_interruption_error(
-                self.context,
-                "the configuration generation",
-            )
-            .is_some()
-        {
-            return None;
-        }
-        match dump_and_reread()? {
-            Ok(Some(after)) if after == token && file.is_file() => Some(format!(
-                "{VERSION_FILE_NAME} was missing from source-set '{}' and was dumped alone, without a full dump: the directory matches the infobase",
-                set.name()
-            )),
-            Ok(_) | Err(_) => Some(match std::fs::remove_file(&file) {
-                Ok(()) => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged while it was dumped; the next pull runs full",
-                    set.name()
-                ),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged; the next pull runs full",
-                    set.name()
-                ),
-                // Оставшийся файл объявил бы каталог совпадающим с базой: его называют, чтобы
-                // его убрали до следующей выгрузки по изменившемуся.
-                Err(error) => format!(
-                    "{VERSION_FILE_NAME} was dumped alone into source-set '{}' while the configuration generation did not confirm that the infobase stayed unchanged, and it could not be removed: {error}; delete '{}' before the next pull, otherwise it claims that the directory matches the infobase",
-                    set.name(),
-                    file.display()
-                ),
-            }),
-        }
+    /// Решает ли что-нибудь поколение после удачной загрузки набора: его ответ нужен записи
+    /// поколения, если у набора есть журнал. Иначе второй запрос не уходит (#637). Файла версий
+    /// загрузка не касается (#646), и ради него поколение не спрашивается.
+    pub(crate) fn generation_after_load_decides(&self, set: &SourceSetContext) -> bool {
+        GenerationLedger::of(set).is_some()
     }
 }
 
@@ -1108,6 +1066,13 @@ pub(crate) fn unchanged_since_the_record(
         )
         },
     )
+}
+
+/// Решает ли что-нибудь поколение после выгрузки набора `set`: его ответ нужен только записи
+/// поколения ([`record_after_dump`]) и хеш-памяти записанного (`watched` — выгрузку
+/// стерегут). У набора без журнала поколений и без сторожа второй запрос не уходит (#637).
+pub(crate) fn generation_after_dump_decides(set: &SourceSetContext, watched: bool) -> bool {
+    watched || GenerationLedger::of(set).is_some()
 }
 
 /// Поколение у выгрузки: до и после. Совпало — запись после выгрузки. Изменилось — базу
@@ -1366,6 +1331,96 @@ mod tests {
             &SourceSetsService::new(config).designer_contexts(),
             None,
         )
+    }
+
+    /// Второй запрос поколения после выгрузки уходит, только когда ответ что-то решает
+    /// (#637): у набора с журналом поколений — всегда
+    /// (`INV.USE-CASES.A-BASE-CHANGED-DURING-A-DUMP-IS-NAMED-AND-NOT-REMEMBERED`); у набора без
+    /// журнала — только ради хеш-памяти стерегомой выгрузки.
+    #[test]
+    fn the_generation_after_a_dump_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+        assert!(GenerationLedger::of(&unremembered).is_none());
+
+        assert!(generation_after_dump_decides(remembered, false));
+        assert!(generation_after_dump_decides(remembered, true));
+        assert!(generation_after_dump_decides(&unremembered, true));
+        assert!(!generation_after_dump_decides(&unremembered, false));
+    }
+
+    /// Второй запрос поколения после загрузки уходит, только когда ответ что-то решает (#637):
+    /// у набора с журналом — всегда, его ответ записывается
+    /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`); у набора без журнала
+    /// — никогда: файла версий загрузка не касается (#646).
+    #[test]
+    fn the_generation_after_a_load_is_asked_only_when_it_decides_something() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
+        let unremembered = remembered.clone().without_memory();
+
+        assert!(gate.generation_after_load_decides(remembered));
+        assert!(!gate.generation_after_load_decides(&unremembered));
+    }
+
+    /// Поколение расширения, записанное `ibcmd`, у отправки агентом спрашивает `ibcmd` своим
+    /// процессом, и об этом известно до разбора: по этому ответу `push` не подключает к базе
+    /// агента, поднятого заранее, пока сверка не прошла (#653). Запись самого агента, запись
+    /// основной конфигурации файловой базы (токены сравнимы) и `push --force` сверки не дают.
+    #[test]
+    fn a_push_knows_before_the_analysis_that_the_record_tool_will_be_asked() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut config = project(root.path());
+        std::fs::create_dir_all(root.path().join("ext")).expect("extension sources");
+        config.source_sets.push(SourceSetConfig {
+            name: "ext".to_owned(),
+            purpose: SourceSetPurpose::Extension,
+            path: PathBuf::from("ext"),
+        });
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let (main, ext) = (&contexts[0], &contexts[1]);
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let token = "1".repeat(40);
+        let record = |set: &SourceSetContext, tool: Provider| {
+            GenerationLedger::of(set)
+                .expect("ledger")
+                .record(tool, &token, GenerationAfter::Build)
+                .expect("generation record");
+        };
+
+        assert!(
+            !gate.asks_the_record_tool(&[main, ext], Provider::Agent),
+            "nothing recorded"
+        );
+
+        record(main, Provider::Ibcmd);
+        assert!(
+            !gate.asks_the_record_tool(&[main, ext], Provider::Agent),
+            "the main configuration of a file base compares tokens of any tool"
+        );
+
+        record(ext, Provider::Agent);
+        assert!(!gate.asks_the_record_tool(&[main, ext], Provider::Agent));
+
+        record(ext, Provider::Ibcmd);
+        assert!(gate.asks_the_record_tool(&[main, ext], Provider::Agent));
+        assert!(gate.asks_the_record_tool(&[ext], Provider::Agent));
+        assert!(!gate.asks_the_record_tool(&[main], Provider::Agent));
+        assert!(
+            !gate.asks_the_record_tool(&[ext], Provider::Ibcmd),
+            "the record tool loads the set itself"
+        );
+        assert!(
+            !GenerationGate::new(&context, &config, PushMode::Force)
+                .asks_the_record_tool(&[ext], Provider::Agent),
+            "push --force checks no generation"
+        );
     }
 
     #[test]

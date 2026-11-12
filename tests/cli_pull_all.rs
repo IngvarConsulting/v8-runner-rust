@@ -91,8 +91,8 @@ struct Project {
 }
 
 impl Project {
-    /// Проект под гитом: наборы `main` и `Old` выгружены прежде и зафиксированы, файлы версий
-    /// в игноре. `Gone` объявлен, но в базе его нет. В базе установлены `installed`.
+    /// Проект под гитом: наборы `main` и `Old` выгружены прежде и зафиксированы, копии описей
+    /// — в памяти раннера. `Gone` объявлен, но в базе его нет. В базе установлены `installed`.
     fn new(installed: &[&str]) -> Self {
         let dir = temp_workspace();
         let root = dir.path().join("project");
@@ -104,11 +104,18 @@ impl Project {
                 format!("<Configuration name='{set}'/>\n"),
             )
             .expect("descriptor");
-            fs::write(
-                set_dir.join("ConfigDumpInfo.xml"),
+            let set_memory = if set == "main" {
+                support::memory::Set::configuration(set, &set_dir)
+            } else {
+                support::memory::Set::extension(set, &set_dir)
+            };
+            support::memory::remember_version_file(
+                &root,
+                "origin",
+                support::memory::Base::File(&root.join("ib")),
+                &set_memory,
                 "<ConfigDumpInfo version=\"2.17\"/>\n",
-            )
-            .expect("version file");
+            );
             // Файл, которого выгрузка по изменившемуся не переписывает: режим по факту —
             // `INCREMENTAL`, как у настоящей платформы при правке части объектов.
             fs::write(set_dir.join("Kept.bsl"), "kept\n").expect("an untouched file");

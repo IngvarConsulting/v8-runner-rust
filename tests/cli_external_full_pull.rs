@@ -1483,7 +1483,9 @@ fn an_edit_after_publication_is_not_absorbed_into_the_prepared_baseline() {
     project.seed_baseline();
     let mut session = project.start();
     let ready = project.ready(&mut session);
-    let prepared_version = fs::read(project.stage.join("ConfigDumpInfo.xml")).unwrap();
+    // Опись в публикуемое дерево не попадает (#646): её запомнила память раннера.
+    assert!(!project.stage.join("ConfigDumpInfo.xml").exists());
+    let prepared_version = b"<ConfigDumpInfo version=\"2.20\"/>\n".to_vec();
     project.publish();
     let edited = b"Procedure UserEditedAfterPublication()\nEndProcedure\n";
     fs::write(project.sources.join("Module.bsl"), edited).unwrap();

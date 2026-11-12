@@ -39,6 +39,16 @@ class FlagTest(unittest.TestCase):
         self.assertTrue(flag.release(self.path, OURS, say=lambda _: None))
         self.assertFalse(os.path.exists(self.path))
 
+    def test_an_empty_or_blank_flag_is_free(self):
+        for left in ("", "  \r\n"):
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(left)
+            looks = []
+            flag.acquire(self.path, OURS, poll=0, say=looks.append, sleep=lambda _: None)
+            self.assertEqual(flag.holder(self.path), OURS)
+            self.assertEqual(looks, [], "no waiting on a free flag")
+            self.assertTrue(flag.release(self.path, OURS, say=lambda _: None))
+
     def test_foreign_flag_is_not_overwritten_without_waiting(self):
         for other in (FOREIGN, SIBLING):
             self.put(other)
@@ -124,6 +134,10 @@ class DescriptionTest(unittest.TestCase):
                 self.assertTrue(stand.project.startswith(stand.work))
                 self.assertTrue(stand.infobase.startswith(stand.work))
             for scenario in scenarios.values():
+                # The pair series (#646) is measured on `ka` and `ssl321` only; release stands
+                # (#585) serve the rest.
+                if scenario.kind == "pair" and name not in ("ka", "ssl321"):
+                    continue
                 describe.check_pair(stand, scenario)
 
     def test_first_set_and_executors(self):
@@ -133,6 +147,7 @@ class DescriptionTest(unittest.TestCase):
         self.assertEqual({s.kind for s in scenarios.values()}, set(describe.KINDS))
         pairs = {(s.modules, s.kind) for s in scenarios.values() if s.modules}
         self.assertTrue({("common2", "push"), ("form", "push"), ("object", "push"), ("common1", "pull")} <= pairs)
+        self.assertEqual(scenarios["pair-common2"].executors, ["runner-live"])
 
     def test_release_set_of_585(self):
         """#585: status, pull without changes, pull 1, push 1, push after pull, full pull; bare
@@ -400,6 +415,22 @@ class CommandTest(unittest.TestCase):
             path = os.path.join(d.name, "CommonModules", "М", "Ext", "Module.bsl")
             self.assertTrue(ex.has_marker(path, "r1 push 1"))
             self.assertFalse(ex.has_marker(path, "r1 push 2"))
+
+    def test_a_description_is_marked_in_its_own_comment(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        original = (b"\xef\xbb\xbf<?xml version=\"1.0\"?>\r\n<MetaDataObject><Catalog><Properties>"
+                    b"<Comment/></Properties><ChildObjects><Attribute><Comment/></Attribute>"
+                    b"</ChildObjects></Catalog></MetaDataObject>\r\n")
+        data = ex.marked(original, "r1 pair 1")
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf<?xml"))
+        self.assertEqual(data.count(b"<Comment/>"), 1, "only the object's own comment is marked")
+        ex.write_files(d.name, {"Catalogs/К.xml": data})
+        path = os.path.join(d.name, "Catalogs", "К.xml")
+        self.assertTrue(ex.has_marker(path, "r1 pair 1"))
+        self.assertFalse(ex.has_marker(path, "r1 pair 2"))
+        with self.assertRaises(ValueError):
+            ex.marked(b"<?xml version=\"1.0\"?><Form/>", "r1 pair 1")
 
     def test_stage_writes_a_list_file_with_bom(self):
         d = tempfile.TemporaryDirectory()

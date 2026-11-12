@@ -25,21 +25,37 @@ use support::{temp_workspace, v8_runner_command};
 /// Поддельный `1cv8`, собранный один раз на прогон.
 fn fake_designer() -> &'static Path {
     static BUILT: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
-    &BUILT
+    compiled(&BUILT, "fake_agent_designer.rs", "1cv8")
+}
+
+/// Поддельный `ibcmd` со списком расширений, собранный один раз на прогон.
+fn fake_ibcmd() -> &'static Path {
+    static BUILT: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+    compiled(&BUILT, "fake_extension_ibcmd.rs", "ibcmd")
+}
+
+/// Исполняемый файл `stem` из `tests/support/<source>`, собранный `rustc` один раз на прогон.
+fn compiled(
+    built: &'static OnceLock<(tempfile::TempDir, PathBuf)>,
+    source: &str,
+    stem: &str,
+) -> &'static Path {
+    &built
         .get_or_init(|| {
-            let dir = tempfile::tempdir().expect("fake designer dir");
+            let dir = tempfile::tempdir().expect("fake tool dir");
             let target = dir
                 .path()
-                .join(format!("1cv8{}", std::env::consts::EXE_SUFFIX));
-            let source =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_agent_designer.rs");
+                .join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/support")
+                .join(source);
             let compiled = Command::new("rustc")
                 .args(["--edition=2021", "-O"])
                 .arg(&source)
                 .arg("-o")
                 .arg(&target)
                 .output()
-                .expect("run rustc for the fake designer");
+                .expect("run rustc for a fake tool");
             assert!(
                 compiled.status.success(),
                 "{}",
@@ -233,6 +249,65 @@ impl Bench {
             "--output",
             &output.display().to_string(),
         ])
+    }
+
+    /// Команды, которые получил двойник агента.
+    fn agent_commands(&self) -> Vec<String> {
+        read_or_empty(&self.marks.join("agent-commands.log"))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Сколько раз двойник получил команду `command`.
+    fn sent(&self, command: &str) -> usize {
+        self.agent_commands()
+            .iter()
+            .filter(|line| line.as_str() == command)
+            .count()
+    }
+
+    /// Кладёт поддельный `ibcmd` рядом с поддельным `1cv8`: цепочка `extensions` файловой
+    /// базы начинается с него.
+    fn with_ibcmd(&self) {
+        let bin = self
+            .dir
+            .path()
+            .join("platform")
+            .join("8.3.27.2074")
+            .join("bin");
+        fs::copy(
+            fake_ibcmd(),
+            bin.join(format!("ibcmd{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .expect("fake ibcmd");
+    }
+
+    /// Запуски поддельного `ibcmd`: его ключи, по строке на запуск.
+    fn ibcmd_calls(&self) -> Vec<String> {
+        read_or_empty(&self.marks.join("ibcmd-args.log"))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Назначает исполнителя операции ключом `providers.*`.
+    fn assign(&self, operation: &str, provider: &str) {
+        let config = fs::read_to_string(&self.config_path).expect("config");
+        fs::write(
+            &self.config_path,
+            config.replacen(
+                "providers:
+",
+                &format!(
+                    "providers:
+  {operation}: {provider}
+"
+                ),
+                1,
+            ),
+        )
+        .expect("assign the executor");
     }
 
     /// Запуски поддельного `1cv8`.
@@ -513,6 +588,207 @@ fn status_deep_reports_reusing_the_generation_agent() {
     assert_eq!(bench.launches(), 1, "one 1cv8 for both status commands");
 }
 
+/// `status --deep`, поколение которого спросил агент, читает состав расширений в той же сессии
+/// (#631): квитанция `extensions.provider` называет агента и его точку входа, `ibcmd`, первый в
+/// цепочке `extensions` файловой базы, пропущен с причиной и не запускается. Ответ совпадает с
+/// ответом `ibcmd` той же базы (`INV.USE-CASES.THE-GENERATION-AGENT-LISTS-THE-EXTENSIONS`). Сессия
+/// у живого и у разового агента (в закрытом Job) одна и та же, поэтому проверка от Job не
+/// зависит.
+#[test]
+fn status_deep_lists_the_extensions_in_the_generation_agent_session() {
+    let bench = Bench::new(
+        "    live: true
+",
+    );
+    bench.with_ibcmd();
+
+    let (code, payload) = bench.run(&["status", "--deep"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    let extensions = &payload["data"]["infobases"][0]["extensions"];
+    assert_eq!(extensions["provider"]["selected"], "agent", "{payload}");
+    assert!(extensions["provider"]["endpoint"].is_object(), "{payload}");
+    assert_eq!(
+        extensions["provider"]["endpoint"], payload["data"]["provider"]["endpoint"],
+        "one session for the generation and the extensions: {payload}"
+    );
+    assert_eq!(
+        extensions["provider"]["skipped"][0]["provider"], "ibcmd",
+        "{payload}"
+    );
+    assert_eq!(
+        bench.sent("config extensions properties get --all-extensions"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    assert_eq!(
+        bench.ibcmd_calls(),
+        Vec::<String>::new(),
+        "no ibcmd process"
+    );
+    assert_eq!(
+        bench.sent("common connect-ib"),
+        1,
+        "the agent connects once, for the generation and the extensions: {:?}",
+        bench.agent_commands()
+    );
+    // Живой агент остаётся подключённым: другому исполнителю база не нужна. Разовый агент в
+    // закрытом Job отключается при закрытии, как всегда.
+    if !in_a_closed_job(&payload) {
+        assert_eq!(
+            bench.sent("common disconnect-ib"),
+            0,
+            "no other executor needs the base, so the agent is not let go: {:?}",
+            bench.agent_commands()
+        );
+    }
+    let through_agent = extensions["installed"].clone();
+    assert_eq!(
+        through_agent,
+        json!([{"name": "Зонд", "active": true, "source_set": null, "tool": false}]),
+        "{payload}"
+    );
+
+    // Тот же вопрос `ibcmd` той же базы: ключ `providers.extensions` назначает его, и агент
+    // поколения состав больше не читает.
+    bench.assign("extensions", "ibcmd");
+    let (code, payload) = bench.run(&["status", "--deep"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let extensions = &payload["data"]["infobases"][0]["extensions"];
+    assert_eq!(extensions["provider"]["selected"], "ibcmd", "{payload}");
+    let calls = bench.ibcmd_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].contains("extension list"), "{calls:?}");
+    assert_eq!(
+        bench.sent("config extensions properties get --all-extensions"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    assert_eq!(extensions["installed"], through_agent, "{payload}");
+}
+
+/// `extensions list` при живом агенте рабочей копии берёт список у него (#631): квитанция
+/// называет агента, `ibcmd`, первый в цепочке файловой базы, пропущен с причиной и не
+/// запускается, `name_prefix` — `null`. Остальные поля те же, что у ответа `ibcmd` той же базы,
+/// который префикс подтверждает (`INV.USE-CASES.EXTENSIONS-LIST-TAKES-THE-LIVE-AGENT`). Без
+/// живого агента список читает `ibcmd`, как прежде.
+#[test]
+fn extensions_list_takes_the_live_agent_and_reports_no_prefix() {
+    let bench = Bench::new(
+        "    live: true
+",
+    );
+    bench.with_ibcmd();
+
+    let (code, through_ibcmd) = bench.run(&["extensions", "list"]);
+    assert_eq!(code, 0, "{through_ibcmd}");
+    assert_eq!(
+        through_ibcmd["data"]["provider"]["selected"], "ibcmd",
+        "no live agent yet: {through_ibcmd}"
+    );
+    assert_eq!(
+        through_ibcmd["data"]["extensions"][0]["name_prefix"], "Зо_",
+        "{through_ibcmd}"
+    );
+    let ibcmd_calls = bench.ibcmd_calls().len();
+
+    // Живой агент рабочей копии поднимает `status --deep`.
+    let (code, payload) = bench.run(&["status", "--deep"]);
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+
+    let (code, through_agent) = bench.run(&["extensions", "list"]);
+
+    assert_eq!(code, 0, "{through_agent}");
+    let provider = &through_agent["data"]["provider"];
+    assert_eq!(provider["selected"], "agent", "{through_agent}");
+    assert_eq!(
+        provider["skipped"][0]["provider"], "ibcmd",
+        "{through_agent}"
+    );
+    assert_eq!(
+        provider["endpoint"]["live"]["reused"], true,
+        "{through_agent}"
+    );
+    assert_eq!(bench.ibcmd_calls().len(), ibcmd_calls, "no ibcmd process");
+    let mut by_agent = through_agent["data"]["extensions"][0].clone();
+    assert!(by_agent["name_prefix"].is_null(), "{through_agent}");
+    let mut by_ibcmd = through_ibcmd["data"]["extensions"][0].clone();
+    by_agent["name_prefix"] = Value::Null;
+    by_ibcmd["name_prefix"] = Value::Null;
+    assert_eq!(by_agent, by_ibcmd, "the other fields agree");
+    assert_eq!(
+        through_agent["data"]["extensions"].as_array().map(Vec::len),
+        Some(1),
+        "{through_agent}"
+    );
+
+    // Ключ `providers.extensions` порядок не отдаёт живому агенту: список читает `ibcmd`.
+    bench.assign("extensions", "ibcmd");
+    let (code, assigned) = bench.run(&["extensions", "list"]);
+
+    assert_eq!(code, 0, "{assigned}");
+    assert_eq!(
+        assigned["data"]["provider"]["selected"], "ibcmd",
+        "{assigned}"
+    );
+    assert!(
+        bench.ibcmd_calls().len() > ibcmd_calls,
+        "ibcmd read the list"
+    );
+    assert_eq!(
+        assigned["data"]["extensions"][0]["name_prefix"], "Зо_",
+        "{assigned}"
+    );
+}
+
+/// `pull --all` по изменившемуся читает состав расширений своим исполнителем — агентом; `ibcmd`,
+/// первый в цепочке `extensions` файловой базы, состав не читает (#631). Набор `main` без памяти
+/// выгружается целиком, и это уже дело его собственного исполнителя.
+#[test]
+fn pull_all_lists_the_extensions_with_the_agent_and_not_with_ibcmd() {
+    let bench = Bench::new(
+        "    live: true
+",
+    );
+    bench.with_ibcmd();
+
+    let (_, payload) = bench.run(&["pull", "--all"]);
+
+    // Предмет — только чтение состава (`INV.CLI.PULL-ALL-READS-THE-INSTALLED-EXTENSIONS-WITH-THE-PULL-PROVIDER`),
+    // исход выгрузки наборов здесь не проверяется: `main` без памяти выгружает целиком `ibcmd`, и
+    // в каталоге без git сторож замены ему отказывает. Что состав прочитан, говорит `declared`:
+    // обход ставит его, только прочитав состав базы.
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert!(
+        payload["data"]["declared"].is_array(),
+        "the inventory was read: {payload}"
+    );
+    assert_eq!(
+        bench.sent("config extensions properties get --all-extensions"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    let calls = bench.ibcmd_calls();
+    assert!(
+        calls.iter().all(|call| !call.contains("extension list")),
+        "{calls:?}"
+    );
+}
+
 /// С `live: false` команда работает с разовым агентом и снимает живого агента своей рабочей
 /// копии (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
 #[test]
@@ -751,6 +1027,10 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
     assert_eq!(agents.len(), 1, "{payload}");
     assert_eq!(agents[0]["this_project"], true, "{payload}");
     assert_eq!(agents[0]["connected"], false, "{payload}");
+    assert_eq!(
+        agents[0]["attached"], true,
+        "the idle agent stays connected to the infobase: {payload}"
+    );
     assert!(
         agents[0]["infobase"]
             .as_str()
@@ -809,6 +1089,107 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
         "--all stops the agents of every project: {payload}"
     );
     assert_eq!(payload["data"]["refused"], json!([]), "{payload}");
+}
+
+/// Вторая команда берёт подключение к базе, оставшееся от первой: `common connect-ib` идёт один
+/// раз на агента (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+#[test]
+fn a_second_command_takes_the_kept_connection_without_connect_ib() {
+    let bench = Bench::new("");
+    let (code, first) = bench.download();
+    assert_eq!(code, 0, "{first}");
+    if in_a_closed_job(&first) {
+        return;
+    }
+    let (code, second) = bench.download();
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(
+        bench.sent("common connect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        0,
+        "{:?}",
+        bench.agent_commands()
+    );
+}
+
+/// `agent release` отключает живого агента от базы — так её отпускают чужому Конфигуратору или
+/// чужой монопольной операции, — а сам агент остаётся; следующая команда подключает его заново
+/// (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`, `CTR.WIRE.AGENT-RELEASE-DATA`).
+#[test]
+fn agent_release_disconnects_the_live_agent_from_the_infobase() {
+    let bench = Bench::new("");
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    let (code, payload) = bench.run(&["agent", "release"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["released"], false, "{payload}");
+    assert_eq!(payload["data"]["disconnected"], true, "{payload}");
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    let (code, payload) = bench.run(&["agent", "status"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["agents"][0]["attached"], false, "{payload}");
+    assert!(
+        alive(bench.designer_pid()),
+        "release does not stop the agent"
+    );
+
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(live(&payload)["reused"], true, "{payload}");
+    assert_eq!(
+        bench.sent("common connect-ib"),
+        2,
+        "{:?}",
+        bench.agent_commands()
+    );
+}
+
+/// Команда, выбравшая другого исполнителя той же базы, сначала отключает от неё живого агента:
+/// пакетный Конфигуратор или `ibcmd` не застают базу подключённой к нему (#644,
+/// `INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+#[test]
+fn another_executor_finds_the_infobase_released_by_the_live_agent() {
+    let bench = Bench::new("");
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    let config = fs::read_to_string(&bench.config_path).expect("config");
+    fs::write(
+        &bench.config_path,
+        config.replace(
+            "infobase.configuration.export: agent",
+            "infobase.configuration.export: designer",
+        ),
+    )
+    .expect("designer for download");
+
+    // Поддельный `1cv8` пакетного запуска не умеет выгрузку: исход команды здесь не важен.
+    let _ = bench.download();
+
+    assert_eq!(
+        bench.sent("common disconnect-ib"),
+        1,
+        "{:?}",
+        bench.agent_commands()
+    );
+    let (code, payload) = bench.run(&["agent", "status"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["agents"][0]["attached"], false, "{payload}");
 }
 
 /// Держатель ушёл, пока команда работала: сторож снимает агента после её сессии, и квитанция

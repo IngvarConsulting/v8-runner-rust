@@ -1,28 +1,16 @@
-//! Что не должно попадать в гит проекта, и что делать, если попало.
+//! Что не должно попадать в гит проекта: шаблоны, которые `init` и `clone` пишут в
+//! `.gitignore` — местный слой конфига и замок выгрузки.
 //!
-//! Один владелец на оба вопроса: шаблоны, которые `init` и `clone` пишут в
-//! `.gitignore`, и отказ `pull`/`push`, нашедших опись версий в индексе.
-//!
-//! Опись (`ConfigDumpInfo.xml`) — состояние одной базы, а не исходный код: у
-//! другой базы она другая и при той же конфигурации. Чужая опись, принесённая
-//! `checkout` или `merge`, врёт тихо — инкрементальная выгрузка считает разницу
-//! от состояния, которого у этой базы не было. Шаблон в `.gitignore` над уже
-//! отслеживаемым файлом бессилен, поэтому одного генератора мало: найдя опись в
-//! индексе, раннер останавливается. Чинить индекс сам он не вправе — `git rm
-//! --cached` трогает чужой репозиторий, — и называет рецепт.
+//! Опись версий (`ConfigDumpInfo.xml`) раннер в каталоги наборов не кладёт (#646): она живёт
+//! в его памяти ([`crate::use_cases::version_file`]), и игнорировать её в проекте незачем.
 
 use std::path::{Path, PathBuf};
 
-use tracing::debug;
-
-use crate::platform::git::{ignored_by_worktree_gitignore, tracking_of, Tracking};
+use crate::platform::git::ignored_by_worktree_gitignore;
 use crate::support::error::AppError;
 
 /// Местный слой конфига: адреса баз и пути этой машины.
 pub(crate) const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
-
-/// Имя описи версий, которую платформа пишет в каталог выгрузки.
-pub(crate) const VERSION_FILE_NAME: &str = "ConfigDumpInfo.xml";
 
 const GITIGNORE_FILE_NAME: &str = ".gitignore";
 
@@ -57,12 +45,6 @@ const IGNORED_PATTERNS: &[IgnoredPattern] = &[
         pattern: LOCAL_CONFIG_FILE_NAME,
         probes: &[LOCAL_CONFIG_FILE_NAME],
         reach: Reach::BesideConfig,
-    },
-    // Опись версий одной базы.
-    IgnoredPattern {
-        pattern: VERSION_FILE_NAME,
-        probes: &[VERSION_FILE_NAME],
-        reach: Reach::AnyDepth,
     },
     // Замок выгрузки рядом с целью (#332): после сбоя он остаётся на диске и не
     // должен уехать в коммит. Файла у замка два, и пользовательский `*.lock`
@@ -189,51 +171,6 @@ fn gitignore_mentions(content: &str, pattern: &str) -> bool {
     })
 }
 
-/// Отказывает, если опись версий в каталоге `dir` лежит в индексе гита.
-///
-/// Проверка чистая: она ничего не пишет и потому одинакова в превью и в боевом
-/// прогоне. Ответ «неизвестно» — гита нет, каталог вне рабочей копии, гит вернул
-/// ошибку — работу не останавливает; причина уходит в журнал отладки.
-pub(crate) fn refuse_tracked_version_file(dir: &Path) -> Result<(), AppError> {
-    let version_file = dir.join(VERSION_FILE_NAME);
-    match tracking_of(&version_file) {
-        Tracking::Tracked(path) => Err(AppError::Validation(tracked_refusal(&path))),
-        Tracking::Untracked => Ok(()),
-        Tracking::Unknown(reason) => {
-            debug!(
-                path = %version_file.display(),
-                %reason,
-                "git tracking of the version file is unknown; proceeding"
-            );
-            Ok(())
-        }
-    }
-}
-
-fn tracked_refusal(path: &Path) -> String {
-    let shown = shell_word(path);
-    // Одной строкой: человеческий вывод — закреплённая форма, и многострочная
-    // подробность в нём рассыпается по разным видам строк.
-    format!(
-        "{VERSION_FILE_NAME} is tracked by git: {shown}; it describes one infobase and must not travel between machines; stop tracking it from the repository root: git rm --cached {shown} && git commit -m \"stop tracking {VERSION_FILE_NAME}\" (keep '{VERSION_FILE_NAME}' in .gitignore)"
-    )
-}
-
-/// Путь, пригодный для вставки в командную строку POSIX-оболочки как одно слово.
-///
-/// Путь из одних безопасных знаков идёт как есть. Любой другой заключается в
-/// одинарные кавычки, внутри которых оболочка ничего не раскрывает; сама кавычка
-/// закрывается, экранируется и открывается снова: `'` → `'\''`.
-fn shell_word(path: &Path) -> String {
-    let text = path.display().to_string();
-    let safe = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
-    if !text.is_empty() && text.chars().all(safe) {
-        text
-    } else {
-        format!("'{}'", text.replace('\'', r"'\''"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,7 +178,8 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    const ALL_PATTERNS: &str = "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n";
+    /// Опись версий в игнор не пишется: в каталоги наборов раннер её не кладёт (#646).
+    const ALL_PATTERNS: &str = "v8project.local.yaml\n.dump-*.lock*\n";
 
     #[test]
     fn writes_every_pattern_into_a_new_gitignore() {
@@ -307,7 +245,7 @@ mod tests {
     /// Конфиг во вложенном каталоге, наборы — в `src/…`: шаблоны пишутся в
     /// `.gitignore` каталога проекта, иначе до наборов они не дотягиваются.
     #[test]
-    fn a_nested_config_ignores_the_version_file_from_the_project_dir() {
+    fn a_nested_config_ignores_the_lock_from_the_project_dir() {
         let dir = tempdir().expect("tempdir");
         init_git_repo(dir.path());
         let config_dir = dir.path().join("config");
@@ -323,7 +261,6 @@ mod tests {
         );
         assert!(!config_dir.join(".gitignore").exists());
         for probe in [
-            "src/cf/ConfigDumpInfo.xml",
             "src/cf/.dump-main.lock",
             "src/cf/.dump-main.lock.system",
             "config/v8project.local.yaml",
@@ -361,7 +298,6 @@ mod tests {
             ALL_PATTERNS
         );
         for probe in [
-            "apps/erp/src/cf/ConfigDumpInfo.xml",
             "apps/erp/src/cf/.dump-main.lock.system",
             "apps/erp/v8project.local.yaml",
         ] {
@@ -379,7 +315,7 @@ mod tests {
     fn a_pattern_from_an_enclosing_gitignore_counts() {
         let dir = tempdir().expect("tempdir");
         init_git_repo(dir.path());
-        fs::write(dir.path().join(".gitignore"), "ConfigDumpInfo.xml\n").expect("root");
+        fs::write(dir.path().join(".gitignore"), ".dump-*.lock*\n").expect("root");
         let project_dir = dir.path().join("erp");
         fs::create_dir_all(&project_dir).expect("project dir");
 
@@ -389,7 +325,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(project_dir.join(".gitignore")).expect("project"),
-            "v8project.local.yaml\n.dump-*.lock*\n"
+            "v8project.local.yaml\n"
         );
     }
 
@@ -401,7 +337,7 @@ mod tests {
         init_git_repo(dir.path());
         fs::write(
             dir.path().join(".gitignore"),
-            "/v8project.local.yaml\n/ConfigDumpInfo.xml\n",
+            "/v8project.local.yaml\n/.dump-*.lock*\n",
         )
         .expect("seed");
 
@@ -411,12 +347,12 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(dir.path().join(".gitignore")).expect("read"),
-            "/v8project.local.yaml\n/ConfigDumpInfo.xml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            "/v8project.local.yaml\n/.dump-*.lock*\n.dump-*.lock*\n"
         );
     }
 
     /// Игнор одной машины с репозиторием не уезжает: генератор всё равно пишет
-    /// шаблон в `.gitignore`, иначе коллега закоммитит опись.
+    /// шаблон в `.gitignore`, иначе коллега закоммитит местный слой.
     #[test]
     fn a_pattern_in_info_exclude_is_still_written() {
         let dir = tempdir().expect("tempdir");
@@ -456,50 +392,5 @@ mod tests {
             fs::read_to_string(dir.path().join(".gitignore")).expect("read"),
             "v8project.local.yaml\nConfigDumpInfo.xml\n*.lock\n.dump-*.lock*\n"
         );
-    }
-
-    #[test]
-    fn the_refusal_names_the_path_and_the_recipe_on_one_line() {
-        let message = tracked_refusal(Path::new("src/cf/ConfigDumpInfo.xml"));
-        assert!(
-            message.contains("git rm --cached src/cf/ConfigDumpInfo.xml && git commit"),
-            "{message}"
-        );
-        assert_eq!(message.lines().count(), 1, "{message}");
-    }
-
-    #[test]
-    fn a_path_with_spaces_stays_one_word() {
-        let message = tracked_refusal(Path::new("my src/ConfigDumpInfo.xml"));
-        assert!(
-            message.contains("git rm --cached 'my src/ConfigDumpInfo.xml'"),
-            "{message}"
-        );
-    }
-
-    /// Оболочка раскрывает не только пробелы: `$`, `*`, `;`, кавычки и прочее
-    /// вне безопасного набора идут в одинарных кавычках, а сама кавычка
-    /// экранируется.
-    #[test]
-    fn a_path_with_shell_metacharacters_is_quoted() {
-        for (path, expected) in [
-            ("src/cf/ConfigDumpInfo.xml", "src/cf/ConfigDumpInfo.xml"),
-            (
-                "src/$HOME/ConfigDumpInfo.xml",
-                "'src/$HOME/ConfigDumpInfo.xml'",
-            ),
-            ("src/a;b/ConfigDumpInfo.xml", "'src/a;b/ConfigDumpInfo.xml'"),
-            ("src/*/ConfigDumpInfo.xml", "'src/*/ConfigDumpInfo.xml'"),
-            (
-                "src/it's/ConfigDumpInfo.xml",
-                r"'src/it'\''s/ConfigDumpInfo.xml'",
-            ),
-            (
-                "src/конф/ConfigDumpInfo.xml",
-                "'src/конф/ConfigDumpInfo.xml'",
-            ),
-        ] {
-            assert_eq!(shell_word(Path::new(path)), expected, "{path}");
-        }
     }
 }

@@ -229,16 +229,32 @@ fn cleanup_orphan_dirs_for(
     })?;
     if target_parent.exists() {
         return_backup_to_a_missing_target(target_path, target_parent, target_identity)?;
-        remove_stale_temp_dirs(target_parent, target_identity)?;
+        remove_stale_temp_dirs(target_parent, target_identity, TempDirPlace::BesideTarget)?;
     }
     if stage_root.exists() {
-        remove_stale_temp_dirs(stage_root, target_identity)?;
+        remove_stale_temp_dirs(stage_root, target_identity, TempDirPlace::StageRoot)?;
     }
     Ok(())
 }
 
-/// Устаревшие `.dump-stage-*` и `.dump-backup-*` цели `target_identity` в каталоге `dir`.
-fn remove_stale_temp_dirs(dir: &Path, target_identity: &str) -> Result<(), AppError> {
+/// Где лежит каталог, который убирает [`remove_stale_temp_dirs`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TempDirPlace {
+    /// Рядом с целью — в каталоге пользователя: только `.dump-stage-*` и `.dump-backup-*` с
+    /// метаданными этой цели.
+    BesideTarget,
+    /// `workPath/stage` — каталог раннера: там же и описи `version-file-*`, оставленные снятым
+    /// процессом (#646).
+    StageRoot,
+}
+
+/// Устаревшие `.dump-stage-*` и `.dump-backup-*` цели `target_identity` в каталоге `dir`, а в
+/// `workPath/stage` — и каталоги `version-file-*`.
+fn remove_stale_temp_dirs(
+    dir: &Path,
+    target_identity: &str,
+    place: TempDirPlace,
+) -> Result<(), AppError> {
     for entry in std::fs::read_dir(dir)
         .map_err(|error| AppError::Runtime(format!("failed to read target parent: {error}")))?
     {
@@ -254,6 +270,12 @@ fn remove_stale_temp_dirs(dir: &Path, target_identity: &str) -> Result<(), AppEr
         };
         if !is_dir {
             remove_metadata_of_a_removed_backup(&path, file_name, target_identity)?;
+            continue;
+        }
+        if place == TempDirPlace::StageRoot
+            && file_name.starts_with(crate::use_cases::version_file::STALE_VERSION_FILE_DIR_PREFIX)
+        {
+            remove_left_version_file_dir(&path, &entry)?;
             continue;
         }
         if !file_name.starts_with(".dump-stage-") && !file_name.starts_with(".dump-backup-") {
@@ -306,6 +328,27 @@ fn remove_stale_temp_dirs(dir: &Path, target_identity: &str) -> Result<(), AppEr
     }
 
     Ok(())
+}
+
+/// Временный каталог свежей описи после загрузки (#646), оставленный снятым процессом:
+/// убирается, когда он старше [`super::ORPHAN_TTL`], — моложе его может писать идущая отправка.
+fn remove_left_version_file_dir(path: &Path, entry: &std::fs::DirEntry) -> Result<(), AppError> {
+    let age = entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok());
+    if age.is_none_or(|age| age < super::ORPHAN_TTL) {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(path)
+        .or_else(already_gone)
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to remove stale temp dir '{}': {error}",
+                path.display()
+            ))
+        })
 }
 
 /// Фоновое удаление уже убрало дерево, или его убирает тот, кто удаляет его одновременно.

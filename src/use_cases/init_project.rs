@@ -72,7 +72,11 @@ fn run_init(
         let settled = if args.dry_run {
             Ok(Vec::new())
         } else {
-            crate::use_cases::infobase_lock::settle_live_agents(config, INFOBASE_CREATE, true)
+            crate::use_cases::infobase_lock::settle_live_agents(
+                config,
+                INFOBASE_CREATE,
+                crate::use_cases::infobase_lock::LiveAgents::Remove,
+            )
         };
         match settled {
             Ok(_) => create_infobase(context, config, args, started, false),
@@ -1042,7 +1046,7 @@ fn assemble_with_designer(
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     let loaded = designer
-        .load_config_from_files_untouched(import, None)
+        .load_config_from_files_full(import, None)
         .map_err(AppError::from)?;
     deferrals.note_result(INFOBASE_CREATE, &loaded);
     ensure_platform_success("load the main configuration", "infobase", &loaded)?;

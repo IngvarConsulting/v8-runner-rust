@@ -618,11 +618,10 @@ fn a_pull_after_a_killed_pull_succeeds_and_removes_the_left_lock_files() {
     assert_eq!(dump_lock_files(&project), Vec::<String>::new());
 }
 
-/// Поддельная платформа, которая, как настоящая, пишет файл версий: выгрузка — в каталог
-/// выгрузки, загрузка Конфигуратора с `-updateConfigDumpInfo` — в каталог загрузки;
-/// `ibcmd config import` его не пишет. Выгрузка по изменившемуся и загрузка, пишущая файл
-/// версий, записывают в `seen`, какой файл версий застали в каталоге. С файлом `fail` рядом вызов, успев записать
-/// файл версий, кончается сбоем.
+/// Поддельная платформа, которая, как настоящая, пишет опись версий в каталог выгрузки, а
+/// загрузка её не пишет. Выгрузка по изменившемуся (`-configDumpInfoForChanges <файл>` у
+/// Конфигуратора, `--base=<файл>` у `ibcmd`) записывает в `seen`, от какой описи считала
+/// разницу. С файлом `fail` рядом вызов, успев записать, кончается сбоем.
 fn version_writing_platform(root: &Path) -> String {
     let calls = root.join("calls.log");
     let counter = root.join("counter");
@@ -632,16 +631,13 @@ fn version_writing_platform(root: &Path) -> String {
         r#"printf '%s\n' "$*" >> '{calls}'
 case " $* " in *" -getChanges "*) exit 1;; *" export status "*) exit 0;; esac
 target=''
-load=''
-update=''
-writes=''
+base=''
 exports=''
 previous=''
 for arg in "$@"; do
   if [ "$previous" = '/DumpConfigToFiles' ]; then target="$arg"; fi
-  if [ "$previous" = '/LoadConfigFromFiles' ]; then load="$arg"; fi
-  if [ "$arg" = '-update' ] || [ "$arg" = '--sync' ]; then update=1; fi
-  if [ "$arg" = '-updateConfigDumpInfo' ]; then writes=1; fi
+  if [ "$previous" = '-configDumpInfoForChanges' ]; then base="$arg"; fi
+  case "$arg" in --base=*) base="${{arg#--base=}}";; esac
   if [ "$previous" = 'config' ] && [ "$arg" = 'export' ]; then exports=1; fi
   previous="$arg"
 done
@@ -650,13 +646,9 @@ n=$(( $(cat '{counter}' 2>/dev/null || echo 0) + 1 ))
 printf '%s\n' "$n" > '{counter}'
 if [ -n "$target" ]; then
   mkdir -p "$target"
-  if [ -n "$update" ]; then cat "$target/ConfigDumpInfo.xml" >> '{seen}'; fi
+  if [ -n "$base" ]; then cat "$base" >> '{seen}'; fi
   printf '<Configuration/>\n' > "$target/Configuration.xml"
   printf '<ConfigDumpInfo version="2.17" dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
-fi
-if [ -n "$load" ] && [ -n "$writes" ]; then
-  cat "$load/ConfigDumpInfo.xml" >> '{seen}'
-  printf '<ConfigDumpInfo version="2.17" load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
 fi
 if [ -f '{fail}' ]; then exit 1; fi
 exit 0"#,
@@ -704,30 +696,38 @@ fn fail_platform(project: &Project, fail: bool) {
     }
 }
 
+/// Опись версий живёт только в памяти раннера (#646): полная выгрузка публикует дерево без
+/// неё, выгрузка по изменившемуся считает разницу от копии раннера и новую опись тоже уносит в
+/// память. `ConfigDumpInfo.xml`, оставшийся в каталоге набора, раннер не читает и не трогает.
 #[test]
-fn a_foreign_version_file_between_commands_does_not_reach_the_dump() {
+fn a_version_file_in_the_sources_never_reaches_the_dump() {
     for provider in ["designer", "ibcmd"] {
         let project = version_project(provider);
         succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
         let version_file = project.sources.join("ConfigDumpInfo.xml");
-        assert_eq!(
-            read(&runner_copy(&project)),
-            read(&version_file),
-            "{provider}"
+        assert!(
+            !version_file.exists(),
+            "{provider}: a full pull publishes no version file"
         );
-        let ours = read(&version_file);
+        let ours = read(&runner_copy(&project));
+        assert!(ours.contains("dump="), "{provider}: {ours}");
         commit_project(&project);
 
-        fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+        let left = "<ConfigDumpInfo left=\"by an earlier runner\"/>\n";
+        fs::write(&version_file, left).expect("a version file left in the sources");
         succeeded(run(&project, &["pull", "--source-set", "main"]));
 
         assert_eq!(format!("{}\n", last_seen(&project)), ours, "{provider}");
-        assert!(read(&version_file).contains("dump="), "{provider}");
-        assert_ne!(read(&version_file), ours, "{provider}");
         assert_eq!(
-            read(&runner_copy(&project)),
             read(&version_file),
-            "{provider}"
+            left,
+            "{provider}: the left file is untouched"
+        );
+        let recorded = read(&runner_copy(&project));
+        assert!(recorded.contains("dump="), "{provider}: {recorded}");
+        assert_ne!(
+            recorded, ours,
+            "{provider}: the new description became the copy"
         );
     }
 }
@@ -747,61 +747,50 @@ fn a_failed_pull_does_not_change_the_runner_copy() {
         assert!(!run(&project, args).status.success(), "{args:?}");
         assert_eq!(read(&runner_copy(&project)), ours, "{args:?}");
     }
-    // Сбой выгрузки по изменившемуся успел переписать файл в каталоге; следующая выгрузка
-    // всё равно считает разницу от копии раннера.
-    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
+    // Выгрузка по изменившемуся пишет в стадию: её сбой ни описи, ни дерева не трогает.
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
 
     fail_platform(&project, false);
     succeeded(run(&project, &["pull", "--source-set", "main"]));
     assert_eq!(format!("{}\n", last_seen(&project)), ours);
 }
 
+/// Небольшой `push` по изменившемуся ключа обновления описи не передаёт и копию раннера не
+/// трогает (#646): копия устаревает только на загруженное, и следующая выгрузка по
+/// изменившемуся идёт от неё.
 #[test]
-fn a_push_refreshes_the_runner_copy() {
-    let project = version_project("designer");
-    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
-    let version_file = project.sources.join("ConfigDumpInfo.xml");
-    let ours = read(&version_file);
-    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
-    fs::write(
-        project.sources.join("Module.bsl"),
-        "Procedure Edited()\nEndProcedure\n",
-    )
-    .expect("edit");
+fn a_push_leaves_the_runner_copy_and_passes_no_update_key() {
+    for provider in ["designer", "ibcmd"] {
+        let project = version_project(provider);
+        succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+        let ours = read(&runner_copy(&project));
+        fs::write(
+            project.sources.join("Module.bsl"),
+            "Procedure Edited()\nEndProcedure\n",
+        )
+        .expect("edit");
 
-    succeeded(run(&project, &["push"]));
+        succeeded(run(&project, &["push"]));
 
-    // Загрузка обновляет файл раннера, а не подменённый.
-    assert_eq!(format!("{}\n", last_seen(&project)), ours);
-    let loaded = read(&version_file);
-    assert!(loaded.contains("load="), "{loaded}");
-    assert_eq!(read(&runner_copy(&project)), loaded);
-
-    fs::write(&version_file, "<ConfigDumpInfo foreign=\"2\"/>\n").expect("foreign write");
-    commit_project(&project);
-    succeeded(run(&project, &["pull", "--source-set", "main"]));
-    assert_eq!(format!("{}\n", last_seen(&project)), loaded);
-}
-
-#[test]
-fn a_push_that_writes_no_version_file_keeps_the_runner_copy() {
-    let project = version_project("ibcmd");
-    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
-    let ours = read(&runner_copy(&project));
-    let version_file = project.sources.join("ConfigDumpInfo.xml");
-    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
-    fs::write(
-        project.sources.join("Module.bsl"),
-        "Procedure Edited()\nEndProcedure\n",
-    )
-    .expect("edit");
-
-    succeeded(run(&project, &["push"]));
-
-    assert_eq!(read(&runner_copy(&project)), ours);
-    commit_project(&project);
-    succeeded(run(&project, &["pull", "--source-set", "main"]));
-    assert_eq!(format!("{}\n", last_seen(&project)), ours);
+        let calls = read(&project.calls);
+        assert!(
+            !calls.contains("-updateConfigDumpInfo"),
+            "{provider}: {calls}"
+        );
+        assert!(
+            !calls.contains("-configDumpInfoOnly"),
+            "{provider}: {calls}"
+        );
+        assert!(!calls.contains("export info"), "{provider}: {calls}");
+        assert_eq!(read(&runner_copy(&project)), ours, "{provider}");
+        assert!(
+            !project.sources.join("ConfigDumpInfo.xml").exists(),
+            "{provider}"
+        );
+        commit_project(&project);
+        succeeded(run(&project, &["pull", "--source-set", "main"]));
+        assert_eq!(format!("{}\n", last_seen(&project)), ours, "{provider}");
+    }
 }
 
 #[test]
@@ -815,10 +804,11 @@ fn a_failed_copy_write_is_a_warning_not_a_refusal() {
 
     let message = response["data"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("ConfigDumpInfo.xml for source-set 'main' was not updated"),
+        message.contains("the runner version copy was not updated"),
         "{response}"
     );
-    assert!(project.sources.join("ConfigDumpInfo.xml").is_file());
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert!(project.sources.join("Configuration.xml").is_file());
 }
 
 #[test]
@@ -833,7 +823,6 @@ fn a_designer_partial_pull_leaves_the_runner_copy_alone() {
         &["pull", "--source-set", "main", "--object", "Catalog:Items"],
     ));
 
-    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
     assert_eq!(read(&runner_copy(&project)), ours);
 }
 
@@ -844,7 +833,8 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
     let ours = read(&runner_copy(&project));
     commit_project(&project);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
-    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+    let left = "<ConfigDumpInfo left=\"1\"/>\n";
+    fs::write(&version_file, left).expect("a left version file");
 
     succeeded(run(
         &project,
@@ -852,60 +842,50 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
     ));
 
     assert_eq!(format!("{}\n", last_seen(&project)), ours);
-    assert_eq!(read(&runner_copy(&project)), read(&version_file));
+    let recorded = read(&runner_copy(&project));
+    assert!(recorded.contains("dump=") && recorded != ours, "{recorded}");
+    assert_eq!(read(&version_file), left);
 }
 
-/// Агент загружает через ссылку на каталог набора: перед загрузкой там лежит файл раннера,
-/// а записанный агентом становится копией.
+/// Полная отправка через агента грузит без `--update-config-dump-info` — опись в каталог загрузки
+/// не пишется, — а копию раннера освежает отдельной выгрузкой одной описи (#646).
 #[test]
-fn an_agent_push_loads_over_the_runner_copy_and_records_the_new_one() {
+fn an_agent_full_push_passes_no_update_key_and_refreshes_the_copy_separately() {
     let project = project("agent", false);
-    let version_file = project.sources.join("ConfigDumpInfo.xml");
-    succeeded(run(&project, &["push", "--force"]));
-    let ours = read(&version_file);
-    assert!(ours.contains("agent-load="), "{ours}");
-    assert_eq!(read(&runner_copy(&project)), ours);
 
-    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+    succeeded(run(&project, &["push", "--force"]));
+
+    let calls = read(&project.calls);
+    assert!(calls.contains("load-config-from-files"), "{calls}");
+    assert!(!calls.contains("--update-config-dump-info"), "{calls}");
+    assert!(calls.contains("--config-dump-info-only"), "{calls}");
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert!(runner_copy(&project).is_file(), "{calls}");
+}
+
+/// Частичная отправка через агента ниже порога грузит без `--update-config-dump-info`, опись
+/// отдельно не выгружает и копию раннера не меняет (#646).
+#[test]
+fn an_agent_partial_push_passes_no_update_key_and_leaves_the_copy() {
+    let project = project("agent", false);
+    succeeded(run(&project, &["push", "--force"]));
+    let copy = fs::read(runner_copy(&project)).ok();
+    let before = read(&project.calls).len();
     fs::write(
         project.sources.join("Module.bsl"),
         "Procedure Edited()\nEndProcedure\n",
     )
     .expect("edit");
+
     succeeded(run(&project, &["push"]));
 
-    let seen = read(&project.calls.with_extension("version-files"));
-    let seen = seen
-        .lines()
-        .next_back()
-        .expect("the agent loaded with --update-config-dump-info");
-    assert_eq!(format!("{seen}\n"), ours);
-    assert_eq!(read(&runner_copy(&project)), read(&version_file));
-    assert_ne!(read(&version_file), ours);
-}
-
-/// Временный файл замены, брошенный снятым процессом, не числится незафиксированной
-/// работой: выгрузка убирает его раньше, чем сторож спрашивает гит.
-#[test]
-fn a_left_temporary_version_file_does_not_stop_a_full_pull() {
-    let project = version_project("designer");
-    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
-    let repository = project.sources.parent().expect("project root");
-    fs::write(repository.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
-    git(repository, &["init", "-q", "-b", "main"]);
-    git(repository, &["add", ".gitignore", "sources"]);
-    git(repository, &["commit", "-qm", "baseline"]);
-    let left = project.sources.join("ConfigDumpInfo.xml.candidate-x1");
-    fs::write(&left, "half written").expect("left candidate");
-
-    let response = support::mcp::call_tool(
-        &project.config,
-        "dump_config",
-        serde_json::json!({ "mode": "FULL" }),
-    );
-
-    assert_eq!(response.envelope["ok"], true, "{}", response.envelope);
-    assert!(!left.exists());
+    let calls = read(&project.calls);
+    let calls = &calls[before..];
+    assert!(calls.contains("load-config-from-files"), "{calls}");
+    assert!(!calls.contains("--update-config-dump-info"), "{calls}");
+    assert!(!calls.contains("--config-dump-info-only"), "{calls}");
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert_eq!(fs::read(runner_copy(&project)).ok(), copy);
 }
 
 #[test]
@@ -922,11 +902,11 @@ fn a_failed_push_does_not_change_the_runner_copy() {
     fail_platform(&project, true);
     assert!(!run(&project, &["push"]).status.success());
 
-    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
     assert_eq!(read(&runner_copy(&project)), ours);
 }
 
-/// Сверяется только сам файл версий: правка исходников выгрузку полной не делает.
+/// Правка исходников выгрузку полной не делает: она идёт по копии раннера.
 #[test]
 fn a_source_edit_keeps_the_pull_incremental() {
     let project = version_project("designer");
@@ -944,7 +924,86 @@ fn a_source_edit_keeps_the_pull_incremental() {
     let calls = read(&project.calls);
     let last = calls.lines().next_back().expect("a dump ran");
     assert!(last.contains("/DumpConfigToFiles"), "{last}");
-    assert!(last.contains("-update"), "{last}");
+    assert!(
+        // Путь копии раннер называет каноническим (на macOS `/private/var/…`).
+        last.contains("-update -configDumpInfoForChanges ")
+            && last.contains("/infobases/origin/dump-info/main/ConfigDumpInfo.xml"),
+        "{last}"
+    );
+    assert!(
+        !last.contains(&project.sources.display().to_string()),
+        "{last}"
+    );
+}
+
+/// Каталог набора, созданный заново (новый клон), копию раннера не подтверждает: выгрузка
+/// идёт полной, хотя копия есть.
+#[test]
+fn a_recloned_source_directory_is_pulled_full() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let parent = project.sources.parent().expect("project root");
+    fs::rename(&project.sources, parent.join("old-clone")).expect("move the old clone away");
+    fs::create_dir_all(&project.sources).expect("a new clone");
+    fs::write(
+        project.sources.join("Configuration.xml"),
+        "<Configuration/>\n",
+    )
+    .expect("source");
+    commit_project(&project);
+
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+    assert_eq!(
+        response["data"]["mode_reason"], "version_file",
+        "{response}"
+    );
+    let last = read(&project.calls);
+    let last = last.lines().next_back().expect("a dump ran");
+    assert!(!last.contains("-update"), "{last}");
+}
+
+/// Переход со старой памяти: копия прежней версии раннера без свидетельства дерева годится,
+/// если в каталоге набора лежит тот же файл, что прежняя сверка держала равным копии; иначе
+/// первая выгрузка полная. Файл в каталоге набора остаётся как был.
+#[test]
+fn a_copy_of_an_earlier_runner_is_adopted_beside_the_same_file() {
+    let earlier = "<ConfigDumpInfo version=\"2.17\" earlier=\"1\"/>\n";
+    let other = "<ConfigDumpInfo version=\"2.17\" other=\"1\"/>\n";
+    for (left, adopted) in [(earlier, true), (other, false)] {
+        let project = version_project("designer");
+        let root = project.config.parent().expect("project root").to_path_buf();
+        support::memory::remember_version_file_of_an_earlier_runner(
+            &root,
+            "origin",
+            support::memory::Base::File(&root.join("ib")),
+            &support::memory::Set::configuration("main", &project.sources),
+            earlier,
+        );
+        let version_file = project.sources.join("ConfigDumpInfo.xml");
+        fs::write(&version_file, left).expect("a file left by an earlier runner");
+        commit_project(&project);
+
+        let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+        if adopted {
+            assert_eq!(format!("{}\n", last_seen(&project)), earlier, "{response}");
+            assert_ne!(
+                response["data"]["mode_reason"], "version_file",
+                "{response}"
+            );
+        } else {
+            assert_eq!(response["data"]["mode"], "FULL", "{response}");
+            assert_eq!(
+                response["data"]["mode_reason"], "version_file",
+                "{response}"
+            );
+            assert!(!project.config.with_file_name("seen.log").exists());
+        }
+        assert_eq!(read(&version_file), left, "the left file is untouched");
+        assert!(read(&runner_copy(&project)).contains("dump="), "{response}");
+    }
 }
 
 fn output_text(output: &Output) -> String {
@@ -998,9 +1057,9 @@ fn a_full_dump_over_the_directory_asks_the_replacement_guard() {
     }
 }
 
-/// Превью называет тот режим, который выполнит выгрузка: без файла версий — полный и
-/// причину; подменённый файл при своей копии раннера уступит ей, и выгрузка останется по
-/// изменившемуся. Платформа не запускается.
+/// Превью называет тот режим, который выполнит выгрузка: без копии описи раннера — полный и
+/// причину; с копией — по изменившемуся, что бы ни лежало в каталоге набора. Превью ничего не
+/// пишет, платформа не запускается.
 #[test]
 fn a_preview_names_the_mode_the_pull_would_run() {
     let project = version_project("designer");
@@ -1028,9 +1087,9 @@ fn a_preview_names_the_mode_the_pull_would_run() {
     succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
     commit_project(&project);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
-    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("a replaced version file");
-    let restored = preview(&project);
-    assert_eq!(restored["data"]["mode"], "INCREMENTAL", "{restored}");
+    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("a file left in the sources");
+    let by_copy = preview(&project);
+    assert_eq!(by_copy["data"]["mode"], "INCREMENTAL", "{by_copy}");
     assert_eq!(read(&version_file), "<ConfigDumpInfo/>\n");
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
     // Выгрузка шла с `-update`; поддельная платформа переписала каждый файл каталога, и
@@ -1047,7 +1106,7 @@ fn a_preview_names_the_mode_the_pull_would_run() {
         "{response}"
     );
 
-    fs::remove_file(&version_file).expect("a lost version file");
+    fs::remove_file(runner_copy(&project)).expect("a lost runner copy");
     let lost = preview(&project);
     assert_eq!(lost["data"]["mode"], "FULL", "{lost}");
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
@@ -1087,8 +1146,9 @@ fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
 }
 
 /// Поддельная платформа выгрузки по изменившемуся: поколение — из файла `token`, модуль —
-/// из файла `module` (так правка в базе доходит до выгрузки). С файлом `gone` выгрузка убирает
-/// `Gone.bsl`, с файлом `fail` она, успев записать, кончается сбоем.
+/// из файла `module` (так правка в базе доходит до выгрузки). Без файла `gone` в базе есть общий
+/// модуль `Gone` (`CommonModules/Gone.xml` и элемент описи), с ним — нет; с файлом `fail`
+/// выгрузка, успев записать, кончается сбоем.
 fn remembering_platform(root: &Path) -> String {
     format!(
         r#"printf '%s\n' "$*" >> '{calls}'
@@ -1113,8 +1173,14 @@ if [ -n "$target" ]; then
   mkdir -p "$target"
   printf '<Configuration/>\n' > "$target/Configuration.xml"
   cp '{root}/module' "$target/Module.bsl"
-  if [ -f '{root}/gone' ]; then rm -f "$target/Gone.bsl"; else printf 'gone\n' > "$target/Gone.bsl"; fi
-  printf '<ConfigDumpInfo version="2.17" dump="%s"/>\n' "$(cat '{root}/token')" > "$target/ConfigDumpInfo.xml"
+  if [ -f '{root}/gone' ]; then
+    elements=''
+  else
+    mkdir -p "$target/CommonModules"
+    printf 'gone\n' > "$target/CommonModules/Gone.xml"
+    elements='<Metadata name="CommonModule.Gone" id="1"/>'
+  fi
+  printf '<ConfigDumpInfo version="2.17" dump="%s"><ConfigVersions><Metadata name="Configuration.Main" id="0"/>%s</ConfigVersions></ConfigDumpInfo>\n' "$(cat '{root}/token')" "$elements" > "$target/ConfigDumpInfo.xml"
   if [ -f '{root}/fail' ]; then exit 1; fi
 fi
 if [ -n "$out" ]; then : > "$out"; fi
@@ -1234,17 +1300,19 @@ fn a_user_edit_after_a_pull_by_changes_is_still_loaded() {
     }
 }
 
-/// Файл, который выгрузка убрала, не грузится заново и не числится удалённым.
+/// Файлы элемента, который пропал из описи, раннер удаляет сами (#646), а память их забывает:
+/// они не грузятся заново и не числятся удалёнными.
 #[test]
 fn a_file_removed_by_a_pull_by_changes_is_forgotten() {
     for provider in ["designer", "ibcmd"] {
         let project = remembering_project(provider);
         pull(&project);
-        assert!(project.sources.join("Gone.bsl").is_file(), "{provider}");
+        let gone = project.sources.join("CommonModules/Gone.xml");
+        assert!(gone.is_file(), "{provider}");
         edit_base(&project, 1);
         fs::write(root_of(&project).join("gone"), "").expect("gone flag");
         succeeded(pull_by_changes(&project));
-        assert!(!project.sources.join("Gone.bsl").exists(), "{provider}");
+        assert!(!gone.exists(), "{provider}");
         assert!(!push_loads(&project), "{provider}");
     }
 }

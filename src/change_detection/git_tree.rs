@@ -8,8 +8,8 @@
 //! selected by the predicates of the push walk ([`scanner::is_push_source_rel_path`]), so the
 //! listing equals the walk's (`git_and_scan_snapshots_agree`).
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::Path;
 
 use crate::change_detection::file_state::mtime_nanos;
 use crate::change_detection::scanner;
@@ -38,6 +38,9 @@ pub struct GitSource<'v, 'h> {
     /// (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
     pub runner_dirs: Vec<String>,
     pub hash_blobs: &'h mut BlobHasher<'h>,
+    /// Whether an ignore check that hid nothing may be recorded under `workPath` (#645): a
+    /// preview writes nothing.
+    pub record_ignore_check: bool,
 }
 
 /// One file of the set as git sees it.
@@ -45,7 +48,6 @@ pub struct GitSource<'v, 'h> {
 pub(super) struct ObservedFile {
     /// From the set root, `/`-separated.
     pub(super) rel_path: String,
-    pub(super) path: PathBuf,
     /// The blob id; `None` when the file changed while it was hashed: it is a change, and its
     /// id is not remembered.
     pub(super) hash: Option<String>,
@@ -103,7 +105,8 @@ impl<'v, 'h> GitSource<'v, 'h> {
         }
     }
 
-    /// Every source file of the set with its blob id, in path order.
+    /// Every source file of the set with its blob id, in path order. The index comes sorted
+    /// with the stages of a path side by side, so it is walked once (#645).
     pub(super) fn observe(
         &mut self,
         set_root: &Path,
@@ -111,41 +114,42 @@ impl<'v, 'h> GitSource<'v, 'h> {
     ) -> Result<Vec<ObservedFile>, ObserveError> {
         let unusable =
             |reason: ScanReason, detail: String| ObserveError::Unusable { reason, detail };
-        // Stages of one path together: an unfinished merge has several.
-        let mut entries: BTreeMap<String, Vec<&GitIndexEntry>> = BTreeMap::new();
-        for entry in &self.view.index {
+        let mut files: Vec<ObservedFile> = Vec::with_capacity(self.view.index.len());
+        let mut to_hash: Vec<String> = Vec::new();
+        let index = &self.view.index;
+        let mut at = 0;
+        while at < index.len() {
+            let entry = &index[at];
+            // Stages of one path together: an unfinished merge has several.
+            let stages = index[at..]
+                .iter()
+                .take_while(|other| other.path == entry.path)
+                .count();
+            at += stages;
             let Some(below) = self.below_root(&entry.path) else {
                 continue;
             };
-            if entry.mode == GitIndexEntry::GITLINK_MODE {
-                if scanner::is_push_source_rel_path(below) {
-                    return Err(unusable(
-                        ScanReason::NestedRepository,
-                        format!("'{}' is a submodule inside the set", entry.path),
-                    ));
-                }
+            if !scanner::is_push_source_rel_path(below) {
                 continue;
             }
-            if scanner::is_push_source_rel_path(below) {
-                entries.entry(below.to_owned()).or_default().push(entry);
+            if entry.mode == GitIndexEntry::GITLINK_MODE {
+                return Err(unusable(
+                    ScanReason::NestedRepository,
+                    format!("'{}' is a submodule inside the set", entry.path),
+                ));
             }
-        }
-
-        let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
-        let mut to_hash: Vec<String> = Vec::new();
-        for (below, stages) in &entries {
-            let full = self.in_toplevel(below);
-            let clean = stages.len() == 1
-                && stages[0].stage == 0
-                && !stages[0].flagged
-                && !self.view.worktree_changed.contains(&full);
-            if clean {
+            let clean = stages == 1
+                && entry.stage == 0
+                && !entry.flagged
+                && !self.view.worktree_changed.contains(&entry.path);
+            if !clean {
+                to_hash.push(below.to_owned());
+            } else if entry.mode != GitIndexEntry::SYMLINK_MODE {
                 // A link is no source for the walk, and git says the tree still holds it.
-                if stages[0].mode != GitIndexEntry::SYMLINK_MODE {
-                    files.insert(below.clone(), Some(stages[0].oid.clone()));
-                }
-            } else {
-                to_hash.push(below.clone());
+                files.push(ObservedFile {
+                    rel_path: below.to_owned(),
+                    hash: Some(entry.oid.clone()),
+                });
             }
         }
         for path in &self.view.untracked {
@@ -199,24 +203,31 @@ impl<'v, 'h> GitSource<'v, 'h> {
             BlobHashError::Failed(detail) => unusable(ScanReason::GitFailed, detail),
         })?;
         for ((below, before), id) in listed.into_iter().zip(ids) {
-            let after = std::fs::symlink_metadata(set_root.join(&below))
+            let path = set_root.join(&below);
+            let after = std::fs::symlink_metadata(&path)
                 .ok()
-                .and_then(|meta| modified_ns(&set_root.join(&below), &meta));
+                .and_then(|meta| modified_ns(&path, &meta));
             // A file whose time moved while it was hashed may hold another content than the id.
             let unmoved = before.is_some() && before == after;
-            files.insert(below, unmoved.then_some(id));
+            files.push(ObservedFile {
+                rel_path: below,
+                hash: unmoved.then_some(id),
+            });
         }
         if interrupted() {
             return Err(ObserveError::Interrupted);
         }
-        Ok(files
-            .into_iter()
-            .map(|(rel_path, hash)| ObservedFile {
-                path: set_root.join(&rel_path),
-                rel_path,
-                hash,
-            })
-            .collect())
+        // Path order; a path named twice keeps its later answer, the hashed one. The listing
+        // is sorted already but for the hashed files, so the sort runs over a few runs.
+        files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        files.dedup_by(|later, earlier| {
+            let same = later.rel_path == earlier.rel_path;
+            if same {
+                std::mem::swap(later, earlier);
+            }
+            same
+        });
+        Ok(files)
     }
 }
 
@@ -227,10 +238,12 @@ fn modified_ns(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
 }
 
 /// Memory keys as git spells them: with `core.ignorecase` a path git names in other letter
-/// case is the remembered file (#575).
+/// case is the remembered file (#575). The folded keys are built on the first path the memory
+/// does not hold as spelled: git usually spells a path as the memory does (#645).
 pub(super) struct Spelling<'m> {
     remembered: &'m HashMap<String, crate::change_detection::hash_storage::StoredFileState>,
-    folded: HashMap<String, &'m str>,
+    ignore_case: bool,
+    folded: std::cell::OnceCell<HashMap<String, &'m str>>,
 }
 
 impl<'m> Spelling<'m> {
@@ -238,22 +251,29 @@ impl<'m> Spelling<'m> {
         remembered: &'m HashMap<String, crate::change_detection::hash_storage::StoredFileState>,
         ignore_case: bool,
     ) -> Self {
-        let folded = if ignore_case {
-            remembered
-                .keys()
-                .map(|key| (key.to_lowercase(), key.as_str()))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-        Self { remembered, folded }
+        Self {
+            remembered,
+            ignore_case,
+            folded: std::cell::OnceCell::new(),
+        }
     }
 
     /// The remembered key of `path`, if the memory holds it.
     pub(super) fn of(&self, path: &str) -> Option<&'m str> {
-        self.remembered
-            .get_key_value(path)
-            .map(|(key, _)| key.as_str())
-            .or_else(|| self.folded.get(&path.to_lowercase()).copied())
+        if let Some((key, _)) = self.remembered.get_key_value(path) {
+            return Some(key.as_str());
+        }
+        if !self.ignore_case {
+            return None;
+        }
+        self.folded
+            .get_or_init(|| {
+                self.remembered
+                    .keys()
+                    .map(|key| (key.to_lowercase(), key.as_str()))
+                    .collect()
+            })
+            .get(&path.to_lowercase())
+            .copied()
     }
 }

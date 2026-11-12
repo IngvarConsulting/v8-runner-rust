@@ -1,24 +1,24 @@
-//! Файл версий принадлежит раннеру, а в каталоге исходников лежит его расходный экземпляр.
+//! Файл версий принадлежит раннеру и лежит только в его памяти (#646).
 //!
-//! `ConfigDumpInfo.xml` описывает отношение одной базы к одному каталогу, но платформа
-//! ищет его только в каталоге выгрузки, где его затирает кто угодно: соседняя база,
-//! ручная выгрузка, `checkout`. Платформа не проверяет, её ли это опись, и выгрузка по
-//! изменившемуся молча считает разницу от чужой точки отсчёта.
+//! `ConfigDumpInfo.xml` описывает отношение одной базы к одному каталогу. Раннер держит его
+//! в `localPath/infobases/<база>/dump-info/<набор>/` и в каталог набора не кладёт: выгрузка
+//! по изменившемуся идёт в пустую стадию по этой копии, а в каталог переносится всё, кроме
+//! описи. Файл, оставшийся в каталоге набора от прежних версий раннера, он не читает и не
+//! пишет; читает его один раз только переход со старой памяти ([`RunnerVersionFile::usable`]).
 //!
-//! Поэтому раннер держит копию у себя — `localPath/infobases/<база>/dump-info/<набор>/` —
-//! и перед работой от файла версий сверяет с ней файл в каталоге. Подменённый файл
-//! уступает место копии; отсутствующий не подкладывается: о каталоге, из которого опись
-//! пропала, копия ничего не доказывает. После удачной команды копией становится то, что
-//! записала платформа; при сбое копия остаётся прежней.
-//!
-//! Копия годится только для той пары, для которой записана: рядом с ней лежит тождество
-//! памяти набора, и копию с другим тождеством раннер своей не считает.
+//! Копия годится только для той пары, для которой записана: рядом лежат тождество памяти
+//! набора и свидетельство дерева — идентификатор каталога набора в файловой системе на
+//! момент записи. Каталог, удалённый и созданный заново (новый клон, `rm -rf`), копию не
+//! подтверждает, и выгрузка идёт полной. Копия старше дерева безопасна: выгрузка по ней
+//! выгрузит больше, чем изменилось, но ничего не пропустит. Пишется она после удачной
+//! выгрузки, а после полной или крупной загрузки — свежей описью той же базы, если поколение
+//! подтвердило, что база не менялась (правило
+//! `a-push-refreshes-the-version-file-only-when-it-pays`).
 
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::domain::source_set::SourceSetContext;
@@ -28,105 +28,120 @@ use crate::support::error::AppError;
 use crate::support::fs::{
     best_effort_fsync_dir, read_optional, write_file_atomically, ATOMIC_WRITE_CANDIDATE_SUFFIX,
 };
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
+
+/// Имя описи версий, которую платформа пишет в каталог выгрузки.
+pub(crate) const VERSION_FILE_NAME: &str = "ConfigDumpInfo.xml";
+
+/// Начало имени временного каталога `workPath/stage/<начало>…`, куда отправка пишет свежую
+/// опись после загрузки; оставленный снятым процессом убирает уборка стадии выгрузки.
+pub(crate) const STALE_VERSION_FILE_DIR_PREFIX: &str = "version-file-";
 
 /// Тождество пары «база ↔ каталог», для которой записана копия.
 const IDENTITY_FILE_NAME: &str = "identity";
 
-/// Отпечаток файла версий: SHA-256 содержимого.
-pub(crate) type Fingerprint = [u8; 32];
+/// Свидетельство дерева: идентификатор каталога набора, под которым записана копия.
+const TREE_FILE_NAME: &str = "tree";
 
-/// Файл версий одного набора: экземпляр в каталоге исходников и копия раннера.
+/// Отметка «последняя выгрузка оставила удаления неизвестными»: пока она стоит, копию не
+/// освежает отправка — свежая опись забыла бы пропавшие элементы, чьи файлы остались в дереве.
+/// Снимает её следующая записанная копия (удачная выгрузка).
+const REMOVALS_UNKNOWN_FILE_NAME: &str = "removals-unknown";
+
+/// Файл версий одного набора — копия раннера в памяти базы.
 #[derive(Debug)]
 pub(crate) struct RunnerVersionFile {
     source_set: String,
-    in_directory: PathBuf,
+    tree: PathBuf,
     copy: PathBuf,
     identity_file: PathBuf,
+    tree_file: PathBuf,
+    removals_unknown_file: PathBuf,
     identity: String,
 }
 
-/// Что сверка оставит в каталоге набора.
-enum Restoration {
-    /// Файла в каталоге нет, и он не подкладывается.
-    Absent,
-    /// Файл каталога остаётся: он совпадает с копией или копии той же пары нет.
-    Kept,
-    /// Подменённый файл уступает копии раннера.
-    FromCopy,
-}
-
 impl RunnerVersionFile {
-    /// Копия есть у набора с памятью базы. У формата EDT файл версий лежит в снимке
-    /// Конфигуратора, который тоже лежит под памятью базы.
+    /// Копия есть у набора с памятью базы. У формата EDT каталог набора — снимок
+    /// Конфигуратора той же базы.
     pub(crate) fn of(context: &SourceSetContext) -> Option<Self> {
         let dir = context.version_file_copy_dir()?;
         let identity = context.storage_identity()?.to_owned();
         Some(Self {
             source_set: context.name().to_owned(),
-            in_directory: context.path().join(VERSION_FILE_NAME),
+            tree: context.path().to_path_buf(),
             copy: dir.join(VERSION_FILE_NAME),
             identity_file: dir.join(IDENTITY_FILE_NAME),
+            tree_file: dir.join(TREE_FILE_NAME),
+            removals_unknown_file: dir.join(REMOVALS_UNKNOWN_FILE_NAME),
             identity,
         })
     }
 
-    /// Перед работой от файла версий: подменённый файл в каталоге заменяется копией
-    /// раннера. Отпечатка сверка не считает: выгрузке он не нужен, а опись бывает в десятки
-    /// мегабайт (#574); кому нужен, спрашивает [`Self::fingerprint_in_directory`].
-    pub(crate) fn restore(&self) -> Result<(), AppError> {
-        if let Restoration::FromCopy = self.restoration()? {
-            copy_atomically(&self.copy, &self.in_directory)?;
-            debug!(
-                source_set = self.source_set.as_str(),
-                path = %self.in_directory.display(),
-                "replaced a foreign version file with the runner's copy"
-            );
+    /// Путь копии в памяти базы.
+    pub(crate) fn path(&self) -> &Path {
+        &self.copy
+    }
+
+    /// Копия, по которой выгрузка идёт по изменившемуся: она есть, тождество её пары наше, а
+    /// свидетельство дерева совпадает с каталогом набора. `None` — выгрузка будет полной.
+    ///
+    /// Переход со старой памяти: у копии, записанной прежней версией, свидетельства нет; тогда
+    /// раннер один раз сравнивает её с `ConfigDumpInfo.xml` в каталоге набора, который прежняя
+    /// сверка держала равным копии. Равны — свидетельство записывается и копия годится; иначе
+    /// (файла нет, он другой) — нет, и первая выгрузка полная.
+    pub(crate) fn usable(&self) -> Result<Option<&Path>, AppError> {
+        self.usable_with(Adoption::Record)
+    }
+
+    /// Тот же ответ, что [`Self::usable`], без записи свидетельства: превью и прогноз до
+    /// замка следа не оставляют.
+    pub(crate) fn would_be_usable(&self) -> Result<Option<&Path>, AppError> {
+        self.usable_with(Adoption::Answer)
+    }
+
+    fn usable_with(&self, adoption: Adoption) -> Result<Option<&Path>, AppError> {
+        if !self.copy_is_ours()? || !self.copy.is_file() {
+            return Ok(None);
         }
-        Ok(())
-    }
-
-    /// Отпечаток файла версий в каталоге набора; `None` — файла нет.
-    pub(crate) fn fingerprint_in_directory(&self) -> Result<Option<Fingerprint>, AppError> {
-        fingerprint(&self.in_directory)
-    }
-
-    /// Какой файл версий окажется в каталоге после [`Self::restore`], ничего не меняя:
-    /// файл каталога, копия раннера или никакой. Так превью видит то же, что выгрузка.
-    pub(crate) fn file_after_restore(&self) -> Result<Option<&Path>, AppError> {
-        Ok(match self.restoration()? {
-            Restoration::Absent => None,
-            Restoration::Kept => Some(&self.in_directory),
-            Restoration::FromCopy => Some(&self.copy),
-        })
-    }
-
-    /// Решение сверки: отсутствующий файл не подкладывается, свой остаётся, подменённый
-    /// уступает копии той же пары. Файлы сравниваются байт в байт: отпечатки двух описей в
-    /// десятки мегабайт стоили выгрузке по изменившемуся больше секунды (#574).
-    fn restoration(&self) -> Result<Restoration, AppError> {
-        let Some(present) = open_optional(&self.in_directory)? else {
-            return Ok(Restoration::Absent);
-        };
-        if !self.copy_is_ours()? {
-            return Ok(Restoration::Kept);
-        }
-        let Some(copy) = open_optional(&self.copy)? else {
-            return Ok(Restoration::Kept);
+        let recorded = read_optional(&self.tree_file)
+            .map_err(|error| io_error("read", &self.tree_file, &error))?;
+        let Some(recorded) = recorded else {
+            return self.adopt_left_behind(adoption);
         };
         Ok(
-            if same_bytes((present, &self.in_directory), (copy, &self.copy))? {
-                Restoration::Kept
-            } else {
-                Restoration::FromCopy
-            },
+            (tree_witness(&self.tree).as_deref() == Some(recorded.as_slice()))
+                .then_some(self.copy.as_path()),
         )
     }
 
-    /// Capture the version file before handing the stage to its publisher.
-    /// The private temporary file keeps a large inventory off the heap and
-    /// prevents a later user edit from becoming the runner's copy.
-    pub(crate) fn prepare_from(&self, stage: &Path) -> Result<Option<File>, AppError> {
+    /// Переход со старой памяти ([`Self::usable`]).
+    fn adopt_left_behind(&self, adoption: Adoption) -> Result<Option<&Path>, AppError> {
+        let Some(witness) = tree_witness(&self.tree) else {
+            return Ok(None);
+        };
+        let left = self.tree.join(VERSION_FILE_NAME);
+        let (Some(left_file), Some(copy_file)) =
+            (open_optional(&left)?, open_optional(&self.copy)?)
+        else {
+            return Ok(None);
+        };
+        if !same_bytes((left_file, &left), (copy_file, &self.copy))? {
+            return Ok(None);
+        }
+        if adoption == Adoption::Record {
+            write_file_atomically(&self.tree_file, |file| io::Write::write_all(file, &witness))
+                .map_err(|error| io_error("write", &self.tree_file, &error))?;
+            debug!(
+                source_set = self.source_set.as_str(),
+                "the version file left in the source directory by an earlier runner was adopted"
+            );
+        }
+        Ok(Some(&self.copy))
+    }
+
+    /// Захват описи из стадии полной выгрузки до публикации: стадия уходит в каталог без неё,
+    /// а копией опись становится только после удачной публикации ([`Self::record_prepared`]).
+    /// Частный временный файл держит большую опись вне памяти процесса.
+    pub(crate) fn prepare_from(stage: &Path) -> Result<Option<File>, AppError> {
         let path = stage.join(VERSION_FILE_NAME);
         let mut input = match File::open(&path) {
             Ok(input) => input,
@@ -136,9 +151,12 @@ impl RunnerVersionFile {
         let mut prepared =
             tempfile::tempfile().map_err(|error| io_error("prepare", &path, &error))?;
         io::copy(&mut input, &mut prepared).map_err(|error| io_error("prepare", &path, &error))?;
+        drop(input);
+        fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
         Ok(Some(prepared))
     }
 
+    /// После удачной публикации: копией становится опись, захваченная [`Self::prepare_from`].
     pub(crate) fn record_prepared(&self, prepared: Option<File>) -> Result<(), AppError> {
         use std::io::{Seek, SeekFrom};
         let Some(mut prepared) = prepared else {
@@ -156,43 +174,38 @@ impl RunnerVersionFile {
         )
     }
 
-    /// После удачной выгрузки: копией становится то, что записала платформа.
-    /// Возвращает предупреждение, если копию записать не удалось.
+    /// После удачной выгрузки в стадию и переноса в каталог: копией становится новая опись
+    /// `staged` — переименованием, а с другого тома копированием. Возвращает предупреждение,
+    /// если копию записать не удалось.
     #[must_use]
-    pub(crate) fn record(&self) -> Option<String> {
-        // Every written file becomes the copy, so its fingerprint is not needed: the copy reads
-        // the file once instead of hashing it first (#571).
-        let recorded = match fs::metadata(&self.in_directory) {
-            Ok(_) => self.write_copy(write_identity),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(io_error("read", &self.in_directory, &error)),
-        };
-        recorded.err().map(|error| self.not_recorded(&error))
+    pub(crate) fn record_from(&self, staged: &Path) -> Option<String> {
+        self.write_copy_using(|path| move_atomically(staged, path), write_identity)
+            .err()
+            .map(|error| self.not_recorded(&error))
     }
 
-    /// После удачной загрузки: копия обновляется, только если платформа переписала файл
-    /// в каталоге. Загрузка, которая файла версий не пишет, чужой файл своим не делает.
+    /// Выгрузка по изменившемуся не узнала удалений, и копия осталась прежней: отметка не даёт
+    /// отправке освежить копию, пока следующая выгрузка её не запишет. Предупреждение — если
+    /// отметку записать не удалось.
     #[must_use]
-    pub(crate) fn record_if_rewritten(&self, before: Option<&Fingerprint>) -> Option<String> {
-        self.record_when(|written| before != Some(written))
+    pub(crate) fn mark_removals_unknown(&self) -> Option<String> {
+        let dir = self.removals_unknown_file.parent()?;
+        fs::create_dir_all(dir)
+            .and_then(|()| write_file_atomically(&self.removals_unknown_file, |_| Ok(())))
+            .err()
+            .map(|error| {
+                format!(
+                    "failed to remember that the removals of source-set '{}' are not known in '{}': {error}",
+                    self.source_set,
+                    self.removals_unknown_file.display()
+                )
+            })
     }
 
-    /// Копия больше не описывает базу: она стирается, и следующая выгрузка по изменившемуся
-    /// не подложит её в каталог. Копии не было — не ошибка.
-    pub(crate) fn forget(&self) -> Result<(), AppError> {
-        match fs::remove_file(&self.copy) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(io_error("remove", &self.copy, &error)),
-        }
-    }
-
-    fn record_when(&self, rewritten: impl Fn(&Fingerprint) -> bool) -> Option<String> {
-        let recorded = fingerprint(&self.in_directory).and_then(|written| match written {
-            Some(written) if rewritten(&written) => self.write_copy(write_identity),
-            Some(_) | None => Ok(()),
-        });
-        recorded.err().map(|error| self.not_recorded(&error))
+    /// Стоит ли отметка [`Self::mark_removals_unknown`]. Её не прочесть — считается, что стоит:
+    /// копию тогда лучше не освежать.
+    pub(crate) fn removals_unknown(&self) -> bool {
+        !matches!(fs::symlink_metadata(&self.removals_unknown_file), Err(error) if error.kind() == ErrorKind::NotFound)
     }
 
     fn not_recorded(&self, error: &AppError) -> String {
@@ -208,18 +221,9 @@ impl RunnerVersionFile {
         Ok(identity.as_deref() == Some(self.identity.as_bytes()))
     }
 
-    /// При смене тождества оно сначала стирается, затем пишется опись и только потом
-    /// новое тождество: оборванная смена оставляет копию ничьей, а не чужую опись своей.
-    fn write_copy(
-        &self,
-        identity_writer: impl FnOnce(&Path, &str) -> io::Result<()>,
-    ) -> Result<(), AppError> {
-        self.write_copy_using(
-            |path| copy_atomically(&self.in_directory, path),
-            identity_writer,
-        )
-    }
-
+    /// При смене тождества оно сначала стирается; свидетельство дерева стирается всегда.
+    /// Затем пишется опись, свидетельство и только потом новое тождество: оборванная запись
+    /// оставляет копию негодной, а не чужую опись своей.
     fn write_copy_using(
         &self,
         copy_writer: impl FnOnce(&Path) -> Result<(), AppError>,
@@ -233,21 +237,60 @@ impl RunnerVersionFile {
         remove_left_candidates(dir)?;
         let ours = self.copy_is_ours()?;
         if !ours {
-            match fs::remove_file(&self.identity_file) {
-                Ok(()) => {
-                    best_effort_fsync_dir(dir).map_err(|error| io_error("sync", dir, &error))?;
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(io_error("remove", &self.identity_file, &error)),
-            }
+            remove_optional(&self.identity_file)?;
         }
+        remove_optional(&self.tree_file)?;
+        best_effort_fsync_dir(dir).map_err(|error| io_error("sync", dir, &error))?;
         copy_writer(&self.copy)?;
+        if let Some(witness) = tree_witness(&self.tree) {
+            write_file_atomically(&self.tree_file, |file| io::Write::write_all(file, &witness))
+                .map_err(|error| io_error("write", &self.tree_file, &error))?;
+        }
         if !ours {
             identity_writer(&self.identity_file, &self.identity)
                 .map_err(|error| io_error("write", &self.identity_file, &error))?;
         }
-        Ok(())
+        remove_optional(&self.removals_unknown_file)
     }
+}
+
+/// Записывает ли переход со старой памяти свидетельство дерева.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    Record,
+    Answer,
+}
+
+/// Свидетельство каталога набора: его идентификатор в файловой системе и время рождения.
+/// `None` — идентификатор не узнать; тогда копия не годится. Время рождения отличает новый
+/// каталог, которому файловая система отдала номер удалённого (inode на ext4 и xfs).
+///
+/// Вид записи — `unix:<узел>:<рождение>` и `windows:<индекс файла>:<рождение>`: без устройства и
+/// тома, которые меняются при перемонтировании (NFS, контейнер, внешний диск);
+/// рождение — наносекунды от эпохи или `-`, если файловая система его не хранит.
+fn tree_witness(tree: &Path) -> Option<Vec<u8>> {
+    use crate::support::path::FilesystemObjectIdentity;
+    let identity = crate::support::path::filesystem_object_identity(tree)
+        .inspect_err(|error| {
+            debug!(path = %tree.display(), %error, "the identity of the source directory is unknown");
+        })
+        .ok()?;
+    let born = fs::metadata(tree)
+        .and_then(|metadata| metadata.created())
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "-".to_owned(), |since| since.as_nanos().to_string());
+    let witness = match identity {
+        #[cfg(unix)]
+        FilesystemObjectIdentity::Unix { inode, .. } => format!("unix:{inode}:{born}"),
+        #[cfg(windows)]
+        FilesystemObjectIdentity::Windows { file_index, .. } => {
+            format!("windows:{file_index}:{born}")
+        }
+        #[cfg(not(any(unix, windows)))]
+        FilesystemObjectIdentity::Portable { .. } => return None,
+    };
+    Some(witness.into_bytes())
 }
 
 /// Перед загрузкой: версия формата файла версий не новее той, что пишет платформа.
@@ -264,42 +307,40 @@ pub(crate) fn check_load_format(
     check_load_format_against(context, platform, written)
 }
 
-/// Сверка с известной версией формата платформы. Версия читается из файла в каталоге
-/// набора, а если его там нет — из копии раннера той же пары. Новее — отказ до запуска
-/// платформы, называющий обе версии. Файла нет ни там, ни там или версия в нём не
-/// распознана — сверки нет, и возвращается примечание о пропуске для ответа.
+/// Сверка с известной версией формата платформы. Версия читается из годной копии раннера
+/// той же пары ([`RunnerVersionFile::would_be_usable`]); файл в каталоге набора не читается. Новее — отказ до запуска платформы, называющий
+/// обе версии. Копии нет или версия в ней не распознана — сверки нет, и возвращается
+/// примечание о пропуске для ответа.
 fn check_load_format_against(
     context: &SourceSetContext,
     platform: &PlatformVersion,
     written: FormatVersion,
 ) -> Result<Option<String>, AppError> {
-    let in_directory = context.path().join(VERSION_FILE_NAME);
-    let mut source = in_directory.clone();
-    let mut recorded = read_format(&in_directory)?;
-    if recorded == RecordedFormat::Missing {
-        if let Some(copy) = RunnerVersionFile::of(context) {
-            if copy.copy_is_ours()? {
-                recorded = read_format(&copy.copy)?;
-                source = copy.copy;
-            }
-        }
-    }
-    let found = match recorded {
-        RecordedFormat::Missing => {
-            return Ok(Some(format!(
-                "the format version was not checked before the load: no {VERSION_FILE_NAME} in '{}' or in the runner's memory",
-                context.path().display()
-            )));
-        }
-        RecordedFormat::Unrecognized => {
+    let copy = match RunnerVersionFile::of(context) {
+        Some(copy) => copy.would_be_usable()?.map(Path::to_path_buf),
+        None => None,
+    };
+    let recorded = match &copy {
+        Some(copy) => read_format(copy)?,
+        None => RecordedFormat::Missing,
+    };
+    let found = match (recorded, &copy) {
+        (RecordedFormat::Version(found), _) => found,
+        (RecordedFormat::Unrecognized, Some(copy)) => {
             return Ok(Some(format!(
                 "the format version was not checked before the load: the format version of '{}' is not recognized",
-                source.display()
+                copy.display()
             )));
         }
-        RecordedFormat::Version(found) => found,
+        (RecordedFormat::Missing | RecordedFormat::Unrecognized, _) => {
+            return Ok(Some(format!(
+                "the format version was not checked before the load: the runner's memory keeps no {VERSION_FILE_NAME} for source-set '{}'",
+                context.name()
+            )));
+        }
     };
     if found > written {
+        let source = copy.as_deref().unwrap_or(context.path());
         return Err(AppError::Validation(format!(
             "'{}' is in format {found}, newer than {written} that platform {platform} writes: the platform cannot load it, so the load is refused before it starts; load with a platform that writes {found} or newer",
             source.display()
@@ -312,11 +353,9 @@ fn read_format(path: &Path) -> Result<RecordedFormat, AppError> {
     read_recorded(path).map_err(|error| io_error("read", path, &error))
 }
 
-/// Временные файлы замен файла версий и его копии (`<имя>.candidate-…`), оставленные
-/// снятым процессом, в каталоге `dir`. Убираются в начале каждой выгрузки и загрузки
-/// набора — под тем же замком, под которым пишутся новые, — и при записи копии: иначе
-/// их видит `git status` и сторож замены каталога.
-pub(crate) fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
+/// Временные файлы замен копии и её спутников (`<имя>.candidate-…`), оставленные снятым
+/// процессом, в каталоге копии `dir`. Убираются при каждой записи копии.
+fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -325,12 +364,17 @@ pub(crate) fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let left = [VERSION_FILE_NAME, IDENTITY_FILE_NAME]
-            .iter()
-            .any(|target| {
-                name.strip_prefix(target)
-                    .is_some_and(|rest| rest.starts_with(ATOMIC_WRITE_CANDIDATE_SUFFIX))
-            });
+        let left = [
+            VERSION_FILE_NAME,
+            IDENTITY_FILE_NAME,
+            TREE_FILE_NAME,
+            REMOVALS_UNKNOWN_FILE_NAME,
+        ]
+        .iter()
+        .any(|target| {
+            name.strip_prefix(target)
+                .is_some_and(|rest| rest.starts_with(ATOMIC_WRITE_CANDIDATE_SUFFIX))
+        });
         if left {
             let path = entry.path();
             fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
@@ -339,18 +383,16 @@ pub(crate) fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn write_identity(path: &Path, identity: &str) -> io::Result<()> {
-    write_file_atomically(path, |file| io::Write::write_all(file, identity.as_bytes()))
+fn remove_optional(path: &Path) -> Result<(), AppError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("remove", path, &error)),
+    }
 }
 
-/// Отпечаток файла без чтения его в память целиком; `None`, если файла нет.
-fn fingerprint(path: &Path) -> Result<Option<Fingerprint>, AppError> {
-    let Some(mut file) = open_optional(path)? else {
-        return Ok(None);
-    };
-    let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher).map_err(|error| io_error("read", path, &error))?;
-    Ok(Some(hasher.finalize().into()))
+fn write_identity(path: &Path, identity: &str) -> io::Result<()> {
+    write_file_atomically(path, |file| io::Write::write_all(file, identity.as_bytes()))
 }
 
 /// Открытый файл или `None`, если его нет.
@@ -401,7 +443,30 @@ fn same_bytes(left: (File, &Path), right: (File, &Path)) -> Result<bool, AppErro
     }
 }
 
-fn copy_atomically(from: &Path, to: &Path) -> Result<(), AppError> {
+/// Переносит `from` на место `to` одним переименованием; с другого тома — атомарной копией.
+/// Опись сбрасывается на диск до переименования: свидетельство, которое пишется после, не
+/// должно подтверждать обрезанную копию.
+fn move_atomically(from: &Path, to: &Path) -> Result<(), AppError> {
+    // На Windows сброс на диск (`FlushFileBuffers`) требует права записи.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(from)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| io_error("sync", from, &error))?;
+    match fs::rename(from, to) {
+        Ok(()) => {
+            if let Some(dir) = to.parent() {
+                let _ = best_effort_fsync_dir(dir);
+            }
+            return Ok(());
+        }
+        Err(error) => debug!(
+            from = %from.display(),
+            to = %to.display(),
+            %error,
+            "the description is copied instead of renamed"
+        ),
+    }
     write_file_atomically(to, |file| {
         io::copy(&mut File::open(from)?, file).map(|_| ())
     })
@@ -420,7 +485,7 @@ fn io_error(action: &str, path: &Path, error: &io::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, RunnerVersionFile};
+    use super::RunnerVersionFile;
     use crate::domain::source_set::SourceSetContext;
     use std::fs;
     use std::path::Path;
@@ -436,8 +501,13 @@ mod tests {
         RunnerVersionFile::of(&context).expect("named base keeps a copy")
     }
 
-    fn print_of(path: &Path) -> Option<super::Fingerprint> {
-        fingerprint(path).expect("fingerprint")
+    /// Опись, которую выгрузка оставила в стадии.
+    fn staged(root: &Path, content: &str) -> std::path::PathBuf {
+        let stage = root.join("stage");
+        fs::create_dir_all(&stage).expect("stage");
+        let path = stage.join("ConfigDumpInfo.xml");
+        fs::write(&path, content).expect("staged description");
+        path
     }
 
     #[test]
@@ -451,133 +521,150 @@ mod tests {
         );
     }
 
+    /// Новая опись из стадии становится копией и уходит из стадии; в каталог набора раннер её
+    /// не кладёт, а файл, оставшийся там, не трогает.
     #[test]
-    fn a_replaced_file_gives_way_to_the_runner_copy() {
+    fn the_staged_description_becomes_the_copy_and_never_reaches_the_sources() {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
-        fs::write(&file.in_directory, "ours").expect("platform wrote");
-        assert_eq!(file.record(), None);
-        let ours = print_of(&file.in_directory);
-
-        fs::write(&file.in_directory, "foreign").expect("foreign write");
+        let left = root.path().join("sources/ConfigDumpInfo.xml");
+        fs::write(&left, "left by an earlier runner").expect("left file");
+        let description = staged(root.path(), "new");
+        assert_eq!(file.record_from(&description), None);
+        assert_eq!(fs::read(&file.copy).expect("copy"), b"new");
+        assert!(!description.exists(), "the description left the stage");
         assert_eq!(
-            {
-                file.restore().expect("restore");
-                file.fingerprint_in_directory().expect("print")
-            },
-            ours
+            fs::read(&left).expect("untouched"),
+            b"left by an earlier runner"
         );
-        assert_eq!(fs::read(&file.in_directory).expect("file"), b"ours");
+        assert_eq!(file.usable().expect("usable"), Some(file.copy.as_path()));
     }
 
-    /// Сверка сравнивает описи байт в байт, а не отпечатками (#574): подмена той же длины,
-    /// отличная только в конце большой описи, тоже уступает копии, а та же опись остаётся.
+    /// Отметка неизвестных удалений переживает команду и снимается следующей записанной копией.
     #[test]
-    fn a_replacement_of_the_same_length_is_told_from_the_copy_byte_by_byte() {
+    fn unknown_removals_are_remembered_until_the_next_copy_is_recorded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let version = version_file(root.path(), "pair-a");
+        assert!(!version.removals_unknown());
+
+        assert_eq!(version.mark_removals_unknown(), None);
+        assert!(version.removals_unknown(), "the mark survives the command");
+
+        assert_eq!(
+            version.record_from(&staged(root.path(), "<ConfigDumpInfo/>")),
+            None
+        );
+        assert!(
+            !version.removals_unknown(),
+            "a recorded copy clears the mark"
+        );
+    }
+
+    /// Каталог набора, созданный заново (новый клон), копию не подтверждает: выгрузка полная.
+    #[test]
+    fn a_recreated_source_directory_does_not_confirm_the_copy() {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
-        let ours: Vec<u8> = (0..200_000_u32).map(|byte| (byte % 251) as u8).collect();
-        fs::write(&file.in_directory, &ours).expect("platform wrote");
-        assert_eq!(file.record(), None);
-        assert_eq!(
-            file.file_after_restore().expect("same"),
-            Some(file.in_directory.as_path())
-        );
+        assert_eq!(file.record_from(&staged(root.path(), "ours")), None);
+        assert!(file.usable().expect("usable").is_some());
 
-        let mut foreign = ours.clone();
-        *foreign.last_mut().expect("last byte") ^= 1;
-        fs::write(&file.in_directory, &foreign).expect("foreign write");
-        assert_eq!(
-            file.file_after_restore().expect("replaced"),
-            Some(file.copy.as_path())
-        );
-        file.restore().expect("restore");
-        assert_eq!(fs::read(&file.in_directory).expect("file"), ours);
+        let sources = root.path().join("sources");
+        // Прежний каталог жив под другим именем: новый не займёт его идентификатор.
+        fs::rename(&sources, root.path().join("old-clone")).expect("moved away");
+        fs::create_dir_all(&sources).expect("a new clone");
+        assert_eq!(file.usable().expect("recreated"), None);
     }
 
     #[test]
     fn temporary_files_left_by_a_killed_write_are_removed() {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
-        let left = root.path().join("sources/ConfigDumpInfo.xml.candidate-x1");
-        fs::write(&left, "half").expect("left candidate");
-        let kept = root.path().join("sources/Module.bsl");
-        fs::write(&kept, "source").expect("source");
-        super::remove_left_candidates(&root.path().join("sources")).expect("sweep");
-        assert!(!left.exists());
-        assert!(kept.exists());
-
         let copy_dir = file.copy.parent().expect("copy dir").to_path_buf();
         fs::create_dir_all(&copy_dir).expect("copy dir");
         let left_copy = copy_dir.join("ConfigDumpInfo.xml.candidate-x2");
         let left_identity = copy_dir.join("identity.candidate-x3");
-        fs::write(&left_copy, "half").expect("left copy");
-        fs::write(&left_identity, "half").expect("left identity");
-        fs::write(&file.in_directory, "ours").expect("platform wrote");
-        assert_eq!(file.record(), None);
+        let left_tree = copy_dir.join("tree.candidate-x4");
+        for left in [&left_copy, &left_identity, &left_tree] {
+            fs::write(left, "half").expect("left candidate");
+        }
+        assert_eq!(file.record_from(&staged(root.path(), "ours")), None);
         assert!(!left_copy.exists());
         assert!(!left_identity.exists());
+        assert!(!left_tree.exists());
     }
 
     #[test]
-    fn a_missing_file_is_not_restored() {
-        let root = tempfile::tempdir().expect("root");
-        let file = version_file(root.path(), "base-a");
-        fs::write(&file.in_directory, "ours").expect("platform wrote");
-        assert_eq!(file.record(), None);
-
-        fs::remove_file(&file.in_directory).expect("remove");
-        assert_eq!(
-            {
-                file.restore().expect("restore");
-                file.fingerprint_in_directory().expect("print")
-            },
-            None
-        );
-        assert!(!file.in_directory.exists());
-    }
-
-    #[test]
-    fn a_copy_of_another_pair_is_not_restored() {
+    fn a_copy_of_another_pair_is_not_used() {
         let root = tempfile::tempdir().expect("root");
         let first = version_file(root.path(), "base-a");
-        fs::write(&first.in_directory, "of base a").expect("platform wrote");
-        assert_eq!(first.record(), None);
+        assert_eq!(first.record_from(&staged(root.path(), "of base a")), None);
 
         let second = version_file(root.path(), "base-b");
-        fs::write(&second.in_directory, "of base b").expect("manual dump");
-        let manual = print_of(&second.in_directory);
-        assert_eq!(
-            {
-                second.restore().expect("restore");
-                second.fingerprint_in_directory().expect("print")
-            },
-            manual
-        );
-        assert_eq!(fs::read(&second.in_directory).expect("file"), b"of base b");
+        assert_eq!(second.usable().expect("foreign"), None);
+        assert!(first.usable().expect("own").is_some());
     }
 
-    /// Смена тождества, оборванная после записи описи, не делает опись новой пары копией
-    /// прежней: ни та, ни другая пара её своей не считает.
+    /// Запись, оборванная после описи, не делает опись новой пары копией прежней: ни та, ни
+    /// другая пара её своей не считает.
     #[test]
     fn an_interrupted_identity_change_leaves_no_pair_owning_the_copy() {
         let root = tempfile::tempdir().expect("root");
         let first = version_file(root.path(), "base-a");
-        fs::write(&first.in_directory, "of base a").expect("platform wrote");
-        assert_eq!(first.record(), None);
+        assert_eq!(first.record_from(&staged(root.path(), "of base a")), None);
 
         let second = version_file(root.path(), "base-b");
-        fs::write(&second.in_directory, "of base b").expect("platform wrote");
+        let description = staged(root.path(), "of base b");
         second
-            .write_copy(|_, _| Err(std::io::Error::other("killed before the identity")))
+            .write_copy_using(
+                |path| super::move_atomically(&description, path),
+                |_, _| Err(std::io::Error::other("killed before the identity")),
+            )
             .expect_err("the identity write was cut off");
         assert_eq!(fs::read(&second.copy).expect("copy"), b"of base b");
 
-        fs::write(&first.in_directory, "foreign").expect("foreign write");
-        assert!(!first.copy_is_ours().expect("identity"));
-        first.restore().expect("restore");
-        assert_eq!(fs::read(&first.in_directory).expect("file"), b"foreign");
-        assert!(!second.copy_is_ours().expect("identity"));
+        assert_eq!(first.usable().expect("identity"), None);
+        assert_eq!(second.usable().expect("identity"), None);
+    }
+
+    /// Переход со старой памяти: копия прежней версии без свидетельства годится, только если
+    /// в каталоге набора лежит тот же файл, что прежняя сверка держала равным копии.
+    #[test]
+    fn a_copy_left_by_an_earlier_runner_is_adopted_only_beside_the_same_file() {
+        let root = tempfile::tempdir().expect("root");
+        let file = version_file(root.path(), "base-a");
+        let copy_dir = file.copy.parent().expect("copy dir").to_path_buf();
+        fs::create_dir_all(&copy_dir).expect("copy dir");
+        fs::write(&file.copy, "ours").expect("earlier copy");
+        fs::write(copy_dir.join("identity"), "base-a").expect("earlier identity");
+        let left = root.path().join("sources/ConfigDumpInfo.xml");
+
+        assert_eq!(file.usable().expect("no file"), None, "nothing to compare");
+        fs::write(&left, "foreign").expect("another file");
+        assert_eq!(file.usable().expect("another"), None);
+        assert!(!copy_dir.join("tree").exists());
+
+        fs::write(&left, "ours").expect("the same file");
+        assert_eq!(file.usable().expect("adopted"), Some(file.copy.as_path()));
+        assert!(copy_dir.join("tree").is_file(), "adopted once");
+        fs::write(&left, "changed after the adoption").expect("ignored now");
+        assert_eq!(file.usable().expect("witness"), Some(file.copy.as_path()));
+        assert_eq!(
+            fs::read(&left).expect("left"),
+            b"changed after the adoption"
+        );
+    }
+
+    #[test]
+    fn a_full_dump_takes_the_description_out_of_the_stage_before_publication() {
+        let root = tempfile::tempdir().expect("root");
+        let file = version_file(root.path(), "base-a");
+        let description = staged(root.path(), "full");
+        let prepared =
+            RunnerVersionFile::prepare_from(description.parent().expect("stage")).expect("taken");
+        assert!(!description.exists(), "the tree is published without it");
+        file.record_prepared(prepared).expect("recorded");
+        assert_eq!(fs::read(&file.copy).expect("copy"), b"full");
+        assert!(file.usable().expect("usable").is_some());
     }
 
     use crate::platform::dump_format::FormatVersion;
@@ -595,10 +682,10 @@ mod tests {
         format!("<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\"/>")
     }
 
-    /// Механизм сверки на версии формата, переданной тестом: нет файла в каталоге — версия
-    /// берётся из копии раннера той же пары; формат новее платформы — отказ с обеими
-    /// версиями, не новее — загрузка идёт; нет файла или версия не распознана — пропуск
-    /// назван. Платформа из таблицы замеров (#403) сверяется и без версии из теста.
+    /// Механизм сверки на версии формата, переданной тестом: версия читается из копии раннера,
+    /// файл в каталоге набора не читается; формат новее платформы — отказ с обеими версиями, не
+    /// новее — загрузка идёт; нет копии или версия не распознана — пропуск назван. Платформа из
+    /// таблицы замеров (#403) сверяется и без версии из теста.
     #[test]
     fn a_load_from_a_newer_format_is_refused_and_the_format_is_read_from_the_runner_copy() {
         let root = tempfile::tempdir().expect("root");
@@ -609,12 +696,18 @@ mod tests {
         let check =
             || super::check_load_format_against(&context, &platform, FormatVersion::new(2, 20));
 
-        let skipped = check().expect("no file").expect("the skip is named");
+        fs::write(
+            root.path().join("sources/ConfigDumpInfo.xml"),
+            with_format("2.99"),
+        )
+        .expect("left in the sources");
+        let skipped = check().expect("no copy").expect("the skip is named");
         assert!(skipped.contains("not checked"), "{skipped}");
 
-        fs::write(&file.in_directory, with_format("2.21")).expect("platform wrote");
-        assert_eq!(file.record(), None);
-        fs::remove_file(&file.in_directory).expect("lost");
+        assert_eq!(
+            file.record_from(&staged(root.path(), &with_format("2.21"))),
+            None
+        );
         let refusal = check().expect_err("a newer format").to_string();
         assert!(refusal.contains("format 2.21"), "{refusal}");
         assert!(
@@ -636,55 +729,20 @@ mod tests {
             None
         );
 
-        fs::write(&file.in_directory, with_format("2.17")).expect("older");
+        assert_eq!(
+            file.record_from(&staged(root.path(), &with_format("2.17"))),
+            None
+        );
         assert_eq!(check().expect("an older format loads"), None);
-        fs::write(&file.in_directory, "<ConfigDumpInfo/>").expect("no version");
+        assert_eq!(
+            file.record_from(&staged(root.path(), "<ConfigDumpInfo/>")),
+            None
+        );
         let unrecognized = check().expect("unrecognized").expect("the skip is named");
         assert!(unrecognized.contains("not recognized"), "{unrecognized}");
         assert_eq!(
             super::check_load_format(&context, None).expect("unknown platform"),
             None
         );
-    }
-
-    /// Превью видит тот файл, который оставит сверка: подменённый уступает копии,
-    /// отсутствующий не подкладывается, и ничего при этом не пишется.
-    #[test]
-    fn the_file_after_restore_is_named_without_writing() {
-        let root = tempfile::tempdir().expect("root");
-        let file = version_file(root.path(), "base-a");
-        assert_eq!(file.file_after_restore().expect("absent"), None);
-        fs::write(&file.in_directory, "ours").expect("platform wrote");
-        assert_eq!(file.record(), None);
-        assert_eq!(
-            file.file_after_restore().expect("kept"),
-            Some(file.in_directory.as_path())
-        );
-        fs::write(&file.in_directory, "foreign").expect("replaced");
-        assert_eq!(
-            file.file_after_restore().expect("from copy"),
-            Some(file.copy.as_path())
-        );
-        assert_eq!(fs::read(&file.in_directory).expect("untouched"), b"foreign");
-        fs::remove_file(&file.in_directory).expect("lost");
-        assert_eq!(file.file_after_restore().expect("not put back"), None);
-    }
-
-    #[test]
-    fn a_load_that_did_not_rewrite_the_file_keeps_the_copy() {
-        let root = tempfile::tempdir().expect("root");
-        let file = version_file(root.path(), "base-a");
-        fs::write(&file.in_directory, "ours").expect("platform wrote");
-        assert_eq!(file.record(), None);
-
-        fs::write(&file.in_directory, "foreign").expect("foreign write");
-        let before = print_of(&file.in_directory);
-        // Загрузка без записи файла версий: копия не перенимает чужой файл.
-        assert_eq!(file.record_if_rewritten(before.as_ref()), None);
-        assert_eq!(fs::read(&file.copy).expect("copy"), b"ours");
-
-        fs::write(&file.in_directory, "loaded").expect("platform rewrote");
-        assert_eq!(file.record_if_rewritten(before.as_ref()), None);
-        assert_eq!(fs::read(&file.copy).expect("copy"), b"loaded");
     }
 }

@@ -123,10 +123,11 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    и записывается с инструментом (без ответа запись набора стирается, и ответ это называет;
    после неудачной загрузки запись помечается как сделанная перед ней; загрузка без
    применения — `--no-apply` или отказ применения — пишет запись с `applied: false`, и
-   отказ применения называет выход `apply`); у Конфигуратора
-   потерянный файл версий выгружается отдельно (`-configDumpInfoOnly`), если совпадение
-   каталога и базы доказано; если загрузка переписала
-   файл версий, он становится копией раннера. Внешние обработки и
+   отказ применения называет выход `apply`); после полной загрузки, загрузки от 1000 файлов
+   или изменения, которое выгрузку по прежней описи сделало бы полной, свежая опись
+   выгружается отдельно (`-configDumpInfoOnly`, `--config-dump-info-only`, `ibcmd config
+   export info`; у загрузки по изменившемуся — при совпавшем перед ней поколении) и при
+   неизменном поколении становится копией раннера. Внешние обработки и
    отчёты в базу не идут: формат Конфигуратора их только проверяет, формат EDT выгружает в
    файлы Конфигуратора, а `make` готовит их заново.
 5. Сбой шага: у него `ok: false`, остальные наборы пропускаются с пометкой, что цепочка
@@ -164,13 +165,13 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [применение — отдельный шаг](../rules/cli/apply-is-a-separate-step.md),
 [загрузка без применения помнится непринятой](../rules/use-cases/a-load-without-apply-is-remembered-as-unapplied.md),
 [`reset` отбрасывает непринятое](../rules/cli/reset-discards-the-unapplied.md),
-[файл версий отдельно — при доказанном совпадении](../rules/use-cases/a-version-file-alone-is-dumped-only-when-the-directory-matches-the-base.md),
+[свежий файл версий — после полной или крупной загрузки](../rules/use-cases/a-push-refreshes-the-version-file-only-when-it-pays.md),
 [изменения ищет та команда, которой нужен ответ](../rules/use-cases/changes-are-detected-on-demand.md),
 [у EDT две ступени состояния](../rules/use-cases/edt-keeps-two-change-contexts.md),
 [изменение вне корня набора делает загрузку полной](../rules/use-cases/a-change-outside-the-source-root-turns-the-load-full.md),
 [загрузка частичная, если есть с чем сравнить](../rules/use-cases/a-load-is-partial-unless-nothing-to-compare.md),
 [переход к полному режиму назван](../rules/use-cases/degradation-is-visible.md),
-[подменённый файл версий уступает копии](../rules/use-cases/a-replaced-version-file-gives-way-to-the-runner-copy.md),
+[файл версий живёт только в памяти раннера](../rules/use-cases/the-version-file-lives-only-in-the-runner-memory.md),
 [копия перенимает файл платформы после удачи](../rules/use-cases/the-runner-copy-takes-the-platform-file-after-success.md),
 [формат новее платформы — отказ до запуска](../rules/use-cases/a-load-from-a-newer-format-is-refused-before-the-platform-starts.md).
 
@@ -342,7 +343,7 @@ XML — заменой каталога со сторожем незафикси
 [цель перепроверяется перед публикацией](../rules/use-cases/a-target-is-rechecked-before-publication.md),
 [неудачный откат называет себя](../rules/use-cases/a-failed-rollback-is-named.md),
 [замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md),
-[подменённый файл версий уступает копии](../rules/use-cases/a-replaced-version-file-gives-way-to-the-runner-copy.md),
+[файл версий живёт только в памяти раннера](../rules/use-cases/the-version-file-lives-only-in-the-runner-memory.md),
 [копия перенимает файл платформы после удачи](../rules/use-cases/the-runner-copy-takes-the-platform-file-after-success.md),
 [отсутствие файла версий известно до запуска](../rules/use-cases/a-missing-version-file-is-known-before-the-platform-starts.md),
 [замена файла версий не оставляет следов](../rules/use-cases/a-version-file-replacement-leaves-no-trace.md),

@@ -27,7 +27,7 @@ use crate::platform::service::{process_facts, started_at};
 use crate::platform::service_record::ServiceRecord;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::agent_session::{existing_live_key, holder_receipt, live_target};
+use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_key};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -67,6 +67,8 @@ pub enum ReleaseRequest {
         started_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Ttl,
+    /// Без держателя: только отключить агента от базы (#644).
+    Connection,
 }
 
 /// `agent hold`.
@@ -129,8 +131,9 @@ pub fn hold(
     })
 }
 
-/// `agent release`: снимает отметку держателя с живого агента цели проекта. Отметки нет или
-/// агента нет — успех без изменений.
+/// `agent release`: снимает отметку держателя с живого агента цели проекта и отключает его от
+/// базы, если он не занят командой (#644): так базу отпускают чужому Конфигуратору или чужой
+/// монопольной операции. Отметки нет или агента нет — успех без изменений.
 pub fn release(
     _context: &ExecutionContext,
     config: &AppConfig,
@@ -141,6 +144,7 @@ pub fn release(
         key,
         released: false,
         holders: Vec::new(),
+        disconnected: false,
         duration_ms: elapsed_ms(started),
     };
     let Some((state, key)) = own_key(config)? else {
@@ -160,10 +164,23 @@ pub fn release(
     for mark in &marks {
         holders = client.release(mark.clone()).map_err(AppError::from)?;
     }
+    // Отметки уже сняты: отказ отключения их не возвращает, он назван в журнале и в
+    // `disconnected: false`.
+    let disconnected = match client.disconnect() {
+        Ok(outcome) => matches!(
+            outcome,
+            crate::platform::agent_keeper::client::Disconnected::Done
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "the live agent was not disconnected from the infobase");
+            false
+        }
+    };
     Ok(AgentReleaseResult {
         key: Some(key),
         released: !marks.is_empty(),
         holders: holders.iter().map(holder_receipt).collect(),
+        disconnected,
         duration_ms: elapsed_ms(started),
     })
 }
@@ -311,13 +328,8 @@ fn locate_v8(config: &AppConfig) -> Result<PathBuf, AppError> {
 /// Каталог состояния и ключ живого агента цели проекта, если они уже есть: ничего не создаёт.
 fn own_key(config: &AppConfig) -> Result<Option<(PathBuf, String)>, AppError> {
     managed_port(config)?;
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return Ok(None);
-    };
-    let v8 = locate_v8(config)?;
-    let key = existing_live_key(&state, config, &v8)
-        .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
-    Ok(key.map(|key| (state, key)))
+    own_live_key(config, &locate_v8(config)?)
+        .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))
 }
 
 /// Держатель из запроса. Процесс должен быть жив и своей учётной записи ОС, а названное время
@@ -427,6 +439,7 @@ fn entry(
             .unwrap_or_default(),
         busy: status.and_then(|status| status.command().map(str::to_owned)),
         connected: status.is_some_and(|status| status.connected),
+        attached: status.is_some_and(|status| status.attached),
         idle_ms: status.map_or(0, |status| status.idle_ms),
         closing: status.is_some_and(|status| status.closing),
     }

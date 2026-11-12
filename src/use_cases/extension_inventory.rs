@@ -17,6 +17,7 @@ use crate::domain::extensions::{
     ExtensionInventoryEntry, ExtensionInventoryResult, ExtensionsResult, ExtensionsStep,
     InstalledExtension, RequestedInventory,
 };
+use crate::platform::agent::WaitPolicy;
 use crate::platform::extension_inventory::{
     is_extension_identifier, parse_extension_inventory, read_applied_extension_descriptor,
 };
@@ -26,6 +27,7 @@ use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::use_cases::agent_session::AgentHandle;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::extension_agent::ExtensionAgent;
@@ -71,7 +73,7 @@ fn run_read(
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let action = match request.scope {
-        ExtensionInventoryScope::All => ExtensionAction::List,
+        ExtensionInventoryScope::All => ExtensionAction::ListWithTheLiveAgent,
         ExtensionInventoryScope::Named { .. } => ExtensionAction::RequiresAgentOrIbcmd("info"),
     };
     let selected = select_executor(config, &mut utilities, action)
@@ -165,6 +167,67 @@ pub(crate) fn read_installed(
         )
     });
     (Some(selected.receipt), read)
+}
+
+/// Состав, прочитанный в сессии агента, которую команда уже держит.
+pub(crate) struct InventoryInSession {
+    /// Квитанция агента; точку входа ставит вызывающий, когда сессия закрыта.
+    pub receipt: ProviderReceipt,
+    pub read: Result<Vec<ExtensionInventoryEntry>, AppError>,
+}
+
+/// Причина, по которой исполнитель цепочки `extensions` до агента не спрошен: состав отдала
+/// сессия агента, которую команда уже держит.
+const READ_IN_THE_OPEN_SESSION: &str =
+    "the agent session the command already holds lists the extensions";
+
+/// Состав расширений в сессии агента, которую команда уже держит (#631): тем же агентом и
+/// без второго процесса платформы, если план `extensions` берёт агента. `None` — не берёт
+/// (ключ `providers.extensions` назначил другого), и состав читает свой исполнитель
+/// ([`read_installed`]).
+pub(crate) fn read_in_agent_session(
+    config: &AppConfig,
+    handle: &mut AgentHandle,
+    wait: &WaitPolicy,
+) -> Option<InventoryInSession> {
+    let plan = config.provider_plan(Operation::Extensions);
+    let skipped = skipped_for_the_open_session(&plan)?;
+    let read = ExtensionAgent::inventory_on(handle, wait, None).map(|extensions| {
+        extensions
+            .into_iter()
+            .map(ExtensionInventoryEntry::Full)
+            .collect()
+    });
+    Some(InventoryInSession {
+        receipt: plan.receipt_for(Provider::Agent, skipped),
+        read,
+    })
+}
+
+/// Берёт ли план `extensions` агента и кто в цепочке стоит до него: они пропущены с причиной.
+/// `None` — агента в плане нет.
+fn skipped_for_the_open_session(plan: &ProviderPlan) -> Option<Vec<SkippedProvider>> {
+    match plan {
+        ProviderPlan::Override {
+            provider: Provider::Agent,
+            ..
+        } => Some(Vec::new()),
+        ProviderPlan::Override { .. } => None,
+        ProviderPlan::Default { chain } => {
+            let agent = chain
+                .iter()
+                .position(|provider| *provider == Provider::Agent)?;
+            Some(
+                chain[..agent]
+                    .iter()
+                    .map(|provider| SkippedProvider {
+                        provider: *provider,
+                        reason: READ_IN_THE_OPEN_SESSION.to_owned(),
+                    })
+                    .collect(),
+            )
+        }
+    }
 }
 
 /// Подтверждать ли префиксы имён снимками применённых расширений (`ibcmd`): `extensions
@@ -462,8 +525,15 @@ fn ensure_requested_record(
 
 pub(crate) enum ExtensionAction<'a> {
     List,
+    /// Список `extensions list`: уже живой агент рабочей копии ведёт цепочку умолчаний (#631).
+    ListWithTheLiveAgent,
     RequiresAgentOrIbcmd(&'a str),
 }
+
+/// Причина, по которой исполнитель цепочки `extensions` до агента не спрошен: живой агент
+/// рабочей копии уже поднят.
+const THE_LIVE_AGENT_LISTS: &str =
+    "the live agent of this working copy is up and lists the extensions";
 
 pub(crate) fn select_executor(
     config: &AppConfig,
@@ -471,8 +541,22 @@ pub(crate) fn select_executor(
     action: ExtensionAction<'_>,
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     let mut plan = config.provider_plan(Operation::Extensions);
-    let ExtensionAction::RequiresAgentOrIbcmd(action) = action else {
-        return provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+    let action = match action {
+        ExtensionAction::List => {
+            return provider_selection::select_from(config, utilities, Operation::Extensions, plan)
+        }
+        ExtensionAction::ListWithTheLiveAgent => {
+            let ahead = lead_with_the_live_agent(config, utilities, &mut plan);
+            let mut selected =
+                provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+            if let Ok(selected) = &mut selected {
+                if selected.provider == Provider::Agent {
+                    selected.receipt.skipped.splice(0..0, ahead);
+                }
+            }
+            return selected;
+        }
+        ExtensionAction::RequiresAgentOrIbcmd(action) => action,
     };
     let skip_designer = || SkippedProvider {
         provider: Provider::Designer,
@@ -501,6 +585,43 @@ pub(crate) fn select_executor(
         receipt.skipped.push(skip_designer());
     }
     selected
+}
+
+/// Ставит агента первым в цепочку умолчаний, если живой агент рабочей копии уже поднят: тогда
+/// список отдаёт он, без процесса `ibcmd` (#631). Ключ `providers.extensions` не трогается.
+/// Ответ — исполнители, стоявшие до агента: квитанция называет их пропущенными с причиной.
+/// Вопрос «жив ли агент» задаётся, только когда агент в цепочке есть и стоит не первым.
+fn lead_with_the_live_agent(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    plan: &mut ProviderPlan,
+) -> Vec<SkippedProvider> {
+    let ProviderPlan::Default { chain } = plan else {
+        return Vec::new();
+    };
+    let Some(agent) = chain
+        .iter()
+        .position(|provider| *provider == Provider::Agent)
+        .filter(|agent| *agent > 0)
+    else {
+        return Vec::new();
+    };
+    let Ok(v8) = utilities.locate(UtilityType::V8) else {
+        return Vec::new();
+    };
+    if !crate::use_cases::agent_session::live_agent_is_up(config, &v8.path) {
+        return Vec::new();
+    }
+    // Вперёд встаёт только агент: остальные сохраняют порядок цепочки.
+    let lead = chain.remove(agent);
+    chain.insert(0, lead);
+    chain[1..=agent]
+        .iter()
+        .map(|provider| SkippedProvider {
+            provider: *provider,
+            reason: THE_LIVE_AGENT_LISTS.to_owned(),
+        })
+        .collect()
 }
 
 pub(crate) fn designer_refusal(action: &str) -> AppError {
@@ -792,7 +913,38 @@ fn run_change(
 
 #[cfg(test)]
 mod tests {
-    use super::{read_inventory, ExtensionChangeRequest};
+    use super::{read_inventory, skipped_for_the_open_session, ExtensionChangeRequest};
+    use crate::domain::capability::{Provider, ProviderPlan};
+
+    /// Сессия агента поколения читает состав, только если план `extensions` берёт агента:
+    /// у ключа на агента пропущенных нет, ключ на другого исполнителя её не берёт, у цепочки
+    /// пропущены все до агента, цепочка без агента её не берёт (#631).
+    #[test]
+    fn the_open_agent_session_lists_the_extensions_where_the_plan_admits_the_agent() {
+        let assigned = |provider| ProviderPlan::Override {
+            provider,
+            file: "v8project.yaml".to_owned(),
+        };
+        let chain = |chain: &[Provider]| ProviderPlan::Default {
+            chain: chain.to_vec(),
+        };
+        let skipped = |plan: &ProviderPlan| {
+            skipped_for_the_open_session(plan)
+                .map(|skipped| skipped.into_iter().map(|s| s.provider).collect::<Vec<_>>())
+        };
+
+        assert_eq!(skipped(&assigned(Provider::Agent)), Some(vec![]));
+        assert_eq!(skipped(&assigned(Provider::Ibcmd)), None);
+        assert_eq!(
+            skipped(&chain(&[Provider::Ibcmd, Provider::Agent])),
+            Some(vec![Provider::Ibcmd])
+        );
+        assert_eq!(
+            skipped(&chain(&[Provider::Agent, Provider::Designer])),
+            Some(vec![])
+        );
+        assert_eq!(skipped(&chain(&[Provider::Designer])), None);
+    }
     use crate::platform::process::ProcessResult;
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};

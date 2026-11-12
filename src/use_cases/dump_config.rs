@@ -51,6 +51,7 @@ mod agent;
 mod all;
 mod coordinator;
 pub(crate) mod helpers;
+mod landing;
 
 pub use self::all::execute_all;
 
@@ -63,10 +64,10 @@ use self::helpers::{
     merge_optional_messages, resolve_dump_edt_base_project_name, validate_dump_objects,
     validate_platform_target, validate_publish_target, validate_supported_matrix,
 };
-use super::ignored_files::VERSION_FILE_NAME;
 #[cfg(test)]
 use super::staged_publication::cleanup_staging_path;
 use super::staged_publication::{interruption_before_publish, BackupRemoval, StagedPublication};
+use super::version_file::VERSION_FILE_NAME;
 #[cfg(test)]
 use crate::support::fs::metadata_sidecar_path;
 use crate::use_cases::source_inventory::SourceSetInventory;
@@ -133,7 +134,7 @@ pub(super) fn refuse_hidden_sets(config: &AppConfig, args: &DumpArgs) -> Result<
         })
         .cloned()
         .collect();
-    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path, args.dry_run)
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +205,8 @@ fn mark_start(
 }
 
 /// Выгрузка по изменившемуся от файла версий, всего набора и без внешней публикации: только
-/// у неё отмечается начало ([`mark_start`]).
+/// у неё отмечается начало ([`mark_start`]), и только её поколение может пропустить, поэтому
+/// сторожа она спрашивает после поколения (`coordinator::generation_then_guard`, #683).
 fn by_version_file(
     context: &ExecutionContext,
     plan: &DumpPlan,
@@ -426,16 +428,6 @@ struct DumpNotes {
     discarded: Losses,
     /// Что сказало о случившемся режиме; `None` — ничего: режим плана.
     evidence: Option<ModeEvidence>,
-    /// Копия файла версий, если исполнитель уже записал её сам — рядом с перечнем каталога
-    /// после выгрузки (#574); `None` — её пишет координатор после удачи.
-    version_copy: Option<VersionCopy>,
-}
-
-/// Копия файла версий, записанная после удачной выгрузки: `warning` — копию записать не
-/// удалось, и ответ это называет.
-#[derive(Debug)]
-struct VersionCopy {
-    warning: Option<String>,
 }
 
 /// Что говорит о случившемся режиме выгрузки по изменившемуся
@@ -446,6 +438,8 @@ pub(super) enum ModeEvidence {
     Forecast(DumpForecast),
     /// Что выгрузка Конфигуратора или агента с `-update` сделала с каталогом.
     Fact(DumpFact),
+    /// Выборка `ibcmd` без годной копии описи раннера прошла полной выгрузкой.
+    WithoutCopy,
 }
 
 impl DumpNotes {
@@ -539,13 +533,18 @@ fn publish_full_dump(
     validate_full_dump_work_path(config, resolved)
         .map_err(|error| publication.cleanup_failure(error))?;
 
+    // Опись платформы в каталог набора не попадает (#646): она уходит из стадии до публикации
+    // и становится копией раннера только после удачной публикации. `ConfigDumpInfo.xml`,
+    // оставшийся в каталоге человека от прежних версий раннера, переходит в новое дерево как
+    // был: раннер его не трогает.
+    let version_snapshot =
+        super::version_file::RunnerVersionFile::prepare_from(publication.staging_path())
+            .and_then(|prepared| {
+                carry_the_left_version_file_over(resolved, publication.staging_path())
+                    .map(|()| prepared)
+            })
+            .map_err(|error| publication.cleanup_failure(error))?;
     if let Some(external) = context.external_full_pull() {
-        let inventory = SourceSetInventory::new(config);
-        let source = inventory.designer_context(&resolved.source_set_name);
-        let version = source.and_then(super::version_file::RunnerVersionFile::of);
-        let version_snapshot = version
-            .as_ref()
-            .map(|version| version.prepare_from(publication.staging_path()));
         let binding = external_binding.expect("external publication captured its binding");
         binding.validate_stage(publication.staging_path())?;
         let published_source = crate::change_detection::source_sets::SourceSetsService::new(config)
@@ -618,8 +617,8 @@ fn publish_full_dump(
         }
         let published_version =
             published_source.and_then(super::version_file::RunnerVersionFile::of);
-        if let (Some(version), Some(prepared)) = (published_version, version_snapshot) {
-            match prepared.and_then(|prepared| version.record_prepared(prepared)) {
+        if let Some(version) = published_version {
+            match version.record_prepared(version_snapshot) {
                 Ok(()) => {}
                 Err(error) => warnings.push(format!(
                     "sources published but the runner version copy was not updated: {error}"
@@ -649,13 +648,20 @@ fn publish_full_dump(
             DUMP_BACKUP_PREFIX,
             "failed to publish staged dump",
             resolved.platform_consent(),
-            // Платформа пишет опись версий в каждую полную выгрузку.
+            // Прежний `ConfigDumpInfo.xml` в корне переходит в новое дерево: это не потеря.
             &[VERSION_FILE_NAME],
             // Прежнее дерево полной выгрузки ответу не нужно (#616).
             BackupRemoval::Background,
         )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
+    let copy_warning = SourceSetInventory::new(config)
+        .designer_context(&resolved.source_set_name)
+        .and_then(super::version_file::RunnerVersionFile::of)
+        .and_then(|version| version.record_prepared(version_snapshot).err())
+        .map(|error| {
+            format!("sources published but the runner version copy was not updated: {error}")
+        });
 
     // Cancellation observed during publication must not leave a successfully published
     // tree unrecorded. This local commit starts no process and has no cancellation check.
@@ -686,13 +692,36 @@ fn publish_full_dump(
     });
     Ok(DumpNotes {
         message: merge_optional_messages(
-            merge_optional_messages(published.cleanup_warning, memory_warning),
+            merge_optional_messages(
+                merge_optional_messages(published.cleanup_warning, memory_warning),
+                copy_warning,
+            ),
             dump_publication_warning(context.command(), published.deferred_interruption),
         ),
         discarded: published.discarded,
         evidence: None,
-        version_copy: None,
     })
+}
+
+/// `ConfigDumpInfo.xml` в корне каталога человека, оставшийся от прежних версий раннера,
+/// переходит в стадию полной выгрузки байт в байт: замена каталога его не теряет. Снимок EDT —
+/// каталог раннера, и его прежний файл не переносится.
+fn carry_the_left_version_file_over(
+    resolved: &ResolvedDumpTarget,
+    stage: &Path,
+) -> Result<(), AppError> {
+    if resolved.platform_target_path != resolved.target_path {
+        return Ok(());
+    }
+    let left = resolved.platform_target_path.join(VERSION_FILE_NAME);
+    match std::fs::copy(&left, stage.join(VERSION_FILE_NAME)) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Runtime(format!(
+            "failed to keep '{}' in the replaced directory: {error}",
+            left.display()
+        ))),
+    }
 }
 
 fn validate_full_dump_work_path(
@@ -724,16 +753,16 @@ fn validate_full_dump_work_path(
 /// Как выгрузка ложится прямо в каталог набора.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OverDirectory {
-    /// По изменившемуся от файла версий в каталоге.
+    /// По изменившемуся от копии описи раннера.
     ByVersionFile,
-    /// Целиком поверх каталога: файл версий не годится, и выгрузка пишет его заново.
+    /// Целиком поверх каталога: годной копии описи нет.
     Whole(WholeReason),
 }
 
-/// Почему выгрузка по изменившемуся не может опереться на файл версий в каталоге.
+/// Почему выгрузка по изменившемуся не может опереться на копию описи раннера.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WholeReason {
-    /// Файла нет.
+    /// Годной копии описи у раннера нет.
     Missing,
     /// Версии формата в корне файла раннер не нашёл: такой файл чужой.
     Unrecognized,
@@ -746,24 +775,24 @@ pub(super) enum WholeReason {
 }
 
 impl WholeReason {
-    /// Причина для ответа: что не так с файлом версий в каталоге `dir`.
+    /// Причина для ответа: что не так с копией описи раннера для каталога `dir`.
     fn describe(&self, dir: &Path) -> String {
-        let path = dir.join(VERSION_FILE_NAME);
         match self {
-            Self::Missing => format!("no version file {VERSION_FILE_NAME} in '{}'", dir.display()),
-            Self::Unrecognized => {
-                format!(
-                    "the format version of '{}' is not recognized",
-                    path.display()
-                )
-            }
+            Self::Missing => format!(
+                "no version file {VERSION_FILE_NAME} for '{}' in the runner's memory",
+                dir.display()
+            ),
+            Self::Unrecognized => format!(
+                "the format version of the runner's {VERSION_FILE_NAME} for '{}' is not recognized",
+                dir.display()
+            ),
             Self::Foreign {
                 found,
                 platform,
                 written,
             } => format!(
-                "'{}' is in format {found}, and platform {platform} writes {written}",
-                path.display()
+                "the runner's {VERSION_FILE_NAME} for '{}' is in format {found}, and platform {platform} writes {written}",
+                dir.display()
             ),
         }
     }
@@ -809,6 +838,9 @@ impl DumpPlan {
                     WholeReason::Foreign { .. } => DumpModeReason::ForeignFormat,
                 }),
             ),
+            (_, Some(ModeEvidence::WithoutCopy)) => {
+                (ReportedDumpMode::Full, Some(DumpModeReason::VersionFile))
+            }
             (_, Some(ModeEvidence::Forecast(DumpForecast::Full))) => (
                 ReportedDumpMode::Full,
                 Some(DumpModeReason::PlatformForecast),
@@ -893,9 +925,10 @@ fn unusable_version_file(
     }
 }
 
-/// Выгрузка Конфигуратором прямо в каталог: с файлом версий — по изменившемуся (`-update`),
-/// без него — полная поверх каталога, которая файл версий и создаёт. Полная выгрузка без
-/// `-update` в существующий каталог ничего в нём не удаляет (замер «Вопросы задачи»).
+/// Выгрузка Конфигуратором поверх каталога набора через стадию
+/// ([`landing::dump_over_directory`]): по копии описи раннера — только изменённое
+/// (`-update -configDumpInfoForChanges`), без годной копии — полная. В каталог ложится всё,
+/// кроме описи; удаления раннер переносит по двум описям.
 fn run_dump_over_directory_designer(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -903,12 +936,13 @@ fn run_dump_over_directory_designer(
     binary: &Path,
     runner: &dyn ProcessRunner,
     how: &OverDirectory,
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
         how = ?how,
-        "running dump over the directory"
+        "running dump over the directory through a stage"
     );
     ensure_dir(&resolved.platform_target_path)
         .map_err(|error| AppError::Runtime(format!("failed to create target dir: {error}")))?;
@@ -917,12 +951,6 @@ fn run_dump_over_directory_designer(
         OverDirectory::ByVersionFile => ("dump: incremental", "incremental"),
         OverDirectory::Whole(_) => ("dump: full", "full"),
     };
-    log_live_stage(
-        ProgressPhase::Dump,
-        Some(resolved.source_set_name.as_str()),
-        stage,
-        "[Конфигуратор] exporting configuration files",
-    );
     let dsl = build_designer_dsl(
         context,
         config,
@@ -931,28 +959,37 @@ fn run_dump_over_directory_designer(
         &resolved.source_set_name,
         label,
     )?;
-    // Прогноза нет: режим, который случился, раннер узнаёт по факту после выгрузки.
-    let dump_result = match how {
-        OverDirectory::ByVersionFile => dsl.dump_config_to_files_incremental(
-            &resolved.platform_target_path,
-            resolved.extension.as_deref(),
-        ),
-        OverDirectory::Whole(_) => dsl.dump_config_to_files(
-            &resolved.platform_target_path,
-            resolved.extension.as_deref(),
-        ),
-    }
-    .map_err(AppError::from)?;
-    ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, DumpNotes::default()))
+    let (dump_result, message) =
+        landing::dump_over_directory(context, config, resolved, how, version, |into| {
+            log_live_stage(
+                ProgressPhase::Dump,
+                Some(resolved.source_set_name.as_str()),
+                stage,
+                "[Конфигуратор] exporting configuration files",
+            );
+            // Прогноза нет: режим, который случился, раннер узнаёт по факту после выгрузки.
+            let dump_result = match into.description {
+                Some(description) => dsl.dump_config_to_files_for_changes(
+                    into.output,
+                    description,
+                    resolved.extension.as_deref(),
+                ),
+                None => dsl.dump_config_to_files(into.output, resolved.extension.as_deref()),
+            }
+            .map_err(AppError::from)?;
+            ensure_platform_success("dump", resolved, &dump_result)?;
+            Ok(dump_result)
+        })?;
+    Ok((dump_result, DumpNotes::message(message)))
 }
 
-/// Прогноз `ibcmd` перед выгрузкой по изменившемуся: `config export status` по файлу версий
-/// каталога. Отказ и ответ вне словаря — «неизвестен».
+/// Прогноз `ibcmd` перед выгрузкой по изменившемуся: `config export status` по копии описи
+/// раннера `description`. Отказ и ответ вне словаря — «неизвестен».
 fn forecast_ibcmd(
     context: &ExecutionContext,
     resolved: &ResolvedDumpTarget,
     dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
+    description: &Path,
 ) -> Result<DumpForecast, AppError> {
     log_live_stage(
         ProgressPhase::Forecast,
@@ -961,10 +998,7 @@ fn forecast_ibcmd(
         "[ibcmd] asking what the dump will do",
     );
     let result = dsl
-        .config_export_status(
-            &resolved.platform_target_path.join(VERSION_FILE_NAME),
-            resolved.extension.as_deref(),
-        )
+        .config_export_status(description, resolved.extension.as_deref())
         .map_err(map_ibcmd_error)?;
     ensure_interruption_clear(context, "after the dump forecast")?;
     Ok(match result.process.outcome() {
@@ -1026,8 +1060,12 @@ fn run_full_dump_designer(
     Ok((dump_result, notes))
 }
 
-/// Выгрузка `ibcmd` в каталог набора: с файлом версий — `--sync` на месте, без него —
-/// полная через промежуточный каталог ([`run_whole_dump_through_stage_ibcmd`]).
+/// Выгрузка `ibcmd` поверх каталога набора через стадию ([`landing::dump_over_directory`]):
+/// в непустой каталог `config export` не пишет (замер #403). По копии описи раннера — прогноз
+/// (`config export status --base`), затем только изменённое (`config export --base`); прогноз
+/// «полная» или отказ «Требуется экспортировать конфигурацию полностью» (замер #646) — полная
+/// выгрузка в стадию. Без годной копии — сразу полная
+/// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
 fn run_dump_over_directory_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1035,12 +1073,13 @@ fn run_dump_over_directory_ibcmd(
     binary: &Path,
     runner: &dyn ProcessRunner,
     how: &OverDirectory,
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
         how = ?how,
-        "running ibcmd dump over the directory"
+        "running ibcmd dump over the directory through a stage"
     );
     ensure_dir(&resolved.platform_target_path)
         .map_err(|error| AppError::Runtime(format!("failed to create target dir: {error}")))?;
@@ -1052,82 +1091,71 @@ fn run_dump_over_directory_ibcmd(
         runner,
         InterruptionSafetyClass::GracefulThenKill,
     )?;
-    let forecast = match how {
-        OverDirectory::Whole(_) => {
-            return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)
-        }
-        OverDirectory::ByVersionFile => forecast_ibcmd(context, resolved, &dsl)?,
+    let extension = resolved.extension.as_deref();
+    let full_into = |output: &Path| -> Result<PlatformCommandResult, AppError> {
+        log_live_stage(
+            ProgressPhase::Dump,
+            Some(resolved.source_set_name.as_str()),
+            "dump: full",
+            "[ibcmd] exporting configuration files",
+        );
+        // В непустой каталог `config export` не пишет: прежняя попытка его не оставляет.
+        remove_path_if_exists(output)
+            .and_then(|()| std::fs::create_dir_all(output))
+            .map_err(|error| AppError::Runtime(format!("failed to prepare the stage: {error}")))?;
+        let result = dsl
+            .config_export_full(output, extension)
+            .map_err(map_ibcmd_error)?;
+        ensure_platform_success("dump", resolved, &result)?;
+        Ok(result)
     };
-    // `--sync` полную выгрузку сам не делает и отказывает (замер #403, #424): при прогнозе
-    // «полная» выгрузка идёт через промежуточный каталог.
-    if forecast == DumpForecast::Full {
-        let (dump_result, notes) = run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)?;
-        return Ok((
-            dump_result,
-            DumpNotes {
-                evidence: Some(ModeEvidence::Forecast(forecast)),
-                ..notes
-            },
-        ));
-    }
-    log_live_stage(
-        ProgressPhase::Dump,
-        Some(resolved.source_set_name.as_str()),
-        "dump: incremental",
-        "[ibcmd] exporting configuration files",
-    );
-    let dump_result = dsl
-        .config_export_incremental(
-            &resolved.platform_target_path,
-            resolved.extension.as_deref(),
-        )
-        .map_err(map_ibcmd_error)?;
-    ensure_platform_success("dump", resolved, &dump_result)?;
+    let ((dump_result, evidence), message) =
+        landing::dump_over_directory(context, config, resolved, how, version, |into| {
+            let Some(description) = into.description else {
+                return full_into(into.output).map(|result| (result, None));
+            };
+            let forecast = forecast_ibcmd(context, resolved, &dsl, description)?;
+            let evidence = Some(ModeEvidence::Forecast(forecast));
+            if forecast == DumpForecast::Full {
+                return full_into(into.output).map(|result| (result, evidence));
+            }
+            log_live_stage(
+                ProgressPhase::Dump,
+                Some(resolved.source_set_name.as_str()),
+                "dump: incremental",
+                "[ibcmd] exporting configuration files",
+            );
+            let result = dsl
+                .config_export_for_changes(into.output, description, extension)
+                .map_err(map_ibcmd_error)?;
+            if crate::platform::ibcmd::asks_for_a_full_export(&result.process) {
+                ensure_interruption_clear(context, "before the full dump the platform asked for")?;
+                let evidence = Some(ModeEvidence::Forecast(DumpForecast::Full));
+                let refused = result.process.stderr.trim().to_owned();
+                return full_into(into.output)
+                    .map(|result| (result, evidence))
+                    .map_err(|error| {
+                        // Класс отказа полной выгрузки сохраняется; причина первой попытки — в
+                        // тексте при любом классе.
+                        if refused.is_empty() {
+                            error
+                        } else {
+                            error.with_context(format!(
+                                "the dump by changes was refused before the full dump: {refused}"
+                            ))
+                        }
+                    });
+            }
+            ensure_platform_success("dump", resolved, &result)?;
+            Ok((result, evidence))
+        })?;
     Ok((
         dump_result,
         DumpNotes {
-            evidence: Some(ModeEvidence::Forecast(forecast)),
-            ..DumpNotes::default()
+            evidence,
+            ..DumpNotes::message(message)
         },
     ))
-}
-
-/// Полная выгрузка `ibcmd` поверх каталога набора. В непустой каталог `config export`
-/// отказывает («Каталог … не пуст», замер #403), поэтому выгрузка идёт в пустой
-/// промежуточный каталог в `workPath/stage`, а результат ложится поверх: файлы выгрузки переписаны,
-/// лишнее и посторонние файлы остаются, как у Конфигуратора
-/// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
-fn run_whole_dump_through_stage_ibcmd(
-    context: &ExecutionContext,
-    resolved: &ResolvedDumpTarget,
-    dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
-) -> DumpRun {
-    let publication = StagedPublication::prepare_dir_in(
-        &resolved.stage_root,
-        &resolved.platform_target_path,
-        &resolved.platform_target_identity,
-        DUMP_STAGE_PREFIX,
-    )?;
-    log_live_stage(
-        ProgressPhase::Dump,
-        Some(resolved.source_set_name.as_str()),
-        "dump: full",
-        "[ibcmd] exporting configuration files",
-    );
-    let dump_result = match dsl
-        .config_export_full(publication.staging_path(), resolved.extension.as_deref())
-        .map_err(map_ibcmd_error)
-        .and_then(|result| ensure_platform_success("dump", resolved, &result).map(|()| result))
-    {
-        Ok(result) => result,
-        Err(error) => return Err(publication.cleanup_failure(error)),
-    };
-    let cleanup_warning = publication.lay_over_dir(
-        context,
-        "failed to lay the staged dump over the directory",
-        VERSION_FILE_NAME,
-    )?;
-    Ok((dump_result, DumpNotes::message(cleanup_warning)))
 }
 
 fn run_full_dump_ibcmd(
@@ -1224,27 +1252,33 @@ fn run_partial_dump_designer(
     Ok((dump_result, DumpNotes::default()))
 }
 
+/// Выборку `ibcmd` не умеет: она идёт выгрузкой по изменившемуся по копии описи раннера, а без
+/// годной копии — полной поверх каталога.
 fn run_partial_dump_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    _objects: &[PartialDumpSelector],
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     let warning = ibcmd_partial_warning(resolved);
-    match run_dump_over_directory_ibcmd(
-        context,
-        config,
-        resolved,
-        binary,
-        runner,
-        &OverDirectory::ByVersionFile,
-    ) {
+    let how = match version.map(super::version_file::RunnerVersionFile::usable) {
+        Some(Err(error)) => return Err(decorate_ibcmd_partial_error(error, &warning)),
+        Some(Ok(Some(_))) => OverDirectory::ByVersionFile,
+        Some(Ok(None)) | None => OverDirectory::Whole(WholeReason::Missing),
+    };
+    let whole = matches!(how, OverDirectory::Whole(_));
+    match run_dump_over_directory_ibcmd(context, config, resolved, binary, runner, &how, version) {
         Ok((dump_result, notes)) => Ok((
             dump_result,
             DumpNotes {
                 message: merge_optional_messages(Some(warning), notes.message),
+                evidence: if whole {
+                    Some(ModeEvidence::WithoutCopy)
+                } else {
+                    notes.evidence
+                },
                 ..notes
             },
         )),
@@ -1256,6 +1290,7 @@ fn ensure_interruption_clear(context: &ExecutionContext, phase: &str) -> Result<
     interruption::pending_interruption_error(context, phase).map_or(Ok(()), Err)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_incremental_dump_edt_designer(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1264,6 +1299,7 @@ fn run_incremental_dump_edt_designer(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
@@ -1284,6 +1320,7 @@ fn run_incremental_dump_edt_designer(
         binary,
         runner,
         &OverDirectory::ByVersionFile,
+        version,
     )?;
     finalize_edt_dump(
         context,
@@ -1355,6 +1392,7 @@ fn run_partial_dump_edt_designer(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_incremental_dump_edt_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1363,6 +1401,7 @@ fn run_incremental_dump_edt_ibcmd(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
@@ -1383,6 +1422,7 @@ fn run_incremental_dump_edt_ibcmd(
         binary,
         runner,
         &OverDirectory::ByVersionFile,
+        version,
     )?;
     let evidence = dump_notes.evidence;
     finalize_edt_dump(
@@ -1419,6 +1459,7 @@ fn run_full_dump_edt_ibcmd(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_partial_dump_edt_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1427,7 +1468,7 @@ fn run_partial_dump_edt_ibcmd(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-    objects: &[PartialDumpSelector],
+    version: Option<&super::version_file::RunnerVersionFile>,
 ) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
@@ -1442,7 +1483,7 @@ fn run_partial_dump_edt_ibcmd(
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
     let (dump_result, dump_notes) =
-        run_partial_dump_ibcmd(context, config, resolved, binary, runner, objects)?;
+        run_partial_dump_ibcmd(context, config, resolved, binary, runner, version)?;
     let evidence = dump_notes.evidence;
     finalize_edt_dump(
         context,
@@ -1571,7 +1612,6 @@ fn finalize_edt_dump(
             ),
             discarded: publish_phase.discarded,
             evidence: None,
-            version_copy: None,
         }
         .after(inherited_message),
     ))
@@ -1952,6 +1992,7 @@ mod tests {
     use crate::use_cases::external_artifacts::ExternalArtifactKind;
     use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs, ForceWayOut};
     use crate::use_cases::result::UseCaseErrorKind;
+    use crate::use_cases::source_inventory::SourceSetInventory;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
@@ -2881,6 +2922,20 @@ exit 0"#,
 
     /// Фиксирует всё дерево исходников в репозитории под `base_path`: каталог набора без
     /// незафиксированного сторож пропускает и без согласия.
+    /// Копия описи раннера для набора `name`, как её оставляет удачная выгрузка (#646): опись,
+    /// тождество пары и свидетельство каталога набора. Возвращает путь копии.
+    fn seed_runner_copy(config: &AppConfig, name: &str, content: &str) -> PathBuf {
+        let inventory = SourceSetInventory::new(config);
+        let set = inventory.designer_context(name).expect("designer context");
+        fs::create_dir_all(set.path()).expect("set dir");
+        let version = crate::use_cases::version_file::RunnerVersionFile::of(set).expect("copy");
+        let staged = config.work_path.join("seeded").join(VERSION_FILE_NAME);
+        fs::create_dir_all(staged.parent().expect("parent")).expect("seed dir");
+        fs::write(&staged, content).expect("seeded description");
+        assert_eq!(version.record_from(&staged), None);
+        version.path().to_path_buf()
+    }
+
     fn commit_sources(base_path: &Path) {
         if !base_path.join(".git").exists() {
             crate::platform::test_git::init_git_repo(base_path);
@@ -3583,6 +3638,49 @@ exit 0"#,
         path
     }
 
+    /// Опись `version-file-*`, оставленная снятым процессом, убирается только в
+    /// `workPath/stage`: одноимённые каталог и файл пользователя рядом с целью остаются (#646).
+    #[test]
+    fn a_left_version_file_dir_is_removed_only_from_the_stage_root() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let old = std::time::SystemTime::now() - ORPHAN_TTL - Duration::from_secs(60);
+        let age = |path: &Path| {
+            let mut options = fs::File::options();
+            if path.is_dir() {
+                options.read(true);
+            } else {
+                options.write(true);
+            }
+            // Каталог на Windows открывается только с FILE_FLAG_BACKUP_SEMANTICS.
+            #[cfg(windows)]
+            std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0200_0000);
+            #[cfg(windows)]
+            options.write(true);
+            options
+                .open(path)
+                .and_then(|file| file.set_modified(old))
+                .expect("age");
+        };
+        let left = resolved.stage_root.join("version-file-run");
+        fs::create_dir_all(&left).expect("left dir");
+        fs::write(left.join("ConfigDumpInfo.xml"), "<x/>").expect("left file");
+        let notes = dir.path().join("version-file-notes");
+        fs::create_dir_all(&notes).expect("user dir");
+        fs::write(notes.join("note.txt"), "keep").expect("user note");
+        let text = dir.path().join("version-file-x.txt");
+        fs::write(&text, "keep").expect("user file");
+        for path in [&left, &notes, &text] {
+            age(path);
+        }
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(!left.exists());
+        assert!(notes.join("note.txt").is_file());
+        assert!(text.is_file());
+    }
+
     #[test]
     fn cleanup_orphan_dirs_ignores_malformed_metadata() {
         let dir = tempdir().expect("tempdir");
@@ -3900,7 +3998,7 @@ exit 0"#,
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
         assert!(!calls.contains("-update"));
-        assert!(calls.contains(base.join("main").display().to_string().as_str()));
+        assert!(calls.contains(".dump-stage-"), "{calls}");
     }
 
     /// Файл без распознанной версии формата чужой, и выгрузка по изменившемуся становится
@@ -3997,13 +4095,9 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        fs::write(
-            base.join("ext/ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.17\"/>",
-        )
-        .expect("version file");
         write_dump_script(&script, &calls, None, 0);
         let config = build_config(&base, &work, &script);
+        let copy = seed_runner_copy(&config, "ext", "<ConfigDumpInfo version=\"2.17\"/>");
 
         let result = run_dump(
             &config,
@@ -4022,7 +4116,13 @@ exit 0"#,
         assert!(result.ok);
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
-        assert!(calls.contains("-update"));
+        assert!(
+            calls.contains(&format!(
+                "-update -configDumpInfoForChanges {}",
+                copy.display()
+            )),
+            "{calls}"
+        );
         assert!(!calls.contains("-updateConfigDumpInfo"));
         assert!(calls.contains("-Extension"));
         assert!(calls.contains("ext"));
@@ -4297,7 +4397,7 @@ exit 0"#,
     }
 
     #[test]
-    fn dump_partial_ibcmd_uses_sync_and_returns_warning() {
+    fn dump_partial_ibcmd_goes_by_the_runner_copy_and_returns_warning() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -4311,6 +4411,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
+        let copy = seed_runner_copy(&config, "main", "<ConfigDumpInfo version=\"2.17\"/>");
 
         let result = run_dump(
             &config,
@@ -4336,7 +4437,11 @@ exit 0"#,
             .expect("warning")
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains(" export --sync "), "{calls}");
+        assert!(
+            calls.contains(&format!(" export --base={} ", copy.display())),
+            "{calls}"
+        );
+        assert!(!calls.contains("--sync"), "{calls}");
     }
 
     #[test]
@@ -4354,6 +4459,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
+        seed_runner_copy(&config, "main", "<ConfigDumpInfo version=\"2.17\"/>");
 
         let result = run_dump(
             &config,
@@ -4387,7 +4493,7 @@ exit 0"#,
             Some(expected_selectors.as_slice())
         );
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--sync"));
+        assert!(calls.contains("--base="), "{calls}");
         assert!(!calls.contains("FutureRoot.Items"));
     }
 
@@ -4406,6 +4512,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
+        let copy = seed_runner_copy(&config, "ext", "<ConfigDumpInfo version=\"2.17\"/>");
 
         let result = run_dump(
             &config,
@@ -4426,7 +4533,13 @@ exit 0"#,
         assert_eq!(result.requested_mode, DumpMode::Partial);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains(" export --extension ext --sync "), "{calls}");
+        assert!(
+            calls.contains(&format!(
+                " export --extension ext --base={} ",
+                copy.display()
+            )),
+            "{calls}"
+        );
         assert!(result
             .message
             .as_deref()
@@ -4442,7 +4555,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, Some("--sync"), 0);
+        write_ibcmd_dump_script(&script, &calls, Some("--force"), 0);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4637,7 +4750,25 @@ exit 0"#,
             fs::read_to_string(target.join("Configuration.xml")).expect("dumped"),
             "new\n"
         );
-        assert!(target.join("ConfigDumpInfo.xml").is_file());
+        assert!(
+            !target.join("ConfigDumpInfo.xml").exists(),
+            "the description stays out of the directory"
+        );
+        let copy = crate::use_cases::version_file::RunnerVersionFile::of(
+            SourceSetInventory::new(&config)
+                .designer_context("main")
+                .expect("set"),
+        )
+        .expect("copy")
+        .path()
+        .to_path_buf();
+        assert_eq!(
+            // `printf` у `dash` оставляет `\"` как есть, у `bash` — нет.
+            fs::read_to_string(copy)
+                .expect("the description became the runner copy")
+                .replace('\\', ""),
+            "<ConfigDumpInfo version=\"2.20\"/>\n"
+        );
         assert_eq!(
             fs::read_to_string(target.join("stray.txt")).expect("stray"),
             "keep"
@@ -4717,11 +4848,11 @@ exit 0"#,
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
     }
 
-    /// Оборванный перенос удаляет файл версий набора: следующая выгрузка снова полная, а
-    /// не `--sync` по файлу, под которым лежат не все объекты.
+    /// Оборванный перенос копию раннера не трогает: прежняя опись старше дерева, и следующая
+    /// выгрузка по ней выгрузит больше, а не меньше (#646). Стадия убрана, описи в каталоге нет.
     #[cfg(unix)]
     #[test]
-    fn a_broken_overlay_removes_the_version_file_so_the_next_dump_is_full() {
+    fn a_broken_overlay_keeps_the_runner_copy_as_it_was() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
@@ -4737,32 +4868,27 @@ exit 0"#,
         let target = base.join("main");
         // Файл на месте каталога, куда должен лечь `Catalogs/Items.xml`: перенос обрывается.
         fs::write(target.join("Catalogs"), "a file, not a directory").expect("blocker");
-        fs::write(target.join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").expect("unrecognized");
-        fs::write(base.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("ignore");
+        let copy = seed_runner_copy(&config, "main", "<ConfigDumpInfo/>");
         commit_sources(&base);
 
         let failed = run_dump(&config, &incremental_main());
 
         let error = format!("{:?}", failed.expect_err("the overlay broke"));
         assert!(error.contains("lay the staged dump"), "{error}");
-        assert!(
-            !target.join("ConfigDumpInfo.xml").exists(),
-            "no version file over a half-laid dump"
+        assert_eq!(
+            fs::read_to_string(&copy).expect("copy"),
+            "<ConfigDumpInfo/>"
         );
+        assert!(!target.join("ConfigDumpInfo.xml").exists());
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
     }
 
-    /// Набор с годным файлом версий в игноре и закоммиченными исходниками: выгрузка идёт по
+    /// Набор с годной копией описи раннера и закоммиченными исходниками: выгрузка идёт по
     /// изменившемуся.
-    fn project_with_a_version_file(base: &Path) {
-        create_source_tree(base);
-        fs::write(
-            base.join("main/ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.20\"/>",
-        )
-        .expect("version file");
-        fs::write(base.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("ignore");
-        commit_sources(base);
+    fn project_with_a_version_file(config: &AppConfig) {
+        create_source_tree(&config.base_path);
+        seed_runner_copy(config, "main", "<ConfigDumpInfo version=\"2.20\"/>");
+        commit_sources(&config.base_path);
     }
 
     /// Конфигуратор: выгрузка переписывает в каталоге файлы `rewrites`, остальное не трогает;
@@ -4814,10 +4940,10 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
         let token = format!("{:040}", 7);
         write_rewriting_designer_script(&script, &calls, Some(&token), &[]);
         let config = build_config(&base, &dir.path().join("work"), &script);
+        project_with_a_version_file(&config);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
 
@@ -4859,7 +4985,6 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
         write_rewriting_designer_script(
             &script,
             &calls,
@@ -4867,6 +4992,7 @@ exit 0"#,
             &["Catalogs.Items/ObjectModule.bsl"],
         );
         let config = build_config(&base, &dir.path().join("work"), &script);
+        project_with_a_version_file(&config);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
 
@@ -4899,11 +5025,7 @@ exit 0"#,
         let mirror = designer_snapshot(&config, "main");
         fs::create_dir_all(&mirror).expect("mirror");
         fs::write(mirror.join("Configuration.xml"), "<Configuration/>").expect("mirror root");
-        fs::write(
-            mirror.join("ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.20\"/>",
-        )
-        .expect("mirror version file");
+        seed_runner_copy(&config, "main", "<ConfigDumpInfo version=\"2.20\"/>");
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
 
@@ -5219,7 +5341,6 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
         write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
         let config = build_config_with_builder(
             &base,
@@ -5227,6 +5348,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
+        project_with_a_version_file(&config);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
 
@@ -5264,7 +5386,6 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
-        project_with_a_version_file(&base);
         write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
         let config = build_config_with_builder(
             &base,
@@ -5272,6 +5393,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
+        project_with_a_version_file(&config);
 
         let result = run_dump(
             &config,
@@ -5287,6 +5409,112 @@ exit 0"#,
         assert_eq!(result.mode, ReportedDumpMode::Full);
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(!calls.contains("--sync"), "{calls}");
+    }
+
+    /// Выгрузка `ibcmd` по копии описи отказывает кодом `-1` («Требуется экспортировать
+    /// конфигурацию полностью», удаление объекта, замер #646): раннер выгружает полностью в
+    /// чистую стадию, и ответ называет режим `FULL`.
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_refusal_to_export_by_changes_falls_back_to_a_full_export() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; *\" export status \"*) printf 'modified: CommonModule.A\\n'; exit 0;; *\" --base=\"*) echo 'Требуется экспортировать конфигурацию полностью' >&2; exit 255;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        project_with_a_version_file(&config);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("--base="), "{calls}");
+        assert!(calls.contains("--force"), "{calls}");
+        assert_eq!(
+            fs::read_to_string(base.join("main/Configuration.xml")).expect("dumped"),
+            "new\n"
+        );
+        assert!(!base.join("main/ConfigDumpInfo.xml").exists());
+    }
+
+    /// Выгрузка Конфигуратора по изменившемуся идёт в стадию по копии описи раннера
+    /// (`-update -configDumpInfoForChanges`): написанное ложится поверх каталога, опись в
+    /// каталог не попадает, а неразобранная новая опись копией не становится; стадия убрана (#646).
+    #[cfg(unix)]
+    #[test]
+    fn a_dump_by_changes_lands_from_the_stage_and_keeps_the_description_in_memory() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        write_rewriting_designer_script(
+            &script,
+            &calls,
+            None,
+            &["Catalogs.Items/ObjectModule.bsl", "ConfigDumpInfo.xml"],
+        );
+        let config = build_config(&base, &dir.path().join("work"), &script);
+        project_with_a_version_file(&config);
+        fs::write(base.join("main/Kept.bsl"), "kept").expect("a file the dump leaves");
+        commit_sources(&base);
+        let copy = crate::use_cases::version_file::RunnerVersionFile::of(
+            SourceSetInventory::new(&config)
+                .designer_context("main")
+                .expect("set"),
+        )
+        .expect("copy")
+        .path()
+        .to_path_buf();
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(
+            calls.contains(&format!(
+                "-update -configDumpInfoForChanges {}",
+                copy.display()
+            )),
+            "{calls}"
+        );
+        assert_eq!(
+            fs::read_to_string(base.join("main/Catalogs.Items/ObjectModule.bsl")).expect("laid"),
+            "from the base\n"
+        );
+        assert_eq!(
+            fs::read_to_string(base.join("main/Kept.bsl")).expect("kept"),
+            "kept"
+        );
+        assert!(!base.join("main/ConfigDumpInfo.xml").exists());
+        // Опись, которую поддельный Конфигуратор пишет текстом, не разобрать: какие элементы
+        // пропали, не узнать, и копия остаётся прежней, а ответ это называет.
+        assert_eq!(
+            fs::read_to_string(&copy).expect("copy"),
+            "<ConfigDumpInfo version=\"2.20\"/>"
+        );
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("removals of the dump")),
+            "{:?}",
+            result.message
+        );
+        assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
     }
 
     #[test]
@@ -5376,7 +5604,7 @@ exit 0"#,
     }
 
     #[test]
-    fn ibcmd_dump_incremental_uses_sync_against_resolved_target() {
+    fn ibcmd_dump_incremental_goes_by_the_runner_copy_through_a_stage() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -5390,11 +5618,7 @@ exit 0"#,
             &script,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
-        fs::write(
-            base.join("main/ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.17\"/>",
-        )
-        .expect("version file");
+        let copy = seed_runner_copy(&config, "main", "<ConfigDumpInfo version=\"2.17\"/>");
         let args = DumpArgs {
             dry_run: false,
             discard_uncommitted: false,
@@ -5409,11 +5633,16 @@ exit 0"#,
 
         assert!(result.ok);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
-        let synced = fs::read_to_string(&calls).expect("calls");
-        assert!(synced.contains("--sync"));
-        assert!(synced.contains(base.join("main").display().to_string().as_str()));
+        let by_copy = fs::read_to_string(&calls).expect("calls");
+        assert!(
+            by_copy.contains(&format!("--base={}", copy.display())),
+            "{by_copy}"
+        );
+        assert!(!by_copy.contains("--sync"), "{by_copy}");
+        assert!(by_copy.contains(".dump-stage-"), "{by_copy}");
 
-        // Без файла версий `ibcmd` выгружает полностью в промежуточный каталог, без `--sync`.
+        // Каталог набора создан заново: копия его не подтверждает, и `ibcmd` выгружает
+        // полностью в промежуточный каталог.
         fs::remove_dir_all(base.join("main")).expect("remove target");
         fs::remove_file(&calls).expect("reset calls");
         let result = run_dump(&config, &args).expect("dump");
@@ -5813,6 +6042,7 @@ exit 0"#,
             &edt,
             &dump_runner,
             &edt_runner,
+            None,
         )
         .expect_err("interrupted after bootstrap");
 
@@ -5917,6 +6147,7 @@ exit 0"#,
             &edt,
             &dump_runner,
             &edt_runner,
+            None,
         )
         .expect_err("interrupted after bootstrap");
 
@@ -5962,8 +6193,6 @@ exit 0"#,
         let edt_runner = TestProcessRunner::default();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
             .with_cancellation(cancellation);
-        let objects = [PartialDumpSelector::parse("Catalog.Items").expect("selector")];
-
         let error = super::run_partial_dump_edt_ibcmd(
             &context,
             &config,
@@ -5972,7 +6201,7 @@ exit 0"#,
             &edt,
             &dump_runner,
             &edt_runner,
-            &objects,
+            None,
         )
         .expect_err("interrupted after bootstrap");
 
