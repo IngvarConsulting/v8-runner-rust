@@ -9,6 +9,7 @@ check:
   - tests/cli_push_generation.rs::a_generation_of_another_tool_refuses_a_push_into_a_base_that_moved_ahead
   - tests/cli_push_generation.rs::an_extension_generation_of_another_tool_is_checked_by_that_tool_before_a_push
   - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens
+  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check
   - tests/cli_build_agent.rs::a_record_tool_without_an_answer_refuses_the_push
 ---
 
