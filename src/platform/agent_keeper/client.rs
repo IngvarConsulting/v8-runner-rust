@@ -247,6 +247,8 @@ enum Take<'a> {
     /// Подключить взятого агента к базе без сессии команды: сессию команда откроет позже,
     /// [`KeeperClient::begin_session`], и возьмёт это подключение (#644).
     Attach,
+    /// Взять агента как есть, без подключения к базе: подключит его сессия команды (#653).
+    Unattached,
 }
 
 /// Чего ждёт клиент, поднимая агента (#574): `cancel` — отмена команды, при которой сторож,
@@ -268,6 +270,11 @@ pub enum EarlySession {
     /// открывает, только когда разбор нашёл работу (#644,
     /// `INV.PLATFORM.AGENT-SESSION-LIVES-WITH-THE-LOCK`).
     Later,
+    /// `push`, у набора которого поколение до загрузки спросит другой инструмент своим процессом
+    /// (`ibcmd`, Конфигуратор): агент поднимается без подключения к базе, и подключает его только
+    /// сессия команды — после сверки (#653). Подключённый агент держал бы файловую базу, а
+    /// поколение расширения агент читает не то, что `ibcmd`.
+    AfterRecordCheck,
 }
 
 /// Чем кончилось ожидание поднятого сторожа.
@@ -356,7 +363,8 @@ impl KeeperClient {
     /// Живой агент ключа `key`, поднятый в начале команды, пока она готовится (#574), — без
     /// подключения к базе при подъёме: [`EarlySession::Now`] — сразу с сессией команды (`pull`),
     /// [`EarlySession::Later`] — подключённый к базе без сессии (`push` откроет её сам,
-    /// [`Self::begin_session`], когда разбор найдёт работу).
+    /// [`Self::begin_session`], когда разбор найдёт работу), [`EarlySession::AfterRecordCheck`] —
+    /// без подключения и без сессии: подключит сессия, открытая после сверки поколения.
     /// Ожидание кончают оба сигнала `wait`; подъём работой команды не считается.
     pub fn start_early(
         key: &str,
@@ -372,6 +380,7 @@ impl KeeperClient {
         let take = match session {
             EarlySession::Now => Take::Session,
             EarlySession::Later => Take::Attach,
+            EarlySession::AfterRecordCheck => Take::Unattached,
         };
         client.obtain(
             launch,
@@ -632,6 +641,7 @@ impl KeeperClient {
                 self.connect_infobase(stop)?;
                 Ok(Vec::new())
             }
+            Take::Unattached => Ok(Vec::new()),
             Take::Hold(holder) => {
                 let request = Request::Hold {
                     holder: (*holder).clone(),
