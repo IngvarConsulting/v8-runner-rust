@@ -177,7 +177,7 @@ fn dump_through(
         &|| crate::use_cases::interruption::interruption_pending(context),
         || {
             let generation = generation_id(handle, extension, wait)?;
-            let unchanged = super::coordinator::generation_then_guard(
+            let decision = super::coordinator::generation_then_guard(
                 context,
                 config,
                 resolved,
@@ -186,11 +186,11 @@ fn dump_through(
                 Provider::Agent,
                 Some(&generation),
             )?;
-            Ok::<_, AppError>((generation, unchanged))
+            Ok::<_, AppError>((generation, decision))
         },
-        |asked| matches!(asked, Ok((_, None))),
+        |asked| matches!(asked, Ok((_, super::coordinator::GenerationDecision::Dump))),
     );
-    let (generation, unchanged) = asked?;
+    let (generation, decision) = asked?;
     let recorded = ledger
         .as_ref()
         .map_or(Recorded::Nothing, GenerationLedger::read);
@@ -200,7 +200,7 @@ fn dump_through(
         )),
         Recorded::Nothing | Recorded::Ours(_) => None,
     };
-    if let Some(unchanged) = unchanged {
+    if let super::coordinator::GenerationDecision::UpToDate(unchanged) = decision {
         return Ok((String::new(), DumpNotes::message(Some(unchanged)), true));
     }
 
