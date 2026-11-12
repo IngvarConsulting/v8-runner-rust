@@ -37,8 +37,7 @@ pub(super) struct StagedPublicationOutcome {
 }
 
 /// Как уходит прежнее дерево после успешной подмены каталога.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BackupRemoval {
+pub(super) enum BackupRemoval<'a> {
     /// На месте, до ответа команды.
     Inline,
     /// Отделённым процессом раннера, который переживает ответ команды (#616,
@@ -46,6 +45,8 @@ pub(super) enum BackupRemoval {
     /// уборка остатков следующей команды: прежнее дерево помечено `superseded`. Процесс не
     /// запустился — дерево удаляется на месте.
     Background,
+    /// Скрыть резерв сразу, а удаление запустить после обновления памяти.
+    AfterMemory(&'a mut Option<SupersededBackup>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +197,7 @@ impl StagedPublication {
         error_prefix: &str,
         consent: &DestructionConsent,
         regenerated: &[&str],
-        removal: BackupRemoval,
+        removal: BackupRemoval<'_>,
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
         let discarded = guard_replacement(
@@ -349,25 +350,39 @@ impl StagedPublication {
 }
 
 /// Убирает прежнее дерево успешной подмены так, как велено; текст — предупреждение ответа.
-fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval) -> Option<String> {
+fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval<'_>) -> Option<String> {
     match removal {
         BackupRemoval::Inline => backup.remove(),
-        BackupRemoval::Background => match hide_from_git(&backup)
-            .and_then(|()| crate::platform::backup_removal::spawn(backup.path()))
-        {
-            Ok(pid) => {
-                tracing::debug!(
-                    backup = %backup.path().display(),
-                    pid,
-                    "removing the replaced tree in the background"
-                );
-                None
-            }
-            Err(refusal) => {
+        BackupRemoval::Background | BackupRemoval::AfterMemory(_) => {
+            if let Err(refusal) = hide_from_git(&backup) {
                 tracing::debug!(%refusal, "removing the replaced tree in place");
-                backup.remove()
+                return backup.remove();
             }
-        },
+            if let BackupRemoval::AfterMemory(pending) = removal {
+                *pending = Some(backup);
+                None
+            } else {
+                finish_background_removal(Some(backup))
+            }
+        }
+    }
+}
+
+pub(super) fn finish_background_removal(backup: Option<SupersededBackup>) -> Option<String> {
+    let backup = backup?;
+    match crate::platform::backup_removal::spawn(backup.path()) {
+        Ok(pid) => {
+            tracing::debug!(
+                backup = %backup.path().display(),
+                pid,
+                "removing the replaced tree in the background"
+            );
+            None
+        }
+        Err(refusal) => {
+            tracing::debug!(%refusal, "removing the replaced tree in place");
+            backup.remove()
+        }
     }
 }
 

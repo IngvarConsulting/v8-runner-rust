@@ -269,7 +269,7 @@ fn remove_stale_temp_dirs(
             continue;
         };
         if !is_dir {
-            remove_metadata_of_a_removed_backup(&path, file_name, target_identity)?;
+            remove_metadata_of_a_removed_backup(&path, file_name, target_identity);
             continue;
         }
         if place == TempDirPlace::StageRoot
@@ -362,36 +362,34 @@ fn already_gone(error: std::io::Error) -> std::io::Result<()> {
 
 /// Метаданные прежнего дерева, которое удалили, а метаданные — нет: процесс фонового удаления
 /// оборвался между ними (#616).
-fn remove_metadata_of_a_removed_backup(
-    path: &Path,
-    file_name: &str,
-    target_identity: &str,
-) -> Result<(), AppError> {
+fn remove_metadata_of_a_removed_backup(path: &Path, file_name: &str, target_identity: &str) {
     let Some(backup_name) = file_name
         .strip_suffix(".meta.json")
         .filter(|name| name.starts_with(".dump-backup-"))
     else {
-        return Ok(());
+        return;
     };
     let backup = path.with_file_name(backup_name);
-    if std::fs::symlink_metadata(&backup).is_ok() {
-        return Ok(());
+    if !matches!(std::fs::symlink_metadata(&backup), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return;
     }
     let Ok(metadata) = read_temp_dir_metadata(&backup) else {
-        return Ok(());
+        return;
     };
     if !is_known_tool_name(&metadata.tool)
         || metadata.target_identity != target_identity
-        || !metadata.is_superseded_backup()
+        || !matches!(metadata.kind, TempDirKind::Backup)
+        || backup_name.strip_prefix(".dump-backup-") != Some(metadata.run_id.as_str())
+        || metadata.target_path.parent() != backup.parent()
     {
-        return Ok(());
+        return;
     }
-    remove_path_if_exists(path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to remove the metadata of a removed backup '{}': {error}",
-            path.display()
-        ))
-    })
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, path = %path.display(), "failed to remove the backup metadata");
+        }
+    }
 }
 
 pub(super) fn resolve_dump_edt_base_project_name(
