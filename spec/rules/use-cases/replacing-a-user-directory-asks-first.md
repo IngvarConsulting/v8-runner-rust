@@ -11,6 +11,7 @@ check:
   - tests/cli_dump.rs::an_incremental_pull_refuses_over_work_version_control_cannot_give_back
   - tests/cli_dump.rs::a_partial_pull_refuses_over_an_uncommitted_edit
   - tests/cli_live_agent.rs::a_pull_the_guard_refuses_answers_alike_and_sends_the_platform_no_work
+  - tests/cli_push_generation.rs::an_uncommitted_edit_with_a_changed_generation_is_refused_by_the_guard
 ---
 
 # Замена каталога человека спрашивает заранее
@@ -19,7 +20,10 @@ check:
 каталога, раннер спрашивает систему контроля версий, что в нём не восстановить. Выгрузка
 `pull` спрашивает до первой рабочей команды платформе при любом режиме: по изменившемуся, выборкой
 объектов, полной поверх каталога без годного файла версий, заменой каталога или проекта EDT;
-замена спрашивает ещё раз перед самой публикацией. Живой агент к этому времени может уже
+замена спрашивает ещё раз перед самой публикацией. Выгрузку по изменившемуся по годной копии
+описи раннера сторож спрашивает после вопроса о поколении — это запрос, не рабочая команда, — и
+до выгрузки: неизменившееся поколение дерево не трогает, и спрашивать не о чем
+(`INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`). Живой агент к этому времени может уже
 подниматься и подключаться к базе (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`); отказ сторожа отвечает тем же, что и без него, а
 поднятый агент живёт по обычным правилам живого агента. Отказ называет действие: `refusing to
 replace` или `refusing to overwrite`. Кроме ответов «терять нечего» и «есть безвозвратное»,

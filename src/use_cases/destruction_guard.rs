@@ -258,6 +258,16 @@ pub(super) fn discard_note(target: &Path, losses: &Losses) -> Option<String> {
     })
 }
 
+/// Когда работа без согласия остановится на стороже.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardStop {
+    /// До запуска платформы.
+    BeforeThePlatform,
+    /// После вопроса о поколении и до выгрузки: неизменившееся поколение отвечает
+    /// «всё актуально», и сторож не спрашивается (#683).
+    AfterTheGeneration,
+}
+
 /// Строка превью о потерях: на чём работа остановится без согласия или что она уничтожит
 /// с ним; `None`, если терять нечего.
 pub(super) fn preview_note(
@@ -266,13 +276,19 @@ pub(super) fn preview_note(
     consent: &DestructionConsent,
     losses: &Losses,
     how: Destruction,
+    stop: GuardStop,
 ) -> Option<String> {
     if losses.is_empty() {
         return None;
     }
     match consent {
         DestructionConsent::AskFirst(ways_out) => Some(format!(
-            "it would stop before the platform starts: {}",
+            "{}: {}",
+            match stop {
+                GuardStop::BeforeThePlatform => "it would stop before the platform starts",
+                GuardStop::AfterTheGeneration =>
+                    "unless the configuration generation is unchanged, it would stop before the dump",
+            },
             refusal(target, losses, ways_out, context, how)
         )),
         DestructionConsent::Granted => Some(format!(
@@ -557,6 +573,7 @@ mod tests {
             &ask_first(),
             &losses,
             Destruction::Overwrite,
+            GuardStop::BeforeThePlatform,
         )
         .expect("a note");
         assert!(refused.contains("would stop"), "{refused}");
@@ -567,6 +584,7 @@ mod tests {
             &DestructionConsent::Granted,
             &losses,
             Destruction::Replace,
+            GuardStop::BeforeThePlatform,
         )
         .expect("a note");
         assert!(granted.contains("would discard"), "{granted}");
@@ -578,7 +596,8 @@ mod tests {
                 dir.path(),
                 &ask_first(),
                 &Losses::default(),
-                Destruction::Replace
+                Destruction::Replace,
+                GuardStop::BeforeThePlatform,
             ),
             None
         );

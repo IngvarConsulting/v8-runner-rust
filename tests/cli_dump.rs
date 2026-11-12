@@ -1102,7 +1102,8 @@ fn a_pull_lays_the_dump_over_the_directory_and_force_brings_it_to_the_base() {
 }
 
 /// Пообъектная перезапись спрашивает сторожа так же, как замена: незафиксированное в
-/// каталоге останавливает `pull` до платформы и называется поимённо.
+/// каталоге останавливает `pull` до выгрузки и называется поимённо. По годной копии описи
+/// до сторожа платформу спрашивают только о поколении (#683).
 #[test]
 fn an_incremental_pull_refuses_over_work_version_control_cannot_give_back() {
     let (_dir, config_path, _binary, _work, base_path, calls_log) =
@@ -1123,9 +1124,16 @@ fn an_incremental_pull_refuses_over_work_version_control_cannot_give_back() {
         !message.contains("ran full"),
         "the version file is usable, so the dump is incremental: {message}"
     );
+    // По годной копии описи поколение сверяется раньше сторожа (#683): платформу спрашивают
+    // только о нём, выгрузки нет.
+    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
     assert!(
-        !calls_log.exists(),
-        "the platform must not start: {rendered}"
+        calls.contains("generation-id"),
+        "the generation is asked: {calls}"
+    );
+    assert!(
+        calls.lines().all(|line| line.contains("generation-id")),
+        "only the generation reaches the platform: {calls}"
     );
     assert!(base_path.join("main").join("hand-written.xml").is_file());
 }

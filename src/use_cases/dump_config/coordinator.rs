@@ -6,7 +6,7 @@ use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::agent_session::EarlyAgent;
 use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
-    Losses, WaysOut,
+    GuardStop, Losses, WaysOut,
 };
 use crate::use_cases::version_file::RunnerVersionFile;
 use std::fmt::Write as _;
@@ -330,6 +330,11 @@ fn run_dump_selected(
             &resolved.consent,
             &losses,
             how,
+            if super::by_version_file(context, &plan, partial_objects.as_deref()) {
+                GuardStop::AfterTheGeneration
+            } else {
+                GuardStop::BeforeThePlatform
+            },
         ) {
             let _ = write!(message, "; {note}");
         }
@@ -477,30 +482,11 @@ fn run_dump_selected(
     let plan = copy
         .and_then(|copy| plan_dump(&mode, copy, platform_of(location.as_ref())))
         .and_then(|plan| {
-            // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
-            // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
-            // безвозвратное останавливает работу здесь, пока ничего не тронуто.
-            let (how, regenerated) = destruction_of(config, &plan);
-            match (how, &resolved.consent) {
-                (_, DestructionConsent::AskFirst(_)) => {
-                    guard_replacement(
-                        context,
-                        &resolved.target_path,
-                        &resolved.consent,
-                        regenerated,
-                        how,
-                    )?;
-                }
-                // Замену с согласием сторож спрашивает при публикации: там он и называет
-                // уничтоженное.
-                (Destruction::Replace, DestructionConsent::Granted) => {}
-                // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
-                // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
-                // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
-                // попасть — `--force` делает выгрузку полной, то есть заменой.
-                (Destruction::Overwrite, DestructionConsent::Granted) => {}
-                // Каталог раннера спрашивать не о чем.
-                (_, DestructionConsent::RunnerOwned) => {}
+            // Каталог человека сторож спрашивает до первой рабочей команды платформе при любом
+            // плане. Выгрузку по изменившемуся по годной копии описи — после поколения
+            // (`generation_then_guard`): неизменившееся поколение дерево не трогает (#683).
+            if !super::by_version_file(context, &plan, partial_objects.as_deref()) {
+                ask_the_guard(context, config, &resolved, &plan)?;
             }
             Ok(plan)
         });
@@ -589,22 +575,34 @@ fn run_dump_selected(
             external.generation_before(provider, generation_before.clone());
         }
         // Как у агента: поколение до выгрузки по изменившемуся совпало с записанным тем же
-        // инструментом — выгружать нечего, и платформа больше не запускается.
-        let unchanged = generation_before
-            .as_deref()
-            .filter(|_| {
-                matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
-                    && partial_objects.is_none()
-            })
-            .and_then(|token| {
-                SourceSetInventory::new(config)
-                    .designer_context(&resolved.source_set_name)
-                    .and_then(|set| {
-                        crate::use_cases::exchange_guard::unchanged_since_the_record(
-                            config, set, provider, token,
-                        )
-                    })
-            });
+        // инструментом — выгружать нечего, и платформа больше не запускается; иначе — сторож.
+        let decided = generation_then_guard(
+            context,
+            config,
+            &resolved,
+            &plan,
+            partial_objects,
+            provider,
+            generation_before.as_deref(),
+        );
+        let unchanged = match decided {
+            Ok(unchanged) => unchanged,
+            Err(error) => {
+                let message = error.to_string();
+                return Err(DumpExecutionFailure::with_payload(
+                    error,
+                    empty_result(
+                        mode,
+                        started,
+                        Some(resolved.source_set_name.clone()),
+                        resolved.extension.clone(),
+                        selectors.clone(),
+                        Some(resolved.target_path.clone()),
+                        Some(message),
+                    ),
+                ));
+            }
+        };
         if let Some(unchanged) = unchanged {
             (
                 // Платформа не запускалась: журнала у пропуска нет.
@@ -960,6 +958,71 @@ fn destruction_of(config: &AppConfig, plan: &DumpPlan) -> (Destruction, &'static
             (Destruction::Overwrite, &[VERSION_FILE_NAME])
         }
     }
+}
+
+/// Поколение до выгрузки и сторож — в этом порядке и одинаково у всех исполнителей (#683).
+/// Ждёт поколения только выгрузка, которую оно может пропустить: по изменившемуся по годной
+/// копии описи раннера, без выборки объектов ([`by_version_file`],
+/// `INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
+/// `generation` — поколение, которое исполнитель прочитал до выгрузки и так прочитал бы;
+/// второго чтения здесь нет. `Ok(Some(_))` — «всё актуально», выгружать нечего, дерево не
+/// трогается; `Ok(None)` — выгрузка будет писать, и сторож её пропустил; `Err` — отказ
+/// сторожа. Выгрузку, которая поколения не ждёт, сторож уже спросил до платформы.
+pub(super) fn generation_then_guard(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+    provider: Provider,
+    generation: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    if !super::by_version_file(context, plan, objects) {
+        return Ok(None);
+    }
+    let inventory = SourceSetInventory::new(config);
+    let set = inventory.designer_context(&resolved.source_set_name);
+    let unchanged = generation.zip(set).and_then(|(token, set)| {
+        crate::use_cases::exchange_guard::unchanged_since_the_record(config, set, provider, token)
+    });
+    if unchanged.is_none() {
+        ask_the_guard(context, config, resolved, plan)?;
+    }
+    Ok(unchanged)
+}
+
+/// Сторож каталога человека перед выгрузкой: выгрузка поверх каталога переписывает его файлы
+/// на месте, замена — стирает лишнее. Без согласия безвозвратное останавливает работу, пока
+/// ничего не тронуто.
+fn ask_the_guard(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    plan: &DumpPlan,
+) -> Result<(), AppError> {
+    let (how, regenerated) = destruction_of(config, plan);
+    match (how, &resolved.consent) {
+        (_, DestructionConsent::AskFirst(_)) => {
+            guard_replacement(
+                context,
+                &resolved.target_path,
+                &resolved.consent,
+                regenerated,
+                how,
+            )?;
+        }
+        // Замену с согласием сторож спрашивает при публикации: там он и называет
+        // уничтоженное.
+        (Destruction::Replace, DestructionConsent::Granted) => {}
+        // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
+        // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
+        // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
+        // попасть — `--force` делает выгрузку полной, то есть заменой.
+        (Destruction::Overwrite, DestructionConsent::Granted) => {}
+        // Каталог раннера спрашивать не о чем.
+        (_, DestructionConsent::RunnerOwned) => {}
+    }
+    Ok(())
 }
 
 /// Файл версий набора и копия раннера: есть у набора с памятью базы.

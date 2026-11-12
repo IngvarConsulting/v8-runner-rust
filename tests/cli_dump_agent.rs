@@ -543,6 +543,35 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
+/// Незакоммиченная работа в каталоге не мешает ответу «всё актуально»: агент сверяет поколение
+/// раньше сторожа, как Конфигуратор и `ibcmd`, и выгрузки, которой нет, сторож не спрашивает (#683).
+#[test]
+fn an_unchanged_generation_answers_up_to_date_over_uncommitted_work() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--force"]);
+    assert_eq!(first, 0, "{payload}");
+    commit_project(&harness);
+    let hand_written = harness.target.join("hand-written.txt");
+    fs::write(&hand_written, "exists nowhere else").expect("hand-written");
+
+    let (second, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(
+        commands(&harness)
+            .iter()
+            .filter(|line| line.starts_with("config dump-config-to-files"))
+            .count(),
+        1,
+        "only the first command dumps"
+    );
+    assert_eq!(
+        fs::read_to_string(&hand_written).expect("hand-written"),
+        "exists nowhere else"
+    );
+}
+
 /// Агент прогноза не спрашивает: перед `--update` нет `--get-changes`, а режим называет то,
 /// что выгрузка сделала с каталогом — файл, которого она не переписала, оставляет его
 /// `INCREMENTAL` (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).

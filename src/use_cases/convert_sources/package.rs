@@ -17,7 +17,7 @@ use crate::support::path::{
 use crate::use_cases::build_infobase::{self, BuildEnvironment, BuildSession};
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::destruction_guard::{
-    discard_note, losses_in, preview_note, Destruction, DestructionConsent, WaysOut,
+    discard_note, losses_in, preview_note, Destruction, DestructionConsent, GuardStop, WaysOut,
 };
 use crate::use_cases::provider_selection::{self, SelectedProvider};
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
@@ -485,6 +485,7 @@ impl Run<'_> {
                     &resolved.consent,
                     &losses,
                     Destruction::Replace,
+                    GuardStop::BeforeThePlatform,
                 ) {
                     message.push_str("; ");
                     message.push_str(&note);

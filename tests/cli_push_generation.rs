@@ -1136,6 +1136,83 @@ exit 0"#,
     );
 }
 
+/// Файлы каталога с содержимым: чтобы видеть, что `pull` его не тронул.
+fn tree(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in fs::read_dir(&current).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(dir).expect("inside").to_path_buf();
+                files.insert(relative, fs::read(&path).expect("read file"));
+            }
+        }
+    }
+    files
+}
+
+/// Выгрузка `pull <SET> --force`, не закоммиченная, и поверх неё правка человека, которой нет
+/// нигде больше: сторож незакоммиченной работы на этом каталоге отказал бы.
+fn pulled_and_edited_without_a_commit() -> Project {
+    let project = Project::new("File=ib");
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    succeeded(&project.run(&["pull", "main", "--force"]));
+    project.edit();
+    project.forget_calls();
+    project
+}
+
+/// Второй `pull` без коммита первого при неизменном поколении отвечает «всё актуально»:
+/// поколение проверяется раньше сторожа, а выгрузка, которой нет, дерево не трогает (#683).
+#[test]
+fn a_second_pull_before_a_commit_with_an_unchanged_generation_is_up_to_date() {
+    let project = pulled_and_edited_without_a_commit();
+    let before = tree(&project.sources);
+
+    let pulled = succeeded(&project.run(&["pull", "main"]));
+
+    assert_eq!(pulled["data"]["up_to_date"], true, "{pulled}");
+    assert!(
+        !project.calls().contains("/DumpConfigToFiles"),
+        "{}",
+        project.calls()
+    );
+    assert_eq!(tree(&project.sources), before, "the tree is left as it was");
+}
+
+/// Поколение изменилось — выгрузка будет писать, и сторож по-прежнему отказывает над
+/// незакоммиченной правкой до выгрузки; дерево не тронуто (#683).
+#[test]
+fn an_uncommitted_edit_with_a_changed_generation_is_refused_by_the_guard() {
+    let project = pulled_and_edited_without_a_commit();
+    project.base_generation(SECOND);
+    let before = tree(&project.sources);
+
+    let output = project.run(&["pull", "main"]);
+
+    let payload = envelope(&output);
+    assert!(!output.status.success(), "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to overwrite"), "{message}");
+    assert!(
+        project.calls().contains("/GetConfigGenerationID"),
+        "the generation is asked first: {}",
+        project.calls()
+    );
+    assert!(
+        !project.calls().contains("/DumpConfigToFiles"),
+        "{}",
+        project.calls()
+    );
+    assert_eq!(tree(&project.sources), before, "the tree is left as it was");
+}
+
 /// Загрузка упала, успев сдвинуть поколение: ответ говорит, что поколение не записано, а
 /// следующая отправка отказывает `non_fast_forward` и называет неудачную загрузку, а не
 /// «ушла вперёд с прошлого обмена». Не проходит она и без сверки.
