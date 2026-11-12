@@ -310,38 +310,14 @@ fn run_build_with(
             continue;
         };
 
-        if source_set.purpose.is_external() {
-            let step_started = Instant::now();
-            let result = discover_designer_external_artifacts(
-                &source_set.name,
-                &inventory.source_path(source_set),
-                source_set_external_kind(source_set).expect("external kind"),
-            );
-            match result {
-                Ok(descriptors) => push_build_step(
-                    &mut steps,
-                    &source_set.name,
-                    BuildMode::Skipped,
-                    true,
-                    format!(
-                        "prepared {} external artifact(s) for packaging",
-                        descriptors.len()
-                    ),
-                    step_started.elapsed().as_millis() as u64,
-                ),
-                Err(error) => {
-                    let result = fail_from_source_set_index(
-                        started,
-                        steps,
-                        &ordered_source_sets,
-                        index,
-                        source_set,
-                        BuildMode::Skipped,
-                        error.to_string(),
-                    );
-                    return Err(BuildExecutionFailure::with_payload(error, result));
-                }
-            }
+        if prepare_external_set(
+            &mut steps,
+            started,
+            &inventory,
+            &ordered_source_sets,
+            index,
+            source_set,
+        )? {
             continue;
         }
 
@@ -665,6 +641,17 @@ pub(super) fn run_build_ibcmd(
         let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
             continue;
         };
+
+        if prepare_external_set(
+            &mut steps,
+            started,
+            &inventory,
+            &ordered_source_sets,
+            index,
+            source_set,
+        )? {
+            continue;
+        }
 
         let plan = match plan_configurator_load_step(
             source_set,
@@ -2263,6 +2250,56 @@ pub(super) fn generation_after_load(
         Err(error) => {
             debug!(%error, "the generation after the load is not known");
             Ok((warnings, None))
+        }
+    }
+}
+
+/// Внешний набор не грузится в базу ни одним исполнителем Конфигуратора, агента и `ibcmd`
+/// (`INV.USE-CASES.A-PUSH-NEVER-LOADS-AN-EXTERNAL-SET`): его артефакты находятся для
+/// упаковки, а шаг — успешный пропуск; ошибка в исходниках останавливает команду на нём.
+/// `true` — набор внешний и шаг записан, планировать загрузку нечего.
+fn prepare_external_set(
+    steps: &mut Vec<crate::domain::build::BuildStep>,
+    started: Instant,
+    inventory: &SourceSetInventory,
+    ordered_source_sets: &[&SourceSetConfig],
+    index: usize,
+    source_set: &SourceSetConfig,
+) -> Result<bool, BuildExecutionFailure> {
+    let Some(kind) = source_set_external_kind(source_set) else {
+        return Ok(false);
+    };
+    let step_started = Instant::now();
+    match discover_designer_external_artifacts(
+        &source_set.name,
+        &inventory.source_path(source_set),
+        kind,
+    ) {
+        Ok(descriptors) => {
+            push_build_step(
+                steps,
+                &source_set.name,
+                BuildMode::Skipped,
+                true,
+                format!(
+                    "prepared {} external artifact(s) for packaging",
+                    descriptors.len()
+                ),
+                step_started.elapsed().as_millis() as u64,
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            let result = fail_from_source_set_index(
+                started,
+                std::mem::take(steps),
+                ordered_source_sets,
+                index,
+                source_set,
+                BuildMode::Skipped,
+                error.to_string(),
+            );
+            Err(BuildExecutionFailure::with_payload(error, result))
         }
     }
 }
