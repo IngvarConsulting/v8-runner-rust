@@ -329,7 +329,6 @@ infobase create --import --apply --force` или Конфигуратор (`CREA
 `/LoadConfigFromFiles` без файла версий, `/UpdateDBCfg`); после удачи
 `exchange_guard::remember_created_base` пишет собранному набору его дерево, остальным —
 пустую память. Сборка Конфигуратором, остановленная после создания, оставляет пустую память.
-Значение `dbms.server` с портом платформа принимает в `CREATEINFOBASE` только в одинарных кавычках; раннер их пока не ставит: [#546](https://github.com/IngvarConsulting/v8-runner-rust/issues/546).
 
 База в кластере: строку `CREATEINFOBASE` собирает `V8Connection::create_cluster_infobase_arg`
 из `Srvr`/`Ref` подключения и реквизитов `dbms`/`cluster`, всегда с `CrSQLDB=Y` и

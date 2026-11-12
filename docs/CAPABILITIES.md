@@ -9,6 +9,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 - [Матрица поддержки](#матрица-поддержки)
 - [Глобальные CLI-опции](#глобальные-cli-опции)
+- [Прежние имена команд и ключей](#прежние-имена-команд-и-ключей)
 - [Настройка проекта](#настройка-проекта)
 - [Проверка и валидация](#проверка-и-валидация)
 - [Файлы и артефакты](#файлы-и-артефакты)
@@ -123,7 +124,9 @@ macOS, 8.3.27 и 8.5.4; Linux под root и Windows, 8.3.27 и 8.5.1 —
 назначался только ключом. Теперь без ключа `push`, `pull`, `download` и снимок `.dt` идут
 через агента, а у кластера `ibcmd` в цепочке нет: ключ `providers.<операция>: ibcmd` для
 `push`, `pull`, `download`, `extensions`, `infobase dump` и `infobase restore` у кластерной
-базы отказывает при проверке настроек и называет допустимых исполнителей.
+базы отказывает при проверке настроек и называет допустимых исполнителей. `clone` своего
+ключа не имеет и выгружает той же цепочкой, что `pull`; `status --deep` спрашивает исполнителя
+`push`, поэтому на кластере — тоже агента.
 
 Исполнитель с пометкой «экспериментально» в цепочку умолчаний не входит: раннер сам такого
 исполнителя не выберет. Включается он ключом `providers.<операция>: <исполнитель>`,
@@ -482,6 +485,39 @@ overrides. Сам local overlay нельзя передавать как `--conf
   (`con.cf`, `out.`), внешняя программа может не открыть. Исключение — `target_path` и
   `stage_path` кадра `ready` внешней публикации: это операнды, и они могут нести приставку.
 
+## Прежние имена команд и ключей
+
+Прежние имена принимаются в течение одного цикла выпуска и скрыты в `--help` на всех уровнях.
+Перечень ведёт `src/cli/synonyms.rs`. Для команды, вызванной прежним именем, поле `command`
+JSON-ответа содержит новое имя.
+
+| Где | Прежнее имя | Новое |
+| --- | --- | --- |
+| команда | `bootstrap` | `clone` |
+| команда | `config init` | `init` |
+| команда | `build` | `push` |
+| команда | `load` | `upload` |
+| команда | `dump` | `pull` |
+| команда | `syntax` | `check` |
+| команда | `infobase configuration export` | `download` |
+| команда | `check designer-config`, `check designer-modules`, `check edt` | `check` |
+| `clone` | `--connection` | `--from` |
+| `init` | `--connection` | `--infobase` |
+| `push` | `--full-rebuild` | `--full` |
+| `push`, `pull`, `make`, `convert` | `--source-set <NAME>` | позиционный набор |
+| `pull`, `convert` | `--discard-uncommitted` | `--force` |
+| `pull` | `--mode incremental\|partial` | без ключа |
+| `test` | `--no-build` | `--no-push` |
+| `upload` | `--path <FILE>` | позиционный файл |
+| `upload` | `--extension` | `--ref` |
+| `upload` | `--mode merge` | `--mode combine` |
+| `download` | `--state working` | без ключа |
+| `download` | `--state database` | `--state db` |
+
+`pull --mode full` не отображается, а отказывает и называет `pull [SET] --force` для того же
+набора. Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база
+создаётся командой `infobase create`.
+
 ## Настройка проекта
 
 ### `version`
@@ -564,7 +600,9 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
   `.dump-*.lock*`; файл — `<project-dir>/.gitignore`, существующий
   только дописывается), и
   `source-set main` типа `CONFIGURATION`.
-- Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
+- Выгружает основную конфигурацию из указанной ИБ в `src/configuration` полной выгрузкой.
+  Выгрузка — та же операция `pull`, и исполнителя выбирает её строка матрицы. Своего ключа
+  `providers` у `clone` нет: проекта с ключом ещё не существует.
 - `--from` не должен содержать embedded credentials; используйте `--user` и `--password`.
   Эти значения пишутся только в `v8project.local.yaml`.
 - Не обнаруживает и не выгружает расширения автоматически.
@@ -1295,6 +1333,7 @@ v8-runner check --project <PROJECT>... [--dry-run]
 `format=DESIGNER` — `/CheckConfig` Конфигуратора:
 
 - Режимы платформы называются ключами команды: проверки конфигурации и области клиента.
+  Например, `v8-runner check --server` проверяет синтаксис модулей только в контексте сервера.
 - Ни один режим не назван — выполняется профиль по умолчанию: `-ThinClient`, `-Server`,
   `-UnreferenceProcedures`, `-HandlersExistence`, `-EmptyHandlers`, `-ExtendedModulesCheck`.
   Пустая `/CheckConfig` не проверяет ничего и отвечает «чисто», поэтому пустой она не
