@@ -472,14 +472,17 @@ class FreeBaseTest(unittest.TestCase):
     def test_a_live_pull_is_measured_with_the_agent_reconnected(self):
         """The owner's call (#585): the foreign edit releases the live agent; the timed pull of
         runner-live must not pay the reconnect a live agent sitting on the base would not pay."""
-        b, events, rows = self.bench()
-        scn = describe.load_scenarios()["pull-common1"]
-        b.run_scenario(scn, ["runner-live"], 1)
-        self.assertEqual([r.get("error") for r in rows if r.get("ok") is False], [])
-        for i, (who, what) in enumerate(events):
-            if (who, what) == ("free", "release"):
-                after = [e for e in events[i + 1:] if e[0] == "runner"][:2]
-                self.assertEqual(after, [("runner", "status"), ("runner", "pull")], events)
+        for name, measured in (("pull-common1", "pull"), ("push-common1", "push")):
+            b, events, rows = self.bench()
+            b.run_scenario(describe.load_scenarios()[name], ["runner-live"], 2)
+            self.assertEqual([r.get("error") for r in rows if r.get("ok") is False], [], name)
+            # Every timed command of runner-live comes right after a reconnect, never right after a release.
+            for i, (who, what) in enumerate(events):
+                if (who, what) == ("runner", measured):
+                    before = [e for e in events[:i] if e[0] in ("runner", "free")]
+                    # (after a stop comes the untimed restore, not a measure)
+                    if before and before[-1] == ("free", "release"):
+                        self.fail(f"{name}: the timed {measured} follows a release: {events}")
 
     def test_the_restore_lets_the_base_go_before_runner_016_syncs(self):
         """The failure on kz83: restore-push left the live agent connected and the sync by 0.16

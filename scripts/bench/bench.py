@@ -298,6 +298,10 @@ class Bench:
     def push_runner(self, scn, executor, rels, originals, marker):
         r = self.runner_for(executor)
         before = self.version_file() if self.verify else None
+        if executor == "runner-live":
+            # The version file of before needed the base free; and the check of the previous rep
+            # released the agent too. Reconnect it outside the measure.
+            self.reconnect_live(r, f"{scn.name}-{executor}")
         ex.write_files(r.stand.src, {rel: ex.marked(originals[rel], marker) for rel in rels})
         self.base_marked = True  # set before the call: a failed push may have loaded part of it
         if r is self.runner_016:
