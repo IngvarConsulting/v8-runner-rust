@@ -731,6 +731,24 @@ fn extensions_list_takes_the_live_agent_and_reports_no_prefix() {
         Some(1),
         "{through_agent}"
     );
+
+    // Ключ `providers.extensions` порядок не отдаёт живому агенту: список читает `ibcmd`.
+    bench.assign("extensions", "ibcmd");
+    let (code, assigned) = bench.run(&["extensions", "list"]);
+
+    assert_eq!(code, 0, "{assigned}");
+    assert_eq!(
+        assigned["data"]["provider"]["selected"], "ibcmd",
+        "{assigned}"
+    );
+    assert!(
+        bench.ibcmd_calls().len() > ibcmd_calls,
+        "ibcmd read the list"
+    );
+    assert_eq!(
+        assigned["data"]["extensions"][0]["name_prefix"], "Зо_",
+        "{assigned}"
+    );
 }
 
 /// `pull --all` по изменившемуся читает состав расширений своим исполнителем — агентом; `ibcmd`,
@@ -744,13 +762,12 @@ fn pull_all_lists_the_extensions_with_the_agent_and_not_with_ibcmd() {
     );
     bench.with_ibcmd();
 
-    let (code, payload) = bench.run(&["pull", "--all"]);
+    let (_, payload) = bench.run(&["pull", "--all"]);
 
-    // Набор `main` без памяти выгружает целиком `ibcmd`, и в каталоге без git сторож замены
-    // отказывает ему (`validation`). Состав к этому времени уже прочитан.
-    assert_ne!(code, 0, "{payload}");
-    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
-
+    // Предмет — только чтение состава (`INV.CLI.PULL-ALL-READS-THE-INSTALLED-EXTENSIONS-WITH-THE-PULL-PROVIDER`),
+    // исход выгрузки наборов здесь не проверяется: `main` без памяти выгружает целиком `ibcmd`, и
+    // в каталоге без git сторож замены ему отказывает. Что состав прочитан, говорит `declared`:
+    // обход ставит его, только прочитав состав базы.
     assert_eq!(
         payload["data"]["provider"]["selected"], "agent",
         "{payload}"

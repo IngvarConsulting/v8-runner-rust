@@ -590,6 +590,7 @@ pub(crate) fn select_executor(
 /// Ставит агента первым в цепочку умолчаний, если живой агент рабочей копии уже поднят: тогда
 /// список отдаёт он, без процесса `ibcmd` (#631). Ключ `providers.extensions` не трогается.
 /// Ответ — исполнители, стоявшие до агента: квитанция называет их пропущенными с причиной.
+/// Вопрос «жив ли агент» задаётся, только когда агент в цепочке есть и стоит не первым.
 fn lead_with_the_live_agent(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
@@ -611,12 +612,13 @@ fn lead_with_the_live_agent(
     if !crate::use_cases::agent_session::live_agent_is_up(config, &v8.path) {
         return Vec::new();
     }
-    let ahead: Vec<Provider> = chain.drain(..agent).collect();
-    chain.extend(ahead.iter().copied());
-    ahead
-        .into_iter()
+    // Вперёд встаёт только агент: остальные сохраняют порядок цепочки.
+    let lead = chain.remove(agent);
+    chain.insert(0, lead);
+    chain[1..=agent]
+        .iter()
         .map(|provider| SkippedProvider {
-            provider,
+            provider: *provider,
             reason: THE_LIVE_AGENT_LISTS.to_owned(),
         })
         .collect()

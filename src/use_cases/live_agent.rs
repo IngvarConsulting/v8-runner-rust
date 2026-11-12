@@ -27,7 +27,7 @@ use crate::platform::service::{process_facts, started_at};
 use crate::platform::service_record::ServiceRecord;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::agent_session::{existing_live_key, holder_receipt, live_target};
+use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_key};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -328,13 +328,8 @@ fn locate_v8(config: &AppConfig) -> Result<PathBuf, AppError> {
 /// Каталог состояния и ключ живого агента цели проекта, если они уже есть: ничего не создаёт.
 fn own_key(config: &AppConfig) -> Result<Option<(PathBuf, String)>, AppError> {
     managed_port(config)?;
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return Ok(None);
-    };
-    let v8 = locate_v8(config)?;
-    let key = existing_live_key(&state, config, &v8)
-        .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
-    Ok(key.map(|key| (state, key)))
+    own_live_key(config, &locate_v8(config)?)
+        .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))
 }
 
 /// Держатель из запроса. Процесс должен быть жив и своей учётной записи ОС, а названное время

@@ -716,7 +716,7 @@ fn live_key(state: &Path, config: &AppConfig, v8: &Path) -> std::io::Result<Stri
 
 /// Ключ живого агента, только если соль учётной записи уже есть: `None` без неё. Ничего не
 /// создаёт.
-pub(crate) fn existing_live_key(
+fn existing_live_key(
     state: &Path,
     config: &AppConfig,
     v8: &Path,
@@ -953,9 +953,24 @@ fn live_start_failure(
     }
 }
 
+/// Каталог состояния учётной записи и ключ живого агента этой рабочей копии под утилитой `v8`,
+/// если они уже есть. Ничего не создаёт: без каталога состояния или соли учётной записи живого
+/// агента нет, и ответ — `None`. Единственная связка «каталог состояния → ключ» для тех, кто
+/// ищет уже поднятого агента: снятие при `live: false`, `agent hold|release|stop|status` и
+/// выбор исполнителя списка расширений.
+pub(crate) fn own_live_key(
+    config: &AppConfig,
+    v8: &Path,
+) -> std::io::Result<Option<(PathBuf, String)>> {
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return Ok(None);
+    };
+    Ok(existing_live_key(&state, config, v8)?.map(|key| (state, key)))
+}
+
 /// Жив ли уже агент этой рабочей копии под утилитой `v8` (#631): `live` включён, управляемая
 /// точка входа файловой или кластерной базы, а сторож ключа есть и жив. Ничего не создаёт и не
-/// поднимает: без каталога состояния, соли учётной записи или сторожа живого агента нет.
+/// поднимает.
 pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
     if !config.tools.designer_agent.live_enabled()
         || config.infobase.standalone.is_some()
@@ -966,11 +981,8 @@ pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
     {
         return false;
     }
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return false;
-    };
-    match existing_live_key(&state, config, v8) {
-        Ok(Some(key)) => matches!(
+    match own_live_key(config, v8) {
+        Ok(Some((state, key))) => matches!(
             crate::platform::agent_keeper::client::KeeperClient::attach(&state, &key),
             Ok(Some(_))
         ),
@@ -986,11 +998,8 @@ pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
 /// Отказ снятия команду не останавливает: она работает с разовым агентом и так.
 /// Каталога состояния и соли учётной записи она не создаёт: без них живого агента нет.
 fn remove_live_agent(config: &AppConfig, v8: &Path) {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return;
-    };
-    let key = match existing_live_key(&state, config, v8) {
-        Ok(Some(key)) => key,
+    let (state, key) = match own_live_key(config, v8) {
+        Ok(Some(found)) => found,
         Ok(None) => return,
         Err(error) => {
             tracing::warn!(%error, "the live agent of this working copy cannot be keyed");
