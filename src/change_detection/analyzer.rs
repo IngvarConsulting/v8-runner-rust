@@ -1262,9 +1262,9 @@ impl DumpListing {
 
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
 /// file by its path ([`partial_load::dump_element_of`]), or the part of it under its `Ext`
-/// directory ([`part_of_element`]: a module, help, predefined data, rights), was in the
-/// description `before` the dump and no name of the description `after` it matches, letter
-/// case aside. A file the dump
+/// directory ([`partial_load::part_of_dump_element`]: a module, help, predefined data,
+/// rights), was in the description `before` the dump and no name of the description `after` it
+/// matches, letter case aside. A file the dump
 /// wrote (stamped no earlier than `start`, when the dump wrote into the tree itself) is never
 /// named: on a case-insensitive file system an element renamed only in letter case keeps its
 /// files under the old spelling. A dump through a stage is listed before its files arrive
@@ -1296,27 +1296,12 @@ pub fn files_of_dropped_elements(
                 .map(|owner| owner.to_lowercase())
                 .is_some_and(|owner| {
                     dropped(&owner)
-                        || part_of_element(path, &owner).is_some_and(|part| dropped(&part))
+                        || crate::change_detection::partial_load::part_of_dump_element(path)
+                            .is_some_and(|part| dropped(&part.to_lowercase()))
                 })
         })
         .map(|file| file.path)
         .collect())
-}
-
-/// Part of the element `owner` a file under its `Ext` directory belongs to, as the version file
-/// names it: `Ext/ObjectModule.bsl` — `<owner>.objectmodule`, `Ext/Help.xml` and `Ext/Help/…` —
-/// `<owner>.help`, a form's `Ext/Form.xml` and `Ext/Form/Module.bsl` — `<owner>.form`. Such a
-/// part drops out of the version file when only it is removed and the element stays: a dump over
-/// the tree removed its files itself (#646, measured on 8.3.27). A name the version file never
-/// had matches nothing, so nothing is removed by it.
-fn part_of_element(path: &Path, owner: &str) -> Option<String> {
-    let components: Vec<_> = path.components().collect();
-    let ext = components
-        .iter()
-        .rposition(|component| component.as_os_str().eq_ignore_ascii_case("Ext"))?;
-    let part = components.get(ext + 1)?;
-    let part = Path::new(part.as_os_str()).file_stem()?.to_str()?;
-    Some(format!("{owner}.{}", part.to_lowercase()))
 }
 
 /// What an incremental dump wrote into the tree, found and hashed but not yet remembered.

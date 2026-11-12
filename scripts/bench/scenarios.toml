@@ -57,3 +57,21 @@ title = "push --no-apply 300 общих модулей и следующий pul
 kind = "pair"
 modules = "common300"
 executors = ["runner-live"]
+
+[pair-objects30]
+title = "push --no-apply 30 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects30"
+executors = ["runner-live"]
+
+[pair-objects100]
+title = "push --no-apply 100 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects100"
+executors = ["runner-live"]
+
+[pair-objects300]
+title = "push --no-apply 300 описаний объектов (метка в комментарии) и следующий pull (#646)"
+kind = "pair"
+modules = "objects300"
+executors = ["runner-live"]

@@ -107,8 +107,8 @@ def load_stand(name, stands_root=None, platform_root=None):
         raise DescriptionError(f"{where}: exactly one of [create] and [existing]")
     modules = data.get("modules") or {}
     for set_name, files in modules.items():
-        if not isinstance(files, list) or not files or not all(isinstance(p, str) and p.endswith(".bsl") for p in files):
-            raise DescriptionError(f"{where}: module set {set_name!r} must be a non-empty list of .bsl paths")
+        if not isinstance(files, list) or not files or not all(isinstance(p, str) and p.endswith((".bsl", ".xml")) for p in files):
+            raise DescriptionError(f"{where}: module set {set_name!r} must be a non-empty list of .bsl or .xml paths")
     common = dict(
         name=name, title=data.get("title", name), platform=_require(data, "platform", where), work=work,
         source_set=data.get("source_set", "main"), source_path=data.get("source_path", "src/main"),

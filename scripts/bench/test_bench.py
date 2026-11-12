@@ -260,6 +260,22 @@ class CommandTest(unittest.TestCase):
             self.assertTrue(ex.has_marker(path, "r1 push 1"))
             self.assertFalse(ex.has_marker(path, "r1 push 2"))
 
+    def test_a_description_is_marked_in_its_own_comment(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        original = (b"\xef\xbb\xbf<?xml version=\"1.0\"?>\r\n<MetaDataObject><Catalog><Properties>"
+                    b"<Comment/></Properties><ChildObjects><Attribute><Comment/></Attribute>"
+                    b"</ChildObjects></Catalog></MetaDataObject>\r\n")
+        data = ex.marked(original, "r1 pair 1")
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf<?xml"))
+        self.assertEqual(data.count(b"<Comment/>"), 1, "only the object's own comment is marked")
+        ex.write_files(d.name, {"Catalogs/К.xml": data})
+        path = os.path.join(d.name, "Catalogs", "К.xml")
+        self.assertTrue(ex.has_marker(path, "r1 pair 1"))
+        self.assertFalse(ex.has_marker(path, "r1 pair 2"))
+        with self.assertRaises(ValueError):
+            ex.marked(b"<?xml version=\"1.0\"?><Form/>", "r1 pair 1")
+
     def test_stage_writes_a_list_file_with_bom(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)

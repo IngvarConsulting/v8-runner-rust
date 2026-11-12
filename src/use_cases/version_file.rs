@@ -10,8 +10,10 @@
 //! набора и свидетельство дерева — идентификатор каталога набора в файловой системе на
 //! момент записи. Каталог, удалённый и созданный заново (новый клон, `rm -rf`), копию не
 //! подтверждает, и выгрузка идёт полной. Копия старше дерева безопасна: выгрузка по ней
-//! выгрузит больше, чем изменилось, но ничего не пропустит. Поэтому `push` её не трогает, а
-//! пишется она только после удачной выгрузки.
+//! выгрузит больше, чем изменилось, но ничего не пропустит. Пишется она после удачной
+//! выгрузки, а после полной или крупной загрузки — свежей описью той же базы, если поколение
+//! подтвердило, что база не менялась (правило
+//! `a-push-refreshes-the-version-file-only-when-it-pays`).
 
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
@@ -30,11 +32,20 @@ use crate::support::fs::{
 /// Имя описи версий, которую платформа пишет в каталог выгрузки.
 pub(crate) const VERSION_FILE_NAME: &str = "ConfigDumpInfo.xml";
 
+/// Начало имени временного каталога `workPath/stage/<начало>…`, куда отправка пишет свежую
+/// опись после загрузки; оставленный снятым процессом убирает уборка стадии выгрузки.
+pub(crate) const STALE_VERSION_FILE_DIR_PREFIX: &str = "version-file-";
+
 /// Тождество пары «база ↔ каталог», для которой записана копия.
 const IDENTITY_FILE_NAME: &str = "identity";
 
 /// Свидетельство дерева: идентификатор каталога набора, под которым записана копия.
 const TREE_FILE_NAME: &str = "tree";
+
+/// Отметка «последняя выгрузка оставила удаления неизвестными»: пока она стоит, копию не
+/// освежает отправка — свежая опись забыла бы пропавшие элементы, чьи файлы остались в дереве.
+/// Снимает её следующая записанная копия (удачная выгрузка).
+const REMOVALS_UNKNOWN_FILE_NAME: &str = "removals-unknown";
 
 /// Файл версий одного набора — копия раннера в памяти базы.
 #[derive(Debug)]
@@ -44,6 +55,7 @@ pub(crate) struct RunnerVersionFile {
     copy: PathBuf,
     identity_file: PathBuf,
     tree_file: PathBuf,
+    removals_unknown_file: PathBuf,
     identity: String,
 }
 
@@ -59,6 +71,7 @@ impl RunnerVersionFile {
             copy: dir.join(VERSION_FILE_NAME),
             identity_file: dir.join(IDENTITY_FILE_NAME),
             tree_file: dir.join(TREE_FILE_NAME),
+            removals_unknown_file: dir.join(REMOVALS_UNKNOWN_FILE_NAME),
             identity,
         })
     }
@@ -171,6 +184,30 @@ impl RunnerVersionFile {
             .map(|error| self.not_recorded(&error))
     }
 
+    /// Выгрузка по изменившемуся не узнала удалений, и копия осталась прежней: отметка не даёт
+    /// отправке освежить копию, пока следующая выгрузка её не запишет. Предупреждение — если
+    /// отметку записать не удалось.
+    #[must_use]
+    pub(crate) fn mark_removals_unknown(&self) -> Option<String> {
+        let dir = self.removals_unknown_file.parent()?;
+        fs::create_dir_all(dir)
+            .and_then(|()| write_file_atomically(&self.removals_unknown_file, |_| Ok(())))
+            .err()
+            .map(|error| {
+                format!(
+                    "failed to remember that the removals of source-set '{}' are not known in '{}': {error}",
+                    self.source_set,
+                    self.removals_unknown_file.display()
+                )
+            })
+    }
+
+    /// Стоит ли отметка [`Self::mark_removals_unknown`]. Её не прочесть — считается, что стоит:
+    /// копию тогда лучше не освежать.
+    pub(crate) fn removals_unknown(&self) -> bool {
+        !matches!(fs::symlink_metadata(&self.removals_unknown_file), Err(error) if error.kind() == ErrorKind::NotFound)
+    }
+
     fn not_recorded(&self, error: &AppError) -> String {
         format!(
             "the runner's copy of {VERSION_FILE_NAME} for source-set '{}' was not updated: {error}; the next pull may dump more than changed",
@@ -213,7 +250,7 @@ impl RunnerVersionFile {
             identity_writer(&self.identity_file, &self.identity)
                 .map_err(|error| io_error("write", &self.identity_file, &error))?;
         }
-        Ok(())
+        remove_optional(&self.removals_unknown_file)
     }
 }
 
@@ -327,12 +364,17 @@ fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let left = [VERSION_FILE_NAME, IDENTITY_FILE_NAME, TREE_FILE_NAME]
-            .iter()
-            .any(|target| {
-                name.strip_prefix(target)
-                    .is_some_and(|rest| rest.starts_with(ATOMIC_WRITE_CANDIDATE_SUFFIX))
-            });
+        let left = [
+            VERSION_FILE_NAME,
+            IDENTITY_FILE_NAME,
+            TREE_FILE_NAME,
+            REMOVALS_UNKNOWN_FILE_NAME,
+        ]
+        .iter()
+        .any(|target| {
+            name.strip_prefix(target)
+                .is_some_and(|rest| rest.starts_with(ATOMIC_WRITE_CANDIDATE_SUFFIX))
+        });
         if left {
             let path = entry.path();
             fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
@@ -499,6 +541,25 @@ mod tests {
     }
 
     /// Каталог набора, созданный заново (новый клон), копию не подтверждает: выгрузка полная.
+    #[test]
+    fn unknown_removals_are_remembered_until_the_next_copy_is_recorded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let version = version_file(root.path(), "pair-a");
+        assert!(!version.removals_unknown());
+
+        assert_eq!(version.mark_removals_unknown(), None);
+        assert!(version.removals_unknown(), "the mark survives the command");
+
+        assert_eq!(
+            version.record_from(&staged(root.path(), "<ConfigDumpInfo/>")),
+            None
+        );
+        assert!(
+            !version.removals_unknown(),
+            "a recorded copy clears the mark"
+        );
+    }
+
     #[test]
     fn a_recreated_source_directory_does_not_confirm_the_copy() {
         let root = tempfile::tempdir().expect("root");

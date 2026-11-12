@@ -1133,13 +1133,16 @@ fn run_dump_over_directory_ibcmd(
                 let refused = result.process.stderr.trim().to_owned();
                 return full_into(into.output)
                     .map(|result| (result, evidence))
-                    .map_err(|error| match error {
-                        AppError::Platform(message) if !refused.is_empty() => {
-                            AppError::Platform(format!(
-                                "{message}; the dump by changes was refused before it: {refused}"
+                    .map_err(|error| {
+                        // Класс отказа полной выгрузки сохраняется; причина первой попытки — в
+                        // тексте при любом классе.
+                        if refused.is_empty() {
+                            error
+                        } else {
+                            error.with_context(format!(
+                                "the dump by changes was refused before the full dump: {refused}"
                             ))
                         }
-                        other => other,
                     });
             }
             ensure_platform_success("dump", resolved, &result)?;

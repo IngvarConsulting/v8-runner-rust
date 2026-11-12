@@ -701,6 +701,70 @@ fn canonicalize_existing(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
+/// Что частичная загрузка списка `paths` (из [`decide_build`]) оставит следующей выгрузке по
+/// прежней описи (#646): сколько модулей и прочих файлов она выгрузит обратно и не уйдёт ли
+/// она в полную.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LoadedForDump {
+    /// Выгрузка по такой описи будет полной: в списке корневой `Configuration.xml` (удалённый,
+    /// переименованный или добавленный объект, свойства конфигурации — у удаления и
+    /// переименования он в списке всегда, частичная загрузка без него их не принимает) или
+    /// `Ext/Predefined.xml`, `Ext/Flowchart.xml` (документация платформы: такие изменения
+    /// выгружаются полностью).
+    pub(crate) full_dump: bool,
+    /// Модули `.bsl`.
+    pub(crate) modules: usize,
+    /// Остальные файлы: описания объектов, форм, макеты, справка.
+    pub(crate) other: usize,
+}
+
+/// [`LoadedForDump`] списка частичной загрузки `paths` под корнем `source_root`.
+pub(crate) fn loaded_for_dump(paths: &[PathBuf], source_root: &Path) -> LoadedForDump {
+    paths
+        .iter()
+        .fold(LoadedForDump::default(), |mut loaded, path| {
+            let relative = path.strip_prefix(source_root).unwrap_or(path);
+            loaded.full_dump |= forces_a_full_dump(relative);
+            if is_bsl(relative) {
+                loaded.modules += 1;
+            } else {
+                loaded.other += 1;
+            }
+            loaded
+        })
+}
+
+fn forces_a_full_dump(relative: &Path) -> bool {
+    if relative == Path::new(CONFIGURATION_XML) {
+        return true;
+    }
+    let in_ext = relative
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|folder| folder.eq_ignore_ascii_case("Ext"));
+    in_ext
+        && relative.file_name().is_some_and(|name| {
+            name.eq_ignore_ascii_case("Predefined.xml")
+                || name.eq_ignore_ascii_case("Flowchart.xml")
+        })
+}
+
+/// Part of the element a file under its own `Ext` directory belongs to, as the version file
+/// names it: `Catalogs/X/Ext/ObjectModule.bsl` — `Catalog.X.ObjectModule`, `Ext/Help.xml` and
+/// `Ext/Help/…` — `<element>.Help`, a form's `Forms/F/Ext/Form.xml` and `Forms/F/Ext/Form/Module.bsl`
+/// — `Catalog.X.Form.F.Form`. `Ext` counts only right under the element's folder. Such a part
+/// drops out of the version file when only it is removed and the element stays: a dump over the
+/// tree removed its files itself (#646, measured on 8.3.27). A name the version file never had
+/// matches nothing.
+pub(crate) fn part_of_dump_element(path: &Path) -> Option<String> {
+    let element = dump_element(path)?;
+    let mut rest = path.iter().skip(element.folders);
+    rest.next()
+        .filter(|folder| folder.eq_ignore_ascii_case("Ext"))?;
+    let part = Path::new(rest.next()?).file_stem()?.to_str()?;
+    Some(format!("{}.{part}", element.name))
+}
+
 fn is_bsl(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -737,8 +801,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        decide, decide_build, dump_element_of, relative_paths, root_dependencies, write_list_file,
-        LoadDecision, RunnerDirs,
+        decide, decide_build, dump_element_of, loaded_for_dump, part_of_dump_element,
+        relative_paths, root_dependencies, write_list_file, LoadDecision, LoadedForDump,
+        RunnerDirs,
     };
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
 
@@ -791,6 +856,82 @@ mod tests {
             ("Unknowns/Thing.xml", None),
         ] {
             assert_eq!(owner(path).as_deref(), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_part_is_named_only_under_the_ext_folder_of_its_element() {
+        for (path, part) in [
+            (
+                "Catalogs/X/Ext/ObjectModule.bsl",
+                Some("Catalog.X.ObjectModule"),
+            ),
+            ("Catalogs/X/Ext/Help/ru.html", Some("Catalog.X.Help")),
+            (
+                "Catalogs/X/Forms/F/Ext/Form/Module.bsl",
+                Some("Catalog.X.Form.F.Form"),
+            ),
+            (
+                "CommonModules/M/Ext/Module.bsl",
+                Some("CommonModule.M.Module"),
+            ),
+            ("Catalogs/X.xml", None),
+            ("Catalogs/X/Forms/F.xml", None),
+            // `Ext` deeper than the element's own folder is not its part.
+            ("Catalogs/X/Ext/Help/Ext/ru.html", Some("Catalog.X.Help")),
+            (
+                "Catalogs/X/Templates/T/Ext/Template.bin",
+                Some("Catalog.X.Template.T.Template"),
+            ),
+            ("Configuration.xml", None),
+            ("Ext/ManagedApplicationModule.bsl", None),
+        ] {
+            assert_eq!(
+                part_of_dump_element(std::path::Path::new(path)).as_deref(),
+                part,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_load_list_names_what_the_next_dump_takes_back() {
+        let root = std::path::Path::new("/sources");
+        let list =
+            |paths: &[&str]| -> Vec<PathBuf> { paths.iter().map(|p| root.join(p)).collect() };
+
+        assert_eq!(
+            loaded_for_dump(
+                &list(&[
+                    "CommonModules/M/Ext/Module.bsl",
+                    "Catalogs/X.xml",
+                    "Catalogs/X/Forms/F/Ext/Form.xml",
+                ]),
+                root
+            ),
+            LoadedForDump {
+                full_dump: false,
+                modules: 1,
+                other: 2
+            }
+        );
+        for full in [
+            "Configuration.xml",
+            "Catalogs/X/Ext/Predefined.xml",
+            "BusinessProcesses/P/Ext/Flowchart.xml",
+            "Catalogs/X/ext/predefined.XML",
+        ] {
+            assert!(loaded_for_dump(&list(&[full]), root).full_dump, "{full}");
+        }
+        for partial in [
+            "Catalogs/Configuration.xml",
+            "Catalogs/X/Predefined.xml",
+            "Catalogs/X/Ext/Predefined/Item.xml",
+        ] {
+            assert!(
+                !loaded_for_dump(&list(&[partial]), root).full_dump,
+                "{partial}"
+            );
         }
     }
 

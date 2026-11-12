@@ -123,11 +123,15 @@ fn land(
     let copy_warning = match version {
         // Какие элементы пропали, не узнать: новая опись копией не становится, иначе следующая
         // выгрузка уже не увидела бы их удаления. Прежняя копия старше дерева и безопасна.
-        Some(_) if removals == Removals::Unknown => Some(format!(
-            "the removals of the dump of source-set '{}' are not known: a description was not read; the runner's copy was not updated, so the next pull dumps the same changes again; run {} to replace the directory with the base and the copy with its description",
-            resolved.source_set_name,
-            context.advised_pull_force(&resolved.source_set_name)
-        )),
+        // Отметка держит и отправку от свежей описи, пока выгрузка не запишет копию.
+        Some(version) if removals == Removals::Unknown => merge_optional_messages(
+            Some(format!(
+                "the removals of the dump of source-set '{}' are not known: a description was not read; the runner's copy was not updated, so the next pull dumps the same changes again; run {} to replace the directory with the base and the copy with its description",
+                resolved.source_set_name,
+                context.advised_pull_force(&resolved.source_set_name)
+            )),
+            version.mark_removals_unknown(),
+        ),
         Some(version) if description.is_file() => version.record_from(&description),
         Some(_) => Some(format!(
             "the dump of source-set '{}' left no {VERSION_FILE_NAME}; the runner's copy was not updated, so the next pull may dump more than changed",

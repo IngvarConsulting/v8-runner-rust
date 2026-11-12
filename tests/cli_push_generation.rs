@@ -771,8 +771,8 @@ fn project_without_a_push_key() -> Project {
     project
 }
 
-/// Полная отправка через `ibcmd` файла версий не пишет и `config export info` не зовёт
-/// (#646): копии раннера нет, и следующий `pull` по изменившемуся становится полным.
+/// Полная отправка через `ibcmd` освежает копию раннера описью `config export info` (#646):
+/// в каталог набора опись не попадает, а следующий `pull` идёт по изменившемуся по этой копии.
 #[test]
 fn a_full_ibcmd_push_refreshes_the_runner_copy_and_the_next_pull_goes_by_it() {
     let project = project_without_a_push_key();
@@ -804,6 +804,74 @@ fn a_full_ibcmd_push_refreshes_the_runner_copy_and_the_next_pull_goes_by_it() {
     assert_eq!(
         preview["data"]["provider"]["reason"], "by_changes",
         "{preview}"
+    );
+}
+
+/// Последняя выгрузка не узнала удалений (#646): отправка копию не освежает — свежая опись
+/// забыла бы пропавшие элементы, чьи файлы остались в каталоге, — и ответ это называет.
+#[test]
+fn a_push_after_a_pull_with_unknown_removals_leaves_the_copy_and_says_so() {
+    let project = project_without_a_push_key();
+    project.base_generation(FIRST);
+    let memory = project
+        .root()
+        .join(".local/infobases/origin/dump-info/main");
+    fs::create_dir_all(&memory).expect("memory");
+    fs::write(memory.join("removals-unknown"), "").expect("mark");
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
+    assert!(
+        !project.calls().contains("export info"),
+        "{}",
+        project.calls()
+    );
+    assert!(!memory.join("ConfigDumpInfo.xml").exists());
+    assert!(
+        pushed
+            .to_string()
+            .contains("did not learn which elements the infobase dropped"),
+        "{pushed}"
+    );
+    assert!(memory.join("removals-unknown").exists(), "the mark stays");
+}
+
+/// Поколение после загрузки не узнать (#646): копия не освежается, и ответ называет это, а не
+/// молчит.
+#[test]
+fn a_push_without_the_generation_after_the_load_says_the_copy_was_not_refreshed() {
+    let project = project_without_a_push_key();
+    project.base_generation(FIRST);
+    let bin = project
+        .root()
+        .join("platform")
+        .join("8.3.27.2074")
+        .join("bin");
+    let token = project.root().join("token");
+    write_shell_script(
+        &bin.join("ibcmd"),
+        &ibcmd(project.root()).replace(
+            "  *'config export status'*) exit 0 ;;",
+            &format!(
+                "  *'config import'*) rm -f '{}'; exit 0 ;;\n  *'config export status'*) exit 0 ;;",
+                token.display()
+            ),
+        ),
+    );
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
+    assert!(
+        project.calls().contains("config import"),
+        "{}",
+        project.calls()
+    );
+    assert!(!project.calls().contains("export info"));
+    assert!(
+        pushed
+            .to_string()
+            .contains("was not refreshed after the load: the configuration generation after the load is unknown"),
+        "{pushed}"
     );
 }
 

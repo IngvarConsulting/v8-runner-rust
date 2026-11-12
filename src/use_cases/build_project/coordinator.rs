@@ -486,26 +486,30 @@ fn run_build_with(
                     });
                 match loaded {
                     Ok((before, mut warnings, token, apply)) => {
-                        if refreshes_the_version_file(partial_paths.as_deref(), &before) {
-                            warnings.extend(refresh_version_file(
-                                context,
-                                config,
-                                &source_context,
-                                token.as_deref(),
-                                |into| {
-                                    loader.dump_version_file(
-                                        context, config, source_set, index, into,
-                                    )?;
-                                    loader.read_generation(context, config, source_set, index)
-                                },
-                            ));
-                        }
                         let recorded = gate.after_load(
                             &source_context,
                             loader.tool(),
                             token.as_deref(),
                             apply.mark(),
                         );
+                        warnings.extend(version_file_after_load(
+                            context,
+                            config,
+                            &gate,
+                            &source_context,
+                            VersionFileLoad {
+                                main_configuration: source_set.purpose
+                                    == crate::config::model::SourceSetPurpose::Configuration,
+                                partial_paths: partial_paths.as_deref(),
+                                before: &before,
+                                token: token.as_deref(),
+                            },
+                            |into| {
+                                loader
+                                    .dump_version_file(context, config, source_set, index, into)?;
+                                loader.read_generation(context, config, source_set, index)
+                            },
+                        ));
                         let remembered = remember_unapplied(&apply, recorded, || {
                             commit_step_state(
                                 source_set,
@@ -786,7 +790,7 @@ pub(super) fn run_build_ibcmd(
                 let step_started = Instant::now();
                 let runner = utilities.runner_for(UtilityType::Ibcmd);
                 let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
-                // `config export info` замерен только у основной конфигурации (#403).
+                // Опись расширения отдельной выгрузкой не замерена ни у одного исполнителя (#403, #646).
                 let main_configuration =
                     source_set.purpose == crate::config::model::SourceSetPurpose::Configuration;
                 match guarded_load_then(
@@ -795,10 +799,19 @@ pub(super) fn run_build_ibcmd(
                     Provider::Ibcmd,
                     read,
                     |before, token| {
-                        (main_configuration
-                            && refreshes_the_version_file(partial_paths.as_deref(), before))
-                        .then(|| {
-                            refresh_version_file(context, config, &source_context, token, |into| {
+                        let load = VersionFileLoad {
+                            main_configuration,
+                            partial_paths: partial_paths.as_deref(),
+                            before,
+                            token,
+                        };
+                        version_file_after_load(
+                            context,
+                            config,
+                            &gate,
+                            &source_context,
+                            load,
+                            |into| {
                                 let exported = build_ibcmd_dsl(
                                     context,
                                     config,
@@ -814,9 +827,8 @@ pub(super) fn run_build_ibcmd(
                                     ))
                                 })?;
                                 read()
-                            })
-                        })
-                        .flatten()
+                            },
+                        )
                     },
                     || {
                         execute_source_set_step_ibcmd(
@@ -1785,73 +1797,138 @@ fn guarded_load_then(
     Ok(Loaded { warnings, apply })
 }
 
-/// С какого числа загруженных файлов отправка по изменившемуся сразу получает свежий файл
-/// версий (#646). Порог консервативный: запрос описи делается, только когда обратная выгрузка
-/// загруженного следующим `pull` однозначно дороже. Замер на КА 8.3.27 с живым агентом: запрос
-/// одной описи стоит отправке 1,6–1,7 с, а `pull` после отправки 2, 30 и 300 общих модулей без
-/// него дороже лишь на 1,1–1,7 с — разница в пределах разброса; выгрузка дерева КА идёт около
-/// 5 мс на файл, и тысяча файлов — не меньше 5 с против 1,6 с. Раздел «Свежий файл версий
-/// после крупной загрузки (#646)» в `references/1c/confirmed-runtime-measurements.md`.
-const VERSION_FILE_REFRESH_FILES: usize = 1000;
+/// Цена обратной выгрузки загруженного модуля `.bsl` в единицах порога
+/// [`VERSION_FILE_REFRESH_COST`] (#646).
+const MODULE_COST: usize = 1;
 
-/// Получает ли загрузка свежий файл версий: полная — всегда, по изменившемуся — с порога
-/// [`VERSION_FILE_REFRESH_FILES`] и только если поколение перед ней совпало с записанным. Иначе
-/// база могла нести правки, которых нет в каталоге, и свежая опись заявила бы их выгруженными.
-fn refreshes_the_version_file(partial_paths: Option<&[PathBuf]>, before: &BeforeLoad) -> bool {
-    match partial_paths {
-        None => true,
-        Some(paths) => *before == BeforeLoad::Matched && paths.len() >= VERSION_FILE_REFRESH_FILES,
+/// Цена обратной выгрузки загруженного файла, который не модуль: описание объекта, формы,
+/// макет (#646). ЗАМЕР: см. раздел «Свежий файл версий после крупной загрузки (#646)».
+const OTHER_FILE_COST: usize = 10;
+
+/// С какой цены загруженного отправка по изменившемуся сразу получает свежий файл версий (#646).
+/// Порог консервативный: запрос описи делается, только когда обратная выгрузка загруженного
+/// следующим `pull` однозначно дороже. Замер на КА 8.3.27 с живым агентом: запрос одной описи
+/// стоит отправке 1,6–1,7 с, а `pull` после отправки 2, 30 и 300 общих модулей без него дороже
+/// лишь на 1,1–1,7 с — разница в пределах разброса; выгрузка дерева КА идёт около 5 мс на файл.
+/// Раздел «Свежий файл версий после крупной загрузки (#646)» в
+/// `references/1c/confirmed-runtime-measurements.md`.
+const VERSION_FILE_REFRESH_COST: usize = 1000;
+
+/// Получает ли загрузка свежий файл версий: полная — всегда; по изменившемуся — только если
+/// поколение перед ней совпало с записанным (иначе база могла нести правки, которых нет в
+/// каталоге, и свежая опись заявила бы их выгруженными) и если без неё следующая выгрузка
+/// пошла бы полной ([`partial_load::LoadedForDump::full_dump`]) или цена загруженного достигла
+/// порога [`VERSION_FILE_REFRESH_COST`]. Список — тот же, что грузит частичная загрузка.
+fn refreshes_the_version_file(
+    partial_paths: Option<&[PathBuf]>,
+    source_root: &Path,
+    before: &BeforeLoad,
+) -> bool {
+    let Some(paths) = partial_paths else {
+        return true;
+    };
+    if *before != BeforeLoad::Matched {
+        return false;
     }
+    let loaded = crate::change_detection::partial_load::loaded_for_dump(paths, source_root);
+    loaded.full_dump
+        || loaded.modules * MODULE_COST + loaded.other * OTHER_FILE_COST
+            >= VERSION_FILE_REFRESH_COST
 }
 
-/// Свежий файл версий после удачной загрузки (#646): `dump_and_reread` пишет одну опись во
-/// временный каталог под `workPath` и читает поколение снова. Поколение то же, что после загрузки
-/// (`token`), — опись становится копией раннера; иначе, без ответа или при сбое копия остаётся
-/// прежней, и ответ это называет. В каталог набора опись не попадает. Загрузка уже прошла:
-/// сбой здесь её не отменяет.
-fn refresh_version_file(
+/// Что удачная загрузка набора говорит шагу свежего файла версий.
+struct VersionFileLoad<'a> {
+    /// Набор — основная конфигурация: опись расширения отдельной выгрузкой не замерена.
+    main_configuration: bool,
+    /// Список частичной загрузки; `None` — полная.
+    partial_paths: Option<&'a [PathBuf]>,
+    /// Сверка поколения перед загрузкой.
+    before: &'a BeforeLoad,
+    /// Поколение после загрузки, если его спросили.
+    token: Option<&'a str>,
+}
+
+/// Единственный шаг свежего файла версий после удачной загрузки и записи её поколения (#646),
+/// общий для всех исполнителей: решает [`refreshes_the_version_file`], пишет
+/// [`refresh_version_file`]. Строка — для ответа.
+fn version_file_after_load(
     context: &ExecutionContext,
     config: &AppConfig,
+    gate: &GenerationGate<'_>,
     set: &SourceSetContext,
-    token: Option<&str>,
+    load: VersionFileLoad<'_>,
     dump_and_reread: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
 ) -> Option<String> {
+    if !load.main_configuration
+        || !refreshes_the_version_file(load.partial_paths, set.path(), load.before)
+    {
+        return None;
+    }
     let version = RunnerVersionFile::of(set)?;
-    let token = token?;
+    // Без журнала поколение после загрузки не спрашивается, и сказать нечего.
+    let token = match load.token {
+        Some(token) => token,
+        None if gate.generation_after_load_decides(set) => {
+            return Some(not_refreshed(
+                set,
+                "the configuration generation after the load is unknown",
+            ))
+        }
+        None => return None,
+    };
     if crate::use_cases::interruption::pending_interruption_error(
         context,
         "the version file after the load",
     )
     .is_some()
     {
-        return None;
+        return Some(not_refreshed(set, "the command was cancelled"));
     }
+    if version.removals_unknown() {
+        return Some(not_refreshed(
+            set,
+            &format!(
+                "the last pull did not learn which elements the infobase dropped, and a fresh description would forget them while their files stay in the directory; run {} first",
+                context.advised_pull_force(set.name())
+            ),
+        ));
+    }
+    refresh_version_file(config, &version, token, dump_and_reread)
+        .unwrap_or_else(|why| Some(not_refreshed(set, &why)))
+}
+
+/// Свежий файл версий (#646): `dump_and_reread` пишет одну опись во временный каталог под
+/// `workPath/stage` и читает поколение снова. Поколение то же, что после загрузки (`token`), —
+/// опись становится копией раннера (`Ok` с предупреждением, если её не записать); иначе, без
+/// ответа или при сбое копия остаётся прежней, и `Err` называет причину. В каталог набора опись
+/// не попадает. Загрузка уже прошла: сбой здесь её не отменяет. Временный каталог, оставленный
+/// снятым процессом, убирает следующая выгрузка ([`STALE_VERSION_FILE_DIR_PREFIX`]).
+fn refresh_version_file(
+    config: &AppConfig,
+    version: &RunnerVersionFile,
+    token: &str,
+    dump_and_reread: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
+) -> Result<Option<String>, String> {
     let stage = config.work_path.join("stage");
-    let refreshed = std::fs::create_dir_all(&stage)
+    let dir = std::fs::create_dir_all(&stage)
         .and_then(|()| {
             tempfile::Builder::new()
-                .prefix("version-file-")
+                .prefix(crate::use_cases::version_file::STALE_VERSION_FILE_DIR_PREFIX)
                 .tempdir_in(&stage)
         })
-        .map_err(|error| AppError::Runtime(format!("failed to prepare '{}': {error}", stage.display())))
-        .and_then(|dir| {
-            let reread = dump_and_reread(dir.path())?;
-            let staged = dir.path().join(VERSION_FILE_NAME);
-            if reread.as_deref() != Some(token) {
-                return Ok(Err(
-                    "the configuration generation did not confirm that the infobase stayed unchanged".to_owned(),
-                ));
-            }
-            if !staged.is_file() {
-                return Ok(Err(format!("the platform wrote no {VERSION_FILE_NAME}")));
-            }
-            Ok(Ok(version.record_from(&staged)))
-        });
-    match refreshed {
-        Ok(Ok(warning)) => warning,
-        Ok(Err(why)) => Some(not_refreshed(set, &why)),
-        Err(error) => Some(not_refreshed(set, &error.to_string())),
+        .map_err(|error| format!("failed to prepare '{}': {error}", stage.display()))?;
+    let reread = dump_and_reread(dir.path()).map_err(|error| error.to_string())?;
+    if reread.as_deref() != Some(token) {
+        return Err(
+            "the configuration generation did not confirm that the infobase stayed unchanged"
+                .to_owned(),
+        );
     }
+    let staged = dir.path().join(VERSION_FILE_NAME);
+    if !staged.is_file() {
+        return Err(format!("the platform wrote no {VERSION_FILE_NAME}"));
+    }
+    Ok(version.record_from(&staged))
 }
 
 fn not_refreshed(set: &SourceSetContext, why: &str) -> String {
@@ -2303,29 +2380,81 @@ fn generated_copy_loads(
 
 #[cfg(test)]
 mod version_refresh_tests {
-    use super::{refreshes_the_version_file, VERSION_FILE_REFRESH_FILES};
+    use super::{
+        refreshes_the_version_file, MODULE_COST, OTHER_FILE_COST, VERSION_FILE_REFRESH_COST,
+    };
     use crate::use_cases::exchange_guard::BeforeLoad;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    /// Полная загрузка получает свежий файл версий всегда; по изменившемуся — только с порога
-    /// и только при совпавшем перед загрузкой поколении (#646).
+    fn files(root: &Path, name: &str, count: usize) -> Vec<PathBuf> {
+        (0..count)
+            .map(|index| root.join(format!("CommonModules/M{index}/Ext/{name}")))
+            .collect()
+    }
+
+    /// Полная загрузка получает свежий файл версий всегда; по изменившемуся — только при
+    /// совпавшем перед загрузкой поколении и с порога цены (#646).
     #[test]
-    fn a_full_or_a_large_matched_load_refreshes_the_version_file() {
-        let files = |count: usize| vec![PathBuf::from("Module.bsl"); count];
-        let large = files(VERSION_FILE_REFRESH_FILES);
-        let small = files(VERSION_FILE_REFRESH_FILES - 1);
-        assert!(refreshes_the_version_file(None, &BeforeLoad::Unchecked));
+    fn a_full_or_a_costly_matched_load_refreshes_the_version_file() {
+        let root = Path::new("/sources");
+        let modules = VERSION_FILE_REFRESH_COST.div_ceil(MODULE_COST);
+        let large = files(root, "Module.bsl", modules);
+        let small = files(root, "Module.bsl", modules - 1);
+        assert!(refreshes_the_version_file(
+            None,
+            root,
+            &BeforeLoad::Unchecked
+        ));
         assert!(refreshes_the_version_file(
             Some(&large),
+            root,
             &BeforeLoad::Matched
         ));
         assert!(!refreshes_the_version_file(
             Some(&small),
+            root,
             &BeforeLoad::Matched
         ));
         assert!(!refreshes_the_version_file(
             Some(&large),
+            root,
             &BeforeLoad::Unchecked
         ));
+    }
+
+    /// Описание объекта стоит дороже модуля: порог достигается меньшим их числом.
+    #[test]
+    fn a_description_costs_more_than_a_module() {
+        let root = Path::new("/sources");
+        let descriptions = VERSION_FILE_REFRESH_COST.div_ceil(OTHER_FILE_COST);
+        const { assert!(OTHER_FILE_COST > MODULE_COST) };
+        assert!(refreshes_the_version_file(
+            Some(&files(root, "Form.xml", descriptions)),
+            root,
+            &BeforeLoad::Matched
+        ));
+        assert!(!refreshes_the_version_file(
+            Some(&files(root, "Form.xml", descriptions - 1)),
+            root,
+            &BeforeLoad::Matched
+        ));
+    }
+
+    /// Изменение, после которого выгрузка по прежней описи шла бы полной, освежает опись при
+    /// любом числе файлов — но только при совпавшем поколении.
+    #[test]
+    fn a_change_the_platform_dumps_in_full_refreshes_the_version_file() {
+        let root = Path::new("/sources");
+        for path in ["Configuration.xml", "Catalogs/X/Ext/Predefined.xml"] {
+            let list = [root.join(path)];
+            assert!(
+                refreshes_the_version_file(Some(&list), root, &BeforeLoad::Matched),
+                "{path}"
+            );
+            assert!(
+                !refreshes_the_version_file(Some(&list), root, &BeforeLoad::Unchecked),
+                "{path}"
+            );
+        }
     }
 }

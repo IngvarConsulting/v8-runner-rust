@@ -847,24 +847,45 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
     assert_eq!(read(&version_file), left);
 }
 
-/// Агент загружает без `--update-config-dump-info`: опись в каталог загрузки не пишется, и
-/// копии раннера загрузка не делает (#646).
+/// Полная отправка через агента грузит без `--update-config-dump-info` — опись в каталог загрузки
+/// не пишется, — а копию раннера освежает отдельной выгрузкой одной описи (#646).
 #[test]
-fn an_agent_push_passes_no_update_key() {
+fn an_agent_full_push_passes_no_update_key_and_refreshes_the_copy_separately() {
+    let project = project("agent", false);
+
+    succeeded(run(&project, &["push", "--force"]));
+
+    let calls = read(&project.calls);
+    assert!(calls.contains("load-config-from-files"), "{calls}");
+    assert!(!calls.contains("--update-config-dump-info"), "{calls}");
+    assert!(calls.contains("--config-dump-info-only"), "{calls}");
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    assert!(runner_copy(&project).is_file(), "{calls}");
+}
+
+/// Частичная отправка через агента ниже порога грузит без `--update-config-dump-info`, опись
+/// отдельно не выгружает и копию раннера не меняет (#646).
+#[test]
+fn an_agent_partial_push_passes_no_update_key_and_leaves_the_copy() {
     let project = project("agent", false);
     succeeded(run(&project, &["push", "--force"]));
+    let copy = fs::read(runner_copy(&project)).ok();
+    let before = read(&project.calls).len();
     fs::write(
         project.sources.join("Module.bsl"),
         "Procedure Edited()\nEndProcedure\n",
     )
     .expect("edit");
+
     succeeded(run(&project, &["push"]));
 
     let calls = read(&project.calls);
+    let calls = &calls[before..];
     assert!(calls.contains("load-config-from-files"), "{calls}");
     assert!(!calls.contains("--update-config-dump-info"), "{calls}");
+    assert!(!calls.contains("--config-dump-info-only"), "{calls}");
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
-    assert!(!runner_copy(&project).exists());
+    assert_eq!(fs::read(runner_copy(&project)).ok(), copy);
 }
 
 #[test]
