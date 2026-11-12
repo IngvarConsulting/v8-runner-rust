@@ -2240,10 +2240,7 @@ mod tests {
             std::fs::read_to_string(dir.path().join("v8project.yaml")).expect("project config");
         assert!(!project_config.contains("infobase"), "{project_config}");
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(
-            gitignore,
-            "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
-        );
+        assert_eq!(gitignore, "v8project.local.yaml\n.dump-*.lock*\n");
     }
 
     #[test]
@@ -2282,7 +2279,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert_eq!(
             gitignore,
-            "# local state\n**/v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            "# local state\n**/v8project.local.yaml\n.dump-*.lock*\n"
         );
     }
 
@@ -2589,7 +2586,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert_eq!(
             gitignore,
-            "docs/v8project.local.yaml\nv8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            "docs/v8project.local.yaml\nv8project.local.yaml\n.dump-*.lock*\n"
         );
     }
 
@@ -2610,10 +2607,7 @@ mod tests {
         .expect("init config");
 
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(
-            gitignore,
-            "*.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
-        );
+        assert_eq!(gitignore, "*.local.yaml\n.dump-*.lock*\n");
     }
 
     #[test]
@@ -2639,7 +2633,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert_eq!(
             gitignore,
-            "v8project.local.yaml\n!v8project.local.yaml\nv8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            "v8project.local.yaml\n!v8project.local.yaml\nv8project.local.yaml\n.dump-*.lock*\n"
         );
     }
 
@@ -2670,14 +2664,11 @@ mod tests {
             .join("config")
             .join("v8project.local.yaml")
             .exists());
-        // Опись и замок лежат в каталогах наборов, а не рядом с конфигом: шаблоны
+        // Замок лежит в каталогах наборов, а не рядом с конфигом: шаблоны
         // уходят в корневой `.gitignore`, местный слой там уже покрыт.
         assert!(!dir.path().join("config").join(".gitignore").exists());
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(
-            gitignore,
-            "config/v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
-        );
+        assert_eq!(gitignore, "config/v8project.local.yaml\n.dump-*.lock*\n");
         assert_eq!(
             result.gitignore_path,
             canonical(dir.path())

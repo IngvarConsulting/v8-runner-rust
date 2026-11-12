@@ -864,21 +864,23 @@ async fn mcp_http_dump_config_partial_ibcmd_returns_degraded_success() {
     assert_envelope_success(structured, "pull");
     assert_eq!(structured["data"]["ok"], true);
     assert_eq!(structured["data"]["requested_mode"], "PARTIAL");
-    assert_eq!(structured["data"]["mode"], "INCREMENTAL");
+    // Без копии описи раннера выборка `ibcmd` идёт полной выгрузкой (#646).
+    assert_eq!(structured["data"]["mode"], "FULL");
     assert!(structured["data"]["message"]
         .as_str()
         .expect("message")
         .contains("IBCMD does not support object-scoped partial dump"));
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
-        .contains("--sync"));
+        .contains("--force"));
 
     server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() {
-    let (_dir, config_path, url, calls_log) = setup_http_ibcmd_dump_project(Some("--sync"), 4, 900);
+    let (_dir, config_path, url, calls_log) =
+        setup_http_ibcmd_dump_project(Some("--force"), 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
         .timeout(HTTP_CLIENT_TIMEOUT)
@@ -915,7 +917,7 @@ async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() 
         .contains("dump failed for source-set 'main' with exit code 17"));
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
-        .contains("--sync"));
+        .contains("--force"));
 
     server.shutdown().await;
 }

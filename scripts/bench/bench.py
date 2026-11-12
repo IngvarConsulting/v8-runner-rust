@@ -28,7 +28,7 @@ import flag  # noqa: E402
 import report  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(HERE))
-LIVE_KINDS = ("push", "pull")  # kinds that use the runner's agent; runner-live warms it up first
+LIVE_KINDS = ("push", "pull", "pair")  # kinds that use the runner's agent; runner-live warms it up first
 
 
 def say(text):
@@ -289,6 +289,35 @@ class Bench:
         shutil.rmtree(dump, ignore_errors=True)
         self.resync(rels, marker)
         return row
+
+    # -- pair: `push --no-apply` and the next `pull` by changes (#646); the database configuration
+    # is not updated, as in the bare-agent measurement the pair is compared with
+    def pair_runner(self, scn, executor, rels, originals, marker):
+        ex.write_files(self.stand.src, {rel: ex.marked(originals[rel], marker) for rel in rels})
+        commit(self.stand.project, f"bench {marker}")
+        self.base_marked = True  # set before the call: a failed push may have loaded part of it
+        push, _ = self.runner.run(f"pair-push-{scn.name}-{executor}", "push", self.stand.source_set,
+                                  "--no-apply", *scn.runner_args)
+        if push["rc"]:
+            self.needs_resync = True
+            raise ex.StepFailed(f"push rc={push['rc']} {push['error']}: {push['message']}")
+        pull, _ = self.runner.run(f"pair-pull-{scn.name}-{executor}", "pull", self.stand.source_set)
+        if pull["rc"]:
+            self.needs_resync = True
+            raise ex.StepFailed(f"pull rc={pull['rc']} {pull['error']}: {pull['message']}")
+        dirty = git(self.stand.project, "status", "--porcelain", "--", ".").stdout.strip().splitlines()
+        row = {"seconds": round(push["seconds"] + pull["seconds"], 2),
+               "steps": {"push": push["seconds"], "pull": pull["seconds"]},
+               "mode": pull.get("mode"), "live": (push.get("live") or []) + (pull.get("live") or []),
+               "dirty": dirty[:10]}
+        # After the pair the tree is what was committed: the dump rewrote the loaded objects
+        # with the same text and brought nothing else.
+        row["verified"] = self.markers_in(self.stand.src, rels, marker) and not dirty
+        commit(self.stand.project, f"bench {marker}: pulled")
+        return row
+
+    def pair_other(self, scn, executor, rels, originals, marker):
+        raise ex.StepFailed("the pair is measured for the runner only")
 
     # -- status: nothing changed; ask what changed
     def status_runner(self, scn, executor, rels, originals, marker):

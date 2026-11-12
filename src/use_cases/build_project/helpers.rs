@@ -754,28 +754,3 @@ pub(super) fn read_ibcmd_generation(
         extension_name(source_set),
     )
 }
-
-/// Один файл версий набора в каталог загрузки — `-configDumpInfoOnly` Конфигуратора.
-pub(super) fn dump_designer_version_file(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-    source_set: &SourceSetConfig,
-    load_context: &SourceSetContext,
-    step_index: usize,
-) -> Result<(), AppError> {
-    let result = build_designer_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        &source_set.name,
-        step_index,
-        "dump-info",
-        InterruptionSafetyClass::GracefulThenKill,
-    )?
-    .dump_config_dump_info_only(load_context.path(), extension_name(source_set))
-    .map_err(AppError::from)?;
-    ensure_platform_success("dump_info", source_set, &result)
-}

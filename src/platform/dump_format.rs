@@ -6,7 +6,7 @@
 //! и её видно до запуска платформы. Тот же атрибут несёт корень `Configuration.xml` — версию
 //! формата самих исходников, которую проверяет загрузка. Файлы раннер не разбирает: читается
 //! только этот атрибут корневого элемента. Исключение — опись элементов файла версий
-//! ([`read_dump_elements`]): по ней раннер переносит удаления выгрузки агента по SFTP.
+//! ([`read_dump_elements`]): по ней раннер переносит удаления выгрузки по изменившемуся.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -134,17 +134,23 @@ pub fn read_recorded(path: &Path) -> io::Result<RecordedFormat> {
 /// нет, он не читается (`NotFound` и прочие ошибки чтения) или не разобран (`InvalidData`:
 /// корень не `ConfigDumpInfo`, у элемента нет имени, XML испорчен). По такой описи судить, что
 /// пропало, нельзя.
+///
+/// Опись большой конфигурации весит десятки мегабайт (КА — 42 МБ, 95 тыс. элементов), и разбор
+/// стоит на пути `pull` (#646): файл читается потоком, в память попадают только имена, а
+/// остальные атрибуты не разбираются.
 pub fn read_dump_elements(path: &Path) -> io::Result<HashSet<String>> {
     use quick_xml::events::Event;
 
     let invalid = |what: String| io::Error::new(ErrorKind::InvalidData, what);
-    let text = std::fs::read_to_string(path)?;
-    let mut reader = quick_xml::Reader::from_str(text.trim_start_matches('\u{feff}'));
+    let file = File::open(path)?;
+    let mut reader = quick_xml::Reader::from_reader(io::BufReader::with_capacity(1 << 20, file));
+    let mut buffer = Vec::with_capacity(4096);
     let mut names = HashSet::new();
     let mut seen_root = false;
     loop {
+        buffer.clear();
         match reader
-            .read_event()
+            .read_event_into(&mut buffer)
             .map_err(|error| invalid(error.to_string()))?
         {
             Event::Start(tag) | Event::Empty(tag) => {

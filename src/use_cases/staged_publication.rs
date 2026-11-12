@@ -237,47 +237,41 @@ impl StagedPublication {
         })
     }
 
-    /// Кладёт промежуточный каталог поверх целевого и убирает промежуточный: файлы
-    /// переносятся на место переименованием, то, чего в выгрузке нет, остаётся. Так ложится
-    /// полная выгрузка `ibcmd`, которая в непустой каталог не пишет
-    /// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
-    ///
-    /// Файл `last` (файл версий) переносится последним: по нему следующая выгрузка решает,
-    /// что каталог совпадает с базой. Оборванный перенос этот файл в целевом каталоге
-    /// удаляет, и следующая выгрузка снова идёт полной. Возвращает предупреждение, если
-    /// промежуточный каталог убрать не удалось: его узнает уборка по описанию.
+    /// Кладёт каталог `produced`, который выгрузка написала внутри промежуточного, поверх
+    /// целевого: файлы переносятся на место переименованием, то, чего в выгрузке нет,
+    /// остаётся. Файл `kept` в корне `produced` (опись версий) остаётся в стадии: в каталог
+    /// набора раннер её не кладёт (#646), а забирает в свою память. Промежуточный каталог
+    /// убирает [`Self::discard`].
     pub fn lay_over_dir(
         &self,
         context: &ExecutionContext,
         error_prefix: &str,
-        last: &str,
-    ) -> Result<Option<String>, AppError> {
+        produced: &Path,
+        kept: &str,
+    ) -> Result<(), AppError> {
         if let Some(error) = interruption_before_publish(context, "staged directory overlay") {
             return Err(self.cleanup_failure(error));
         }
-        let laid =
-            move_tree_over(&self.staging_path, &self.target_path, Path::new(last)).and_then(|()| {
-                let staged_last = self.staging_path.join(last);
-                if staged_last.exists() {
-                    move_file(&staged_last, &self.target_path.join(last))?;
-                }
-                Ok(())
-            });
-        if let Err(error) = laid {
-            let _ = remove_path_if_exists(&self.target_path.join(last));
-            return Err(self.cleanup_failure(AppError::Runtime(format!(
-                "{error_prefix}: {error}; the version file was removed, so the next dump is full"
-            ))));
+        if !produced.is_dir() {
+            return Ok(());
         }
+        move_tree_over(produced, &self.target_path, Path::new(kept)).map_err(|error| {
+            self.cleanup_failure(AppError::Runtime(format!("{error_prefix}: {error}")))
+        })
+    }
+
+    /// Убирает промежуточный каталог. Возвращает предупреждение, если убрать его не удалось:
+    /// его узнает уборка по описанию.
+    pub fn discard(&self) -> Option<String> {
         let sidecar = metadata_sidecar_path(&self.staging_path);
         let cleanup = remove_path_if_exists(&self.staging_path)
             .and_then(|()| remove_path_if_exists(&sidecar));
-        Ok(cleanup.err().map(|error| {
+        cleanup.err().map(|error| {
             format!(
                 "failed to remove the dump stage '{}': {error}; the next run removes it once it is stale",
                 self.staging_path.display()
             )
-        }))
+        })
     }
 
     pub fn publish_file(

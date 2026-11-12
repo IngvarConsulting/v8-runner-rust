@@ -38,6 +38,13 @@ assert_file_exists() {
     fi
 }
 
+assert_file_missing() {
+    local path="$1"
+    if [[ -e "$path" ]]; then
+        die "Unexpected file was produced: $path"
+    fi
+}
+
 assert_file_nonempty() {
     local path="$1"
     if [[ ! -s "$path" ]]; then
@@ -479,13 +486,13 @@ run_extended_steps() {
         "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     run_cli pull "$CONFIGURATION_SOURCE_SET_NAME" --force
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Configuration.xml"
-    assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
+    # Опись версий живёт только в памяти раннера (#646): в каталоге набора её нет.
+    assert_file_missing "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/full"
 
-    rm -f "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     run_cli pull "$CONFIGURATION_SOURCE_SET_NAME"
     assert_dir_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH"
-    assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
+    assert_file_missing "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/incremental"
 
     rm -f "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Catalogs/Справочник1.xml"
@@ -493,9 +500,8 @@ run_extended_steps() {
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Catalogs/Справочник1.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/partial"
 
-    rm -f "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     run_cli pull "$EXTENSION_SOURCE_SET_NAME" --extension "$EXTENSION_SOURCE_SET_NAME"
-    assert_file_exists "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
+    assert_file_missing "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH" "$dump_root/extension-incremental"
 }
 

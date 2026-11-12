@@ -83,71 +83,31 @@ impl<'a> DesignerDsl<'a> {
         }
     }
 
-    /// `/LoadConfigFromFiles <dir> -updateConfigDumpInfo`
+    /// `/LoadConfigFromFiles <dir> [-Extension <name>]` без `-updateConfigDumpInfo`: файл
+    /// версий раннер держит в своей памяти, а не в каталоге исходников, и загрузка его не
+    /// пишет (#646): ключ стоил загрузке на КА 1,8 с.
     pub fn load_config_from_files_full(
         &self,
         source_dir: &Path,
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, DesignerError> {
-        self.run(&self.load_config_from_files_args(source_dir, true, extension))
-    }
-
-    /// `/LoadConfigFromFiles <dir> [-Extension <name>]` без `-updateConfigDumpInfo`: файл
-    /// версий в каталоге исходников не пишется. Так `make` загружает исходники во временную
-    /// базу раннера — исходники при сборке пакета не меняются (замер #182).
-    pub fn load_config_from_files_untouched(
-        &self,
-        source_dir: &Path,
-        extension: Option<&str>,
-    ) -> Result<PlatformCommandResult, DesignerError> {
-        self.run(&self.load_config_from_files_args(source_dir, false, extension))
-    }
-
-    fn load_config_from_files_args(
-        &self,
-        source_dir: &Path,
-        update_dump_info: bool,
-        extension: Option<&str>,
-    ) -> Vec<String> {
         let mut args = self.base_args();
         args.push("/LoadConfigFromFiles".to_owned());
         args.push(source_dir.display().to_string());
-        if update_dump_info {
-            args.push("-updateConfigDumpInfo".to_owned());
-        }
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
-        args
+        self.run(&args)
     }
 
-    /// `/LoadConfigFromFiles <dir> -partial -listFile <list_file> -updateConfigDumpInfo`
+    /// `/LoadConfigFromFiles <dir> -partial -listFile <list_file> [-Extension <name>]`, тоже
+    /// без `-updateConfigDumpInfo`.
     pub fn load_config_from_files_partial(
         &self,
         source_dir: &Path,
         list_file: &Path,
         extension: Option<&str>,
-    ) -> Result<PlatformCommandResult, DesignerError> {
-        self.load_config_from_files_partial_with_policy(source_dir, list_file, extension, true)
-    }
-
-    /// Partial load for package builds, leaving the source tree untouched.
-    pub fn load_config_from_files_partial_untouched(
-        &self,
-        source_dir: &Path,
-        list_file: &Path,
-        extension: Option<&str>,
-    ) -> Result<PlatformCommandResult, DesignerError> {
-        self.load_config_from_files_partial_with_policy(source_dir, list_file, extension, false)
-    }
-
-    fn load_config_from_files_partial_with_policy(
-        &self,
-        source_dir: &Path,
-        list_file: &Path,
-        extension: Option<&str>,
-        update_dump_info: bool,
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/LoadConfigFromFiles".to_owned());
@@ -155,9 +115,6 @@ impl<'a> DesignerDsl<'a> {
         args.push("-partial".to_owned());
         args.push("-listFile".to_owned());
         args.push(list_file.display().to_string());
-        if update_dump_info {
-            args.push("-updateConfigDumpInfo".to_owned());
-        }
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -444,24 +401,8 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> -update [-Extension <name>]`
-    pub fn dump_config_to_files_incremental(
-        &self,
-        target_dir: &Path,
-        extension: Option<&str>,
-    ) -> Result<PlatformCommandResult, DesignerError> {
-        let mut args = self.base_args();
-        args.push("/DumpConfigToFiles".to_owned());
-        args.push(target_dir.display().to_string());
-        args.push("-update".to_owned());
-        if let Some(extension) = extension {
-            args.push("-Extension".to_owned());
-            args.push(extension.to_owned());
-        }
-        self.run(&args)
-    }
-
-    /// `/DumpConfigToFiles <dir> -configDumpInfoOnly [-Extension <name>]`: только файл версий.
+    /// `/DumpConfigToFiles <dir> -configDumpInfoOnly [-Extension <name>]`: только файл версий —
+    /// свежая опись после крупной загрузки (#646).
     pub fn dump_config_dump_info_only(
         &self,
         target_dir: &Path,
@@ -471,6 +412,28 @@ impl<'a> DesignerDsl<'a> {
         args.push("/DumpConfigToFiles".to_owned());
         args.push(target_dir.display().to_string());
         args.push("-configDumpInfoOnly".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
+    /// `/DumpConfigToFiles <dir> -update -configDumpInfoForChanges <file> [-Extension <name>]`:
+    /// в каталог, которого ещё нет, — только изменённое относительно описи `version_file` и
+    /// новая полная опись; после удаления элемента — всё (замер «-configDumpInfoForChanges», #646).
+    pub fn dump_config_to_files_for_changes(
+        &self,
+        target_dir: &Path,
+        version_file: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpConfigToFiles".to_owned());
+        args.push(target_dir.display().to_string());
+        args.push("-update".to_owned());
+        args.push("-configDumpInfoForChanges".to_owned());
+        args.push(version_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -1278,7 +1241,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dump_config_to_files_incremental_requests_update() {
+    fn dump_config_to_files_for_changes_passes_the_runner_copy() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("1cv8");
         let args_log = dir.path().join("args.log");
@@ -1295,12 +1258,20 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.dump_config_to_files_incremental(dir.path().join("out").as_path(), Some("ExtName"))
-            .expect("dump config incremental");
+        dsl.dump_config_to_files_for_changes(
+            dir.path().join("out").as_path(),
+            dir.path().join("copy.xml").as_path(),
+            Some("ExtName"),
+        )
+        .expect("dump config incremental");
 
         let args = fs::read_to_string(args_log).expect("args log");
         assert!(args.contains("/DumpConfigToFiles"));
-        assert!(args.contains("-update"));
+        assert!(
+            args.contains("-update\n-configDumpInfoForChanges\n"),
+            "{args}"
+        );
+        assert!(args.contains("copy.xml"), "{args}");
         assert!(!args.contains("-updateConfigDumpInfo"));
         assert!(args.contains("-Extension"));
         assert!(args.contains("ExtName"));

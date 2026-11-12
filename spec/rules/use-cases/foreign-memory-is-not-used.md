@@ -5,7 +5,7 @@ check:
   - tests/cli_push_generation.rs::a_full_push_with_memory_of_another_base_is_refused_as_no_memory
   - tests/cli_push_generation.rs::a_generation_record_does_not_make_memory_of_another_pair_own
   - src/change_detection/source_sets.rs::base_snapshots_remain_separate_and_reject_a_retargeted_base
-  - src/use_cases/version_file.rs::a_copy_of_another_pair_is_not_restored
+  - src/use_cases/version_file.rs::a_copy_of_another_pair_is_not_used
   - src/use_cases/agent_session.rs::a_generation_recorded_for_another_pair_is_not_used
 ---
 
@@ -21,7 +21,7 @@ check:
 или каталога. Решение владельца от 06.10.2026: выход каталога — `push --force`, а не
 `--full`, потому что `--full` проверки памяти не обходит.
 
-Остальная память о базе хранит рядом ту же привязку. Копия файла версий другой пары не
-подкладывается в каталог (`INV.USE-CASES.A-REPLACED-VERSION-FILE-GIVES-WAY-TO-THE-RUNNER-COPY`).
+Остальная память о базе хранит рядом ту же привязку. Копия файла версий другой пары выгрузке
+по изменившемуся не годится (`INV.USE-CASES.THE-VERSION-FILE-LIVES-ONLY-IN-THE-RUNNER-MEMORY`).
 Запись о поколении другой пары не даёт агенту пропустить выгрузку, и ответ выгрузки
 называет её чужой.

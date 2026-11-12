@@ -473,7 +473,7 @@ impl BuildSession {
                                 log_file.clone(),
                                 InterruptionSafetyClass::GracefulThenKill,
                             )
-                            .load_config_from_files_partial_untouched(
+                            .load_config_from_files_partial(
                                 item.context.path(),
                                 &list,
                                 item.extension,

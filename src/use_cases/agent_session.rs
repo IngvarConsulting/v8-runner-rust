@@ -1446,14 +1446,7 @@ pub(crate) fn stage_dir_partially(
                 .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?,
         );
     }
-    selected.extend(
-        [
-            configuration,
-            local.join(crate::use_cases::ignored_files::VERSION_FILE_NAME),
-        ]
-        .into_iter()
-        .filter(|path| path.is_file()),
-    );
+    selected.extend(Some(configuration).filter(|path| path.is_file()));
     selected.sort_unstable();
     selected.dedup();
     let paths = relative_paths(&selected, local)

@@ -344,14 +344,14 @@ fn a_push_after_an_apply_that_changed_the_generation_is_not_refused() {
 #[test]
 fn a_pull_after_a_push_without_apply_is_up_to_date() {
     let project = Project::new();
-    // Выгрузка по изменившемуся идёт только при файле версий: он принадлежит базе и в git
-    // не хранится.
-    fs::write(project.root().join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
-    fs::write(
-        project.root().join("sources").join("ConfigDumpInfo.xml"),
+    // Выгрузка по изменившемуся идёт только по копии описи раннера (#646).
+    support::memory::remember_version_file(
+        project.root(),
+        "origin",
+        support::memory::Base::File(&project.root().join("ib")),
+        &support::memory::Set::configuration("main", &project.root().join("sources")),
         "<ConfigDumpInfo version=\"2.20\"/>\n",
-    )
-    .expect("version file");
+    );
     support::commit_sources(project.root());
     succeeded(&project.run(&["push", "--force"]));
     project.edit();

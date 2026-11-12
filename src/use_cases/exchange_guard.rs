@@ -40,7 +40,6 @@ use crate::use_cases::agent_session::{
     ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded, TokenScope,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 use crate::use_cases::request::PushMode;
 use crate::use_cases::result::{Generations, UseCaseError, UseCaseErrorKind};
 
@@ -576,15 +575,6 @@ pub(crate) fn predict(
     }
 }
 
-/// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoadExtent {
-    /// Набор загружен целиком.
-    Whole,
-    /// Загружены изменившиеся файлы.
-    Partial,
-}
-
 /// Что показало поколение перед загрузкой.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeforeLoad {
@@ -1005,82 +995,10 @@ impl<'a> GenerationGate<'a> {
     }
 
     /// Решает ли что-нибудь поколение после удачной загрузки набора: его ответ нужен записи
-    /// поколения (у набора есть журнал) и восстановлению потерянного файла версий
-    /// ([`Self::restore_version_file`]; `restore` — загрузка и сверка перед ней у
-    /// исполнителя, который его восстанавливает). Иначе второй запрос не уходит (#637).
-    pub(crate) fn generation_after_load_decides(
-        &self,
-        set: &SourceSetContext,
-        restore: Option<(LoadExtent, &BeforeLoad)>,
-    ) -> bool {
+    /// поколения, если у набора есть журнал. Иначе второй запрос не уходит (#637). Файла версий
+    /// загрузка не касается (#646), и ради него поколение не спрашивается.
+    pub(crate) fn generation_after_load_decides(&self, set: &SourceSetContext) -> bool {
         GenerationLedger::of(set).is_some()
-            || restore
-                .is_some_and(|(extent, before)| self.may_restore_version_file(set, extent, before))
-    }
-
-    /// Можно ли выгрузить один файл версий набора после загрузки: его нет в каталоге, совпадение
-    /// каталога и базы доказано, и отмены не было.
-    fn may_restore_version_file(
-        &self,
-        set: &SourceSetContext,
-        extent: LoadExtent,
-        before: &BeforeLoad,
-    ) -> bool {
-        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
-        proven
-            && !set.path().join(VERSION_FILE_NAME).exists()
-            && crate::use_cases::interruption::pending_interruption_error(
-                self.context,
-                "the configuration generation",
-            )
-            .is_none()
-    }
-
-    /// Восстановление потерянного файла версий без полной выгрузки
-    /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
-    ///
-    /// Сразу после удачной загрузки, если файла версий в каталоге набора нет, а совпадение
-    /// каталога и базы доказано — загрузка была полной или поколение перед частичной совпало
-    /// с записанным, — выгружается один файл версий: `dump_and_reread` выгружает его и
-    /// читает поколение снова, а `None` значит, что инструмент этого не умеет. Поколение после
-    /// загрузки и после выгрузки сравнивается тем же инструментом: изменилось или ответа нет
-    /// — файл убирается. Возвращает строку для ответа.
-    pub(crate) fn restore_version_file(
-        &self,
-        set: &SourceSetContext,
-        extent: LoadExtent,
-        before: &BeforeLoad,
-        token: Option<&str>,
-        dump_and_reread: impl FnOnce() -> Option<Result<Option<String>, AppError>>,
-    ) -> Option<String> {
-        let token = token?;
-        if !self.may_restore_version_file(set, extent, before) {
-            return None;
-        }
-        let file = set.path().join(VERSION_FILE_NAME);
-        match dump_and_reread()? {
-            Ok(Some(after)) if after == token && file.is_file() => Some(format!(
-                "{VERSION_FILE_NAME} was missing from source-set '{}' and was dumped alone, without a full dump: the directory matches the infobase",
-                set.name()
-            )),
-            Ok(_) | Err(_) => Some(match std::fs::remove_file(&file) {
-                Ok(()) => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged while it was dumped; the next pull runs full",
-                    set.name()
-                ),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
-                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged; the next pull runs full",
-                    set.name()
-                ),
-                // Оставшийся файл объявил бы каталог совпадающим с базой: его называют, чтобы
-                // его убрали до следующей выгрузки по изменившемуся.
-                Err(error) => format!(
-                    "{VERSION_FILE_NAME} was dumped alone into source-set '{}' while the configuration generation did not confirm that the infobase stayed unchanged, and it could not be removed: {error}; delete '{}' before the next pull, otherwise it claims that the directory matches the infobase",
-                    set.name(),
-                    file.display()
-                ),
-            }),
-        }
     }
 }
 
@@ -1436,8 +1354,7 @@ mod tests {
     /// Второй запрос поколения после загрузки уходит, только когда ответ что-то решает (#637):
     /// у набора с журналом — всегда, его ответ записывается
     /// (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`); у набора без журнала
-    /// — только ради восстановления потерянного файла версий
-    /// (`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`).
+    /// — никогда: файла версий загрузка не касается (#646).
     #[test]
     fn the_generation_after_a_load_is_asked_only_when_it_decides_something() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1446,20 +1363,9 @@ mod tests {
         let gate = GenerationGate::new(&context, &config, PushMode::Changes);
         let remembered = &SourceSetsService::new(&config).designer_contexts()[0];
         let unremembered = remembered.clone().without_memory();
-        let whole = Some((LoadExtent::Whole, &BeforeLoad::Unchecked));
-        let unproven = Some((LoadExtent::Partial, &BeforeLoad::Unchecked));
 
-        // Файла версий нет: полная загрузка может его восстановить, частичная без сверки — нет.
-        assert!(gate.generation_after_load_decides(remembered, None));
-        assert!(gate.generation_after_load_decides(remembered, unproven));
-        assert!(gate.generation_after_load_decides(&unremembered, whole));
-        assert!(!gate.generation_after_load_decides(&unremembered, unproven));
-        assert!(!gate.generation_after_load_decides(&unremembered, None));
-
-        // Файл версий на месте: восстанавливать нечего.
-        std::fs::write(unremembered.path().join(VERSION_FILE_NAME), "").expect("version file");
-        assert!(!gate.generation_after_load_decides(&unremembered, whole));
-        assert!(gate.generation_after_load_decides(remembered, whole));
+        assert!(gate.generation_after_load_decides(remembered));
+        assert!(!gate.generation_after_load_decides(&unremembered));
     }
 
     /// Поколение расширения, записанное `ibcmd`, у отправки агентом спрашивает `ibcmd` своим

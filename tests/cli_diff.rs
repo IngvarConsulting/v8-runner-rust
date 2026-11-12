@@ -66,6 +66,15 @@ impl Project {
             ),
         )
         .unwrap();
+        // Опись версий — в памяти раннера; рядом в исходниках лежит та же опись прежней версии
+        // раннера, и копия годится по переходу со старой памяти (#646).
+        support::memory::remember_version_file_of_an_earlier_runner(
+            &root,
+            "origin",
+            support::memory::Base::File(&base),
+            &support::memory::Set::configuration("main", &root.join("src")),
+            BASELINE,
+        );
         Self { root, base }
     }
 
@@ -344,45 +353,33 @@ fn owner_boundary_warns_for_status_and_preserves_marker_for_both_forms() {
     assert_eq!(fs::read(other.marker()).unwrap(), marker);
 }
 
+/// `diff` берёт опись из памяти раннера (#646) и исходники не трогает. Копия, чьё тождество
+/// чужое, или копия прежней версии раннера рядом с другим файлом в исходниках не годится:
+/// файл в исходниках вместо неё не читается, и `diff` отказывает до платформы.
 #[test]
 fn version_file_is_resolved_without_rewriting_the_sources() {
     let dir = tempfile::tempdir().unwrap();
     let project = Project::new(dir.path(), "project", Some("designer"));
-    support::memory::remember_base(
-        &project.root,
-        "origin",
-        support::memory::Base::File(&project.base),
-        &[support::memory::Set::configuration(
-            "main",
-            &project.root.join("src"),
-        )],
-    );
-    let memory: Value = serde_json::from_slice(
-        &fs::read(project.root.join(".local/infobases/origin/generation.json")).unwrap(),
-    )
-    .unwrap();
     let copy = project.root.join(".local/infobases/origin/dump-info/main");
-    fs::create_dir_all(&copy).unwrap();
-    fs::write(copy.join(VERSION_FILE), "saved version file").unwrap();
-    fs::write(
-        copy.join("identity"),
-        memory["main"]["identity"].as_str().unwrap(),
-    )
-    .unwrap();
-    envelope(project.run(&[], ""), true);
-    assert_eq!(
-        fs::read_to_string(project.root.join("baseline.txt")).unwrap(),
-        "saved version file"
-    );
-    let local = project.root.join("src").join(VERSION_FILE);
-    assert_eq!(fs::read_to_string(&local).unwrap(), BASELINE);
-    fs::write(copy.join("identity"), "foreign pair").unwrap();
     envelope(project.run(&[], ""), true);
     assert_eq!(
         fs::read_to_string(project.root.join("baseline.txt")).unwrap(),
         BASELINE
     );
-    fs::remove_file(local).unwrap();
+    let local = project.root.join("src").join(VERSION_FILE);
+    assert_eq!(fs::read_to_string(&local).unwrap(), BASELINE);
+    assert!(
+        !copy.join("tree").exists(),
+        "diff leaves no trace in the runner's memory"
+    );
+
+    fs::write(&local, "another version file").unwrap();
+    let response = envelope(project.run(&[], ""), false);
+    assert!(response["error"].to_string().contains(VERSION_FILE));
+    assert!(!project.root.join("argv.txt").exists());
+
+    fs::write(&local, BASELINE).unwrap();
+    fs::write(copy.join("identity"), "foreign pair").unwrap();
     let response = envelope(project.run(&[], ""), false);
     assert!(response["error"].to_string().contains(VERSION_FILE));
     assert!(!project.root.join("argv.txt").exists());

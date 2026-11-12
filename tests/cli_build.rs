@@ -1856,10 +1856,11 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-/// Загрузка из файлов переписывает опись версий в каталоге набора. Опись в индексе
-/// гита останавливает сборку до платформы — и превью отказывает так же.
+/// Опись версий в каталоге набора раннер больше не читает и не пишет (#646): файл, оставшийся
+/// там от прежних версий, даже в индексе гита, отправку не останавливает — ни превью, ни
+/// боевой прогон — и остаётся как был.
 #[test]
-fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
+fn a_push_does_not_refuse_a_version_file_tracked_by_git() {
     let (dir, config_path, binary_path, _work_path) = setup_project();
     let marker = dir.path().join("designer-ran.marker");
     write_script(
@@ -1867,11 +1868,8 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
         &format!("printf 'ran' > '{}'\nexit 0", marker.display()),
     );
     let project = dir.path().join("project");
-    fs::write(
-        project.join("main").join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo/>\n",
-    )
-    .expect("version file");
+    let version_file = project.join("main").join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("version file");
     git(&project, &["init", "-q", "-b", "main", "."]);
     git(&project, &["config", "user.email", "test@example.com"]);
     git(&project, &["config", "user.name", "Test"]);
@@ -1880,7 +1878,7 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
 
     for extra in [&["--dry-run"][..], &[][..]] {
         let config = config_path.display().to_string();
-        let mut args = vec!["--config", config.as_str(), "push", "--full"];
+        let mut args = vec!["--config", config.as_str(), "push", "--force"];
         args.extend_from_slice(extra);
         let output = v8_runner_command().args(&args).output().expect("run push");
         let rendered = format!(
@@ -1888,17 +1886,16 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "a tracked version file is a validation refusal ({extra:?}): {rendered}"
-        );
         assert!(
-            rendered.contains("git rm --cached main/ConfigDumpInfo.xml && git commit"),
-            "the refusal names the file and carries the recipe ({extra:?}): {rendered}"
+            !rendered.contains("git rm --cached") && !rendered.contains("is tracked by git"),
+            "a tracked version file is not refused ({extra:?}): {rendered}"
         );
     }
-    assert!(!marker.exists(), "the platform must not start");
+    assert!(marker.exists(), "the platform ran");
+    assert_eq!(
+        fs::read_to_string(&version_file).expect("left in place"),
+        "<ConfigDumpInfo/>\n"
+    );
 }
 
 /// Набор EDT, чей этап EDT пропущен, а копия Конфигуратора изменилась и потому грузится,

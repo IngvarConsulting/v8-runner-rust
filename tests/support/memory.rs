@@ -78,12 +78,7 @@ pub fn remember_base(project: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]
     let records: serde_json::Map<String, serde_json::Value> = sets
         .iter()
         .map(|set| {
-            let identity = format!(
-                "{address}; source={}; purpose={}; set={}",
-                path_hash(&canonical(set.root)),
-                set.purpose,
-                set.name
-            );
+            let identity = identity(&address, set);
             (
                 set.name.to_owned(),
                 serde_json::json!({
@@ -103,6 +98,66 @@ pub fn remember_base(project: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]
         serde_json::to_vec_pretty(&records).expect("records"),
     )
     .expect("generation ledger");
+}
+
+/// Тождество пары «база ↔ набор», как его строит раннер.
+fn identity(address: &str, set: &Set<'_>) -> String {
+    format!(
+        "{address}; source={}; purpose={}; set={}",
+        path_hash(&canonical(set.root)),
+        set.purpose,
+        set.name
+    )
+}
+
+/// Копия описи версий набора в памяти базы `key`, как её записала бы прежняя версия раннера:
+/// опись и тождество пары, без свидетельства каталога. Такую копию раннер берёт, только если в
+/// каталоге набора лежит тот же `ConfigDumpInfo.xml` (переход со старой памяти, #646).
+/// Возвращает путь копии.
+pub fn remember_version_file_of_an_earlier_runner(
+    project: &Path,
+    key: &str,
+    base: Base<'_>,
+    set: &Set<'_>,
+    content: &str,
+) -> PathBuf {
+    let dir = project
+        .join(".local")
+        .join("infobases")
+        .join(key)
+        .join("dump-info")
+        .join(set.name);
+    std::fs::create_dir_all(&dir).expect("copy dir");
+    std::fs::write(dir.join("identity"), identity(&address(&base), set)).expect("identity");
+    let copy = dir.join("ConfigDumpInfo.xml");
+    std::fs::write(&copy, content).expect("copy");
+    copy
+}
+
+/// Копия описи версий набора, как её оставляет удачная выгрузка: опись, тождество пары и
+/// свидетельство каталога набора (`unix:<узел>:<рождение>`, как у раннера). Возвращает путь копии.
+#[cfg(unix)]
+pub fn remember_version_file(
+    project: &Path,
+    key: &str,
+    base: Base<'_>,
+    set: &Set<'_>,
+    content: &str,
+) -> PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let copy = remember_version_file_of_an_earlier_runner(project, key, base, set, content);
+    let metadata = std::fs::metadata(set.root).expect("set root");
+    let born = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "-".to_owned(), |since| since.as_nanos().to_string());
+    std::fs::write(
+        copy.with_file_name("tree"),
+        format!("unix:{}:{born}", metadata.ino()),
+    )
+    .expect("tree witness");
+    copy
 }
 
 /// Каноничный путь, как его строит раннер: ближайший существующий предок и остаток.

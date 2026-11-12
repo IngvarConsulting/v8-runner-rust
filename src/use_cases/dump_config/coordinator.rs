@@ -8,7 +8,7 @@ use crate::use_cases::destruction_guard::{
     discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
     Losses, WaysOut,
 };
-use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
+use crate::use_cases::version_file::RunnerVersionFile;
 use std::fmt::Write as _;
 
 pub(super) fn run_dump_with_context(
@@ -106,13 +106,6 @@ fn prepare_and_dump(
     });
 
     let resolved = match resolve_target(config, args).and_then(|resolved| {
-        // Платформа пишет опись версий в каталог выгрузки. В каталоге человека опись
-        // из индекса гита останавливает выгрузку до платформы, превью — тоже:
-        // проверка ничего не пишет. Служебный снимок EDT в `workPath` — забота
-        // раннера, а не гита.
-        if resolved.platform_target_path == resolved.target_path {
-            crate::use_cases::ignored_files::refuse_tracked_version_file(&resolved.target_path)?;
-        }
         // Внешняя стадия Unica лежит у неё, а не в `workPath`: её том сверяет она.
         if context.external_full_pull().is_none() {
             super::helpers::refuse_a_work_path_on_another_volume(&resolved)?;
@@ -466,99 +459,51 @@ fn run_dump_selected(
         }
     }
 
-    // Выгрузка по изменившемуся работает от файла версий в каталоге: подменённый файл
-    // уступает место копии раннера до запуска платформы. Выборку `ibcmd` выгружает как
-    // `--sync` по тому же файлу; что пишет в него выборочная выгрузка Конфигуратора,
-    // раннер не знает и копию ею не меняет.
-    // Временные файлы прошлых замен файла версий убираются в начале любой выгрузки: их
-    // видит `git status` и сторож замены каталога.
-    if let Err(error) = if context.external_full_pull().is_none() {
-        remove_left_candidates(&resolved.platform_target_path)
-    } else {
-        Ok(())
-    } {
-        let message = error.to_string();
-        return Err(DumpExecutionFailure::with_payload(
-            error,
-            empty_result(
-                mode,
-                started,
-                Some(resolved.source_set_name.clone()),
-                resolved.extension.clone(),
-                selectors.clone(),
-                Some(resolved.target_path.clone()),
-                Some(message),
-            ),
-        ));
-    }
-    let version_file_use = match mode {
-        DumpMode::Incremental => VersionFileUse::RestoreAndRecord,
-        DumpMode::Partial if provider == Provider::Ibcmd => VersionFileUse::RestoreAndRecord,
-        DumpMode::Partial => VersionFileUse::Untouched,
-        DumpMode::Full => VersionFileUse::RecordOnly,
-    };
-    let version_file = match version_file_use {
-        VersionFileUse::Untouched => None,
-        VersionFileUse::RestoreAndRecord | VersionFileUse::RecordOnly => {
+    // Копия описи раннера (#646): по ней идёт выгрузка по изменившемуся и выборка `ibcmd`,
+    // её пишет удачная выгрузка. Выборка Конфигуратора и агента её не трогает.
+    let version_file = match (mode, provider) {
+        (DumpMode::Partial, Provider::Ibcmd) | (DumpMode::Incremental | DumpMode::Full, _) => {
             runner_version_file(config, &resolved)
         }
+        (DumpMode::Partial, _) => None,
     };
-    if let (VersionFileUse::RestoreAndRecord, Some(version_file)) =
-        (version_file_use, version_file.as_ref())
-    {
-        if let Err(error) = version_file.restore() {
-            let message = error.to_string();
-            return Err(DumpExecutionFailure::with_payload(
-                error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
-                    Some(message),
-                ),
-            ));
-        }
-    }
+    let copy = match (&mode, &version_file) {
+        (DumpMode::Incremental, Some(version_file)) => version_file.usable(),
+        _ => Ok(None),
+    };
 
-    // Выгрузка по изменившемуся держится на файле версий в каталоге. Нет его или формат в
-    // нём чужой — она становится полной до запуска платформы: `-update` у платформы без
-    // файла отказывает, а при чужом формате считает разницу не от того.
-    let plan = plan_dump(
-        &mode,
-        Some(&resolved.platform_target_path.join(VERSION_FILE_NAME)),
-        platform_of(location.as_ref()),
-    )
-    .and_then(|plan| {
-        // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
-        // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
-        // безвозвратное останавливает работу здесь, пока ничего не тронуто.
-        let (how, regenerated) = destruction_of(config, &plan);
-        match (how, &resolved.consent) {
-            (_, DestructionConsent::AskFirst(_)) => {
-                guard_replacement(
-                    context,
-                    &resolved.target_path,
-                    &resolved.consent,
-                    regenerated,
-                    how,
-                )?;
+    // Выгрузка по изменившемуся держится на копии описи раннера. Нет годной копии или формат в
+    // ней чужой — она становится полной до запуска платформы.
+    let plan = copy
+        .and_then(|copy| plan_dump(&mode, copy, platform_of(location.as_ref())))
+        .and_then(|plan| {
+            // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
+            // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
+            // безвозвратное останавливает работу здесь, пока ничего не тронуто.
+            let (how, regenerated) = destruction_of(config, &plan);
+            match (how, &resolved.consent) {
+                (_, DestructionConsent::AskFirst(_)) => {
+                    guard_replacement(
+                        context,
+                        &resolved.target_path,
+                        &resolved.consent,
+                        regenerated,
+                        how,
+                    )?;
+                }
+                // Замену с согласием сторож спрашивает при публикации: там он и называет
+                // уничтоженное.
+                (Destruction::Replace, DestructionConsent::Granted) => {}
+                // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
+                // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
+                // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
+                // попасть — `--force` делает выгрузку полной, то есть заменой.
+                (Destruction::Overwrite, DestructionConsent::Granted) => {}
+                // Каталог раннера спрашивать не о чем.
+                (_, DestructionConsent::RunnerOwned) => {}
             }
-            // Замену с согласием сторож спрашивает при публикации: там он и называет
-            // уничтоженное.
-            (Destruction::Replace, DestructionConsent::Granted) => {}
-            // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
-            // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
-            // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
-            // попасть — `--force` делает выгрузку полной, то есть заменой.
-            (Destruction::Overwrite, DestructionConsent::Granted) => {}
-            // Каталог раннера спрашивать не о чем.
-            (_, DestructionConsent::RunnerOwned) => {}
-        }
-        Ok(plan)
-    });
+            Ok(plan)
+        });
     let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
@@ -585,6 +530,17 @@ fn run_dump_selected(
         )
     });
     let requested = mode;
+    // Выборка Конфигуратора и агента пишет прямо в каталог набора, и пишет ли она опись версий,
+    // не замерено. Опись, которой до выборки в каталоге не было, раннер после неё убирает:
+    // в каталог исходников он описи не кладёт (#646). Оставшийся от прежних версий файл не
+    // трогается.
+    let version_file_before_partial = matches!(plan, DumpPlan::Partial)
+        && provider != Provider::Ibcmd
+        && config.format == SourceFormat::Designer
+        && !resolved
+            .platform_target_path
+            .join(VERSION_FILE_NAME)
+            .exists();
 
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
@@ -689,6 +645,7 @@ fn run_dump_selected(
                     binary.as_path(),
                     utilities.runner_for(UtilityType::V8),
                     how,
+                    version_file.as_ref(),
                 ),
                 (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Ibcmd, _, _) => {
                     run_dump_over_directory_ibcmd(
@@ -698,6 +655,7 @@ fn run_dump_selected(
                         binary.as_path(),
                         utilities.runner_for(UtilityType::Ibcmd),
                         how,
+                        version_file.as_ref(),
                     )
                 }
                 (SourceFormat::Designer, DumpPlan::Full, Provider::Designer, _, _) => {
@@ -732,14 +690,14 @@ fn run_dump_selected(
                     utilities.runner_for(UtilityType::V8),
                     objects,
                 ),
-                (SourceFormat::Designer, DumpPlan::Partial, Provider::Ibcmd, Some(objects), _) => {
+                (SourceFormat::Designer, DumpPlan::Partial, Provider::Ibcmd, Some(_), _) => {
                     run_partial_dump_ibcmd(
                         context,
                         config,
                         &resolved,
                         binary.as_path(),
                         utilities.runner_for(UtilityType::Ibcmd),
-                        objects,
+                        version_file.as_ref(),
                     )
                 }
                 (
@@ -756,6 +714,7 @@ fn run_dump_selected(
                     edt_binary,
                     utilities.runner_for(UtilityType::V8),
                     utilities.runner_for(UtilityType::EdtCli),
+                    version_file.as_ref(),
                 ),
                 (
                     SourceFormat::Edt,
@@ -771,6 +730,7 @@ fn run_dump_selected(
                     edt_binary,
                     utilities.runner_for(UtilityType::Ibcmd),
                     utilities.runner_for(UtilityType::EdtCli),
+                    version_file.as_ref(),
                 ),
                 (
                     SourceFormat::Edt,
@@ -822,7 +782,7 @@ fn run_dump_selected(
                     SourceFormat::Edt,
                     DumpPlan::Partial,
                     Provider::Ibcmd,
-                    Some(objects),
+                    Some(_),
                     Some(edt_binary),
                 ) => run_partial_dump_edt_ibcmd(
                     context,
@@ -832,7 +792,7 @@ fn run_dump_selected(
                     edt_binary,
                     utilities.runner_for(UtilityType::Ibcmd),
                     utilities.runner_for(UtilityType::EdtCli),
-                    objects,
+                    version_file.as_ref(),
                 ),
                 (_, DumpPlan::Partial, _, None, _) => Err(AppError::Runtime(
                     "partial dump objects were not validated before execution".to_owned(),
@@ -912,17 +872,8 @@ fn run_dump_selected(
             (result, false)
         }
     };
-    // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
+    // Копию пишет сама выгрузка под тем же замком и только после удачи: сбой оставляет прежнюю.
     let result = result.map(|(platform_log_path, notes)| {
-        let copy_warning = match notes.version_copy {
-            Some(copied) => copied.warning,
-            None if context.external_full_pull().is_none() => {
-                let warning = version_file.as_ref().and_then(RunnerVersionFile::record);
-                debug!("the runner copy of the version file was recorded");
-                warning
-            }
-            None => None,
-        };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
         let evidence = notes.evidence;
@@ -930,12 +881,20 @@ fn run_dump_selected(
             whole_note,
             merge_optional_messages(
                 discard_note(&resolved.target_path, &discarded),
-                merge_optional_messages(notes.message, copy_warning),
+                notes.message,
             ),
         );
         let losses = discarded.report();
         (platform_log_path, message, losses, evidence)
     });
+    if version_file_before_partial {
+        let written = resolved.platform_target_path.join(VERSION_FILE_NAME);
+        if let Err(error) = std::fs::remove_file(&written) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                debug!(path = %written.display(), %error, "the version file of a partial dump was not removed");
+            }
+        }
+    }
     drop(lock_guard);
 
     match result {
@@ -988,10 +947,11 @@ fn run_dump_selected(
     }
 }
 
-/// Как выгрузка по плану обходится с каталогом человека и какие файлы в его корне пишет
-/// заново. Проект EDT при любом плане заменяется целиком, и импорт описи версий не пишет;
-/// в формате Конфигуратора полная выгрузка заменяет каталог, остальные ложатся поверх, и
-/// опись версий платформа пишет сама.
+/// Как выгрузка по плану обходится с каталогом человека и какие файлы в его корне не теряет.
+/// Проект EDT при любом плане заменяется целиком; в формате Конфигуратора полная выгрузка
+/// заменяет каталог, остальные ложатся поверх. `ConfigDumpInfo.xml` в корне, оставшийся от
+/// прежних версий раннера, не потеря (#646): выгрузка поверх каталога его не трогает, а замена
+/// переносит в новое дерево.
 fn destruction_of(config: &AppConfig, plan: &DumpPlan) -> (Destruction, &'static [&'static str]) {
     match (config.format, plan) {
         (SourceFormat::Edt, _) => (Destruction::Replace, &[]),
@@ -1084,32 +1044,18 @@ fn dump_size(
     }
 }
 
-/// План превью: тот же [`plan_dump`], что у выгрузки, по файлу версий, который оставит в
-/// каталоге сверка с копией раннера. Ничего не пишет.
+/// План превью: тот же [`plan_dump`], что у выгрузки, по копии описи раннера, которую
+/// выгрузка сочтёт годной. Ничего не пишет.
 fn preview_plan(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     mode: &DumpMode,
     location: Option<&UtilityLocation>,
 ) -> Result<DumpPlan, AppError> {
-    let in_directory = resolved.platform_target_path.join(VERSION_FILE_NAME);
     let version_file = runner_version_file(config, resolved);
-    let file = match (mode, &version_file) {
-        (DumpMode::Incremental, Some(version_file)) => version_file.file_after_restore()?,
-        (DumpMode::Incremental | DumpMode::Full | DumpMode::Partial, _) => {
-            Some(in_directory.as_path())
-        }
+    let copy = match (mode, &version_file) {
+        (DumpMode::Incremental, Some(version_file)) => version_file.would_be_usable()?,
+        (DumpMode::Incremental | DumpMode::Full | DumpMode::Partial, _) => None,
     };
-    plan_dump(mode, file, platform_of(location))
-}
-
-/// Что выгрузка делает с файлом версий набора и копией раннера.
-#[derive(Debug, Clone, Copy)]
-enum VersionFileUse {
-    /// Сверить файл в каталоге с копией до платформы, после удачи записать копию.
-    RestoreAndRecord,
-    /// Полная выгрузка пишет файл заново: только записать копию после удачи.
-    RecordOnly,
-    /// Не трогать ни файл, ни копию.
-    Untouched,
+    plan_dump(mode, copy, platform_of(location))
 }

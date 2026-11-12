@@ -1261,17 +1261,21 @@ impl DumpListing {
 }
 
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
-/// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
-/// dump and no name of the description `after` it matches, letter case aside. A file the dump
-/// wrote (stamped no earlier than `start`) is never named: on a case-insensitive file system an
-/// element renamed only in letter case keeps its files under the old spelling. Files without a
+/// file by its path, or the part of it under its `Ext` directory
+/// ([`partial_load::dump_element_and_part`]: a module, help, predefined data,
+/// rights), was in the description `before` the dump and no name of the description `after` it
+/// matches, letter case aside. A file the dump
+/// wrote (stamped no earlier than `start`, when the dump wrote into the tree itself) is never
+/// named: on a case-insensitive file system an element renamed only in letter case keeps its
+/// files under the old spelling. A dump through a stage is listed before its files arrive
+/// (`start` is `None`). Files without a
 /// recognized owner and files of elements that stayed are not named either. Listed in the set's
 /// walk scope, links never followed; this listing precedes the one the dump's mode comes from,
 /// because what it names is gone before that one.
 pub fn files_of_dropped_elements(
     context: &SourceSetContext,
     work_path: &Path,
-    start: DumpStart,
+    start: Option<DumpStart>,
     before: &HashSet<String>,
     after: &HashSet<String>,
     interrupted: &(dyn Fn() -> bool + Sync),
@@ -1284,11 +1288,16 @@ pub fn files_of_dropped_elements(
     Ok(listing
         .files
         .into_iter()
-        .filter(|file| file.mtime_ns < start.started_ns)
+        .filter(|file| start.is_none_or(|start| file.mtime_ns < start.started_ns))
         .filter(|file| {
-            crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
-                .map(|owner| owner.to_lowercase())
-                .is_some_and(|owner| before.contains(&owner) && !after.contains(&owner))
+            let path = Path::new(&file.rel_path);
+            let dropped = |name: &str| before.contains(name) && !after.contains(name);
+            crate::change_detection::partial_load::dump_element_and_part(path).is_some_and(
+                |(owner, part)| {
+                    dropped(&owner.to_lowercase())
+                        || part.is_some_and(|part| dropped(&part.to_lowercase()))
+                },
+            )
         })
         .map(|file| file.path)
         .collect())
@@ -2054,6 +2063,71 @@ mod tests {
         );
     }
 
+    /// Часть оставшегося элемента — модуль, справка, предопределённые, — пропавшая из описи,
+    /// уносит свои файлы, а сам элемент и его прочие части остаются: так выгрузка `-update`
+    /// поверх дерева убирала модуль удалённой команды (замер #646, 8.3.27). Файл части, которой
+    /// не было в прежней описи, не трогается.
+    #[test]
+    fn a_dropped_part_of_a_staying_element_takes_its_files() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        for file in [
+            "CommonCommands/К.xml",
+            "CommonCommands/К/Ext/CommandModule.bsl",
+            "Catalogs/Items.xml",
+            "Catalogs/Items/Ext/ObjectModule.bsl",
+            "Catalogs/Items/Ext/Help.xml",
+            "Catalogs/Items/Ext/Help/ru.html",
+            "Catalogs/Items/Ext/Predefined.xml",
+            "Catalogs/Items/Ext/Stray.bsl",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, file).expect("file");
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main");
+        let names = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let before = names(&[
+            "CommonCommand.К",
+            "CommonCommand.К.CommandModule",
+            "Catalog.Items",
+            "Catalog.Items.ObjectModule",
+            "Catalog.Items.Help",
+            "Catalog.Items.Predefined",
+        ]);
+        let after = names(&[
+            "CommonCommand.К",
+            "Catalog.Items",
+            "Catalog.Items.ObjectModule",
+            "Catalog.Items.Predefined",
+        ]);
+
+        let mut dropped: Vec<String> =
+            files_of_dropped_elements(&context, &work, None, &before, &after, &|| false)
+                .expect("listing")
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&root)
+                        .expect("inside the set")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+        dropped.sort();
+
+        assert_eq!(
+            dropped,
+            [
+                "Catalogs/Items/Ext/Help.xml",
+                "Catalogs/Items/Ext/Help/ru.html",
+                "CommonCommands/К/Ext/CommandModule.bsl",
+            ]
+        );
+    }
+
     /// Удалению по SFTP достаются только файлы элементов, пропавших из описи: удалённый
     /// объект и удалённая форма уходят, посторонний файл в каталоге оставшегося объекта,
     /// неизвестный вид и файлы вне области обхода остаются
@@ -2108,7 +2182,7 @@ mod tests {
         let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept", "Document.ЗАКАЗ"]);
 
         let mut dropped: Vec<String> =
-            files_of_dropped_elements(&context, &work, start, &before, &after, &|| false)
+            files_of_dropped_elements(&context, &work, Some(start), &before, &after, &|| false)
                 .expect("listing")
                 .iter()
                 .map(|path| {
@@ -2129,9 +2203,16 @@ mod tests {
             ]
         );
         assert!(
-            files_of_dropped_elements(&context, &work, start, &HashSet::new(), &after, &|| false)
-                .expect("listing")
-                .is_empty(),
+            files_of_dropped_elements(
+                &context,
+                &work,
+                Some(start),
+                &HashSet::new(),
+                &after,
+                &|| false
+            )
+            .expect("listing")
+            .is_empty(),
             "nothing was in the description before"
         );
     }

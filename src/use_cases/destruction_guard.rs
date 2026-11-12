@@ -362,7 +362,7 @@ fn remedy(ways_out: &WaysOut, context: &ExecutionContext, losses: &Losses) -> St
 mod tests {
     use super::*;
     use crate::platform::test_git::init_git_repo;
-    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
+    use crate::use_cases::version_file::VERSION_FILE_NAME;
     use std::fs;
     use tempfile::tempdir;
 

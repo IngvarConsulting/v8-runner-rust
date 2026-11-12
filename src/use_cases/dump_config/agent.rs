@@ -1,9 +1,10 @@
 //! Выгрузка через агентский shell Конфигуратора.
 //!
-//! Агент читает и пишет только внутри своего `AgentBaseDir`, поэтому цель выставляется
-//! ему символической ссылкой: инкрементальная и частичная выгрузка обновляют цель на
-//! месте, как у пакетного Конфигуратора, а полная идёт в каталог пользователя агента
-//! и оттуда переносится той же ступенчатой публикацией. Перед
+//! Агент читает и пишет только внутри своего `AgentBaseDir`, поэтому каталог выставляется
+//! ему символической ссылкой: выгрузка по изменившемуся пишет в стадию раннера по копии
+//! описи (#646) и ложится поверх каталога так же, как у Конфигуратора; выборка обновляет
+//! цель на месте, а полная идёт в каталог пользователя агента и оттуда переносится той же
+//! ступенчатой публикацией. Перед
 //! инкрементальной выгрузкой агента спрашивают о поколении конфигурации: если оно
 //! не изменилось с последней удачной загрузки или выгрузки, выгружать нечего.
 
@@ -17,15 +18,16 @@ use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, collect_dir, collect_into_dir, connect, expose_output_dir, generation_id,
-    make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
-    write_text, AgentHandle, EarlyAgent, EarlySession, Exchange, GenerationLedger, Recorded,
+    argument, collect_dir, collect_into_dir, connect, expose_file, expose_output_dir,
+    generation_id, make_output_dir, run_id, stage_file, tidy, tidy_run_path, transcript_log,
+    wait_policy, withdraw_dir, write_text, AgentHandle, EarlyAgent, EarlySession, Exchange,
+    GenerationLedger, Recorded,
 };
 use crate::use_cases::version_file::RunnerVersionFile;
 
 /// Живой агент, которого `pull` поднимает в начале команды, пока сам готовится (#574): только
 /// если агент, судя по дешёвому прогнозу, и станет исполнителем. Прогноз — цепочка по объёму,
-/// который план выгрузки скажет по файлу версий в каталоге набора; ошибка прогноза стоит
+/// который план выгрузки скажет по копии описи раннера; ошибка прогноза стоит
 /// поднятого живого агента, который живёт по обычным правилам. Превью, внешняя публикация,
 /// расширение и неназванный набор из нескольких не поднимают ничего.
 pub(super) fn start_early(
@@ -56,11 +58,14 @@ pub(super) fn start_early(
                     _ => return None,
                 },
             };
-            match plan_dump(
-                mode,
-                Some(&set.path().join(VERSION_FILE_NAME)),
-                super::coordinator::platform_of(Some(&location)),
-            ) {
+            let version = RunnerVersionFile::of(set);
+            let copy = version
+                .as_ref()
+                .map(RunnerVersionFile::would_be_usable)
+                .transpose()
+                .ok()?
+                .flatten();
+            match plan_dump(mode, copy, super::coordinator::platform_of(Some(&location))) {
                 Ok(DumpPlan::OverDirectory(OverDirectory::ByVersionFile) | DumpPlan::Partial) => {
                     OperationSize::ByChanges
                 }
@@ -215,7 +220,7 @@ fn dump_through(
         .zip(marked_start(mark.as_ref()))
         .map(|(before, start)| before.watch(start));
     let run = run_id();
-    let stage = match plan.mode() {
+    let stage_name = match plan.mode() {
         DumpMode::Full => "dump: full",
         DumpMode::Incremental => "dump: incremental",
         DumpMode::Partial => "dump: partial",
@@ -236,7 +241,7 @@ fn dump_through(
             log_live_stage(
                 ProgressPhase::Dump,
                 Some(resolved.source_set_name.as_str()),
-                stage,
+                stage_name,
                 "[агент] exporting configuration files",
             );
             let transcript = run_command(handle, &command, wait);
@@ -267,98 +272,113 @@ fn dump_through(
             (transcript, cleanup?)
         }
         DumpPlan::OverDirectory(how) => {
-            let update = match how {
-                OverDirectory::ByVersionFile => " --update",
-                OverDirectory::Whole(_) => "",
-            };
             ensure_dir(&resolved.platform_target_path).map_err(|error| {
                 AppError::Runtime(format!("failed to create target dir: {error}"))
             })?;
             let target_relative = format!("target/{run}");
-            match &exchange {
-                // Каталог точки входа виден раннеру: цель выставляется ссылкой и
-                // обновляется на месте, как у пакетного Конфигуратора.
-                Exchange::Dir(user_dir) => {
-                    let target = expose_output_dir(
-                        user_dir,
-                        &target_relative,
-                        &resolved.platform_target_path,
-                    )?;
-                    let command = with_extension(
-                        format!(
-                            "config dump-config-to-files --dir={}{update}",
-                            argument(&target)
-                        ),
-                        extension,
-                    );
-                    log_live_stage(
-                        ProgressPhase::Dump,
-                        Some(resolved.source_set_name.as_str()),
-                        stage,
-                        "[агент] exporting configuration files",
-                    );
-                    let (outcome, prepared) = beside(
-                        "dump-hashing",
-                        || watch.as_ref().and(set).map(DumpHashing::of),
-                        || run_command(handle, &command, wait),
-                    );
-                    hashing = prepared;
-                    withdraw_dir(user_dir, &target);
-                    (outcome?, DumpNotes::default())
-                }
-                // По сети цель целиком не возится: точке входа хватает описи выгрузки
-                // (`ConfigDumpInfo.xml`), чтобы выгрузить только изменённое; обратно
-                // приходят изменённые файлы и новая опись, поверх локальной цели. Удалений
-                // точка входа не возвращает: их раннер переносит сам по двум описям.
-                Exchange::Sftp => {
-                    make_output_dir(handle, &exchange, &target_relative)?;
-                    let dump_info = resolved.platform_target_path.join(VERSION_FILE_NAME);
-                    // Прежняя опись читается до того, как выгрузка её перепишет.
-                    let elements_before = match how {
-                        OverDirectory::ByVersionFile => dump_elements(&dump_info, "before"),
-                        OverDirectory::Whole(_) => None,
-                    };
-                    if dump_info.is_file() {
-                        stage_file(
-                            handle,
-                            &exchange,
-                            &format!("{target_relative}/ConfigDumpInfo.xml"),
-                            &dump_info,
-                        )?;
+            let info_relative = format!("dump-info/{run}.xml");
+            let (dumped, landed) = super::landing::dump_over_directory(
+                context,
+                config,
+                resolved,
+                how,
+                version_file,
+                |into| match &exchange {
+                    // Каталог точки входа виден раннеру: стадия выставляется ссылкой, опись
+                    // раннера — файлом рядом (`--config-dump-info-for-changes`, замер #646), и
+                    // агент пишет в ещё не созданный подкаталог стадии.
+                    Exchange::Dir(user_dir) => {
+                        let stage = into.output.parent().unwrap_or(into.output);
+                        let exposed = expose_output_dir(user_dir, &target_relative, stage)?;
+                        let output = format!(
+                            "{exposed}/{}",
+                            into.output
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        );
+                        let mut command =
+                            format!("config dump-config-to-files --dir={}", argument(&output));
+                        if let Some(description) = into.description {
+                            let info = expose_file(user_dir, &info_relative, description)?;
+                            command.push_str(&format!(
+                                " --update --config-dump-info-for-changes={}",
+                                argument(&info)
+                            ));
+                        }
+                        let command = with_extension(command, extension);
+                        log_live_stage(
+                            ProgressPhase::Dump,
+                            Some(resolved.source_set_name.as_str()),
+                            stage_name,
+                            "[агент] exporting configuration files",
+                        );
+                        let (outcome, prepared) = beside(
+                            "dump-hashing",
+                            || watch.as_ref().and(set).map(DumpHashing::of),
+                            || run_command(handle, &command, wait),
+                        );
+                        withdraw_dir(user_dir, &target_relative);
+                        tidy_run_path(user_dir, &info_relative);
+                        outcome.map(|transcript| (transcript, prepared))
                     }
-                    let command = with_extension(
-                        format!(
-                            "config dump-config-to-files --dir={}{update}",
-                            argument(&target_relative)
-                        ),
-                        extension,
-                    );
-                    log_live_stage(
-                        ProgressPhase::Dump,
-                        Some(resolved.source_set_name.as_str()),
-                        stage,
-                        "[агент] exporting changed configuration files",
-                    );
-                    let outcome = run_command(handle, &command, wait);
-                    let collected = outcome.as_ref().ok().map(|_| {
-                        collect_into_dir(
-                            handle,
-                            &exchange,
-                            &target_relative,
-                            &resolved.platform_target_path,
-                        )
-                    });
-                    tidy(handle, &exchange, &target_relative);
-                    let transcript = outcome?;
-                    collected.transpose()?;
-                    if let (Some(before), Some(set), Some(start)) =
-                        (&elements_before, set, marked_start(mark.as_ref()))
-                    {
-                        remove_dropped_elements(context, config, set, start, &dump_info, before)?;
+                    // По сети стадия целиком не возится: точке входа хватает описи, чтобы
+                    // выгрузить только изменённое; обратно приходят изменённые файлы и новая
+                    // опись — в стадию раннера, а не в каталог.
+                    Exchange::Sftp => {
+                        make_output_dir(handle, &exchange, &target_relative)?;
+                        let update = match into.description {
+                            Some(description) => {
+                                stage_file(
+                                    handle,
+                                    &exchange,
+                                    &format!("{target_relative}/{VERSION_FILE_NAME}"),
+                                    description,
+                                )?;
+                                " --update"
+                            }
+                            None => "",
+                        };
+                        let command = with_extension(
+                            format!(
+                                "config dump-config-to-files --dir={}{update}",
+                                argument(&target_relative)
+                            ),
+                            extension,
+                        );
+                        log_live_stage(
+                            ProgressPhase::Dump,
+                            Some(resolved.source_set_name.as_str()),
+                            stage_name,
+                            "[агент] exporting changed configuration files",
+                        );
+                        let outcome = run_command(handle, &command, wait);
+                        let collected = outcome.as_ref().ok().map(|_| {
+                            ensure_dir(into.output)
+                                .map_err(|error| {
+                                    AppError::Runtime(format!(
+                                        "failed to prepare the stage: {error}"
+                                    ))
+                                })
+                                .and_then(|()| {
+                                    collect_into_dir(
+                                        handle,
+                                        &exchange,
+                                        &target_relative,
+                                        into.output,
+                                    )
+                                })
+                        });
+                        tidy(handle, &exchange, &target_relative);
+                        let transcript = outcome?;
+                        collected.transpose()?;
+                        Ok((transcript, None))
                     }
-                    (transcript, DumpNotes::default())
-                }
-            }
+                },
+            )?;
+            let (transcript, prepared) = dumped;
+            hashing = prepared;
+            (transcript, DumpNotes::message(landed))
         }
         DumpPlan::Partial => {
             let objects = objects.ok_or_else(|| {
@@ -394,7 +414,7 @@ fn dump_through(
                     log_live_stage(
                         ProgressPhase::Dump,
                         Some(resolved.source_set_name.as_str()),
-                        stage,
+                        stage_name,
                         "[агент] exporting selected configuration objects",
                     );
                     let outcome = run_command(handle, &command, wait);
@@ -414,7 +434,7 @@ fn dump_through(
                     log_live_stage(
                         ProgressPhase::Dump,
                         Some(resolved.source_set_name.as_str()),
-                        stage,
+                        stage_name,
                         "[агент] exporting selected configuration objects",
                     );
                     let outcome = run_command(handle, &command, wait);
@@ -438,7 +458,6 @@ fn dump_through(
     // правили во время выгрузки, и ответ это называет. Выборка объектов каталог с базой не
     // сводит и поколения не пишет; после отмены поколение не спрашивается.
     let mut evidence = None;
-    let mut version_copy = None;
     let changed_note = match (set, plan) {
         (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
             if context.external_full_pull().is_none()
@@ -471,23 +490,8 @@ fn dump_through(
                     } else {
                         None
                     };
-                    // Выгрузка удалась: копия файла версий пишется, пока перечисляется каталог и
-                    // агент отключается от базы (#637).
-                    let ((), copy) = beside(
-                        "version-copy",
-                        || {
-                            version_file.map(|version_file| {
-                                let warning = version_file.record();
-                                debug!("the runner copy of the version file was recorded");
-                                VersionCopy { warning }
-                            })
-                        },
-                        || {
-                            handle.finish(context, wait);
-                            debug!("the agent session of the dump was closed");
-                        },
-                    );
-                    version_copy = copy;
+                    handle.finish(context, wait);
+                    debug!("the agent session of the dump was closed");
                     after
                 },
             );
@@ -514,95 +518,7 @@ fn dump_through(
     let mut notes = cleanup.after(foreign_note);
     notes.message = merge_optional_messages(notes.message, changed_note);
     notes.evidence = evidence;
-    notes.version_copy = version_copy;
     Ok((transcript, notes, false))
-}
-
-/// Опись элементов файла версий `path` — прежняя (`side` = `before`) или новая; `None`, если
-/// её нет или она не разобрана: по такой описи не сказать, что пропало.
-fn dump_elements(path: &Path, side: &str) -> Option<std::collections::HashSet<String>> {
-    crate::platform::dump_format::read_dump_elements(path)
-        .inspect_err(|error| {
-            debug!(
-                path = %path.display(),
-                side,
-                %error,
-                "the dump description was not read; no removal is carried over"
-            );
-        })
-        .ok()
-}
-
-/// Удаления выгрузки по SFTP (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`):
-/// файл, чей владелец был в прежней описи `before` и пропал из новой в `dump_info`, удаляется
-/// из каталога набора — в его области обхода, без ссылок, до того как раннер запомнит
-/// записанное; файл, который выгрузка написала (не раньше её начала `start`), не удаляется.
-/// Новой описи нет, она не разобрана или пуста при непустой прежней — не удаляется ничего:
-/// такая опись не описывает базу. Неудачное удаление — отказ с перечнем оставшегося: каталог
-/// тогда не равен базе, и молчать об этом нельзя.
-fn remove_dropped_elements(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    set: &SourceSetContext,
-    start: DumpStart,
-    dump_info: &Path,
-    before: &std::collections::HashSet<String>,
-) -> Result<(), AppError> {
-    let Some(after) = dump_elements(dump_info, "after") else {
-        return Ok(());
-    };
-    if after.is_empty() && !before.is_empty() {
-        debug!(
-            path = %dump_info.display(),
-            "the new dump description names no element; no removal is carried over"
-        );
-        return Ok(());
-    }
-    let dropped = crate::change_detection::analyzer::files_of_dropped_elements(
-        set,
-        &config.work_path,
-        start,
-        before,
-        &after,
-        &|| crate::use_cases::interruption::interruption_pending(context),
-    )
-    .map_err(|error| {
-        AppError::Runtime(format!(
-            "the dump of source-set '{}' is in place, but the files of removed elements were not found: {error}",
-            set.name()
-        ))
-    })?;
-    remove_files(set, &dropped)
-}
-
-/// Удаляет файлы `files` из каталога набора `set` и каталоги, опустевшие от этого; непустой
-/// каталог не удаляется. Что удалить не удалось, называет отказ.
-fn remove_files(set: &SourceSetContext, files: &[PathBuf]) -> Result<(), AppError> {
-    let mut left = Vec::new();
-    for file in files {
-        if let Err(error) = std::fs::remove_file(file) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                left.push(format!("'{}': {error}", file.display()));
-            }
-            continue;
-        }
-        let mut dir = file.parent();
-        while let Some(current) = dir.filter(|current| *current != set.path()) {
-            if std::fs::remove_dir(current).is_err() {
-                break;
-            }
-            dir = current.parent();
-        }
-    }
-    if left.is_empty() {
-        return Ok(());
-    }
-    Err(AppError::Runtime(format!(
-        "the dump of source-set '{}' is in place, but {} file(s) of removed elements were not deleted: {}",
-        set.name(),
-        left.len(),
-        left.join("; ")
-    )))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {
@@ -648,43 +564,4 @@ fn publish_full(
         return Err(publication.cleanup_failure(error));
     }
     publish_full_dump(context, config, resolved, &publication)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::remove_files;
-    use crate::domain::source_set::SourceSetContext;
-
-    /// Удаление, которое не удалось, — отказ, называющий оставшееся; удалённое не мешает
-    /// назвать остальное, а опустевший каталог уходит вслед.
-    #[test]
-    fn a_failed_removal_names_what_is_left() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("src");
-        let gone = root.join("Catalogs").join("Gone.xml");
-        let stuck = root.join("Catalogs").join("Stuck");
-        std::fs::create_dir_all(stuck.join("Ext")).expect("a directory where a file was");
-        std::fs::write(&gone, "gone").expect("file");
-        let empty = root.join("Documents").join("Empty").join("Ext");
-        std::fs::create_dir_all(&empty).expect("dirs");
-        let lone = empty.join("ObjectModule.bsl");
-        std::fs::write(&lone, "lone").expect("file");
-        let set = SourceSetContext::new("main", root.clone(), "designer-main");
-
-        let error = remove_files(&set, &[gone.clone(), stuck.clone(), lone])
-            .expect_err("a directory is not removed as a file");
-
-        let message = error.to_string();
-        assert!(message.contains("1 file(s)"), "{message}");
-        assert!(message.contains(&stuck.display().to_string()), "{message}");
-        assert!(!gone.exists());
-        assert!(
-            !root.join("Documents").exists(),
-            "emptied directories go too"
-        );
-        assert!(
-            root.join("Catalogs").is_dir(),
-            "a directory with files stays"
-        );
-    }
 }

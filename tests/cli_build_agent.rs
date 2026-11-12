@@ -509,7 +509,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     assert!(
         lines.get(2).is_some_and(|line| line
             .starts_with("config load-config-from-files --dir=build/")
-            && line.ends_with("--update-config-dump-info")),
+            && !line.contains("--update-config-dump-info")),
         "{lines:?}"
     );
     assert_eq!(
@@ -707,10 +707,26 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
+    // Копия описи — как после прежнего `pull`, что бы ни оставило освежение после сборки (#646).
+    support::memory::remember_version_file(
+        harness.dir.path(),
+        "origin",
+        support::memory::Base::File(&harness.dir.path().join("ib")),
+        &support::memory::Set::configuration("main", &harness.sources),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    );
     // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
     let project = harness.sources.parent().expect("project dir");
-    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
     support::commit_sources(project);
+
+    // Полная сборка сама освежает опись (`--config-dump-info-only`, #646): смотрим только команды выгрузки.
+    let before_dump = commands(&harness).len();
+    assert!(
+        commands(&harness)
+            .iter()
+            .any(|line| line.contains("--config-dump-info-only")),
+        "a full build refreshes the version file"
+    );
 
     let (dump, payload) = run(&harness, &["dump"]);
 
@@ -723,7 +739,7 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
         "{payload}"
     );
     assert!(
-        !commands(&harness)
+        !commands(&harness)[before_dump..]
             .iter()
             .any(|line| line.starts_with("config dump-config-to-files")),
         "nothing may be dumped for an unchanged generation"

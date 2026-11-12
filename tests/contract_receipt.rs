@@ -119,16 +119,16 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     }
 }
 
-/// Файл версий, по которому выгрузка идёт по изменившемуся: формат 2.20 пишет платформа
-/// 8.3.27 из раскладки `write_project`.
+/// Копия описи раннера, по которой выгрузка идёт по изменившемуся (#646): формат 2.20 пишет
+/// платформа 8.3.27 из раскладки `write_project`.
 fn with_version_file(dir: &Path) {
-    fs::write(
-        dir.join("project")
-            .join("configuration")
-            .join("ConfigDumpInfo.xml"),
+    support::memory::remember_version_file(
+        dir,
+        "origin",
+        support::memory::Base::File(&dir.join("ib")),
+        &support::memory::Set::configuration("main", &dir.join("project").join("configuration")),
         "<ConfigDumpInfo version=\"2.20\"/>\n",
-    )
-    .expect("version file");
+    );
 }
 
 /// Умолчание — цепочка: без платформы выгрузка по изменившемуся идёт через `ibcmd`, и
