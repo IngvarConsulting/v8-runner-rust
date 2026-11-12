@@ -9,6 +9,9 @@ check:
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_load.rs::upload_update_failure_preserves_the_completed_load_receipt
   - tests/cli_load.rs::upload_ref_names_an_extension_set_by_the_set_name_like_push
+  - tests/cli_load.rs::upload_rejects_a_cfe_name_mismatch_before_loading_the_target
+  - tests/cli_load.rs::upload_refuses_a_cfe_when_designer_did_not_export_its_descriptor
+  - tests/cli_load.rs::first_extension_load_json_reports_absent_and_applies_in_order
   - tests/cli_load.rs::vendor_update_requires_a_version_change_before_updating_the_database
   - src/use_cases/load_artifact.rs::a_configuration_probe_cancelled_after_its_start_reports_the_work
   - src/use_cases/load_artifact.rs::an_extension_probe_cancelled_after_its_start_reports_the_work
@@ -26,7 +29,13 @@ check:
 
 Поле `extension` называет расширение в базе. Набор `EXTENSION`, имя которого совпало с
 `--ref`, называет расширение своим именем, как у `push`; `Name` из его `Configuration.xml`
-не читается. Без такого набора значение `--ref` передаётся платформе как есть.
+не читается. Без такого набора значение `--ref` используется как имя расширения.
+В режиме `load` Конфигуратор читает внутреннее имя из приватной копии CFE в
+одноразовой файловой ИБ. Несовпадение, в том числе в регистре, и невозможность
+прочитать имя останавливают загрузку до записи в целевую ИБ. При совпадении
+Конфигуратор загружает ту же копию. Проба состава целевой ИБ по-прежнему определяет
+`compatibility_state`, а отказ проверки имени оставляет `applied: false` и
+`update_db_cfg_ran: false`.
 
 Вложенный `execution` несёт машинную часть исхода: статус, ошибки с кодами и полезную
 нагрузку сценария.

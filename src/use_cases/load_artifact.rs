@@ -1,3 +1,4 @@
+mod cfe_target;
 mod vendor_update;
 
 use std::path::{Path, PathBuf};
@@ -369,6 +370,34 @@ fn run_load_selected(
         None
     };
 
+    let checked_cfe =
+        if let (LoadMode::Load, Some(name)) = (resolved.mode, resolved.extension.as_deref()) {
+            Some(
+                cfe_target::check(
+                    context,
+                    &config.work_path,
+                    &location.path,
+                    utilities.runner_for(UtilityType::V8),
+                    &resolved.artifact_path,
+                    name,
+                )
+                .map_err(|error| {
+                    let result = failed_result_from_resolved(
+                        &resolved,
+                        compatibility_state,
+                        started,
+                        &error,
+                        ExecutionInterruptionPhase::ProviderCommand,
+                        probe_log_path.clone(),
+                        false,
+                    );
+                    LoadExecutionFailure::with_payload(error, result)
+                })?,
+            )
+        } else {
+            None
+        };
+
     let (apply_action, apply_stage) = match resolved.mode {
         LoadMode::Load => ("load", "load: apply"),
         LoadMode::Merge => ("merge", "load: merge"),
@@ -405,7 +434,13 @@ fn run_load_selected(
     );
     let apply_result = match (resolved.mode, &resolved.settings) {
         (LoadMode::Load, None) => apply_dsl
-            .load_cfg(&resolved.artifact_path, resolved.extension.as_deref())
+            .load_cfg(
+                checked_cfe.as_ref().map_or(
+                    resolved.artifact_path.as_path(),
+                    cfe_target::CheckedCfe::path,
+                ),
+                resolved.extension.as_deref(),
+            )
             .map_err(|error| (AppError::from(error), None)),
         (LoadMode::Merge, Some(ResolvedSettings::Merge(settings))) => apply_dsl
             .merge_cfg(
@@ -427,6 +462,7 @@ fn run_load_selected(
         )),
     };
 
+    drop(checked_cfe);
     let apply_result = match apply_result {
         Ok(result) => result,
         Err((error, platform_log_path)) => {
@@ -1656,6 +1692,21 @@ mod tests {
         make_executable(path);
     }
 
+    #[cfg(unix)]
+    fn write_cfe_probe_designer(path: &Path, calls: &Path, name: &str) {
+        let extra = format!(
+            r#"prev=""
+for arg in "$@"; do
+  if [ "$prev" = /DumpConfigToFiles ]; then
+    printf '%s\n' '<MetaDataObject><Configuration><Properties><Name>{name}</Name></Properties></Configuration></MetaDataObject>' > "$arg/Configuration.xml"
+  fi
+  prev="$arg"
+done
+"#
+        );
+        write_designer_script_with(path, calls, &extra);
+    }
+
     fn sample_config(root: &Path, binary: &Path) -> AppConfig {
         AppConfig {
             local_path: root.join(".local"),
@@ -1738,7 +1789,7 @@ mod tests {
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        write_cfe_probe_designer(&binary, &calls, "FirstExt");
         write_extension_list_ibcmd(&root.join("ibcmd"), &[]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
@@ -2673,7 +2724,7 @@ mod tests {
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_designer_script(&binary, &calls);
+        write_cfe_probe_designer(&binary, &calls, "UnsupportedExt");
         write_extension_list_ibcmd(&root.join("ibcmd"), &["UnsupportedExt"]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {

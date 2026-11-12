@@ -10,6 +10,18 @@ pub struct V8Connection {
 }
 
 impl V8Connection {
+    /// A runner-owned file path is already a single value, even if it contains
+    /// connection-string separators.
+    pub(crate) fn for_file(path: &std::path::Path) -> Self {
+        let path = path.display().to_string();
+        Self {
+            raw: format!("/F {path}"),
+            connection_args: vec!["/F".to_owned(), path],
+            user: None,
+            password: None,
+        }
+    }
+
     /// Build a reusable connection model from a raw connection string.
     pub fn from_connection_string(raw: &str) -> Self {
         let trimmed = raw.trim();
