@@ -20,6 +20,7 @@ use std::time::Instant;
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::capability::{Operation, Provider, ProviderReceipt};
+use crate::domain::extensions::ExtensionInventoryEntry;
 use crate::domain::git_worktree::ChangeDetection;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{
@@ -36,6 +37,9 @@ use crate::use_cases::agent_session::{
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::exchange_guard::{
     memory_of, new_owner_since, predict, recorded_generation, token_scope,
+};
+use crate::use_cases::extension_inventory::{
+    read_in_agent_session, read_installed, InventoryInSession,
 };
 use crate::use_cases::generation_reader::{
     designer_log_file, read_generation, read_unapplied, GenerationProcess,
@@ -290,8 +294,22 @@ fn deepen(
             ),
         });
     }
-    // Состав расширений может открыть свою сессию. Снимаем квитанцию поколения
-    // после завершения её сессии и до запроса состава.
+    // Агент поколения отдаёт и состав расширений в той же сессии, без второго процесса
+    // платформы (#631).
+    let phase = Instant::now();
+    let in_session = match (&outcome, asker.as_mut()) {
+        (Ok(()), Ok(asker)) => match interrupted(context, "the extension inventory") {
+            Ok(()) => asker.extensions(config),
+            Err(error) => {
+                outcome = Err(error);
+                None
+            }
+        },
+        _ => None,
+    };
+    let mut inventory_ms = phase.elapsed().as_millis();
+    // Иначе состав может открыть свою сессию. Снимаем квитанцию поколения после завершения
+    // её сессии и до запроса состава.
     let phase = Instant::now();
     let provider = asker.ok().map(|asker| asker.close(context));
     tracing::debug!(
@@ -300,14 +318,24 @@ fn deepen(
         "status finish generation executor"
     );
     outcome?;
-    interrupted(context, "the extension inventory")?;
-    let phase = Instant::now();
-    let extensions = extensions(context, config, &packages);
+    let extensions = match in_session {
+        Some(InventoryInSession { mut receipt, read }) => {
+            receipt.endpoint = context.opened_session();
+            extensions_status(config, &packages, Some(receipt), read)
+        }
+        None => {
+            interrupted(context, "the extension inventory")?;
+            let phase = Instant::now();
+            let (receipt, read) = read_installed(context, config);
+            inventory_ms = phase.elapsed().as_millis();
+            extensions_status(config, &packages, receipt, read)
+        }
+    };
     let extension_tool = extensions
         .provider
         .as_ref()
         .and_then(|provider| provider.selected);
-    tracing::debug!(tool = ?extension_tool, duration_ms = phase.elapsed().as_millis(), "status extension inventory");
+    tracing::debug!(tool = ?extension_tool, duration_ms = inventory_ms, "status extension inventory");
     status.extensions = Some(extensions);
     interrupted(context, "the owner marker")?;
     let phase = Instant::now();
@@ -356,12 +384,12 @@ fn base_generation(
 
 /// Состав расширений базы рядом с наборами расширений проекта. Имена 1С регистр не
 /// различают: сопоставление без регистра, как у `pull --all`.
-fn extensions(
-    context: &ExecutionContext,
+fn extensions_status(
     config: &AppConfig,
     packages: &[(&crate::config::model::SourceSetConfig, Option<&str>)],
+    provider: Option<ProviderReceipt>,
+    read: Result<Vec<ExtensionInventoryEntry>, AppError>,
 ) -> ExtensionsStatus {
-    let (provider, read) = crate::use_cases::extension_inventory::read_installed(context, config);
     let installed = match read {
         Ok(installed) => installed,
         Err(error) => {
@@ -400,7 +428,6 @@ fn extensions(
             installed
                 .into_iter()
                 .map(|(key, extension)| {
-                    use crate::domain::extensions::ExtensionInventoryEntry;
                     let (name, active) = match extension {
                         ExtensionInventoryEntry::Full(extension) => {
                             (extension.name, Some(extension.active))
@@ -586,6 +613,15 @@ impl Asker {
                 "the agent's configuration save is not measured: the unapplied state is unknown"
                     .to_owned(),
             )),
+        }
+    }
+
+    /// Состав расширений в сессии агента поколения, если план `extensions` берёт агента;
+    /// `None` — исполнитель поколения не агент или план назначил другого.
+    fn extensions(&mut self, config: &AppConfig) -> Option<InventoryInSession> {
+        match &mut self.how {
+            How::Agent { handle, wait } => read_in_agent_session(config, handle, wait),
+            How::Designer { .. } | How::Ibcmd { .. } => None,
         }
     }
 
