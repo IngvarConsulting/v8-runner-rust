@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 DESIGNER_CONFIG_PATH="${V8TR_DESIGNER_REAL_CONFIG:-}"
 ALLOW_MISSING_CONFIG="${V8TR_DESIGNER_ALLOW_MISSING_CONFIG:-0}"
+SMOKE_BACKEND="${V8TR_LIVE_CLI_BACKEND:-DESIGNER}"
 DESIGNER_SMOKE_PROFILE="${V8TR_DESIGNER_SMOKE_PROFILE:-mandatory}"
 DESIGNER_TEST_MODE="${V8TR_DESIGNER_TEST_MODE:-none}"
 DESIGNER_TEST_MODULE="${V8TR_DESIGNER_TEST_MODULE:-}"
@@ -89,10 +90,6 @@ snapshot_dir() {
     cp -R "$source_dir/." "$target_dir/"
 }
 
-trim_yaml_scalar() {
-    sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" -e "s/^['\"]//" -e "s/['\"]$//"
-}
-
 strip_shell_quotes() {
     local value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
@@ -102,17 +99,6 @@ strip_shell_quotes() {
     value="${value#\"}"
     value="${value%\"}"
     printf '%s\n' "$value"
-}
-
-extract_yaml_scalar() {
-    local key="$1"
-    awk -v key="$key" '
-        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
-            sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
-            print
-            exit
-        }
-    ' "$DESIGNER_CONFIG_PATH" | trim_yaml_scalar
 }
 
 config_matches() {
@@ -508,7 +494,7 @@ run_extended_steps() {
 if [[ -z "$DESIGNER_CONFIG_PATH" ]]; then
     if [[ "$ALLOW_MISSING_CONFIG" == "1" ]]; then
         echo "SKIPPED: V8TR_DESIGNER_REAL_CONFIG is not set."
-        echo "Set V8TR_DESIGNER_REAL_CONFIG to a dedicated format=DESIGNER,builder=DESIGNER fixture config."
+        echo "Set V8TR_DESIGNER_REAL_CONFIG to a dedicated format=DESIGNER fixture config."
         echo "Default va-path also requires tests/fixtures/vanessa-automation-single.epf, scripts/test/live-cli-designer.va-params.json, and scripts/test/features/live-cli-designer."
         exit 0
     fi
@@ -535,15 +521,14 @@ if ! config_matches "^format:[[:space:]]*DESIGNER[[:space:]]*$" "$DESIGNER_CONFI
     die "Live Designer config must contain 'format: DESIGNER': $DESIGNER_CONFIG_PATH"
 fi
 
-BUILDER_BACKEND="$(extract_yaml_scalar "builder")"
-case "$BUILDER_BACKEND" in
+case "$SMOKE_BACKEND" in
     DESIGNER|IBCMD)
         ;;
     *)
-        die "Live config must contain 'builder: DESIGNER' or 'builder: IBCMD': $DESIGNER_CONFIG_PATH"
+        die "Unsupported V8TR_LIVE_CLI_BACKEND: $SMOKE_BACKEND"
         ;;
 esac
-SMOKE_TITLE="LIVE CLI $BUILDER_BACKEND SMOKE"
+SMOKE_TITLE="LIVE CLI $SMOKE_BACKEND SMOKE"
 
 if ! extract_connection_file_path >/dev/null; then
     die "Live Designer config must use file-based infobase.connection ('File=...' or raw '/F ...'): $DESIGNER_CONFIG_PATH"
@@ -555,7 +540,7 @@ required_types=(
     CONFIGURATION
     EXTENSION
 )
-if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
+if [[ "$SMOKE_BACKEND" == "DESIGNER" ]]; then
     required_types+=(
         EXTERNAL_DATA_PROCESSORS
         EXTERNAL_REPORTS
@@ -594,7 +579,13 @@ EXTERNAL_PROCESSOR_SOURCE_SET_PATH="${SOURCE_SET_PATH_BY_TYPE[EXTERNAL_DATA_PROC
 EXTERNAL_REPORT_SOURCE_SET_NAME="${SOURCE_SET_NAME_BY_TYPE[EXTERNAL_REPORTS]:-}"
 EXTERNAL_REPORT_SOURCE_SET_PATH="${SOURCE_SET_PATH_BY_TYPE[EXTERNAL_REPORTS]:-}"
 
-WORK_BASE_PATH="$OUTPUT_ROOT/workspace/project-root"
+if [[ "${1:-}" == "--validate-config" ]]; then
+    validation_root="$(mktemp -d)"
+    trap 'rm -rf -- "$validation_root"' EXIT
+    WORK_BASE_PATH="$validation_root/project-root"
+else
+    WORK_BASE_PATH="$OUTPUT_ROOT/workspace/project-root"
+fi
 WORK_CONFIG_PATH="$WORK_BASE_PATH/v8project.yaml"
 
 if [[ ! -d "$FIXTURE_BASE_PATH" ]]; then
@@ -606,12 +597,14 @@ if [[ ! -x "$BIN_PATH" ]]; then
     (cd "$ROOT_DIR" && cargo build --locked --bin v8-runner >/dev/null)
 fi
 
-rm -rf "$OUTPUT_ROOT"
-mkdir -p \
-    "$WORK_BASE_PATH" \
-    "$OUTPUT_ROOT/artifacts/external-processor" \
-    "$OUTPUT_ROOT/artifacts/external-report" \
-    "$OUTPUT_ROOT/launch"
+if [[ "${1:-}" != "--validate-config" ]]; then
+    rm -rf "$OUTPUT_ROOT"
+    mkdir -p \
+        "$OUTPUT_ROOT/artifacts/external-processor" \
+        "$OUTPUT_ROOT/artifacts/external-report" \
+        "$OUTPUT_ROOT/launch"
+fi
+mkdir -p "$WORK_BASE_PATH"
 
 cp -R "$FIXTURE_BASE_PATH/." "$WORK_BASE_PATH/"
 materialize_live_config "$DESIGNER_CONFIG_PATH" "$WORK_CONFIG_PATH" "$OUTPUT_ROOT" "$WORK_BASE_PATH"
@@ -625,7 +618,12 @@ for source_set_type in "${required_types[@]}"; do
     fi
 done
 
-if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
+if [[ "${1:-}" == "--validate-config" ]]; then
+    run_cli platforms
+    exit 0
+fi
+
+if [[ "$SMOKE_BACKEND" == "DESIGNER" ]]; then
     EXTERNAL_PROCESSOR_ARTIFACT_NAME="$(extract_artifact_root_name "$EXTERNAL_PROCESSOR_SOURCE_SET_PATH")"
     EXTERNAL_REPORT_ARTIFACT_NAME="$(extract_artifact_root_name "$EXTERNAL_REPORT_SOURCE_SET_PATH")"
 fi
@@ -646,7 +644,7 @@ run_cli_json_to_file "$incremental_build_json" push
 assert_json_step_ok "$incremental_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 assert_json_step_ok "$incremental_build_json" "$EXTENSION_SOURCE_SET_NAME"
 
-if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
+if [[ "$SMOKE_BACKEND" == "DESIGNER" ]]; then
     partial_candidate="$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/CommonModules/ОбщийМодуль1/Ext/Module.bsl"
     partial_source="$(resolve_contained_existing_path "$WORK_BASE_PATH" "$partial_candidate")"
     assert_file_exists "$partial_source"
@@ -666,7 +664,7 @@ print_stage "extensions properties"
 run_cli_json_to_file "$extensions_json" extensions --name "$EXTENSION_SOURCE_SET_NAME"
 assert_json_command_ok "$extensions_json" "extensions"
 
-if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
+if [[ "$SMOKE_BACKEND" == "DESIGNER" ]]; then
     print_stage "syntax and checks"
     run_cli check --all-extensions
     run_cli check \
@@ -713,10 +711,13 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
 else
     print_stage "pull --force (full replacement)"
     run_cli pull --force
+    # The next pulls use the overwrite guard. Keep the fresh dump recoverable in Git.
+    git -C "$WORK_BASE_PATH" init --quiet
+    git -C "$WORK_BASE_PATH" add --force -- "$CONFIGURATION_SOURCE_SET_PATH"
     print_stage "pull (incremental)"
     run_cli pull
     print_stage "pull --object (partial)"
-    run_cli pull --object Catalog:Items
+    run_cli pull --object Catalog:Справочник1
 fi
 
 if [[ "$DESIGNER_SMOKE_PROFILE" == "extended" ]]; then
@@ -724,4 +725,4 @@ if [[ "$DESIGNER_SMOKE_PROFILE" == "extended" ]]; then
 fi
 
 echo
-echo "Live CLI $BUILDER_BACKEND smoke completed successfully."
+echo "Live CLI $SMOKE_BACKEND smoke completed successfully."

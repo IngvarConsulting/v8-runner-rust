@@ -57,6 +57,7 @@ platform_path = pathlib.Path(sys.argv[6])
 
 text = source.read_text(encoding="utf-8")
 replacements = {
+    "__SMOKE_PROVIDER__": "designer",
     "__ROOT_DIR__": root_dir.as_posix(),
     "__OUTPUT_ROOT__": output_root.as_posix(),
     "__VANESSA_EPF__": (root_dir / "tests/fixtures/vanessa-automation-single.epf").as_posix(),
@@ -77,27 +78,11 @@ text, connection_count = re.subn(
 if connection_count != 1:
     raise SystemExit("failed to replace infobase.connection in CI designer config")
 
-def inject_platform_path(match: re.Match[str]) -> str:
-    body = match.group("body")
-    replacement_line = f'    path: "{platform_path.as_posix()}"\n'
-    if re.search(r"^    path:\s*.*$", body, re.MULTILINE):
-        body = re.sub(
-            r"^    path:\s*.*$",
-            replacement_line.rstrip("\n"),
-            body,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    else:
-        body = replacement_line + body
-    return match.group("prefix") + body
-
-
+# The template declares tools.platform.version and leaves the installation path to CI.
 text, platform_count = re.subn(
-    r"(?m)(?P<prefix>^tools:\n  platform:\n)(?P<body>(?:    .*\n)+)",
-    inject_platform_path,
+    r"(?m)^  platform:\n(?=    version:)",
+    lambda match: f'{match.group()}    path: "{platform_path.as_posix()}"\n',
     text,
-    count=1,
 )
 if platform_count != 1:
     raise SystemExit("failed to inject tools.platform.path into CI designer config")
@@ -106,8 +91,6 @@ target.write_text(text, encoding="utf-8")
 PY
 
     grep -Eq '^format:[[:space:]]*DESIGNER[[:space:]]*$' "$CONFIG_PATH" || die "Generated config must keep format: DESIGNER"
-    grep -Eq '^builder:[[:space:]]*DESIGNER[[:space:]]*$' "$CONFIG_PATH" || die "Generated config must keep builder: DESIGNER"
-    grep -Eq "^[[:space:]]*path:[[:space:]]*[\"']?.+[\"']?$" "$CONFIG_PATH" || die "Generated config must contain tools.platform.path"
     grep -Eq "^[[:space:]]*connection:[[:space:]]*[\"']?File=" "$CONFIG_PATH" || die "Generated config must contain file infobase.connection"
 
     write_env V8TR_DESIGNER_REAL_CONFIG "$CONFIG_PATH"

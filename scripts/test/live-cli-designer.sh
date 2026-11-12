@@ -24,6 +24,7 @@ output_root = pathlib.Path(sys.argv[4])
 
 text = source.read_text(encoding="utf-8")
 replacements = {
+    "__SMOKE_PROVIDER__": "designer",
     "__ROOT_DIR__": root_dir.as_posix(),
     "__OUTPUT_ROOT__": output_root.as_posix(),
     "__VANESSA_EPF__": (root_dir / "tests/fixtures/vanessa-automation-single.epf").as_posix(),
@@ -57,4 +58,4 @@ fi
 export V8TR_DESIGNER_REAL_CONFIG="$CONFIG_PATH"
 export V8TR_LIVE_CLI_OUTPUT_ROOT="$OUTPUT_ROOT"
 
-bash "$ROOT_DIR/scripts/test/live-cli-fixture.sh"
+V8TR_LIVE_CLI_BACKEND=DESIGNER bash "$ROOT_DIR/scripts/test/live-cli-fixture.sh" "$@"
