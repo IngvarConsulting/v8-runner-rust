@@ -799,12 +799,12 @@ fn invocation_too_long(error: &std::io::Error) -> bool {
     }
 }
 
-/// Отказ `config export --base`, которым `ibcmd` просит полную выгрузку: код `-1` и «Требуется
-/// экспортировать конфигурацию полностью» (замер #646, удаление объекта). Другой отказ — не
-/// просьба, и полной выгрузкой он не заменяется.
+/// Отказ `config export --base`, которым `ibcmd` просит полную выгрузку: код `-1` (на Unix —
+/// `255`) с «Требуется экспортировать конфигурацию полностью» (замер #646, удаление объекта).
+/// Решает код, а не текст: полная выгрузка верна всегда и лишь дороже, поэтому и другой отказ с
+/// тем же кодом уходит в неё, а если она невозможна — откажет сама.
 pub fn asks_for_a_full_export(process: &crate::platform::process::ProcessResult) -> bool {
-    const ASKS: &str = "Требуется экспортировать конфигурацию полностью";
-    process.exit_code != 0 && (process.stdout.contains(ASKS) || process.stderr.contains(ASKS))
+    matches!(process.exit_code, -1 | 255)
 }
 
 /// `config export` with both `--sync` and `--force`: when the platform falls back to a full

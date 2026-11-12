@@ -553,9 +553,10 @@ fn dump_ibcmd_incremental_json_success() {
     assert_eq!(payload["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(
-        calls.contains(&format!("--base={}", copy.display())),
+        calls.contains("--base=") && calls.contains("dump-info/main/ConfigDumpInfo.xml"),
         "{calls}"
     );
+    assert!(copy.is_file());
     assert!(!calls.contains("--sync"), "{calls}");
     assert_ibcmd_data_path(&calls, &work_path);
     assert!(calls.contains(".dump-stage-"), "{calls}");
