@@ -904,10 +904,9 @@ fn a_source_edit_keeps_the_pull_incremental() {
     let last = calls.lines().next_back().expect("a dump ran");
     assert!(last.contains("/DumpConfigToFiles"), "{last}");
     assert!(
-        last.contains(&format!(
-            "-update -configDumpInfoForChanges {}",
-            runner_copy(&project).display()
-        )),
+        // Путь копии раннер называет каноническим (на macOS `/private/var/…`).
+        last.contains("-update -configDumpInfoForChanges ")
+            && last.contains("/infobases/origin/dump-info/main/ConfigDumpInfo.xml"),
         "{last}"
     );
     assert!(
