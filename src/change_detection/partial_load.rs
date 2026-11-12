@@ -701,37 +701,18 @@ fn canonicalize_existing(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// Что частичная загрузка списка `paths` (из [`decide_build`]) оставит следующей выгрузке по
-/// прежней описи (#646): сколько модулей и прочих файлов она выгрузит обратно и не уйдёт ли
-/// она в полную.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct LoadedForDump {
-    /// Выгрузка по такой описи будет полной: в списке корневой `Configuration.xml` (удалённый,
-    /// переименованный или добавленный объект, свойства конфигурации — у удаления и
-    /// переименования он в списке всегда, частичная загрузка без него их не принимает) или
-    /// `Ext/Predefined.xml`, `Ext/Flowchart.xml` (документация платформы: такие изменения
-    /// выгружаются полностью).
-    pub(crate) full_dump: bool,
-    /// Модули `.bsl`.
-    pub(crate) modules: usize,
-    /// Остальные файлы: описания объектов, форм, макеты, справка.
-    pub(crate) other: usize,
-}
-
-/// [`LoadedForDump`] списка частичной загрузки `paths` под корнем `source_root`.
-pub(crate) fn loaded_for_dump(paths: &[PathBuf], source_root: &Path) -> LoadedForDump {
+/// Пойдёт ли следующая выгрузка по прежней описи полной после частичной загрузки списка
+/// `paths` (из [`decide_build`]) под корнем `source_root` (#646). По документации платформы
+/// (8.5.1, 2.17.4) полной выгрузку делают удаление и переименование объекта, переименование
+/// конфигурации и изменение `Ext/Predefined.xml` или `Ext/Flowchart.xml`. Первые три в списке
+/// всегда несут корневой `Configuration.xml`: частичная загрузка без него их не принимает. Он же
+/// попадает в список при добавлении объекта, изменении каталога объекта и любой правке свойств
+/// конфигурации (например, `Version`) — тогда ответ «да» шире документированного, ценой одного
+/// запроса описи.
+pub(crate) fn next_dump_goes_full(paths: &[PathBuf], source_root: &Path) -> bool {
     paths
         .iter()
-        .fold(LoadedForDump::default(), |mut loaded, path| {
-            let relative = path.strip_prefix(source_root).unwrap_or(path);
-            loaded.full_dump |= forces_a_full_dump(relative);
-            if is_bsl(relative) {
-                loaded.modules += 1;
-            } else {
-                loaded.other += 1;
-            }
-            loaded
-        })
+        .any(|path| forces_a_full_dump(path.strip_prefix(source_root).unwrap_or(path)))
 }
 
 fn forces_a_full_dump(relative: &Path) -> bool {
@@ -801,9 +782,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        decide, decide_build, dump_element_of, loaded_for_dump, part_of_dump_element,
-        relative_paths, root_dependencies, write_list_file, LoadDecision, LoadedForDump,
-        RunnerDirs,
+        decide, decide_build, dump_element_of, next_dump_goes_full, part_of_dump_element,
+        relative_paths, root_dependencies, write_list_file, LoadDecision, RunnerDirs,
     };
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
 
@@ -900,38 +880,28 @@ mod tests {
         let list =
             |paths: &[&str]| -> Vec<PathBuf> { paths.iter().map(|p| root.join(p)).collect() };
 
-        assert_eq!(
-            loaded_for_dump(
-                &list(&[
-                    "CommonModules/M/Ext/Module.bsl",
-                    "Catalogs/X.xml",
-                    "Catalogs/X/Forms/F/Ext/Form.xml",
-                ]),
-                root
-            ),
-            LoadedForDump {
-                full_dump: false,
-                modules: 1,
-                other: 2
-            }
-        );
+        assert!(!next_dump_goes_full(
+            &list(&[
+                "CommonModules/M/Ext/Module.bsl",
+                "Catalogs/X.xml",
+                "Catalogs/X/Forms/F/Ext/Form.xml",
+            ]),
+            root
+        ));
         for full in [
             "Configuration.xml",
             "Catalogs/X/Ext/Predefined.xml",
             "BusinessProcesses/P/Ext/Flowchart.xml",
             "Catalogs/X/ext/predefined.XML",
         ] {
-            assert!(loaded_for_dump(&list(&[full]), root).full_dump, "{full}");
+            assert!(next_dump_goes_full(&list(&[full]), root), "{full}");
         }
         for partial in [
             "Catalogs/Configuration.xml",
             "Catalogs/X/Predefined.xml",
             "Catalogs/X/Ext/Predefined/Item.xml",
         ] {
-            assert!(
-                !loaded_for_dump(&list(&[partial]), root).full_dump,
-                "{partial}"
-            );
+            assert!(!next_dump_goes_full(&list(&[partial]), root), "{partial}");
         }
     }
 
@@ -1521,6 +1491,139 @@ mod tests {
         );
 
         assert_eq!(decision, LoadDecision::Partial(vec![configuration]));
+    }
+
+    /// Признаки полной выгрузки из документации платформы (8.5.1, 2.17.4) — по тому же списку
+    /// частичной загрузки, что строит сборка (#646): каждый случай — свой набор изменений.
+    mod a_change_the_platform_dumps_in_full {
+        use super::*;
+
+        const WITH_OTHER: &str = "<MetaDataObject><Configuration><Properties><Name>Base</Name></Properties><ChildObjects><Catalog>Other</Catalog></ChildObjects></Configuration></MetaDataObject>";
+
+        fn full_dump_after(root: &std::path::Path, changes: &[FileChange]) -> bool {
+            let work = root.join("../work");
+            match decide_build(changes, root, RunnerDirs::new(&work, None)) {
+                LoadDecision::Partial(paths) => next_dump_goes_full(&paths, root),
+                LoadDecision::Full => panic!("the change must load partially"),
+            }
+        }
+
+        #[test]
+        fn a_deleted_object() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let configuration = write_source(root, "Configuration.xml", WITH_OTHER);
+            write_source(root, "Catalogs/Other.xml", "<xml/>");
+            assert!(full_dump_after(
+                root,
+                &[
+                    change(&configuration, ChangeKind::Modified),
+                    change(&root.join("Catalogs/Items.xml"), ChangeKind::Deleted),
+                ]
+            ));
+        }
+
+        #[test]
+        fn a_renamed_object() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let configuration = write_source(root, "Configuration.xml", WITH_OTHER);
+            let renamed = write_source(root, "Catalogs/Other.xml", "<xml/>");
+            assert!(full_dump_after(
+                root,
+                &[
+                    change(&configuration, ChangeKind::Modified),
+                    change(&root.join("Catalogs/Items.xml"), ChangeKind::Deleted),
+                    change(&renamed, ChangeKind::Added),
+                ]
+            ));
+        }
+
+        #[test]
+        fn a_renamed_configuration() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let configuration = write_source(
+                root,
+                "Configuration.xml",
+                &WITH_OTHER.replace("<Name>Base</Name>", "<Name>Renamed</Name>"),
+            );
+            assert!(full_dump_after(
+                root,
+                &[change(&configuration, ChangeKind::Modified)]
+            ));
+        }
+
+        #[test]
+        fn changed_predefined_items() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            write_source(root, "Catalogs/Items.xml", "<xml/>");
+            let predefined = write_source(root, "Catalogs/Items/Ext/Predefined.xml", "<xml/>");
+            assert!(full_dump_after(
+                root,
+                &[change(&predefined, ChangeKind::Modified)]
+            ));
+        }
+
+        #[test]
+        fn a_changed_flowchart() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            write_source(root, "BusinessProcesses/Job.xml", "<xml/>");
+            let flowchart = write_source(root, "BusinessProcesses/Job/Ext/Flowchart.xml", "<xml/>");
+            assert!(full_dump_after(
+                root,
+                &[change(&flowchart, ChangeKind::Modified)]
+            ));
+        }
+
+        /// Добавленный объект документация не называет, но корневой `Configuration.xml` в
+        /// списке освежает опись и ему — шире документированного, ценой одного запроса.
+        #[test]
+        fn and_an_added_object_counts_too() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let configuration = write_source(root, "Configuration.xml", WITH_OTHER);
+            let added = write_source(root, "Catalogs/Other.xml", "<xml/>");
+            assert!(full_dump_after(
+                root,
+                &[
+                    change(&configuration, ChangeKind::Modified),
+                    change(&added, ChangeKind::Added),
+                ]
+            ));
+        }
+
+        /// Правка одного описания объекта корневой `Configuration.xml` в список не тянет.
+        #[test]
+        fn but_not_a_changed_object_description() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            write_source(root, "Configuration.xml", WITH_OTHER);
+            let description = write_source(root, "Catalogs/Other.xml", "<xml/>");
+            assert!(!full_dump_after(
+                root,
+                &[change(&description, ChangeKind::Modified)]
+            ));
+        }
+
+        /// Правка модуля и формы выгрузку в полную не переводит.
+        #[test]
+        fn but_not_a_changed_module_or_form() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            write_source(root, "Catalogs/Items.xml", "<xml/>");
+            let module = write_source(root, "Catalogs/Items/Ext/ObjectModule.bsl", "module");
+            let form = write_source(root, "Catalogs/Items/Forms/F/Ext/Form.xml", "<xml/>");
+            assert!(!full_dump_after(
+                root,
+                &[
+                    change(&module, ChangeKind::Modified),
+                    change(&form, ChangeKind::Modified),
+                ]
+            ));
+        }
     }
 
     #[test]

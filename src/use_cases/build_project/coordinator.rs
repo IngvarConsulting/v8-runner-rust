@@ -1797,28 +1797,20 @@ fn guarded_load_then(
     Ok(Loaded { warnings, apply })
 }
 
-/// Цена обратной выгрузки загруженного модуля `.bsl` в единицах порога
-/// [`VERSION_FILE_REFRESH_COST`] (#646).
-const MODULE_COST: usize = 1;
-
-/// Цена обратной выгрузки загруженного файла, который не модуль: описание объекта, формы,
-/// макет (#646). ЗАМЕР: см. раздел «Свежий файл версий после крупной загрузки (#646)».
-const OTHER_FILE_COST: usize = 10;
-
-/// С какой цены загруженного отправка по изменившемуся сразу получает свежий файл версий (#646).
-/// Порог консервативный: запрос описи делается, только когда обратная выгрузка загруженного
-/// следующим `pull` однозначно дороже. Замер на КА 8.3.27 с живым агентом: запрос одной описи
-/// стоит отправке 1,6–1,7 с, а `pull` после отправки 2, 30 и 300 общих модулей без него дороже
-/// лишь на 1,1–1,7 с — разница в пределах разброса; выгрузка дерева КА идёт около 5 мс на файл.
-/// Раздел «Свежий файл версий после крупной загрузки (#646)» в
-/// `references/1c/confirmed-runtime-measurements.md`.
-const VERSION_FILE_REFRESH_COST: usize = 1000;
+/// Со скольких загруженных файлов отправка по изменившемуся сразу получает свежий файл версий
+/// (#646): один порог владельца для модулей, описаний объектов и форм. Замер на КА 8.3.27 с
+/// живым агентом: запрос одной описи стоит отправке 1,6–1,7 с после модулей и 6–7 с после
+/// описаний объектов, а `pull` после отправки до 300 модулей или описаний без него дороже лишь
+/// на 0,8–1,7 с. Обратная выгрузка у дерева КА — около 5 мс на файл: с тысячи модулей она дороже
+/// запроса, у тысячи описаний сравнима с ним. Раздел «Свежий файл
+/// версий после крупной загрузки (#646)» в `references/1c/confirmed-runtime-measurements.md`.
+const VERSION_FILE_REFRESH_FILES: usize = 1000;
 
 /// Получает ли загрузка свежий файл версий: полная — всегда; по изменившемуся — только если
 /// поколение перед ней совпало с записанным (иначе база могла нести правки, которых нет в
 /// каталоге, и свежая опись заявила бы их выгруженными) и если без неё следующая выгрузка
-/// пошла бы полной ([`partial_load::LoadedForDump::full_dump`]) или цена загруженного достигла
-/// порога [`VERSION_FILE_REFRESH_COST`]. Список — тот же, что грузит частичная загрузка.
+/// пошла бы полной ([`partial_load::next_dump_goes_full`]) или загружено не меньше
+/// [`VERSION_FILE_REFRESH_FILES`] файлов. Список — тот же, что грузит частичная загрузка.
 fn refreshes_the_version_file(
     partial_paths: Option<&[PathBuf]>,
     source_root: &Path,
@@ -1830,10 +1822,8 @@ fn refreshes_the_version_file(
     if *before != BeforeLoad::Matched {
         return false;
     }
-    let loaded = crate::change_detection::partial_load::loaded_for_dump(paths, source_root);
-    loaded.full_dump
-        || loaded.modules * MODULE_COST + loaded.other * OTHER_FILE_COST
-            >= VERSION_FILE_REFRESH_COST
+    crate::change_detection::partial_load::next_dump_goes_full(paths, source_root)
+        || paths.len() >= VERSION_FILE_REFRESH_FILES
 }
 
 /// Что удачная загрузка набора говорит шагу свежего файла версий.
@@ -2380,9 +2370,7 @@ fn generated_copy_loads(
 
 #[cfg(test)]
 mod version_refresh_tests {
-    use super::{
-        refreshes_the_version_file, MODULE_COST, OTHER_FILE_COST, VERSION_FILE_REFRESH_COST,
-    };
+    use super::{refreshes_the_version_file, VERSION_FILE_REFRESH_FILES};
     use crate::use_cases::exchange_guard::BeforeLoad;
     use std::path::{Path, PathBuf};
 
@@ -2393,13 +2381,12 @@ mod version_refresh_tests {
     }
 
     /// Полная загрузка получает свежий файл версий всегда; по изменившемуся — только при
-    /// совпавшем перед загрузкой поколении и с порога цены (#646).
+    /// совпавшем перед загрузкой поколении и с порога числа файлов (#646).
     #[test]
-    fn a_full_or_a_costly_matched_load_refreshes_the_version_file() {
+    fn a_full_or_a_large_matched_load_refreshes_the_version_file() {
         let root = Path::new("/sources");
-        let modules = VERSION_FILE_REFRESH_COST.div_ceil(MODULE_COST);
-        let large = files(root, "Module.bsl", modules);
-        let small = files(root, "Module.bsl", modules - 1);
+        let large = files(root, "Module.bsl", VERSION_FILE_REFRESH_FILES);
+        let small = files(root, "Module.bsl", VERSION_FILE_REFRESH_FILES - 1);
         assert!(refreshes_the_version_file(
             None,
             root,
@@ -2422,19 +2409,24 @@ mod version_refresh_tests {
         ));
     }
 
-    /// Описание объекта стоит дороже модуля: порог достигается меньшим их числом.
+    /// Описания объектов и модули считаются одной мерой: отдельного веса нет.
     #[test]
-    fn a_description_costs_more_than_a_module() {
+    fn modules_and_descriptions_count_alike() {
         let root = Path::new("/sources");
-        let descriptions = VERSION_FILE_REFRESH_COST.div_ceil(OTHER_FILE_COST);
-        const { assert!(OTHER_FILE_COST > MODULE_COST) };
+        let half = VERSION_FILE_REFRESH_FILES / 2;
+        let mut mixed = files(root, "Module.bsl", half);
+        mixed.extend(
+            (0..VERSION_FILE_REFRESH_FILES - half)
+                .map(|index| root.join(format!("Catalogs/C{index}.xml"))),
+        );
         assert!(refreshes_the_version_file(
-            Some(&files(root, "Form.xml", descriptions)),
+            Some(&mixed),
             root,
             &BeforeLoad::Matched
         ));
+        mixed.pop();
         assert!(!refreshes_the_version_file(
-            Some(&files(root, "Form.xml", descriptions - 1)),
+            Some(&mixed),
             root,
             &BeforeLoad::Matched
         ));
@@ -2445,7 +2437,11 @@ mod version_refresh_tests {
     #[test]
     fn a_change_the_platform_dumps_in_full_refreshes_the_version_file() {
         let root = Path::new("/sources");
-        for path in ["Configuration.xml", "Catalogs/X/Ext/Predefined.xml"] {
+        for path in [
+            "Configuration.xml",
+            "Catalogs/X/Ext/Predefined.xml",
+            "BusinessProcesses/P/Ext/Flowchart.xml",
+        ] {
             let list = [root.join(path)];
             assert!(
                 refreshes_the_version_file(Some(&list), root, &BeforeLoad::Matched),
