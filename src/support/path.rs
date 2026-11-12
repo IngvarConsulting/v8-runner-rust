@@ -244,7 +244,41 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
         std::env::current_dir()?.join(path)
     };
 
-    let mut existing = absolute.as_path();
+    #[cfg(windows)]
+    if let Some(native) = checked_windows_parent_components(&absolute)? {
+        return resolve_existing_ancestor(&native);
+    }
+
+    resolve_existing_ancestor(&absolute)
+}
+
+#[cfg(windows)]
+fn checked_windows_parent_components(absolute: &Path) -> std::io::Result<Option<PathBuf>> {
+    if matches!(absolute.components().next(), Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim())
+    {
+        return Ok(None);
+    }
+
+    // Win32 folds `..` before opening the path. Check each prefix it would
+    // erase, then resolve the native spelling so identity checks name the
+    // same target as callers that perform I/O with the original path.
+    let mut components = absolute.components();
+    let mut has_parent = false;
+    while let Some(component) = components.next_back() {
+        if component == Component::ParentDir {
+            let prefix = std::path::absolute(components.as_path())?;
+            let resolved = resolve_existing_ancestor(&prefix)?;
+            check_traversable_directory(&resolved)?;
+            has_parent = true;
+        }
+    }
+    has_parent
+        .then(|| std::path::absolute(absolute))
+        .transpose()
+}
+
+fn resolve_existing_ancestor(absolute: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = absolute;
     loop {
         match std::fs::symlink_metadata(existing) {
             Ok(_) => break,
@@ -252,7 +286,7 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
                 existing = existing.parent().ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        format!("no existing ancestor for path '{}'", path.display()),
+                        format!("no existing ancestor for path '{}'", absolute.display()),
                     )
                 })?;
             }
@@ -270,18 +304,7 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let mut resolved = existing_canonical;
     for component in suffix.components() {
-        // A missing directory may be traversed in the planned path, but a file may not.
-        match std::fs::metadata(&resolved) {
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotADirectory,
-                    format!("cannot traverse file '{}'", resolved.display()),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        check_traversable_directory(&resolved)?;
         match component {
             Component::Normal(part) => {
                 resolved.push(part);
@@ -302,7 +325,7 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
                     std::io::ErrorKind::InvalidInput,
                     format!(
                         "path '{}' contains unsupported component '{}'",
-                        path.display(),
+                        absolute.display(),
                         component.as_os_str().to_string_lossy()
                     ),
                 ));
@@ -311,6 +334,19 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
     }
 
     Ok(resolved)
+}
+
+fn check_traversable_directory(path: &Path) -> std::io::Result<()> {
+    // A missing directory may be traversed in the planned path, but a file may not.
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("cannot traverse file '{}'", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Snapshot bindings compare canonical paths exactly. Unlike lock identities,
@@ -703,13 +739,44 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("file"), "content").expect("file");
 
-        for suffix in ["file/child", "file/../child", "missing/../file/../child"] {
+        for suffix in [
+            "file/child",
+            "file/../child",
+            "file/child/../../sibling",
+            "missing/../file/../child",
+        ] {
             assert!(
                 nearest_existing_canonical_path(&dir.path().join(suffix)).is_err(),
                 "must reject file traversal: {suffix}"
             );
         }
         assert!(!dir.path().join("missing").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn planned_path_matches_native_windows_target_after_junction_and_parent() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("physical/nested");
+        fs::create_dir_all(&target).expect("junction target");
+        junction::create(&target, dir.path().join("link")).expect("junction");
+        let native = dir.path().join("out.cf");
+        let requested = dir.path().join(r"link\..\out.cf");
+
+        assert_eq!(
+            nearest_existing_canonical_path(&requested).expect("planned target"),
+            fs::canonicalize(dir.path())
+                .expect("canonical directory")
+                .join("out.cf")
+        );
+        fs::write(&requested, "artifact").expect("native write");
+        let resolved = nearest_existing_canonical_path(&requested).expect("published target");
+        assert_eq!(resolved, fs::canonicalize(&native).expect("native target"));
+        assert_eq!(
+            filesystem_object_identity(&resolved).expect("resolved identity"),
+            filesystem_object_identity(&requested).expect("native identity")
+        );
+        assert!(!dir.path().join("physical/out.cf").exists());
     }
 
     #[test]

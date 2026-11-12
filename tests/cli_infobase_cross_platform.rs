@@ -67,6 +67,60 @@ fn run_json(config: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON envelope")
 }
 
+#[cfg(windows)]
+#[test]
+fn workdir_rejects_file_traversal_before_creating_a_directory() {
+    let root = tempdir().expect("tempdir");
+    fs::create_dir(root.path().join("src")).expect("source directory");
+    fs::write(root.path().join("blocker"), "data").expect("blocker");
+    let config = root.path().join("v8project.yaml");
+    fs::write(
+        &config,
+        "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+    )
+    .expect("config");
+    let infobase = format!("File={}", root.path().join("empty-base").display());
+    let run = |workdir: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+            .arg("--config")
+            .arg(&config)
+            .args([
+                "--infobase",
+                &infobase,
+                "--workdir",
+                workdir,
+                "--json-message",
+            ])
+            .args(args)
+            .output()
+            .expect("run v8-runner")
+    };
+    for workdir in ["blocker/../redirected", r"blocker\..\redirected"] {
+        for args in [&["push", "main", "--dry-run"][..], &["status"][..]] {
+            let output = run(workdir, args);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !root.path().join("redirected").exists(),
+                "{args:?}: {stdout}"
+            );
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {stdout}");
+            assert!(
+                stdout.contains("cannot traverse file") && stdout.contains("blocker"),
+                "{stdout}"
+            );
+        }
+    }
+
+    let output = run("missing/../redirected-control", &["status"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(root.path().join("redirected-control/.gitignore").is_file());
+    assert!(!root.path().join("missing").exists());
+}
+
 /// Проект с набором `main`, который выгружается фальшивым Конфигуратором.
 #[cfg(windows)]
 fn with_main_set(config: &Path) {

@@ -35,6 +35,8 @@ case "$CI_SCOPE" in
           "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
           "support::path::tests::resolve_from_builds_native_windows_paths"
+          "support::path::tests::planned_path_rejects_regular_file_traversal_even_before_parent_components"
+          "support::path::tests::planned_path_matches_native_windows_target_after_junction_and_parent"
           "support::path::tests::a_response_on_windows_names_paths_without_the_verbatim_prefix"
           "mcp::server::tests::an_mcp_answer_names_paths_without_the_verbatim_prefix"
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"

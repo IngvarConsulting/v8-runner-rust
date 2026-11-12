@@ -65,6 +65,7 @@ live-mcp-http.py
   публикации на Windows без требования установленной платформы 1С. Тот же scope запускает
   процессные тесты внешней публикации полного `pull`, cross-process contention smoke
   и unit-регрессии общего OS/legacy lock protocol.
+  Для `--workdir` проверяются отказ на файле перед `..` и совпадение идентичности цели Windows после junction и `..`.
 - Linux и macOS contract scope запускают полный `cargo test --locked`; неизвестный OS label
   считается ошибкой конфигурации CI, а не неявным Linux/macOS fallback.
 - Не знает деталей live fixture и не должен дублировать live smoke-логику.
