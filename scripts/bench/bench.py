@@ -347,9 +347,19 @@ class Bench:
         return row
 
     # -- pull: the module changed in the base; take the change into files
+    def reconnect_live(self, r, label):
+        """The foreign edit needed the base free, so the live agent was released from it. A live agent
+        normally sits connected between commands: reconnect it before the timed step (not timed), so
+        the measure is the step itself and not a reconnect a real live agent would not pay."""
+        row, _ = r.run(f"reconnect-{label}", "status", "--deep")
+        if row["rc"]:
+            raise ex.StepFailed(f"status --deep before the measure rc={row['rc']} {row['error']}: {row['message']}")
+
     def pull_runner(self, scn, executor, rels, originals, marker):
         r = self.runner_for(executor)
         self.base_edit(rels, originals, marker)
+        if executor == "runner-live":
+            self.reconnect_live(r, f"{scn.name}-{executor}")
         row, _ = r.run(f"pull-{scn.name}-{executor}", "pull", r.stand.source_set, *scn.runner_args)
         if row["rc"]:
             raise ex.StepFailed(f"pull rc={row['rc']} {row['error']}: {row['message']}")

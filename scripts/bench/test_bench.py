@@ -469,6 +469,18 @@ class FreeBaseTest(unittest.TestCase):
         self.assertEqual(others, {"designer", "ibcmd", "bare", "pull", "push", "status"})
         self.assert_free_before_others(events)
 
+    def test_a_live_pull_is_measured_with_the_agent_reconnected(self):
+        """The owner's call (#585): the foreign edit releases the live agent; the timed pull of
+        runner-live must not pay the reconnect a live agent sitting on the base would not pay."""
+        b, events, rows = self.bench()
+        scn = describe.load_scenarios()["pull-common1"]
+        b.run_scenario(scn, ["runner-live"], 1)
+        self.assertEqual([r.get("error") for r in rows if r.get("ok") is False], [])
+        for i, (who, what) in enumerate(events):
+            if (who, what) == ("free", "release"):
+                after = [e for e in events[i + 1:] if e[0] == "runner"][:2]
+                self.assertEqual(after, [("runner", "status"), ("runner", "pull")], events)
+
     def test_the_restore_lets_the_base_go_before_runner_016_syncs(self):
         """The failure on kz83: restore-push left the live agent connected and the sync by 0.16
         that followed got `agent ... rejected the credentials of user ''`."""
