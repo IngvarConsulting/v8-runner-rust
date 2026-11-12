@@ -2614,35 +2614,22 @@ mod tests {
 
     impl DumpFixture {
         fn install(self, path: &Path, calls: &Path) -> PathBuf {
-            use std::sync::OnceLock;
-
-            static EXECUTABLE: OnceLock<Vec<u8>> = OnceLock::new();
-            let executable = EXECUTABLE.get_or_init(|| {
-                let dir = tempdir().expect("fake platform build directory");
-                let output = dir
-                    .path()
-                    .join(format!("fake-platform{}", std::env::consts::EXE_SUFFIX));
-                let source =
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_platform.rs");
-                let compile = std::process::Command::new("rustc")
-                    .arg("--edition=2021")
-                    .arg(source)
-                    .arg("-o")
-                    .arg(&output)
-                    .output()
-                    .expect("compile fake platform");
-                assert!(
-                    compile.status.success(),
-                    "fake platform compilation failed: {}",
-                    String::from_utf8_lossy(&compile.stderr)
-                );
-                fs::read(output).expect("read compiled fake platform")
-            });
-
             let mut path = path.to_path_buf();
             path.as_mut_os_string().push(std::env::consts::EXE_SUFFIX);
-            fs::write(&path, executable).expect("install fake platform");
-            make_executable(&path);
+            let source =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_platform.rs");
+            let compile = std::process::Command::new("rustc")
+                .arg("--edition=2021")
+                .arg(source)
+                .arg("-o")
+                .arg(&path)
+                .output()
+                .expect("compile fake platform");
+            assert!(
+                compile.status.success(),
+                "fake platform compilation failed: {}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
 
             let scenario = path.with_extension("dump-fixture");
             fs::create_dir(&scenario).expect("dump scenario directory");
