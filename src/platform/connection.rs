@@ -10,10 +10,12 @@ pub struct V8Connection {
 }
 
 impl V8Connection {
-    /// A runner-owned file path is already a single value, even if it contains
-    /// connection-string separators.
+    /// Use a single `/F` argument when the path could be parsed as a connection string.
     pub(crate) fn for_file(path: &std::path::Path) -> Self {
         let path = path.display().to_string();
+        if !path.contains([';', '"', '\'']) {
+            return Self::from_connection_string(&format!("File={path}"));
+        }
         Self {
             raw: format!("/F {path}"),
             connection_args: vec!["/F".to_owned(), path],
