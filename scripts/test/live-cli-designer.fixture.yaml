@@ -3,7 +3,11 @@
 
 workPath: __OUTPUT_ROOT__/work
 format: DESIGNER
-builder: DESIGNER
+providers:
+  infobase.create: __SMOKE_PROVIDER__
+  push: __SMOKE_PROVIDER__
+  pull: __SMOKE_PROVIDER__
+  make: __SMOKE_PROVIDER__
 infobase:
   connection: "File=__OUTPUT_ROOT__/infobase"
 
