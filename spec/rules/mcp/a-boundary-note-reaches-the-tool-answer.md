@@ -14,6 +14,7 @@ check:
 `INV.USE-CASES.A-TAKEOVER-IS-NAMED-IN-THE-ANSWER`,
 `INV.USE-CASES.A-GONE-OWNER-IS-REPLACED-AND-NAMED`), его ответ говорит об этом так же, как
 ответ командной строки: те же тексты в том же порядке — в `warnings` после предупреждений
-самой команды, и в успехе, и в отказе.
+самой команды, и в успехе, и в отказе, — и те же предупреждения с кодом в `warning_details`.
+Превью у инструмента MCP нет, поэтому код `infobase_of_another_copy` приходит у прогона.
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies).

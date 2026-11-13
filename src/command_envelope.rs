@@ -7,6 +7,7 @@ use crate::domain::sessions::InfobaseSessions;
 use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
+use crate::domain::warning::{CodedWarning, Warning};
 
 /// Род отказа. Набор закрыт: новый род приходит вместе с версией конверта, а не молча.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -226,6 +227,12 @@ pub struct Envelope<T: Serialize> {
     pub duration_ms: u64,
     pub data: T,
     pub warnings: Vec<String>,
+    /// Предупреждения из `warnings`, у которых есть машинный код, — в том же порядке и с тем же
+    /// текстом в `message`. Поля нет, когда таких предупреждений нет. Пишет его только
+    /// `follow_with`; типом это не закреплено — держат тесты превью, прогона, MCP и внешней
+    /// выгрузки.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warning_details: Vec<CodedWarning>,
     pub steps: Vec<StepResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<EnvelopeError>,
@@ -239,6 +246,7 @@ impl<T: Serialize> Envelope<T> {
             duration_ms,
             data,
             warnings: vec![],
+            warning_details: vec![],
             steps: vec![],
             error: None,
         }
@@ -251,6 +259,7 @@ impl<T: Serialize> Envelope<T> {
             duration_ms,
             data,
             warnings: vec![],
+            warning_details: vec![],
             steps: vec![],
             error: None,
         }
@@ -259,6 +268,18 @@ impl<T: Serialize> Envelope<T> {
     pub fn with_error(mut self, error: EnvelopeError) -> Self {
         self.error = Some(error);
         self
+    }
+
+    /// Дописывает предупреждения после уже названных: текст — в `warnings`, предупреждение с
+    /// кодом — ещё и в `warning_details`. Этим путём предупреждение с кодом попадает в конверт у
+    /// presenter CLI, MCP и внешней выгрузки, поэтому два поля не расходятся.
+    pub fn follow_with<'a>(&mut self, warnings: impl IntoIterator<Item = &'a Warning>) {
+        for warning in warnings {
+            self.warnings.push(warning.message().to_owned());
+            if let Some(coded) = warning.coded() {
+                self.warning_details.push(coded.clone());
+            }
+        }
     }
 }
 
@@ -303,6 +324,7 @@ pub fn test_envelope(result: &TestRunResult) -> Envelope<TestEnvelopeData> {
         command: "test".to_owned(),
         duration_ms: result.duration_ms,
         warnings: result.warnings.clone(),
+        warning_details: vec![],
         steps: result.steps.clone(),
         error: None,
         data: TestEnvelopeData::from_result(result),
@@ -370,6 +392,86 @@ mod schema_tests {
             actual, generated,
             "{COMMAND_ENVELOPE_SCHEMA_PATH} is stale; rerun UPDATE_ENVELOPE_SCHEMA=1 cargo test generated_envelope_schema_is_current"
         );
+    }
+
+    /// Набор кодов предупреждений закрыт по кругу, как набор кодов отказа: каждый код,
+    /// который умеет выдать раннер, назван схемой, и схема не называет кода, которого нет.
+    /// Объект каждого кода закрыт: новое поле — новая версия конверта.
+    #[test]
+    fn every_warning_code_is_named_by_the_schema_and_by_a_producer() {
+        use crate::domain::status::HolderStatus;
+        let schema = generated_envelope_schema();
+        let variants = schema
+            .pointer("/$defs/CodedWarning/oneOf")
+            .and_then(serde_json::Value::as_array)
+            .expect("CodedWarning is a closed set of tagged objects");
+        let named: Vec<String> = variants
+            .iter()
+            .map(|variant| {
+                assert_eq!(
+                    variant["additionalProperties"],
+                    serde_json::Value::Bool(false),
+                    "{variant}"
+                );
+                variant
+                    .pointer("/properties/code/const")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("a variant names its code: {variant}"))
+                    .to_owned()
+            })
+            .collect();
+
+        // Каждый производитель — по примеру: код на проводе берётся из сериализации, а не из
+        // таблицы, которую можно забыть поправить.
+        let produced = [CodedWarning::InfobaseOfAnotherCopy {
+            message: "push writes the infobase '/srv/ib' of another working copy".to_owned(),
+            name: Some("origin".to_owned()),
+            address: "file:/srv/ib".to_owned(),
+            owners: vec![HolderStatus {
+                project: "/home/dev/other".into(),
+                host: Some("dev-box".to_owned()),
+                since: chrono::DateTime::parse_from_rfc3339("2026-10-01T09:00:00Z")
+                    .expect("since")
+                    .to_utc(),
+                this_copy: false,
+                this_machine: true,
+            }],
+        }];
+        let produced_codes: Vec<String> = produced
+            .iter()
+            .map(|warning| {
+                let value = serde_json::to_value(warning).expect("serialize");
+                assert_eq!(value["code"], warning.code(), "{value}");
+                assert_eq!(value["message"], warning.message(), "{value}");
+                warning.code().to_owned()
+            })
+            .collect();
+        assert_eq!(named, produced_codes);
+
+        // Конверт с таким предупреждением проходит свою схему.
+        let mut envelope = Envelope::ok("push", 1, serde_json::json!({}));
+        envelope.follow_with(&produced.map(Warning::Coded));
+        let value = serde_json::to_value(&envelope).expect("envelope");
+        assert_eq!(
+            value["warnings"][0], value["warning_details"][0]["message"],
+            "{value}"
+        );
+        let validator = jsonschema::validator_for(&schema).expect("schema");
+        assert!(validator.is_valid(&value), "{value}");
+        // Строка соединения базу не называет: `name: null`, и поле при этом есть.
+        let mut ad_hoc = value.clone();
+        ad_hoc["warning_details"][0]["name"] = serde_json::Value::Null;
+        assert!(validator.is_valid(&ad_hoc), "{ad_hoc}");
+        let mut unnamed = value.clone();
+        unnamed["warning_details"][0]
+            .as_object_mut()
+            .expect("detail")
+            .remove("name");
+        assert!(!validator.is_valid(&unnamed), "{unnamed}");
+        // Без предупреждения с кодом поля нет — прежний конверт не меняется.
+        let plain =
+            serde_json::to_value(Envelope::ok("push", 1, serde_json::json!({}))).expect("envelope");
+        assert!(plain.get("warning_details").is_none(), "{plain}");
     }
 
     /// Набор родов и кодов закрыт по кругу: что умеет назвать код, то перечисляет схема, и
