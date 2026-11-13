@@ -1807,8 +1807,9 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 - Перед IBCMD DT раннер проверяет блокировку `1Cv8.1CD` через `F_GETLK`. Открытый сеанс
   даёт `infobase_busy` с PID держателя (или «неизвестный держатель» у OFD-блокировки) до
   запуска утилиты. Ошибка проверки также не допускает запуск. Снимок публикуется из staging только после успеха: сам `ibcmd` при отказе обрезает
-  выходной файл. Проверено на Linux и macOS; на Windows этот исполнитель DT отказывает,
-  пока признак сеанса не измерен. [Замеры](../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux).
+  выходной файл. Проверено на Linux и macOS. На Windows выбор `ibcmd` для `infobase dump`
+  и `infobase restore` отклоняется и в превью, и в обычном вызове, пока признак сеанса
+  не измерен. [Замеры](../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux).
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Push/source/test/EDT/client-MCP настройки для этих команд не валидируются.
@@ -2203,7 +2204,10 @@ v8-runner mcp serve http
   между форматами исходников; `convert --to package` из набора EDT переводит его в XML здесь
   же и называет этот каталог в `data.workspace_path`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert` между форматами
-  исходников.
+  исходников. При подтверждённой устаревшей регистрации каталога стадии экспорт EDT → XML
+  повторяется в соседнем `edt-workspace-recovery-*`, который переиспользуется для этой записи.
+  Живая коллизия называет путь источника и зарегистрированный путь. `data.workspace_path`
+  показывает область последней попытки экспорта.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD: каждая команда к базе проекта; у базы сборки и у временной базы разбора пакета каталог свой; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/reports/diff/`: отчёты `diff --against`; раннер их не удаляет, каталог можно очистить.
 - `workPath/logs/platform/`: platform logs.

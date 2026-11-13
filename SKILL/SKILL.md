@@ -154,7 +154,8 @@ v8-runner infobase create
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`): the
   agent, then Designer; POSIX file DT transfers also accept explicit IBCMD via
   `providers.infobase.dump|restore: ibcmd`. Close all file-base sessions first; a busy base
-  refuses with its holder PID. Windows IBCMD DT is unavailable until its session probe is measured.
+  refuses with its holder PID. On Windows, both previews and actual DT requests refuse IBCMD
+  during provider selection until its session probe is measured.
   `restore --create` skips the agent.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`. Without a `providers` key a file-base `push`/`pull` where every set goes
@@ -293,6 +294,7 @@ v8-runner infobase create
   itself a Designer run, and `infobase create` against a cluster infobase cannot tell "created" from
   "already existed" without creating it (a failed creation may leave its database in the DBMS — check before a retry).
 - Source files need conversion between Designer and EDT, a set into a `.cf`/`.cfe` (`convert <SET> --to package`) or a package into XML (`convert main.cf --to xml`): use `v8-runner convert`; this is CLI-only, never selects the project infobase (`--infobase` is refused) and uses `ibcmd` for package directions. Source-to-package shares the `make` build infobase. Package-to-XML uses a throwaway infobase.
+- EDT-to-XML may recover in a separate workspace if EDT confirms a missing convert stage. Use `data.workspace_path` to locate the last export attempt. For a live name conflict, the error identifies the source and the registered project.
 - Apply packages with `v8-runner upload <FILE>`. For an extension, `--ref <NAME>` is the
   extension name in the base: an extension source-set is named by its set name, as in `push`.
   Vendor distribution `.cf` and update `.cfu` use `--mode update --settings <FILE>`.
