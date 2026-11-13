@@ -8,6 +8,8 @@ check:
   - src/use_cases/dump_config.rs::cleanup_orphan_dirs_returns_the_backup_when_the_target_is_gone
   - src/use_cases/dump_config.rs::a_failed_dump_after_a_killed_replacement_leaves_the_returned_directory
   - src/use_cases/staged_publication.rs::background_removal_outside_the_runner_removes_the_previous_tree_in_place
+  - src/use_cases/staged_publication.rs::a_replaced_directory_link_does_not_change_its_referent
+  - src/use_cases/staged_publication.rs::an_ignore_link_in_a_replaced_directory_does_not_change_its_referent
   - src/support/fs.rs::a_swap_leaves_a_superseded_backup_that_only_the_marked_removal_takes
   - src/support/fs.rs::a_failed_stage_rename_restores_the_whole_previous_directory
   - src/support/fs.rs::a_backup_metadata_collision_leaves_the_old_and_staged_trees
@@ -36,7 +38,9 @@ check:
 скрытая подкоманда `remove-backup` с пониженным приоритетом, запущенная так же, как служба
 стенда, но без журнала: его отказ виден по оставшейся копии. Процесс переживает ответ
 команды. Подкоманда удаляет только помеченную резервную копию раннера рядом с её целью. Если
-процесс не запустился, каталог удаляется на месте до ответа.
+процесс не запустился, каталог удаляется на месте до ответа. Резерв-ссылка удаляется на
+месте без записи в её цель. В обычном резерве раннер заменяет сам файл `.gitignore`,
+поэтому символическая или жёсткая ссылка на месте этого файла не меняет другой файл.
 
 Не успевший или упавший процесс ничего не ломает: помеченную копию и её оставшиеся
 метаданные уборка остатков следующего `pull` той же цели удаляет в любом возрасте, под
