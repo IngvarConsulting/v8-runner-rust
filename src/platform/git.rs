@@ -483,10 +483,13 @@ fn run_git_query(
 /// (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`). На Unix группа не
 /// меняется.
 fn git() -> Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut command = Command::new("git");
+    let command = Command::new("git");
     #[cfg(windows)]
-    crate::platform::process::outside_the_runner_process_group(&mut command);
+    let command = {
+        let mut command = command;
+        crate::platform::process::outside_the_runner_process_group(&mut command);
+        command
+    };
     command
 }
 
