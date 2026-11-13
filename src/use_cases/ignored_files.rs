@@ -153,19 +153,13 @@ impl ProjectGitignore {
     fn covered_by_git(&self, entry: &IgnoredPattern) -> Option<bool> {
         for probe in entry.probes {
             let covered = match entry.reach {
-                Reach::BesideConfig => match self.config_dir.strip_prefix(&self.project_dir) {
-                    // Из каталога проекта: каталога конфига до записи может ещё не быть,
-                    // а `git -C` в несуществующем каталоге не отвечает вовсе.
-                    Ok(relative) => {
-                        let beside = relative
-                            .components()
-                            .map(|part| part.as_os_str().to_string_lossy())
-                            .chain(std::iter::once((*probe).into()))
-                            .collect::<Vec<_>>()
-                            .join("/");
+                // Из каталога проекта: каталога конфига до записи может ещё не быть, а
+                // `git -C` в несуществующем каталоге не отвечает вовсе.
+                Reach::BesideConfig => match self.beside_config_from_project(probe) {
+                    Some(beside) => {
                         ignored_by_worktree_gitignore(&self.project_dir, Path::new(&beside))?
                     }
-                    Err(_) => ignored_by_worktree_gitignore(&self.config_dir, Path::new(probe))?,
+                    None => ignored_by_worktree_gitignore(&self.config_dir, Path::new(probe))?,
                 },
                 Reach::AnyDepth => {
                     // Строкой через `/`, а не `Path::join`: гит ждёт косую черту на
@@ -180,6 +174,20 @@ impl ProjectGitignore {
             }
         }
         Some(true)
+    }
+}
+
+impl ProjectGitignore {
+    /// Имя рядом с конфигом относительно каталога проекта, через `/`, как его ждёт гит на
+    /// любой платформе; `None` — конфиг вне проекта или путь не в UTF-8.
+    fn beside_config_from_project(&self, probe: &str) -> Option<String> {
+        let relative = self.config_dir.strip_prefix(&self.project_dir).ok()?;
+        let mut parts = relative
+            .components()
+            .map(|part| part.as_os_str().to_str())
+            .collect::<Option<Vec<&str>>>()?;
+        parts.push(probe);
+        Some(parts.join("/"))
     }
 }
 

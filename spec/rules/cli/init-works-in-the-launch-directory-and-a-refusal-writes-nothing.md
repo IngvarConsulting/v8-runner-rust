@@ -8,6 +8,10 @@ check:
   - tests/cli_config_init.rs::a_gitignore_write_failure_after_force_restores_the_project_file
   - src/use_cases/config_init.rs::an_output_outside_the_project_is_refused_before_anything_is_read_or_written
   - src/use_cases/config_init.rs::a_failed_write_restores_the_written_files_and_removes_the_created_directories
+  - src/use_cases/config_init.rs::a_restore_that_fails_is_named_by_the_error
+  - src/use_cases/config_init.rs::a_failed_rollback_keeps_the_local_layer_holding_the_moved_address
+  - src/use_cases/config_init.rs::a_failed_restore_does_not_stop_the_rest_of_the_rollback
+  - src/use_cases/config_init.rs::a_failed_write_keeps_a_dangling_link_and_removes_its_created_target
   - src/use_cases/ignored_files.rs::a_config_directory_not_yet_created_is_probed_from_the_project_dir
 ---
 
@@ -20,7 +24,9 @@ check:
 
 Отказ `init` не оставляет изменённых файлов. Всё, что может отказать, проверяется до
 записи. Если запись всё же отказала, уже записанные файлы получают прежнее содержимое,
-а созданные каталоги убираются. Файл, который вернуть не удалось, называет ошибка.
+а созданные каталоги убираются. Файл, который вернуть не удалось, называет ошибка. Местный
+слой, принявший адрес базы из проектного файла, после такого сбоя остаётся записанным и
+тоже назван: адрес базы остаётся хотя бы в одном файле.
 
 Источник: [`cli-init.html#init-output-outside`](../../../docs/site/cli-init.html#init-output-outside),
 [`cli-init.html#init-write-failed`](../../../docs/site/cli-init.html#init-write-failed).

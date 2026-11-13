@@ -83,6 +83,10 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             request.output_path.display()
         ))
     })?;
+    let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
+    // Проект — каталог запуска: в нём ищутся наборы и лежит его `.gitignore`. Проектный
+    // файл вне его — чужой проект, и отказ приходит раньше любого чтения и записи (#718).
+    refuse_output_outside_the_project(&project_dir, &output_path, output_dir)?;
     // Проект объявлен, если проектный файл уже есть: тогда местный слой перенаправляет
     // `origin`, а не отказывает, и без `--force` проектный файл остаётся как был.
     let project_declared = output_path.is_file();
@@ -106,10 +110,6 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         OriginConflict::Refuse
     };
 
-    let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
-    // Проект — каталог запуска: в нём ищутся наборы и лежит его `.gitignore`. Проектный
-    // файл вне его — чужой проект, и отказ приходит раньше любого чтения и записи (#718).
-    refuse_output_outside_the_project(&project_dir, output_dir)?;
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
     // Проектный файл называет `localPath`, только пока остаётся: `--force` пишет его заново.
@@ -123,10 +123,10 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     };
 
     if project_declared && !request.force {
-        let local = plan_local_config(&local_path, origin_request)?;
+        let mut local = plan_local_config(&local_path, origin_request)?;
         let mut writes = Vec::new();
-        if let Some(content) = local.content.clone() {
-            writes.push(PlannedWrite::new(&local_path, LOCAL_CONFIG_FILE, content)?);
+        if let Some(content) = local.content.take() {
+            writes.push(PlannedWrite::new(&local_path, WrittenFile::Local, content)?);
         }
         writes.extend(planned_gitignore(&gitignore)?);
         apply_writes(output_dir, writes)?;
@@ -151,18 +151,26 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
     // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
     // бы переписать проект, а команда ответила бы отказом.
-    let local = plan_local_config(&local_path, origin_request)?;
+    let mut local = plan_local_config(&local_path, origin_request)?;
 
-    let project_write = PlannedWrite::new(&output_path, PROJECT_CONFIG_FILE, yaml)?;
+    let project_write = PlannedWrite::new(&output_path, WrittenFile::Project, yaml)?;
     let local_write = local
         .content
-        .clone()
-        .map(|content| PlannedWrite::new(&local_path, LOCAL_CONFIG_FILE, content))
-        .transpose()?;
+        .take()
+        .map(|content| PlannedWrite::new(&local_path, WrittenFile::Local, content))
+        .transpose()?
+        .map(|write| {
+            if project.is_some() {
+                write.holding_the_moved_address()
+            } else {
+                write
+            }
+        });
     let mut writes = Vec::new();
     if project.is_some() {
         // Секция `infobase:` переезжает из проектного файла в местный слой: слой пишется
-        // первым, чтобы и сбой отката не потерял единственную копию адреса и учётных данных.
+        // первым и при сбое отката остаётся, чтобы не потерять единственную копию адреса
+        // и учётных данных.
         writes.extend(local_write);
         writes.push(project_write);
     } else {
@@ -352,18 +360,40 @@ fn plan_local_config(path: &Path, request: OriginRequest<'_>) -> Result<LocalLay
     Ok(plan)
 }
 
-const PROJECT_CONFIG_FILE: &str = "config file";
-const LOCAL_CONFIG_FILE: &str = "local config file";
-const GITIGNORE_FILE: &str = "gitignore file";
+/// Какой файл `init` пишет: так его называет ошибка записи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrittenFile {
+    Project,
+    Local,
+    Gitignore,
+}
+
+impl std::fmt::Display for WrittenFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Project => "config file",
+            Self::Local => "local config file",
+            Self::Gitignore => "gitignore file",
+        })
+    }
+}
 
 /// Отказ, если проектный файл лежит вне каталога запуска. Сравнение — у проверки
 /// настроек: ссылки, `..` и регистр Windows здесь те же.
 fn refuse_output_outside_the_project(
     project_dir: &Path,
+    output_path: &Path,
     output_dir: &Path,
 ) -> Result<(), AppError> {
     use crate::support::path::compared_path;
-    if compared_path(output_dir).starts_with(compared_path(project_dir)) {
+    let project = compared_path(project_dir);
+    if compared_path(output_path) == project {
+        return Err(AppError::Validation(format!(
+            "`init --output` names the project directory '{}' itself; pass the path of the config file, e.g. `v8project.yaml`",
+            project_dir.display()
+        )));
+    }
+    if compared_path(output_dir).starts_with(&project) {
         return Ok(());
     }
     Err(AppError::Validation(format!(
@@ -377,19 +407,33 @@ fn refuse_output_outside_the_project(
 /// прежнее содержимое уже записанным файлам.
 struct PlannedWrite {
     path: PathBuf,
-    what: &'static str,
+    what: WrittenFile,
     content: String,
-    /// Прежние байты файла; `None` — файла не было, и откат его удаляет.
-    previous: Option<Vec<u8>>,
+    previous: Previous,
+    /// Запись держит единственную копию адреса базы (секция `infobase:` переезжает из
+    /// проектного файла): её откатывают, только пока откат остальных удался.
+    holds_moved_address: bool,
+}
+
+/// Что лежало на месте файла до записи.
+enum Previous {
+    /// Прежние байты: откат пишет их обратно.
+    Bytes(Vec<u8>),
+    /// Файла не было: откат удаляет то, что создала запись, — сам файл или, если на его
+    /// месте висячая ссылка, её цель, а ссылку оставляет.
+    Absent { created: PathBuf },
+    /// На месте файла каталог: запись откажет, ничего не изменив, и возвращать нечего.
+    Untouched,
 }
 
 impl PlannedWrite {
-    fn new(path: &Path, what: &'static str, content: String) -> Result<Self, AppError> {
+    fn new(path: &Path, what: WrittenFile, content: String) -> Result<Self, AppError> {
         let previous = match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            // На месте файла каталог: запись откажет сама, и возвращать нечего.
-            Err(_) if path.is_dir() => None,
+            Ok(bytes) => Previous::Bytes(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Previous::Absent {
+                created: dangling_link_end(path),
+            },
+            Err(_) if path.is_dir() => Previous::Untouched,
             Err(error) => {
                 return Err(AppError::Runtime(format!(
                     "failed to read {what} '{}': {error}",
@@ -402,26 +446,60 @@ impl PlannedWrite {
             what,
             content,
             previous,
+            holds_moved_address: false,
         })
+    }
+
+    fn holding_the_moved_address(self) -> Self {
+        Self {
+            holds_moved_address: true,
+            ..self
+        }
     }
 
     /// Возвращает файлу прежнее содержимое. `fs::write`, а не замена файла: местный
     /// слой бывает ссылкой на общий файл, и ссылка должна остаться ссылкой.
+    /// Файл, который остался прежним (запись отказала, не открыв его), не трогается.
     fn restore(&self) -> std::io::Result<()> {
         match &self.previous {
-            Some(bytes) => std::fs::write(&self.path, bytes),
-            None => match std::fs::remove_file(&self.path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                other => other,
-            },
+            Previous::Bytes(bytes) => {
+                if std::fs::read(&self.path).is_ok_and(|current| current == *bytes) {
+                    return Ok(());
+                }
+                std::fs::write(&self.path, bytes)
+            }
+            Previous::Absent { created } => {
+                if std::fs::symlink_metadata(created).is_err() {
+                    return Ok(());
+                }
+                std::fs::remove_file(created)
+            }
+            Previous::Untouched => Ok(()),
         }
     }
+}
+
+/// Файл, который создаст запись по `path`: сам путь или конец цепочки висячих ссылок.
+fn dangling_link_end(path: &Path) -> PathBuf {
+    // Предел — как у систем, что разрешают ссылки: дальше цепочка считается петлёй.
+    const MAX_LINKS: usize = 40;
+    let mut end = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        let Ok(target) = std::fs::read_link(&end) else {
+            break;
+        };
+        end = match end.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    end
 }
 
 fn planned_gitignore(gitignore: &ProjectGitignore) -> Result<Option<PlannedWrite>, AppError> {
     gitignore
         .planned_content()?
-        .map(|content| PlannedWrite::new(gitignore.path(), GITIGNORE_FILE, content))
+        .map(|content| PlannedWrite::new(gitignore.path(), WrittenFile::Gitignore, content))
         .transpose()
 }
 
@@ -436,34 +514,38 @@ fn apply_writes(config_dir: &Path, writes: Vec<PlannedWrite>) -> Result<(), AppE
         .ancestors()
         .take_while(|dir| !dir.exists())
         .collect();
-    let mut done: Vec<&PlannedWrite> = Vec::with_capacity(writes.len());
-    let failure = match std::fs::create_dir_all(config_dir) {
-        Err(error) => Some(format!(
+    // Сколько записей начато: отказавшая тоже — `fs::write` успевает обрезать файл.
+    let mut attempted = 0;
+    let mut failure = std::fs::create_dir_all(config_dir).err().map(|error| {
+        format!(
             "failed to create config directory '{}': {error}",
             config_dir.display()
-        )),
-        Ok(()) => {
-            writes
-                .iter()
-                .find_map(|write| match std::fs::write(&write.path, &write.content) {
-                    Ok(()) => {
-                        done.push(write);
-                        None
-                    }
-                    Err(error) => Some(format!(
-                        "failed to write {} '{}': {error}",
-                        write.what,
-                        write.path.display()
-                    )),
-                })
+        )
+    });
+    if failure.is_none() {
+        for write in &writes {
+            attempted += 1;
+            if let Err(error) = std::fs::write(&write.path, &write.content) {
+                failure = Some(format!(
+                    "failed to write {} '{}': {error}",
+                    write.what,
+                    write.path.display()
+                ));
+                break;
+            }
         }
-    };
-    let Some(mut message) = failure else {
+    }
+    let Some(message) = failure else {
         return Ok(());
     };
+    // Откат идёт от последней записи к первой. Местный слой, принявший адрес базы из
+    // проектного файла, после сбоя отката не возвращается: иначе адрес пропал бы из обоих
+    // файлов. Что вернуть не удалось или что оставлено записанным, называет ошибка.
     let mut unrestored = Vec::new();
-    for write in done.into_iter().rev() {
-        if let Err(error) = write.restore() {
+    for write in writes[..attempted].iter().rev() {
+        if write.holds_moved_address && !unrestored.is_empty() {
+            unrestored.push(format!("'{}' (left as written)", write.path.display()));
+        } else if let Err(error) = write.restore() {
             unrestored.push(format!("'{}' ({error})", write.path.display()));
         }
     }
@@ -476,10 +558,13 @@ fn apply_writes(config_dir: &Path, writes: Vec<PlannedWrite>) -> Result<(), AppE
             ));
         }
     }
-    if !unrestored.is_empty() {
-        message.push_str(&format!("; could not restore {}", unrestored.join(", ")));
+    if unrestored.is_empty() {
+        return Err(AppError::Runtime(message));
     }
-    Err(AppError::Runtime(message))
+    Err(AppError::Runtime(format!(
+        "{message}; could not restore {}",
+        unrestored.join(", ")
+    )))
 }
 
 fn with_local_schema_modeline(existing: &str) -> String {
@@ -868,11 +953,12 @@ fn yaml_document_is_empty(content: &str) -> bool {
     )
 }
 
+/// Путь проектного файла: существующая часть — без ссылок, несуществующая — без `.` и `..`,
+/// чтобы проверка «внутри проекта» и уборка созданных каталогов видели один и тот же путь.
 fn resolve_output_path(project_dir: &Path, output_path: &Path) -> std::io::Result<PathBuf> {
-    nearest_existing_canonical_path(&crate::support::path::resolve_from(
-        project_dir,
-        output_path,
-    ))
+    use crate::support::path::{lexically_normal_absolute, resolve_from};
+    nearest_existing_canonical_path(&resolve_from(project_dir, output_path))
+        .map(|resolved| lexically_normal_absolute(&resolved))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1731,8 +1817,7 @@ fn escape_yaml(value: &str) -> String {
 mod tests {
     use super::{
         apply_writes, discover_sources, execute, ConfigFormatRequest, ConfigInitRequest,
-        DeclaredOrigin, OriginKey, PlannedWrite, SourcePurpose, GITIGNORE_FILE, LOCAL_CONFIG_FILE,
-        PROJECT_CONFIG_FILE,
+        DeclaredOrigin, OriginKey, PlannedWrite, Previous, SourcePurpose, WrittenFile,
     };
     use crate::config::loader::load_config;
     use crate::config::model::InfobaseSelector;
@@ -2304,14 +2389,17 @@ mod tests {
         std::fs::write(dir.path().join("plain"), "file").expect("plain file");
         let blocked = dir.path().join("plain").join(".gitignore");
         let writes = vec![
-            PlannedWrite::new(&existing, LOCAL_CONFIG_FILE, "after\n".to_owned()).expect("plan"),
-            PlannedWrite::new(&created, PROJECT_CONFIG_FILE, "new\n".to_owned()).expect("plan"),
+            PlannedWrite::new(&existing, WrittenFile::Local, "after\n".to_owned()).expect("plan"),
+            PlannedWrite::new(&created, WrittenFile::Project, "new\n".to_owned()).expect("plan"),
             // Путь сквозь обычный файл: запись отказывает и у суперпользователя.
             PlannedWrite {
                 path: blocked,
-                what: GITIGNORE_FILE,
+                what: WrittenFile::Gitignore,
                 content: "x\n".to_owned(),
-                previous: None,
+                previous: Previous::Absent {
+                    created: dir.path().join("plain").join(".gitignore"),
+                },
+                holds_moved_address: false,
             },
         ];
 
@@ -2328,6 +2416,206 @@ mod tests {
             !dir.path().join("new").exists(),
             "created directories are removed"
         );
+    }
+
+    #[test]
+    fn a_restore_that_fails_is_named_by_the_error() {
+        let dir = tempdir().expect("tempdir");
+        let written = dir.path().join("written.yaml");
+        let busy = dir.path().join("busy");
+        std::fs::create_dir_all(busy.join("inside")).expect("busy dir");
+        std::fs::write(dir.path().join("plain"), "file").expect("plain file");
+        let writes = vec![
+            // Откат удаляет непустой каталог вместо файла — и отказывает.
+            PlannedWrite {
+                path: written.clone(),
+                what: WrittenFile::Local,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent { created: busy },
+                holds_moved_address: false,
+            },
+            PlannedWrite {
+                path: dir.path().join("plain").join(".gitignore"),
+                what: WrittenFile::Gitignore,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent {
+                    created: dir.path().join("plain").join(".gitignore"),
+                },
+                holds_moved_address: false,
+            },
+        ];
+
+        let error = apply_writes(dir.path(), writes).expect_err("the last write fails");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to write gitignore file"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("could not restore '{}'", written.display())),
+            "{message}"
+        );
+    }
+
+    /// Местный слой, принявший адрес базы, после сбоя отката остаётся записанным и назван:
+    /// адрес не пропадает из обоих файлов.
+    #[test]
+    fn a_failed_rollback_keeps_the_local_layer_holding_the_moved_address() {
+        let dir = tempdir().expect("tempdir");
+        let local = dir.path().join("v8project.local.yaml");
+        std::fs::write(&local, "before\n").expect("local");
+        let project = dir.path().join("v8project.yaml");
+        let busy = dir.path().join("busy");
+        std::fs::create_dir_all(busy.join("inside")).expect("busy dir");
+        std::fs::write(dir.path().join("plain"), "file").expect("plain file");
+        let writes = vec![
+            PlannedWrite::new(&local, WrittenFile::Local, "moved\n".to_owned())
+                .expect("plan")
+                .holding_the_moved_address(),
+            PlannedWrite {
+                path: project.clone(),
+                what: WrittenFile::Project,
+                content: "new\n".to_owned(),
+                previous: Previous::Absent { created: busy },
+                holds_moved_address: false,
+            },
+            PlannedWrite {
+                path: dir.path().join("plain").join(".gitignore"),
+                what: WrittenFile::Gitignore,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent {
+                    created: dir.path().join("plain").join(".gitignore"),
+                },
+                holds_moved_address: false,
+            },
+        ];
+
+        let error = apply_writes(dir.path(), writes).expect_err("the last write fails");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("'{}' (", project.display())),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("'{}' (left as written)", local.display())),
+            "{message}"
+        );
+        assert_eq!(read(&local), "moved\n");
+    }
+
+    /// Без переноса адреса сбой одного возврата не останавливает остальные.
+    #[test]
+    fn a_failed_restore_does_not_stop_the_rest_of_the_rollback() {
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("v8project.yaml");
+        std::fs::write(&project, "before\n").expect("project");
+        let busy = dir.path().join("busy");
+        std::fs::create_dir_all(busy.join("inside")).expect("busy dir");
+        std::fs::write(dir.path().join("plain"), "file").expect("plain file");
+        let writes = vec![
+            PlannedWrite::new(&project, WrittenFile::Project, "new\n".to_owned()).expect("plan"),
+            PlannedWrite {
+                path: dir.path().join("v8project.local.yaml"),
+                what: WrittenFile::Local,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent { created: busy },
+                holds_moved_address: false,
+            },
+            PlannedWrite {
+                path: dir.path().join("plain").join(".gitignore"),
+                what: WrittenFile::Gitignore,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent {
+                    created: dir.path().join("plain").join(".gitignore"),
+                },
+                holds_moved_address: false,
+            },
+        ];
+
+        let error = apply_writes(dir.path(), writes).expect_err("the last write fails");
+
+        assert!(error.to_string().contains("could not restore"), "{error}");
+        assert_eq!(read(&project), "before\n");
+    }
+
+    #[test]
+    fn a_directory_at_the_output_path_is_reported_without_a_false_restore() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+        std::fs::create_dir(dir.path().join("sub")).expect("sub");
+
+        let error = execute(&ConfigInitRequest {
+            project_dir: dir.path().to_path_buf(),
+            output_path: "sub".into(),
+            force: true,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect_err("a directory cannot be written as a file");
+
+        let message = error.to_string();
+        assert!(message.contains("failed to write config file"), "{message}");
+        assert!(!message.contains("could not restore"), "{message}");
+    }
+
+    /// Висячая ссылка на месте файла: запись создаёт её цель, откат убирает цель и
+    /// оставляет ссылку.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_keeps_a_dangling_link_and_removes_its_created_target() {
+        let dir = tempdir().expect("tempdir");
+        let link = dir.path().join("v8project.local.yaml");
+        std::os::unix::fs::symlink("shared.yaml", &link).expect("link");
+        std::fs::write(dir.path().join("plain"), "file").expect("plain file");
+        let writes = vec![
+            PlannedWrite::new(&link, WrittenFile::Local, "x\n".to_owned()).expect("plan"),
+            PlannedWrite {
+                path: dir.path().join("plain").join(".gitignore"),
+                what: WrittenFile::Gitignore,
+                content: "x\n".to_owned(),
+                previous: Previous::Absent {
+                    created: dir.path().join("plain").join(".gitignore"),
+                },
+                holds_moved_address: false,
+            },
+        ];
+
+        apply_writes(dir.path(), writes).expect_err("the last write fails");
+
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "the link stays");
+        assert!(
+            !dir.path().join("shared.yaml").exists(),
+            "its target is removed"
+        );
+    }
+
+    #[test]
+    fn an_output_through_a_missing_directory_and_back_is_resolved_without_dots() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "new/../config/v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
+
+        assert_eq!(
+            result.path,
+            canonical(dir.path())
+                .join("config")
+                .join("v8project.yaml")
+                .display()
+                .to_string()
+        );
+        assert!(!dir.path().join("new").exists());
     }
 
     #[test]
