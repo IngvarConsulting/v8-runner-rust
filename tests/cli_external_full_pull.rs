@@ -904,12 +904,14 @@ fn the_terminal_frame_carries_the_code_of_a_base_of_another_copy() {
     let project = Project::new("designer", false);
     let root = project.config.parent().expect("project root").to_path_buf();
     let marker = root.join(".ib.v8-runner.owners.json");
+    // Абсолютный путь на любой системе: копия другой машины отсюда не проверяется.
+    let elsewhere = root.join("elsewhere");
     let foreign = json!({
         "version": 2,
         "owners": [{
             "machine": "a".repeat(64),
             "host": "build-agent",
-            "project": "/srv/elsewhere",
+            "project": elsewhere,
             "since": "2026-10-01T00:00:00Z"
         }]
     })
@@ -932,7 +934,8 @@ fn the_terminal_frame_carries_the_code_of_a_base_of_another_copy() {
         "{terminal}"
     );
     assert_eq!(
-        detail["owners"][0]["project"], "/srv/elsewhere",
+        detail["owners"][0]["project"],
+        json!(elsewhere),
         "{terminal}"
     );
     assert_eq!(detail["owners"][0]["this_machine"], false, "{terminal}");
