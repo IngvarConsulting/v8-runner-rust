@@ -8,6 +8,7 @@ use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
 use crate::domain::warning::{CodedWarning, Warning};
+use crate::support::error::EnvironmentLayer;
 
 /// Род отказа. Набор закрыт: новый род приходит вместе с версией конверта, а не молча.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -195,6 +196,10 @@ pub struct EnvelopeError {
     /// Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sessions: Option<Box<InfobaseSessions>>,
+    /// Слой окружения, который отказал; заполняется отказом `environment_unavailable`, когда
+    /// слой определён. Без поля слой не определён.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<EnvironmentLayer>,
 }
 
 impl EnvelopeError {
@@ -208,6 +213,7 @@ impl EnvelopeError {
             local_generation: None,
             platform_release: None,
             sessions: None,
+            layer: None,
         }
     }
 
@@ -392,6 +398,32 @@ mod schema_tests {
             actual, generated,
             "{COMMAND_ENVELOPE_SCHEMA_PATH} is stale; rerun UPDATE_ENVELOPE_SCHEMA=1 cargo test generated_envelope_schema_is_current"
         );
+    }
+
+    /// Набор слоёв окружения закрыт: схема перечисляет ровно четыре согласованных значения,
+    /// литералами (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). Новое значение или
+    /// переименование меняет контракт и валит проверку, а не уходит потребителю молча.
+    #[test]
+    fn the_environment_layer_set_is_closed_and_named_by_the_schema() {
+        let schema = generated_envelope_schema();
+        let layers = crate::support::schema::enum_values(
+            schema
+                .pointer("/$defs/EnvironmentLayer")
+                .expect("EnvironmentLayer is defined by the schema"),
+        );
+        assert_eq!(
+            layers,
+            ["infobase_user", "agent_endpoint", "agent_start", "platform"]
+        );
+        use crate::support::error::EnvironmentLayer;
+        for (layer, name) in [
+            (EnvironmentLayer::InfobaseUser, "infobase_user"),
+            (EnvironmentLayer::AgentEndpoint, "agent_endpoint"),
+            (EnvironmentLayer::AgentStart, "agent_start"),
+            (EnvironmentLayer::Platform, "platform"),
+        ] {
+            assert_eq!(serde_json::to_value(layer).unwrap(), name);
+        }
     }
 
     /// Набор кодов предупреждений закрыт по кругу, как набор кодов отказа: каждый код,

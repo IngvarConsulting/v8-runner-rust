@@ -236,6 +236,7 @@ fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
         payload["error"]["code"], "environment_unavailable",
         "{payload}"
     );
+    assert_eq!(payload["error"]["layer"], "agent_endpoint", "{payload}");
     let message = payload["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("not with the key the runner handed to the agent it launched"),
@@ -861,6 +862,8 @@ fn a_rejected_password_is_an_environment_refusal_even_though_the_port_answers() 
         payload["error"]["code"], "environment_unavailable",
         "{payload}"
     );
+    // Слой назван полем, а не прозой (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    assert_eq!(payload["error"]["layer"], "infobase_user", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()
@@ -888,6 +891,7 @@ fn a_managed_agent_without_the_local_platform_is_refused_before_any_connection()
         payload["error"]["code"], "environment_unavailable",
         "{payload}"
     );
+    assert_eq!(payload["error"]["layer"], "platform", "{payload}");
     let receipt = &payload["data"]["provider"];
     assert!(receipt["selected"].is_null(), "{payload}");
     assert_eq!(receipt["skipped"][0]["provider"], "agent", "{payload}");
@@ -916,6 +920,7 @@ fn an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead()
         payload["error"]["code"], "environment_unavailable",
         "{payload}"
     );
+    assert_eq!(payload["error"]["layer"], "agent_endpoint", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()
