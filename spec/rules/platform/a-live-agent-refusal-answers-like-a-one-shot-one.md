@@ -3,9 +3,7 @@ id: INV.PLATFORM.A-LIVE-AGENT-REFUSAL-ANSWERS-LIKE-A-ONE-SHOT-ONE
 check:
   - src/platform/agent_keeper/protocol.rs::an_environment_layer_and_a_kind_survive_the_keeper_channel
   - src/platform/agent_keeper/protocol.rs::an_agent_failure_keeps_its_kind_across_the_channel
-  - src/platform/agent_keeper/protocol.rs::an_unknown_failure_kind_from_another_keeper_is_read_as_a_keeper_failure
-  - src/platform/agent_keeper/protocol.rs::a_failure_folded_into_other_by_an_older_keeper_is_still_read
-  - src/platform/agent_keeper/protocol.rs::a_known_failure_kind_with_broken_fields_is_not_read_as_unknown
+  - src/platform/agent_keeper/protocol.rs::a_launch_or_keeper_failure_travels_as_other_with_its_text
 ---
 
 # Отказ живого агента отвечает тем же кодом, что у разового
@@ -17,8 +15,7 @@ check:
 переносит отказ агента его собственным видом или видом того же рода и слоя — тогда может
 отличаться текст; отказом сторожа становятся только отказы подъёма агента и самого сторожа.
 
-Начиная с этой сборки вид отказа агента, которого сборка не знает, кадр не ломает: он
-читается отказом сторожа. Известный вид с испорченными полями — ошибка разбора, а не
-неизвестный вид. Прежняя запись `other`, которой сторож прежней сборки передавал эти отказы,
-читается отказом сторожа с тем же текстом. Сборка до этой неизвестного вида не читает; команда
-к сторожу другой сборки не попадает — версия и штамп сборки входят в ключ живого агента.
+Перенос закреплён для каждого вида отказа агента, в том числе для тех, которых сторож сегодня
+не порождает: отказа отменённой до отправки команды, брошенной команды, обмена файлами и
+каталога пользователя агента. Поэтому ответ команды не изменится и тогда, когда сторож начнёт
+их порождать.

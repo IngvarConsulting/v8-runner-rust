@@ -323,13 +323,13 @@ pub enum AgentFailure {
     },
     /// Отказ без своего варианта: отказ хранителя, код — «среда недоступна», слой
     /// `agent_start`. Так идут только отказы подъёма и самого хранителя.
+    ///
+    /// Перечень закрыт, как у [`KeeperError`]: вид, которого клиент не знает, кадр не читает, и
+    /// клиент поступает с ним как с ушедшим агентом. Сторож другой сборки команде не служит —
+    /// версия и штамп сборки входят в ключ живого агента.
     Other {
         message: String,
     },
-    /// Вид, которого эта сборка не знает: его прислал хранитель другой сборки. Кадр всё равно
-    /// читается — отказом хранителя, а не обрывом канала.
-    #[serde(other)]
-    Unknown,
 }
 
 impl AgentFailure {
@@ -410,8 +410,10 @@ impl AgentFailure {
             },
             AgentError::Canceled { message } => Self::Canceled { message },
             AgentError::Question { message } => Self::Question { message },
-            // Свой вид, а не `Other`: род ответа команды не должен зависеть от того, живой агент
-            // или разовый — отмена, брошенная команда и отказ платформы остаются собой.
+            // Сегодня сторож этих отказов не порождает: он служит своему агенту, работу команды
+            // не отмечает, а обмен файлами и каталог пользователя агента живут на стороне
+            // команды. Свой вид, а не `Other`, — чтобы и тогда, когда породит, род ответа не
+            // зависел от того, живой агент или разовый.
             AgentError::NotSent { command } => Self::NotSent { command },
             AgentError::Abandoned { command } => Self::Abandoned { command },
             AgentError::Exchange { path, detail } => Self::Exchange { path, detail },
@@ -512,11 +514,6 @@ impl AgentFailure {
                 detail,
             },
             Self::Other { message } => AgentError::Keeper { detail: message },
-            Self::Unknown => AgentError::Keeper {
-                detail:
-                    "the live agent keeper reported a failure of a kind this runner does not know"
-                        .to_owned(),
-            },
         }
     }
 }
@@ -931,25 +928,10 @@ mod tests {
         );
     }
 
-    /// Вид отказа, которого эта сборка не знает, читается отказом хранителя, а не ошибкой
-    /// разбора кадра: хранитель другой сборки не обрывает канал.
+    /// Отказ подъёма и самого хранителя идёт как `other` и читается отказом хранителя с тем же
+    /// текстом.
     #[test]
-    fn an_unknown_failure_kind_from_another_keeper_is_read_as_a_keeper_failure() {
-        let line = r#"{"frame":"error","error":{"error":"agent","failure":{"kind":"from_the_future","detail":"x"}}}"#;
-        let frame = serde_json::from_str::<Frame>(line).expect("the frame is read");
-        let Frame::Error {
-            error: KeeperError::Agent { failure },
-        } = frame
-        else {
-            panic!("an agent failure frame: {line}");
-        };
-        assert_eq!(failure, AgentFailure::Unknown);
-        assert!(matches!(failure.into_agent(), AgentError::Keeper { .. }));
-    }
-
-    /// Прежняя сборка слала эти виды как `other`: такой кадр по-прежнему читается.
-    #[test]
-    fn a_failure_folded_into_other_by_an_older_keeper_is_still_read() {
+    fn a_launch_or_keeper_failure_travels_as_other_with_its_text() {
         let line = r#"{"kind":"other","message":"agent command 'dump' was not sent: the command was cancelled"}"#;
         let failure = serde_json::from_str::<AgentFailure>(line).expect("read");
         assert!(matches!(
@@ -957,21 +939,6 @@ mod tests {
             AgentError::Keeper { detail }
                 if detail == "agent command 'dump' was not sent: the command was cancelled"
         ));
-    }
-
-    /// Известный вид с испорченными полями — ошибка разбора, а не неизвестный вид: запасной
-    /// вариант не прячет поломку кадра, который эта сборка обязана понимать.
-    #[test]
-    fn a_known_failure_kind_with_broken_fields_is_not_read_as_unknown() {
-        for line in [
-            r#"{"kind":"not_sent"}"#,
-            r#"{"kind":"user_dir_unknown","base_dir":1,"user":"u","detail":"d"}"#,
-        ] {
-            assert!(
-                serde_json::from_str::<AgentFailure>(line).is_err(),
-                "{line}"
-            );
-        }
     }
 
     /// Строка длиннее предела не читается: сторож не копит её в памяти.
