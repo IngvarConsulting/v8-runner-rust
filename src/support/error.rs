@@ -263,7 +263,32 @@ impl AppError {
                 .platform_release()
                 .is_none()
                 .then_some(EnvironmentLayer::Platform),
-            _ => None,
+            // Прочие виды — не `environment_unavailable`: слоя у них нет. Перечислены поимённо,
+            // чтобы новый вид рода `environment` не остался без решения о слое молча.
+            Self::CapabilityUnavailable(_)
+            | Self::WorkspaceBusy(_)
+            | Self::InfobaseBusy(_)
+            | Self::Cancelled { .. }
+            | Self::Refused(_)
+            | Self::TimedOut(_)
+            | Self::InvalidOutput(_)
+            | Self::Validation(_)
+            | Self::ValidationIbcmd(_)
+            | Self::ValidationIbcmdContext { .. }
+            | Self::SourceLoadNotStarted(_)
+            | Self::Runtime(_)
+            | Self::Platform(_)
+            | Self::AgentAbandoned(_)
+            | Self::PlatformDesigner(_)
+            | Self::PlatformDesignerContext { .. }
+            | Self::PlatformProcess(_)
+            | Self::PlatformProcessContext { .. }
+            | Self::PlatformEdt(_)
+            | Self::PlatformEdtContext { .. }
+            | Self::PlatformEdtSession(_)
+            | Self::PlatformEdtSessionContext { .. }
+            | Self::Config(_)
+            | Self::ConfigContext { .. } => None,
         }
     }
 
