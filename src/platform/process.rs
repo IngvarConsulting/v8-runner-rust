@@ -1074,6 +1074,8 @@ fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<Chil
 
             let mut wrapped = CommandWrap::from(cmd);
             wrapped.wrap(JobObject);
+            // Только после `JobObject`: см. [`OwnProcessGroupInJob`].
+            wrapped.wrap(OwnProcessGroupInJob);
             return wrapped.spawn().map(ChildHandle::Wrapped);
         }
     }
@@ -1169,7 +1171,15 @@ fn build_command(
     Ok(cmd)
 }
 
+/// Потомок раннера получает свою группу процессов: сигнал или событие консоли, посланные
+/// группе раннера, достаются только раннеру, а потомка снимает раннер по своим правилам
+/// отмены. На Unix это `setpgid(0, 0)`, на Windows — [`outside_the_runner_process_group`];
+/// потомку в job-объекте флаг ставит [`OwnProcessGroupInJob`], потому что `JobObject` флаги
+/// `Command` заменяет.
 fn set_child_process_group(cmd: &mut Command) {
+    #[cfg(windows)]
+    outside_the_runner_process_group(cmd);
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1183,9 +1193,54 @@ fn set_child_process_group(cmd: &mut Command) {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = cmd;
+    }
+}
+
+/// Флаг запуска потомка в своей группе процессов консоли Windows.
+#[cfg(windows)]
+const OWN_PROCESS_GROUP: u32 = windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+/// Windows: консольный потомок раннера рождается в своей группе процессов
+/// (`CREATE_NEW_PROCESS_GROUP`). `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid раннера)`
+/// получает вся группа раннера, а обработчик потомка по умолчанию снял бы его сразу, мимо
+/// решения раннера об отмене, — в том числе посреди записи базы
+/// (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`). Побочное действие
+/// флага — `Ctrl+C` в новой группе выключен; раннер событий консоли потомкам не шлёт, а снимает
+/// их сам: через job-объект, `taskkill` или `TerminateProcess`. Единственный владелец флага:
+/// так запускаются потомки из этого модуля, `git` и интерактивные сеансы EDT.
+///
+/// `Command::creation_flags` заменяет флаги, а не добавляет: это единственный флаг запуска,
+/// который ставят на эти `Command`. Кому понадобится ещё один, задаёт оба здесь.
+#[cfg(windows)]
+pub(in crate::platform) fn outside_the_runner_process_group(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(OWN_PROCESS_GROUP);
+}
+
+/// Своя группа процессов для потомка в job-объекте `process_wrap`. `JobObject::pre_spawn`
+/// заменяет флаги запуска на `CREATE_SUSPENDED`, а флаги `CreationFlags` в `process-wrap` 9.1
+/// до него не доходят: перед запуском обёртки вынуты из `CommandWrap`, и `get_wrap` их не
+/// находит. Поэтому эта обёртка регистрируется после `JobObject` и ставит оба флага сама.
+/// Поток потомка `JobObject` возобновляет в `wrap_child`, не видя `CreationFlags` с
+/// `CREATE_SUSPENDED`, — так и остаётся, ведь эта обёртка не `CreationFlags`.
+#[cfg(windows)]
+#[derive(Debug)]
+struct OwnProcessGroupInJob;
+
+#[cfg(windows)]
+impl process_wrap::std::CommandWrapper for OwnProcessGroupInJob {
+    fn pre_spawn(
+        &mut self,
+        command: &mut Command,
+        _core: &process_wrap::std::CommandWrap,
+    ) -> std::io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        command.creation_flags(CREATE_SUSPENDED | OWN_PROCESS_GROUP);
+        Ok(())
     }
 }
 
@@ -1651,7 +1706,10 @@ fn unix_process_group_exists(pgid: i32) -> bool {
 
 #[cfg(windows)]
 fn terminate_windows_process_tree(pid: u32) {
-    let _ = Command::new("taskkill")
+    let mut taskkill = Command::new("taskkill");
+    // Повторный `CTRL_BREAK` оператора во время снятия не обрывает само снятие.
+    outside_the_runner_process_group(&mut taskkill);
+    let _ = taskkill
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -4195,5 +4253,144 @@ mod tests {
     #[cfg(windows)]
     fn powershell_literal(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "''"))
+    }
+
+    /// Потомок в job-объекте (`ManagedWait`, `ManagedDetached`) возглавляет свою группу
+    /// процессов консоли: `CTRL_BREAK`, посланный группе с его номером, до него доходит. Без
+    /// своей группы события ему не досталось бы — он сидел бы в группе раннера и получал бы
+    /// то, что шлют раннеру (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`).
+    /// После этого раннер снимает его прежним путём job-объекта.
+    #[cfg(windows)]
+    mod windows_process_group {
+        use std::fs;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        use tempfile::tempdir;
+        use windows_sys::core::BOOL;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Console::{
+            AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, SetConsoleCtrlHandler,
+            CTRL_BREAK_EVENT,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        use crate::platform::process::{
+            ManagedSpawnMode, ProcessExecutor, ProcessRequest, ProcessRunner,
+        };
+
+        const FIXTURE: &str =
+            "platform::process::tests::windows_process_group::console_child_fixture";
+        const READY: &str = "ready";
+        const CONSOLE_EVENT: &str = "console-event";
+
+        static EVENT_MARKER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+        unsafe extern "system" fn record_console_event(_kind: u32) -> BOOL {
+            if let Some(marker) = EVENT_MARKER.get() {
+                let _ = fs::write(marker, "received");
+            }
+            1
+        }
+
+        unsafe extern "system" fn swallow_console_event(_kind: u32) -> BOOL {
+            1
+        }
+
+        /// Консольный потомок: в рабочем каталоге отмечает, что готов, и записывает любое
+        /// событие консоли, переживая его. Снимает его раннер.
+        #[test]
+        #[ignore = "subprocess fixture"]
+        fn console_child_fixture() {
+            let dir = std::env::current_dir().expect("fixture directory");
+            EVENT_MARKER
+                .set(dir.join(CONSOLE_EVENT))
+                .expect("one fixture marker");
+            // SAFETY: the handler is a plain function that lives for the whole process.
+            assert_ne!(
+                unsafe { SetConsoleCtrlHandler(Some(record_console_event), 1) },
+                0
+            );
+            fs::write(dir.join(READY), std::process::id().to_string()).expect("ready marker");
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        #[test]
+        fn a_managed_child_leads_its_own_process_group() {
+            // Событие доходит только до процессов той же консоли; у теста без консоли её
+            // заводят. Сам тест события не боится: если флаг группы потерян, номер потомка
+            // не назовёт группу, и событие могло бы уйти всей консоли.
+            // SAFETY: calls without pointer arguments on this test process's own console; the
+            // handler is a plain function that lives for the whole process.
+            unsafe {
+                if GetConsoleWindow().is_null() {
+                    AllocConsole();
+                }
+                assert_ne!(SetConsoleCtrlHandler(Some(swallow_console_event), 1), 0);
+            }
+            for mode in [ManagedSpawnMode::Wait, ManagedSpawnMode::Detached] {
+                let dir = tempdir().expect("fixture directory");
+                let request = ProcessRequest {
+                    program: std::env::current_exe().expect("test executable"),
+                    args: vec![
+                        "--exact".into(),
+                        FIXTURE.into(),
+                        "--ignored".into(),
+                        "--nocapture".into(),
+                    ],
+                    workdir: Some(dir.path().to_path_buf()),
+                    stdout_log_path: None,
+                    stderr_log_path: Some(dir.path().join("stderr.log")),
+                    startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
+                };
+                let child = ProcessExecutor
+                    .spawn_managed(&request, mode, None)
+                    .expect("spawn the managed console child");
+                let pid = child.pid();
+                // SAFETY: a plain open by PID while the managed handle still holds the child,
+                // so the number cannot be reused; the handle is owned right below.
+                let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                assert!(!process.is_null(), "open the managed child {pid}");
+                // SAFETY: the successful open transfers this handle to the guard exactly once.
+                let process = unsafe { OwnedHandle::from_raw_handle(process) };
+                assert!(
+                    wait_for(&dir.path().join(READY)),
+                    "{mode:?}: the console child never got ready"
+                );
+
+                // SAFETY: no pointer arguments; the group is named by the child's own number.
+                unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+                assert!(
+                    wait_for(&dir.path().join(CONSOLE_EVENT)),
+                    "{mode:?}: the managed child does not lead its own process group"
+                );
+
+                match mode {
+                    ManagedSpawnMode::Detached => child.remove(),
+                    _ => child.terminate(),
+                }
+                // SAFETY: the handle is open and owned by `process`.
+                let ended = unsafe { WaitForSingleObject(process.as_raw_handle(), 10_000) };
+                assert_eq!(
+                    ended, WAIT_OBJECT_0,
+                    "{mode:?}: the job of the managed child did not end it"
+                );
+            }
+        }
+
+        fn wait_for(path: &Path) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !path.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            path.exists()
+        }
     }
 }

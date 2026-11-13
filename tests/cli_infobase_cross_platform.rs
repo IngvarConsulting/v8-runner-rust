@@ -207,6 +207,121 @@ fn an_owner_warning_names_the_copies_with_ordinary_paths() {
     );
 }
 
+/// `CTRL_BREAK`, посланный группе раннера (`GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid
+/// раннера)`), достаётся только раннеру. Его консольный потомок — здесь подставной
+/// Конфигуратор, который переживает любое событие консоли и отмечает его файлом, — события
+/// не получает: он в своей группе процессов. Снимает его раннер по своей отмене, и ответ —
+/// `cancelled` (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`).
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_to_the_runner_group_leaves_its_console_child_to_the_runner() {
+    use std::io::Read;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, CTRL_BREAK_EVENT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, PROCESS_SYNCHRONIZE,
+    };
+
+    // Событие доходит только до процессов той же консоли; у теста без консоли её заводят.
+    // SAFETY: calls without pointer arguments on this test process's own console.
+    unsafe {
+        if GetConsoleWindow().is_null() {
+            AllocConsole();
+        }
+    }
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let ready = root.path().join("designer.ready");
+    let release = root.path().join("designer.release");
+    let pid_file = root.path().join("designer.pid");
+    let console_event = root.path().join("designer.console-event");
+
+    let runner = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            "out/main.cf",
+        ])
+        .env("V8_RUNNER_FAKE_PLATFORM_READY", &ready)
+        .env("V8_RUNNER_FAKE_PLATFORM_RELEASE", &release)
+        .env("V8_RUNNER_FAKE_PLATFORM_PID", &pid_file)
+        .env("V8_RUNNER_FAKE_PLATFORM_CONSOLE_EVENT", &console_event)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .expect("spawn v8-runner");
+    let mut runner = BlockedProcess::new(runner, release.clone());
+    let mut stdout = runner
+        .child
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .expect("piped stdout");
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    wait_for_file(&ready);
+    let designer: u32 = fs::read_to_string(&pid_file)
+        .expect("designer pid")
+        .trim()
+        .parse()
+        .expect("numeric designer pid");
+    // SAFETY: a plain open by PID while the designer is alive and held by the runner; the
+    // handle keeps the number from being reused and is owned right below.
+    let designer = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, designer) };
+    assert!(!designer.is_null(), "open the designer process");
+    // SAFETY: the successful open transfers this handle to the guard exactly once.
+    let designer = unsafe { OwnedHandle::from_raw_handle(designer) };
+
+    let runner_pid = runner.child.as_ref().expect("runner").id();
+    // SAFETY: no pointer arguments; the runner's group is its pid (`CREATE_NEW_PROCESS_GROUP`).
+    let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, runner_pid) };
+    assert_ne!(sent, 0, "CTRL_BREAK was not delivered");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        let child = runner.child.as_mut().expect("runner");
+        if let Some(status) = child.try_wait().expect("wait runner") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the runner did not answer the CTRL_BREAK"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = reader.join().expect("reader").expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(payload["error"]["kind"], "interruption", "{payload}");
+    assert_eq!(status.code(), Some(4), "{payload}");
+    // SAFETY: the handle is open and owned by `designer`.
+    let ended = unsafe { WaitForSingleObject(designer.as_raw_handle(), 10_000) };
+    assert_eq!(ended, WAIT_OBJECT_0, "the runner left its designer running");
+    assert!(
+        !console_event.exists(),
+        "the designer received the CTRL_BREAK sent to the runner's group: {}",
+        fs::read_to_string(&console_event).unwrap_or_default()
+    );
+    assert!(
+        !root.path().join("out/main.cf").exists(),
+        "an interrupted download published its file"
+    );
+}
+
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.is_file() {
