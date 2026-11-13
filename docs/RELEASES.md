@@ -27,10 +27,11 @@
 | --- | --- | --- |
 | `v8-runner-linux-x86_64-musl.tar.gz` | Linux, любой дистрибутив (статическая сборка musl) | Intel/AMD 64 |
 | `v8-runner-macos-aarch64.tar.gz` | macOS | Apple Silicon (M1 и новее) |
-| `v8-runner-macos-x86_64.tar.gz` | macOS | Intel |
 | `v8-runner-windows-x86_64.zip` | Windows | Intel/AMD 64 |
 
-Отличить Apple Silicon от Intel: `uname -m` отвечает `arm64` или `x86_64`.
+Mac на Intel не поддерживается с 0.17.2: архива `v8-runner-macos-x86_64.tar.gz` больше нет, соберите
+из исходников `cargo build --release`. Отличить Apple Silicon от Intel: `uname -m` отвечает
+`arm64` или `x86_64`.
 
 ## Манифест и аттестации
 
@@ -68,8 +69,20 @@ done
 манифеста. Манифест, скачанный вместе с бинарником без предварительной проверки
 `gh release verify-asset`, сам по себе не является корнем доверия.
 
+## Изменения выпусков
+
+### 0.17.2
+
+- Windows: `CTRL_BREAK`, посланный группе раннера (`GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+  pid раннера)`), больше не обрывает его консольных потомков (`ibcmd`, `1cedtcli`, `rac`, `git`)
+  мимо отмены раннера: они запускаются в своих группах процессов, и снимает их раннер, а
+  критическая фаза записи базы доводится до конца (#717).
+
 ## История имён файлов выпуска
 
+- С `v0.17.2` архив `v8-runner-macos-x86_64.tar.gz` (macOS на Intel) не собирается: машин
+  GitHub с Intel macOS мало, и выпуск ждал их дольше всех остальных шагов. Для Mac на Intel —
+  сборка из исходников `cargo build --release`.
 - До `v0.11.4` включительно рядом с архивами выкладывались несжатые бинарники
   `v8-runner-darwin-arm64`, `v8-runner-linux-x64` и `v8-runner-win-x64.exe`. Это были байт в
   байт те же файлы, что лежат в архивах, и одна платформа выходила под двумя именами. Начиная

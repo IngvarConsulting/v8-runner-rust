@@ -18,6 +18,8 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::render_masked_command;
 
 const INTERACTIVE_EDT_ERROR_MARKER: &str = "Run '$exception printStackTrace' for error details";
+// EDT 2026.2.2 uses this for command failures including a duplicate registration.
+const EDT_COMMAND_FAILED: i32 = 204;
 
 #[derive(Debug, Error)]
 pub enum EdtError {
@@ -172,6 +174,62 @@ impl<'a> EdtDsl<'a> {
             &render_interactive_export_project_path_command(source, target),
             None,
         )
+    }
+
+    /// Looks up the effective name of `export --project`: the source directory basename.
+    /// `project-info` returns structured fields even for a missing registered directory.
+    pub(crate) fn export_project_registration(
+        &self,
+        source: &Path,
+        target: &Path,
+        export: &PlatformCommandResult,
+    ) -> Result<Option<PathBuf>, EdtError> {
+        let process = &export.process;
+        if process.interruption.is_some() {
+            return Ok(None);
+        }
+        let should_inspect = match self.backend {
+            EdtBackend::OneShot { .. } => process.exit_code == EDT_COMMAND_FAILED,
+            _ => {
+                process.outcome().is_err()
+                    || std::fs::read_dir(target).is_ok_and(|mut entries| entries.next().is_none())
+            }
+        };
+        if !should_inspect {
+            return Ok(None);
+        }
+        let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
+        if name.starts_with('-')
+            || name
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`'))
+        {
+            return Ok(None);
+        }
+        let arguments = ["project-info".to_owned(), name.to_owned()];
+        // Gogo treats punctuation as syntax in unquoted arguments. The name check
+        // excludes characters that could escape or interpolate this quoted literal.
+        let info = self.run(
+            &process_arguments(&self.workspace, &arguments),
+            &format!("project-info \"{name}\""),
+            None,
+        )?;
+        if info.process.outcome().is_err() || info.process.interruption.is_some() {
+            return Ok(None);
+        }
+        let stdout = &info.process.stdout;
+        if project_info_field(stdout, "Name") != Some(name) {
+            return Ok(None);
+        }
+        Ok(project_info_field(stdout, "Location")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()))
+    }
+
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     /// `-command validate --file <out_log> --project-list <source>`
@@ -663,7 +721,7 @@ fn render_interactive_output_for_log(output: &str) -> String {
 
     let mut rendered = trimmed.replace('\n', "\\n");
     if rendered.len() > MAX_LEN {
-        rendered.truncate(MAX_LEN);
+        rendered.truncate(rendered.floor_char_boundary(MAX_LEN));
         rendered.push_str("...");
     }
     rendered
@@ -671,6 +729,17 @@ fn render_interactive_output_for_log(output: &str) -> String {
 
 fn output_indicates_interactive_command_error(stdout: &str, stderr: &str) -> bool {
     stdout.contains(INTERACTIVE_EDT_ERROR_MARKER) || stderr.contains(INTERACTIVE_EDT_ERROR_MARKER)
+}
+
+fn project_info_field<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
+    let mut values = stdout.lines().filter_map(|line| {
+        let value = line.trim_start().strip_prefix(key)?;
+        value
+            .starts_with(char::is_whitespace)
+            .then(|| value.trim_start())
+    });
+    let value = values.next()?;
+    (values.next().is_none() && !value.is_empty()).then_some(value)
 }
 
 fn export_command_arguments(project_name: &str, target: &Path) -> Vec<String> {
@@ -774,6 +843,15 @@ mod tests {
     use crate::config::model::{
         AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
+
+    #[test]
+    fn project_info_requires_unambiguous_structured_fields() {
+        let path = "/sample with spaces/configuration";
+        let info = format!("Name                Продажи (2026)+\nLocation            {path}\n");
+        assert_eq!(super::project_info_field(&info, "Location"), Some(path));
+        let ambiguous = format!("{info}Location            /another");
+        assert_eq!(super::project_info_field(&ambiguous, "Location"), None);
+    }
     use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
