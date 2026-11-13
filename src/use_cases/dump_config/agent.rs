@@ -280,6 +280,7 @@ fn dump_through(
                     // раннера — файлом рядом (`--config-dump-info-for-changes`, замер #646), и
                     // агент пишет в ещё не созданный подкаталог стадии.
                     Exchange::Dir(user_dir) => {
+                        let started = std::time::Instant::now();
                         let stage = into.output.parent().unwrap_or(into.output);
                         let exposed = expose_output_dir(user_dir, &target_relative, stage)?;
                         let output = format!(
@@ -298,6 +299,10 @@ fn dump_through(
                                 argument(&info)
                             ));
                         }
+                        debug!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "the local agent dump paths were prepared"
+                        );
                         let command = with_extension(command, extension);
                         log_live_stage(
                             ProgressPhase::Dump,
@@ -310,8 +315,13 @@ fn dump_through(
                             || watch.as_ref().and(set).map(DumpHashing::of),
                             || run_command(handle, &command, wait),
                         );
+                        let started = std::time::Instant::now();
                         withdraw_dir(user_dir, &target_relative);
                         tidy_run_path(user_dir, &info_relative);
+                        debug!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "the local agent dump paths were withdrawn"
+                        );
                         outcome.map(|transcript| (transcript, prepared))
                     }
                     // По сети стадия целиком не возится: точке входа хватает описи, чтобы

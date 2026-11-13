@@ -193,7 +193,12 @@ fn mark_start(
     if !by_version_file(context, plan, objects) {
         return None;
     }
+    let started = std::time::Instant::now();
     let mark = mark_dump_start(&resolved.platform_target_path);
+    debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the incremental dump start was measured on the source volume"
+    );
     if let Err(error) = &mark {
         debug!(
             target = %resolved.platform_target_path.display(),
@@ -383,6 +388,7 @@ fn observe_dump(
         (Ok(_), Err(_)) if interrupted() => None,
         (Err(_), _) | (Ok(_), Err(_)) => Some(DumpFact::Unlisted),
     });
+    let started = std::time::Instant::now();
     let writes = watch.zip(hashing).map(|(watch, hashing)| {
         listed.and_then(|listing| {
             hashing.with(|blobs| {
@@ -390,7 +396,11 @@ fn observe_dump(
             })
         })
     });
-    tracing::debug!(source_set = %set.name(), "the dump writes were observed");
+    debug!(
+        source_set = %set.name(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the dump writes were observed"
+    );
     DumpObservation { fact, writes }
 }
 
@@ -408,8 +418,14 @@ fn remember_dump_writes(
     if before.is_none() || before != after {
         return None;
     }
-    observed
-        .and_then(|writes| writes.commit(set, work_path))
+    let started = std::time::Instant::now();
+    let result = observed.and_then(|writes| writes.commit(set, work_path));
+    debug!(
+        source_set = %set.name(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the incremental dump updated hash memory"
+    );
+    result
         .err()
         .map(|error| {
             format!(
