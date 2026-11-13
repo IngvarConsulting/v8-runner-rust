@@ -933,11 +933,7 @@ fn the_terminal_frame_carries_the_code_of_a_base_of_another_copy() {
             .contains(&detail["message"]),
         "{terminal}"
     );
-    assert_eq!(
-        detail["owners"][0]["project"],
-        json!(elsewhere),
-        "{terminal}"
-    );
+    assert_reported_path(&detail["owners"][0]["project"], &elsewhere);
     assert_eq!(detail["owners"][0]["this_machine"], false, "{terminal}");
     assert_eq!(fs::read_to_string(&marker).expect("marker"), foreign);
 }
