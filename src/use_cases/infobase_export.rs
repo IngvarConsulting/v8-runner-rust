@@ -24,7 +24,7 @@ use crate::domain::infobase_export::{
     RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::IbcmdConnection;
+use crate::platform::ibcmd::{dt_transfer_refusal, IbcmdConnection};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
@@ -1062,6 +1062,22 @@ fn select_provider(
             utility,
         ) {
             Ok(executable) => {
+                // IBCMD для DT доступен только по явному ключу, без запасного исполнителя.
+                if provider == Provider::Ibcmd
+                    && matches!(
+                        intent,
+                        InfobaseTransferIntent::Snapshot
+                            | InfobaseTransferIntent::SnapshotRestore { .. }
+                    )
+                {
+                    if let Some(error) = dt_transfer_refusal() {
+                        skipped.push(SkippedProvider {
+                            provider,
+                            reason: error.to_string(),
+                        });
+                        return Err((AppError::from(error), plan.receipt_for_nobody(skipped)));
+                    }
+                }
                 crate::use_cases::provider_selection::release_for_another_executor(
                     config, operation, provider,
                 );

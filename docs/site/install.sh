@@ -5,9 +5,9 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 for tool in curl tar awk sed install mktemp grep mv; do command -v "$tool" >/dev/null 2>&1 || fail "Нужна команда: $tool"; done
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) package=v8-runner-macos-aarch64 ;;
-  Darwin:x86_64) package=v8-runner-macos-x86_64 ;;
+  Darwin:x86_64) fail 'Mac на Intel не поддерживается с 0.17.2: соберите из исходников cargo build --release.' ;;
   Linux:x86_64) package=v8-runner-linux-x86_64-musl ;;
-  *) fail 'Поддерживаются macOS Apple Silicon/Intel и Linux x86_64.' ;;
+  *) fail 'Поддерживаются macOS Apple Silicon и Linux x86_64.' ;;
 esac
 if command -v sha256sum >/dev/null 2>&1; then
   digest() { sha256sum "$1" | awk '{print $1}'; }

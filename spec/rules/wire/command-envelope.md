@@ -5,6 +5,9 @@ artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
   - src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
+  - src/command_envelope.rs::every_warning_code_is_named_by_the_schema_and_by_a_producer
+  - tests/cli_infobase_owner.rs::a_preview_on_a_base_of_another_copy_gives_the_warning_code_and_writes_nothing
+  - tests/cli_infobase_owner.rs::an_own_base_and_a_base_without_a_marker_give_no_warning_code
   - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
   - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
   - tests/cli_platform_release.rs::every_platform_command_refuses_without_the_release_of_the_sources_format
@@ -17,7 +20,7 @@ check:
 
 Структурный ответ любой команды имеет одну оболочку, закреплённую схемой
 `docs/schemas/command-envelope.schema.json`: `ok`, `command`, `duration_ms`, `data`,
-`warnings`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
+`warnings`, необязательная `warning_details`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
 нужде `next` — следующий шаг структурой, — два поля поколений у отказа
 `non_fast_forward`, поле `platform_release` у отказа `platform_release_missing`, поле `sessions` у отказов `infobase_sessions` и `infobase_designer_busy` и поле `layer` у отказа `environment_unavailable`, когда слой, который отказал, определён. Список полей конверта, шага и отказа закрыт: новое поле у любого из
 них валит проверку.
@@ -44,7 +47,7 @@ check:
 сервера, отказ исполнителя (`executor_error`)
 (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). База другой рабочей копии отказом не служит: команда идёт, а
 `warnings` несёт предупреждение
-(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). У рода `platform`, код
+(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`), и у него есть код. У рода `platform`, код
 выхода 4, — `platform_failure` и `agent_command_abandoned`: второй сигнал бросил ожидание
 команды чужого агента, и она, возможно, ещё идёт
 (`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
@@ -94,8 +97,11 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 
 **Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. В эту же версию вошёл код `source_set_ignored_by_git` рода `validation`, код выхода 2: правило игнорирования git прячет файл набора, изменения которого берутся у git ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)). Так же, родом `validation` с кодом выхода 2, в неё вошёл код `work_path_on_another_volume`: каталог набора и `workPath` на разных томах, и `pull` не начинается ([правило](../use-cases/the-dump-stage-lies-in-the-work-path-on-the-set-volume.md)). Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они. Роду `platform` прибавился код `agent_command_abandoned`, код выхода 4.
 
-**Что изменила версия 6.** У отказа появилось необязательное поле `layer`: его заполняет
-только `environment_unavailable`, когда слой, который отказал, определён, — `infobase_user`,
+**Что изменила версия 6.** У конверта новое необязательное поле `warning_details` —
+предупреждения с машинным кодом рядом с прежними строками `warnings`, которые не изменились.
+Первый код — `infobase_of_another_copy`. Поле появляется, только когда такое предупреждение
+есть, поэтому прежние ответы не изменились. Здесь же у отказа появилось необязательное поле
+`layer`: его заполняет только `environment_unavailable`, когда слой, который отказал, определён, — `infobase_user`,
 `agent_endpoint`, `agent_start` или `platform`
 (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). Рода, коды и тексты отказов прежние:
 поле только добавлено, и потребитель, который его не знает, читает конверт как раньше. Тем же
@@ -103,6 +109,18 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.
+
+**Предупреждения с кодом.** `warnings` — строки для людей, и форма их не меняется.
+Предупреждение, которое вызывающий узнаёт без разбора текста, едет ещё и в `warning_details`:
+объект с `code`, `message` — та же строка, что стоит в `warnings`, — и полями своего кода.
+Порядок `warning_details` — порядок их строк в `warnings`; поля нет, когда таких
+предупреждений нет. Набор кодов закрыт, объект каждого кода закрыт, как у отказа. Код один —
+`infobase_of_another_copy`: команда записи идёт на файловой базе другой живой рабочей копии.
+Его поля: `name` — имя базы в местном слое (`null` у строки соединения), `address` — адрес без
+учётных данных, тот же, что `address` у `status`, и `owners` — живые копии-владельцы, кроме
+этой, той же записью, что `holders.owners` у `status` (`project`, `host`, `since`, `this_copy`,
+`this_machine`). Код приходит у прогона и у превью (`--dry-run`) командной строки и у
+инструмента MCP; превью у MCP нет, поэтому там — у прогона.
 
 **Два разных `code`.** Код отказа команды живёт в `error.code` этой формы. Код шага
 исполнителя, который едет внутри `data.execution.errors[]`, — другой словарь и другая

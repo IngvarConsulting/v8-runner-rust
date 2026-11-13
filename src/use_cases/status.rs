@@ -1,17 +1,19 @@
 //! `status`: состояние пары «каталог ↔ база».
 //!
-//! Без `--deep` ответ собран только из памяти под `workPath` — память о базе у каждого
-//! набора, запись журнала поколений, признак нового владельца и файлы, изменившиеся с
-//! последнего чтения каталога; ни одна утилита платформы не запускается
-//! (`INV.CLI.STATUS-WITHOUT-DEEP-STARTS-NO-PLATFORM`). `--all` отвечает так же о каждой базе,
-//! объявленной в местном слое.
+//! Без `--deep` ответ собран из памяти под `workPath` — память о базе у каждого набора, запись
+//! журнала поколений, признак нового владельца и файлы, изменившиеся с последнего чтения
+//! каталога, — и, у файловой базы, из метки владельца рядом с ней: живые копии, которые её
+//! держат, с тем же отбором ушедших, что у проверки записи
+//! (`INV.CLI.STATUS-NAMES-THE-LIVE-HOLDERS-WITHOUT-THE-PLATFORM`); ни одна утилита платформы не
+//! запускается (`INV.CLI.STATUS-WITHOUT-DEEP-STARTS-NO-PLATFORM`). `--all` отвечает так же о
+//! каждой базе, объявленной в местном слое.
 //!
 //! `--deep` спрашивает платформу: поколение каждого набора тем исполнителем, которым его
 //! сверит `push`, и та же сверка с записью (`exchange_guard::predict`,
 //! `INV.CLI.STATUS-DEEP-PREDICTS-THE-PUSH-GENERATION-CHECK`); состав расширений базы рядом с
-//! наборами проекта (`INV.CLI.STATUS-DEEP-NAMES-AN-EXTENSION-WITHOUT-A-PROJECT`); копии,
-//! которые держат файловую базу (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Ни памяти, ни
-//! метки он не пишет — только журналы платформы и сессии агента.
+//! наборами проекта (`INV.CLI.STATUS-DEEP-NAMES-AN-EXTENSION-WITHOUT-A-PROJECT`). Ни памяти, ни
+//! метки он не пишет — только журналы платформы и сессии агента
+//! (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,6 +46,7 @@ use crate::use_cases::extension_inventory::{
 use crate::use_cases::generation_reader::{
     designer_log_file, read_generation, read_unapplied, GenerationProcess,
 };
+use crate::use_cases::infobase_owner::{file_address, file_infobase_dir, holders};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
@@ -170,14 +173,15 @@ fn from_memory(
         selected,
         kind: config.target_kind(),
         // Память привязана к адресу с хешем пути; человеку показывается сам путь.
-        address: match config.v8_connection().file_infobase_dir(&base_path) {
-            Some(dir) => Some(format!("file:{}", dir.display())),
+        address: match file_infobase_dir(config) {
+            Some(dir) => Some(file_address(&dir)),
             None => config.infobase_memory_address(&base_path),
         },
         new_owner_since: new_owner_since(config),
         source_sets,
         extensions: None,
-        holders: None,
+        // Метка читается без платформы и без замка: владельцы есть и без `--deep`.
+        holders: holders(config),
     })
 }
 
@@ -230,7 +234,7 @@ fn interrupted(context: &ExecutionContext, place: &str) -> Result<(), AppError> 
     }
 }
 
-/// То, что знает только платформа: поколение, состав расширений и метка владельца.
+/// То, что знает только платформа: поколение и состав расширений.
 fn deepen(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -337,13 +341,6 @@ fn deepen(
         .and_then(|provider| provider.selected);
     tracing::debug!(tool = ?extension_tool, duration_ms = inventory_ms, "status extension inventory");
     status.extensions = Some(extensions);
-    interrupted(context, "the owner marker")?;
-    let phase = Instant::now();
-    status.holders = crate::use_cases::infobase_owner::holders(config);
-    tracing::debug!(
-        duration_ms = phase.elapsed().as_millis(),
-        "status owner marker"
-    );
     Ok(provider)
 }
 

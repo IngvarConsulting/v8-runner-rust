@@ -896,6 +896,48 @@ fn rejecting_the_selected_executor_starts_no_platform_and_preserves_baseline() {
     assert_eq!(project.baseline(), baseline);
 }
 
+/// На базе другой живой копии итоговый кадр несёт в `result` то же предупреждение с кодом
+/// `infobase_of_another_copy`, что и конверт командной строки (`CTR.WIRE.FULL-PULL-PUBLICATION`
+/// версии 4): текст в `warnings`, структура — в `warning_details`.
+#[test]
+fn the_terminal_frame_carries_the_code_of_a_base_of_another_copy() {
+    let project = Project::new("designer", false);
+    let root = project.config.parent().expect("project root").to_path_buf();
+    let marker = root.join(".ib.v8-runner.owners.json");
+    // Абсолютный путь на любой системе: копия другой машины отсюда не проверяется.
+    let elsewhere = root.join("elsewhere");
+    let foreign = json!({
+        "version": 2,
+        "owners": [{
+            "machine": "a".repeat(64),
+            "host": "build-agent",
+            "project": elsewhere,
+            "since": "2026-10-01T00:00:00Z"
+        }]
+    })
+    .to_string();
+    fs::write(&marker, &foreign).expect("marker of another copy");
+
+    let mut session = project.start();
+    let selected = session.next("selected");
+    session.decide(&selected, "reject");
+    let (_, terminal) = session.finish();
+
+    let result = &terminal["result"];
+    let detail = &result["warning_details"][0];
+    assert_eq!(detail["code"], "infobase_of_another_copy", "{terminal}");
+    assert!(
+        result["warnings"]
+            .as_array()
+            .expect("warnings")
+            .contains(&detail["message"]),
+        "{terminal}"
+    );
+    assert_reported_path(&detail["owners"][0]["project"], &elsewhere);
+    assert_eq!(detail["owners"][0]["this_machine"], false, "{terminal}");
+    assert_eq!(fs::read_to_string(&marker).expect("marker"), foreign);
+}
+
 #[test]
 fn rejecting_the_selected_attached_agent_starts_no_session_and_preserves_baseline() {
     let project = Project::new("designer", false);
