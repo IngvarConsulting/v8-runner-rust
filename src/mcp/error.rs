@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
+use crate::support::error::EnvironmentLayer;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Stable machine-readable code for MCP-facing service failures.
@@ -65,6 +66,10 @@ pub struct McpBusinessError {
     /// а поле то же, что у CLI (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_release: Option<Box<PlatformReleaseRefusal>>,
+    /// Слой окружения, который отказал: код у MCP — `runtime_failure`, а поле то же, что у
+    /// CLI (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<EnvironmentLayer>,
 }
 
 impl McpBusinessError {
@@ -101,6 +106,7 @@ impl McpBusinessError {
             message: error.message().to_owned(),
             next: error.next().cloned(),
             platform_release: error.platform_release().cloned().map(Box::new),
+            layer: error.environment_layer(),
         }
     }
 }
@@ -198,6 +204,38 @@ mod tests {
         assert_eq!(mcp.code, McpErrorCode::RuntimeFailure);
         assert_eq!(mcp.kind, McpBusinessErrorKind::Runtime);
         assert_eq!(mcp.message, error.message());
+        assert_eq!(
+            mcp.layer,
+            Some(crate::support::error::EnvironmentLayer::Platform)
+        );
+    }
+
+    /// Код у MCP один — `runtime_failure`, — а слой окружения едет тем же полем `layer`, что
+    /// в конверте CLI (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    #[test]
+    fn an_agent_refusal_names_its_layer_over_mcp() {
+        use crate::platform::agent::AgentError;
+
+        let error = UseCaseError::from(
+            AppError::from(AgentError::AuthenticationRejected {
+                endpoint: "127.0.0.1:1543".to_owned(),
+                user: String::new(),
+            })
+            .with_context("dump"),
+        );
+
+        let mcp = McpBusinessError::from_use_case(&error);
+
+        assert_eq!(mcp.code, McpErrorCode::RuntimeFailure);
+        let wire = serde_json::to_value(&mcp).expect("mcp error serializes");
+        assert_eq!(wire["layer"], "infobase_user", "{wire}");
+        let back: McpBusinessError = serde_json::from_value(wire).expect("mcp error reads back");
+        assert_eq!(back, mcp);
+
+        let undetermined =
+            McpBusinessError::from_use_case(&UseCaseError::from(AppError::environment("no job")));
+        let wire = serde_json::to_value(&undetermined).expect("mcp error serializes");
+        assert!(wire.get("layer").is_none(), "{wire}");
     }
 
     /// Нет выпуска формата исходников: у MCP код тот же `runtime_failure`, а формат и опись
@@ -235,6 +273,10 @@ mod tests {
                 .as_ref()
                 .and_then(|release| release.source_format.release.as_deref()),
             Some("8.5.1")
+        );
+        assert_eq!(
+            mcp.layer, None,
+            "a missing release has its own code and no layer"
         );
     }
 }

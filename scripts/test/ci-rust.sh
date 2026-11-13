@@ -22,6 +22,7 @@ case "$CI_SCOPE" in
         cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'
         windows_contract_tests=(
           "a_closed_job_keeps_the_agent_one_shot"
+          "a_ctrl_break_from_another_process_group_cancels_like_ctrl_c"
           "platform::designer::tests::cf_exports_pass_windows_drive_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_pass_windows_unc_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_preserve_regular_windows_targets"
@@ -31,6 +32,7 @@ case "$CI_SCOPE" in
           "platform::ibcmd::tests::config_save_passes_windows_paths_without_verbatim_prefix"
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
+          "platform::process::tests::windows_process_group::a_ctrl_break_to_the_runner_group_misses_its_managed_child"
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
           "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"

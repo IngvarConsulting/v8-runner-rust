@@ -149,6 +149,15 @@ fn main() {
         std::process::exit(2);
     };
 
+    if let Some(marker) = std::env::var_os("V8_RUNNER_FAKE_PLATFORM_CONSOLE_EVENT") {
+        record_console_events(marker.into());
+    }
+    if let Some(pid_path) = std::env::var_os("V8_RUNNER_FAKE_PLATFORM_PID") {
+        write_artifact(
+            Path::new(&pid_path),
+            std::process::id().to_string().as_bytes(),
+        );
+    }
     if let Some(ready_path) = std::env::var_os("V8_RUNNER_FAKE_PLATFORM_READY") {
         write_artifact(Path::new(&ready_path), b"ready");
     }
@@ -262,6 +271,40 @@ fn fixture_option(scenario: &Path, name: &str) -> Option<String> {
         Err(error) => panic!("read dump fixture option {name}: {error}"),
     }
 }
+
+/// Событие консоли (`CTRL_BREAK`, `CTRL_C`) этот процесс переживает и отмечает файлом
+/// `marker`: так тест видит, что событие до потомка раннера дошло. Обработчик пишет отметку
+/// первым делом, а снимает процесс раннер.
+#[cfg(windows)]
+fn record_console_events(marker: std::path::PathBuf) {
+    static MARKER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    unsafe extern "system" fn record(kind: u32) -> i32 {
+        if let Some(marker) = MARKER.get() {
+            let _ = std::fs::write(marker, format!("console event {kind}"));
+        }
+        1
+    }
+
+    MARKER.set(marker).expect("one console event marker");
+    // SAFETY: the handler is a plain function that lives for the whole process.
+    assert_ne!(
+        unsafe { SetConsoleCtrlHandler(Some(record), 1) },
+        0,
+        "install the console event handler"
+    );
+}
+
+#[cfg(not(windows))]
+fn record_console_events(_marker: std::path::PathBuf) {}
 
 fn write_artifact(path: &Path, contents: &[u8]) {
     if let Some(parent) = path.parent() {
