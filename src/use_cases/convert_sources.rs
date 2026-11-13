@@ -36,6 +36,7 @@ use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 mod package;
+mod workspace;
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -287,71 +288,66 @@ fn run_convert_with_context(
         return Ok(preview);
     }
 
-    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
-    if config.tools.edt_cli.interactive_mode {
-        let manager = EdtSessionManager::for_config(
-            config,
-            convert_session_host_options(config, &resolved.workspace_path),
-        )
-        .map_err(|error| {
-            let app_error = AppError::from(error);
-            let message = app_error.to_string();
-            ConvertExecutionFailure::with_payload(
-                app_error,
-                result_snapshot(
-                    false,
-                    resolved.direction,
-                    resolved.scope,
-                    resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
-                    Vec::new(),
-                    started,
-                    Some(message),
-                ),
+    let edt_started = Instant::now();
+    let open = |workspace_path: PathBuf| -> Result<EdtDsl<'_>, AppError> {
+        let remaining = context
+            .edt_timeout()
+            .map(|timeout| timeout.saturating_sub(edt_started.elapsed()));
+        if remaining == Some(Duration::ZERO) {
+            return Err(AppError::TimedOut(
+                "convert EDT budget exhausted".to_owned(),
+            ));
+        }
+        let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
+        let dsl = if config.tools.edt_cli.interactive_mode {
+            let manager = EdtSessionManager::for_config(
+                config,
+                convert_session_host_options(config, &workspace_path),
+            )?;
+            EdtDsl::new_shared_session(
+                location.path.clone(),
+                workspace_path,
+                Arc::new(manager),
+                Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
+                Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+                policy,
+            )?
+        } else {
+            EdtDsl::new(
+                location.path.clone(),
+                workspace_path,
+                utilities.runner_for(UtilityType::EdtCli),
+                policy,
             )
-        })?;
-        let dsl = EdtDsl::new_shared_session(
-            location.path.clone(),
-            resolved.workspace_path.clone(),
-            Arc::new(manager),
-            Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
-            Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            policy,
+        };
+        let remaining = context
+            .edt_timeout()
+            .map(|timeout| timeout.saturating_sub(edt_started.elapsed()));
+        Ok(dsl.with_timeout(remaining))
+    };
+    let primary = open(resolved.workspace_path.clone()).map_err(|error| {
+        let message = error.to_string();
+        ConvertExecutionFailure::with_payload(
+            error,
+            result_snapshot(
+                false,
+                resolved.direction,
+                resolved.scope,
+                resolved.source_set.clone(),
+                Some(resolved.workspace_path.clone()),
+                Vec::new(),
+                started,
+                Some(message),
+            ),
         )
-        .map_err(|error| {
-            let app_error = AppError::from(error);
-            let message = app_error.to_string();
-            ConvertExecutionFailure::with_payload(
-                app_error,
-                result_snapshot(
-                    false,
-                    resolved.direction,
-                    resolved.scope,
-                    resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
-                    Vec::new(),
-                    started,
-                    Some(message),
-                ),
-            )
-        })?
-        .with_timeout(context.edt_timeout());
-        execute_with_dsl(context, &dsl, &resolved, started)
-    } else {
-        let dsl = EdtDsl::new(
-            location.path.clone(),
-            resolved.workspace_path.clone(),
-            utilities.runner_for(UtilityType::EdtCli),
-            policy,
-        )
-        .with_timeout(context.edt_timeout());
-        execute_with_dsl(context, &dsl, &resolved, started)
-    }
+    })?;
+    let mut workspace = workspace::ConvertWorkspace::new(primary, &open);
+    execute_with_dsl(context, &mut workspace, &resolved, started)
 }
 
 fn execute_with_dsl(
     context: &ExecutionContext,
-    dsl: &EdtDsl<'_>,
+    workspace: &mut workspace::ConvertWorkspace<'_>,
     resolved: &ResolvedConvertRequest,
     started: Instant,
 ) -> UseCaseResult<ConvertResult> {
@@ -362,7 +358,7 @@ fn execute_with_dsl(
 
     for item in &resolved.items {
         let import_options = resolve_runtime_import_options(
-            dsl,
+            workspace.primary(),
             item,
             &processed_source_sets,
             &mut base_project_names,
@@ -376,7 +372,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -394,7 +390,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -415,7 +411,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -439,7 +435,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -462,7 +458,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -491,7 +487,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -503,7 +499,7 @@ fn execute_with_dsl(
         })?;
 
         run_platform_conversion(
-            dsl,
+            workspace,
             resolved.direction,
             item,
             &import_options,
@@ -519,7 +515,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -543,7 +539,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -563,7 +559,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs,
                     started,
                     Some(message),
@@ -588,7 +584,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    Some(resolved.workspace_path.clone()),
+                    Some(workspace.last_path().to_path_buf()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -617,7 +613,7 @@ fn execute_with_dsl(
                         resolved.direction,
                         resolved.scope,
                         resolved.source_set.clone(),
-                        Some(resolved.workspace_path.clone()),
+                        Some(workspace.last_path().to_path_buf()),
                         outputs.clone(),
                         started,
                         Some(message),
@@ -655,7 +651,7 @@ fn execute_with_dsl(
         resolved.direction,
         resolved.scope,
         resolved.source_set.clone(),
-        Some(resolved.workspace_path.clone()),
+        Some(workspace.last_path().to_path_buf()),
         outputs,
         started,
         merge_messages(messages),
@@ -1332,7 +1328,7 @@ fn read_edt_project_name(path: &Path, label: &str) -> Result<String, AppError> {
 }
 
 fn run_platform_conversion(
-    dsl: &EdtDsl<'_>,
+    workspace: &mut workspace::ConvertWorkspace<'_>,
     direction: ConvertDirection,
     item: &ResolvedConvertItem,
     import_options: &ConvertImportOptions,
@@ -1372,10 +1368,7 @@ fn run_platform_conversion(
                         "convert: edt export",
                         "[EDT] exporting external project to Designer files",
                     );
-                    let result = dsl
-                        .export_project_path(project_path, &export_target)
-                        .map_err(AppError::from)?;
-                    ensure_platform_success(&item.source_set_name, "edt-to-designer", &result)?;
+                    workspace.export(&item.source_set_name, project_path, &export_target)?;
                     let discovered = discover_designer_external_artifacts(
                         &item.source_set_name,
                         &export_target,
@@ -1416,10 +1409,7 @@ fn run_platform_conversion(
                     "convert: edt export",
                     "[EDT] exporting project to Designer files",
                 );
-                let result = dsl
-                    .export_project_path(&item.source_path, staging_dir)
-                    .map_err(AppError::from)?;
-                ensure_platform_success(&item.source_set_name, "edt-to-designer", &result)
+                workspace.export(&item.source_set_name, &item.source_path, staging_dir)
             }
         }
         ConvertDirection::DesignerToPackage
@@ -1432,7 +1422,8 @@ fn run_platform_conversion(
                 "convert: designer import",
                 "[EDT] importing Designer files",
             );
-            let result = dsl
+            let result = workspace
+                .primary()
                 .import_configuration_files(
                     staging_dir,
                     &item.source_path,
