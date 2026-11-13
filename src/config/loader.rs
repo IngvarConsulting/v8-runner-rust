@@ -804,6 +804,8 @@ pub fn load_declared_infobases(
     #[cfg(test)]
     run_declared_read_hook(DeclaredReadPoint::AfterProjectRecheck);
     local_file.recheck()?;
+    // Keep the shared notification check last, including for writes to the
+    // project file after its individual recheck.
     route.recheck()?;
     Ok(infobases)
 }
@@ -885,7 +887,8 @@ struct CapturedConfigDirectory {
 
 /// Ownership reads one pair through its held project directory. Route identity
 /// and self-move witnesses reject an ancestor replaced and restored during the
-/// read; its namespace witness also protects captured missing files.
+/// read; its namespace witness also protects captured missing files. On Linux
+/// the same queue records modifications to the held YAML inodes.
 struct CapturedConfigRoute {
     // Field order keeps the route bound until its notification handle is closed.
     #[cfg(windows)]
@@ -996,7 +999,7 @@ impl CapturedConfigRoute {
     }
 }
 
-/// One synchronous native queue binds the held route objects for this read.
+/// One synchronous native queue records changes to the objects held for this read.
 /// The route drops it before closing the directory descriptors it watches.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 struct ConfigRouteChanges {
@@ -1048,28 +1051,17 @@ impl ConfigRouteChanges {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let changes = Self {
+            queue,
+            #[cfg(target_os = "macos")]
+            changed: std::cell::Cell::new(false),
+        };
         for directory in movable_directories {
             #[cfg(target_os = "linux")]
-            {
-                // Bind the watch to the held inode, not a name which could
-                // already designate another directory while watches are set up.
-                let path = std::ffi::CString::new(format!(
-                    "/proc/self/fd/{}",
-                    directory.file.as_raw_fd()
-                ))?;
-                // SAFETY: the fd and its NUL-terminated kernel link stay live.
-                // Deliberately follow this owned fd link; no project alias is read.
-                let watch = unsafe {
-                    libc::inotify_add_watch(
-                        fd,
-                        path.as_ptr(),
-                        libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_ONLYDIR,
-                    )
-                };
-                if watch < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
+            changes.watch_inode(
+                &directory.file,
+                libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_ONLYDIR,
+            )?;
             #[cfg(target_os = "macos")]
             {
                 let change = libc::kevent {
@@ -1093,11 +1085,23 @@ impl ConfigRouteChanges {
                 }
             }
         }
-        Ok(Self {
-            queue,
-            #[cfg(target_os = "macos")]
-            changed: std::cell::Cell::new(false),
-        })
+        Ok(changes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn watch_inode(&self, file: &std::fs::File, mask: u32) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        // The kernel fd link binds the watch to the object already opened,
+        // including modifications through other hardlinks or existing fds.
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        // SAFETY: both descriptors and the NUL-terminated fd link stay live
+        // throughout the call.
+        let watch = unsafe { libc::inotify_add_watch(self.queue.as_raw_fd(), path.as_ptr(), mask) };
+        if watch < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     fn filesystem_supported(filesystem: &libc::statfs) -> bool {
@@ -1129,8 +1133,8 @@ impl ConfigRouteChanges {
                 revents: 0,
             };
             // SAFETY: state is one live pollfd and a zero timeout never blocks.
-            // Poll does not drain the queue: move, deletion, overflow, ignored
-            // watch and unmount events all permanently invalidate this read.
+            // Poll does not drain the queue: any queued notification (including
+            // modification, overflow or a lost watch) permanently invalidates this read.
             match unsafe { libc::poll(&mut state, 1, 0) } {
                 0 => Ok(()),
                 -1 => Err(std::io::Error::last_os_error().into()),
@@ -1337,6 +1341,10 @@ impl<'a> CapturedYamlFile<'a> {
             }
             Err(error) => return Err(error.into()),
         };
+        // Register before sampling the file. An ordinary write can restore
+        // its bytes and mtime within the same ctime tick.
+        #[cfg(target_os = "linux")]
+        route.route_changes.watch_inode(&file, libc::IN_MODIFY)?;
         let stamp = ConfigObjectStamp::read(&file)?;
         let mut text = String::new();
         file.read_to_string(&mut text)?;
@@ -4188,7 +4196,69 @@ source-set:
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
-            "restoring writable mtime cannot restore the native change generation"
+            "restoring bytes and mtime must not hide a rewrite"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn declared_infobases_refuse_a_hardlink_rewrite_after_the_primary_recheck() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let bytes = b"format: DESIGNER\n";
+        std::fs::write(&primary, bytes).unwrap();
+        std::fs::write(
+            project.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:\n  origin:\n    connection: File=ib\n",
+        )
+        .unwrap();
+        let alias = root.join("writer.yaml");
+        std::fs::hard_link(&primary, &alias).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&alias)
+            .unwrap();
+        let before = writer.metadata().unwrap();
+        let accessed = before.accessed().unwrap();
+        let modified = before.modified().unwrap();
+
+        let result = super::with_declared_read_hook(
+            move |point| {
+                // No primary stamp is read after this hook. The outcome must
+                // therefore be independent of whether the kernel changes ctime.
+                if matches!(point, super::DeclaredReadPoint::AfterProjectRecheck) {
+                    writer.write_all(b"format: TEMPORAR\n").unwrap();
+                    writer.seek(SeekFrom::Start(0)).unwrap();
+                    writer.write_all(bytes).unwrap();
+                    // Restore both times so the restoration generates IN_ATTRIB,
+                    // leaving the writes as the source of IN_MODIFY.
+                    writer
+                        .set_times(
+                            std::fs::FileTimes::new()
+                                .set_accessed(accessed)
+                                .set_modified(modified),
+                        )
+                        .unwrap();
+                    let after = writer.metadata().unwrap();
+                    assert_eq!(after.ino(), before.ino());
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after.modified().unwrap(), modified);
+                    assert_eq!(std::fs::read(&primary).unwrap(), bytes);
+                    // The hook owns the writer until after the final queue check.
+                }
+            },
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(ref error))
+                if error.to_string() == "project configuration changed while its declared infobases were read"),
+            "a write after the primary recheck must invalidate the pair: {result:?}"
         );
     }
 
