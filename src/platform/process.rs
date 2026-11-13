@@ -4334,11 +4334,13 @@ mod tests {
                 return;
             }
             // Событие доходит только до процессов той же консоли; у теста без консоли её
-            // заводят. Сам тест в группу раннера не входит и события не получает.
+            // заводят. Консоль без окна (так у CI) `AllocConsole` отвергает отказом доступа —
+            // она уже есть, поэтому его итог не проверяется. Сам тест в группу раннера не
+            // входит и события не получает.
             // SAFETY: calls without pointer arguments on this test process's own console.
             unsafe {
                 if GetConsoleWindow().is_null() {
-                    assert_ne!(AllocConsole(), 0, "{}", std::io::Error::last_os_error());
+                    AllocConsole();
                 }
             }
             for mode in ["wait", "detached", "tied"] {
