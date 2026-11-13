@@ -702,6 +702,16 @@ fn a_preview_names_the_warning_on_a_base_of_another_copy_and_writes_nothing() {
         "--dry-run",
     ]);
     assert_warned(&preview, "infobase.restore", &first, &stand);
+    // Превью восстановления идёт своей дорогой мимо общей границы, но код несёт и оно.
+    let restore = envelope(&preview);
+    assert_eq!(
+        details(&restore)
+            .iter()
+            .map(|detail| detail["code"].clone())
+            .collect::<Vec<_>>(),
+        [json!("infobase_of_another_copy")],
+        "{restore}"
+    );
     assert_eq!(stand.marker_text(), marker);
 }
 

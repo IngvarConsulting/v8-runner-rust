@@ -228,7 +228,9 @@ pub struct Envelope<T: Serialize> {
     pub data: T,
     pub warnings: Vec<String>,
     /// Предупреждения из `warnings`, у которых есть машинный код, — в том же порядке и с тем же
-    /// текстом в `message`. Поля нет, когда таких предупреждений нет.
+    /// текстом в `message`. Поля нет, когда таких предупреждений нет. Пишет его только
+    /// `follow_with`; типом это не закреплено — держат тесты превью, прогона, MCP и внешней
+    /// выгрузки.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warning_details: Vec<CodedWarning>,
     pub steps: Vec<StepResult>,
@@ -269,8 +271,8 @@ impl<T: Serialize> Envelope<T> {
     }
 
     /// Дописывает предупреждения после уже названных: текст — в `warnings`, предупреждение с
-    /// кодом — ещё и в `warning_details`. Единственный путь, которым предупреждение с кодом
-    /// попадает в конверт, поэтому два поля не расходятся.
+    /// кодом — ещё и в `warning_details`. Этим путём предупреждение с кодом попадает в конверт у
+    /// presenter CLI, MCP и внешней выгрузки, поэтому два поля не расходятся.
     pub fn follow_with<'a>(&mut self, warnings: impl IntoIterator<Item = &'a Warning>) {
         for warning in warnings {
             self.warnings.push(warning.message().to_owned());
@@ -456,6 +458,16 @@ mod schema_tests {
         );
         let validator = jsonschema::validator_for(&schema).expect("schema");
         assert!(validator.is_valid(&value), "{value}");
+        // Строка соединения базу не называет: `name: null`, и поле при этом есть.
+        let mut ad_hoc = value.clone();
+        ad_hoc["warning_details"][0]["name"] = serde_json::Value::Null;
+        assert!(validator.is_valid(&ad_hoc), "{ad_hoc}");
+        let mut unnamed = value.clone();
+        unnamed["warning_details"][0]
+            .as_object_mut()
+            .expect("detail")
+            .remove("name");
+        assert!(!validator.is_valid(&unnamed), "{unnamed}");
         // Без предупреждения с кодом поля нет — прежний конверт не меняется.
         let plain =
             serde_json::to_value(Envelope::ok("push", 1, serde_json::json!({}))).expect("envelope");

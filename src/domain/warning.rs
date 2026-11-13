@@ -17,7 +17,8 @@ pub enum CodedWarning {
     /// (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).
     InfobaseOfAnotherCopy {
         message: String,
-        /// Имя базы в местном слое; `null` — база пришла строкой соединения.
+        /// Имя базы в местном слое; `null` — база пришла строкой соединения. Поле есть всегда.
+        #[schemars(required, extend("type" = ["string", "null"]))]
         name: Option<String>,
         /// Адрес базы без учётных данных, как `address` у `status`: `file:<каталог>`.
         address: String,
@@ -35,7 +36,7 @@ impl CodedWarning {
     }
 
     /// Код на проводе. Читает сторож закрытого набора.
-    #[allow(dead_code, reason = "читает сторож закрытого набора")]
+    #[cfg(test)]
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InfobaseOfAnotherCopy { .. } => "infobase_of_another_copy",
@@ -63,11 +64,5 @@ impl Warning {
             Self::Plain(_) => None,
             Self::Coded(coded) => Some(coded),
         }
-    }
-}
-
-impl From<String> for Warning {
-    fn from(message: String) -> Self {
-        Self::Plain(message)
     }
 }

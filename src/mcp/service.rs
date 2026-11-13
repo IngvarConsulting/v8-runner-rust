@@ -1208,12 +1208,27 @@ mod envelope_tests {
             },
         );
 
-        let answered = with_boundary_warnings(vec![boundary_note("boundary")], Err(refusal));
+        let coded = crate::domain::warning::CodedWarning::InfobaseOfAnotherCopy {
+            message: "coded".to_owned(),
+            name: Some("origin".to_owned()),
+            address: "file:/srv/ib".to_owned(),
+            owners: Vec::new(),
+        };
+        let notes = vec![
+            boundary_note("boundary"),
+            BoundaryNote {
+                phase: crate::domain::infobase_export::InfobaseTransferPhase::InfobaseOwner,
+                warning: crate::domain::warning::Warning::Coded(coded.clone()),
+            },
+        ];
+
+        let answered = with_boundary_warnings(notes, Err(refusal));
 
         let Err(McpServiceError::Business(failure)) = answered else {
             panic!("a refusal stays a refusal");
         };
-        assert_eq!(failure.response.warnings, ["own", "boundary"]);
+        assert_eq!(failure.response.warnings, ["own", "boundary", "coded"]);
+        assert_eq!(failure.response.warning_details, [coded]);
     }
 }
 
