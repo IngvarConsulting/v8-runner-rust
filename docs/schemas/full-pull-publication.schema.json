@@ -216,6 +216,17 @@
         "kind": {
           "$ref": "#/$defs/ErrorKind"
         },
+        "layer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentLayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Слой окружения, который отказал; заполняется отказом `environment_unavailable`, когда\nслой определён. Без поля слой не определён."
+        },
         "local_generation": {
           "description": "Поколение, записанное после прошлого обмена; заполняется тем же отказом.",
           "type": [
@@ -266,6 +277,31 @@
         "message"
       ],
       "type": "object"
+    },
+    "EnvironmentLayer": {
+      "description": "Какой слой окружения отказал у `environment_unavailable`. Набор закрыт и едет в отказе\nполем `layer` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`): по нему потребитель\nрешает, не читая прозы. Отказ, слой которого не определён, поля не несёт.",
+      "oneOf": [
+        {
+          "const": "infobase_user",
+          "description": "Агент отверг вход с учётными данными пользователя базы. Так же отвечает агент без\nлицензии платформы (замер 8.5.4.1878).",
+          "type": "string"
+        },
+        {
+          "const": "agent_endpoint",
+          "description": "Точка входа агента не ответила, SSH-рукопожатие не прошло или ключ хоста не тот.",
+          "type": "string"
+        },
+        {
+          "const": "agent_start",
+          "description": "Агент не поднялся: запуск, порт, срок подъёма, хранитель живого агента.",
+          "type": "string"
+        },
+        {
+          "const": "platform",
+          "description": "Утилиты платформы нет, она не той версии или не выбрана.",
+          "type": "string"
+        }
+      ]
     },
     "ErrorCode": {
       "description": "Код отказа — та же причина подробнее. Набор закрыт вместе с родом.",

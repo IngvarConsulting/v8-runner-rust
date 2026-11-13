@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 5
+version: 6
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -9,6 +9,8 @@ check:
   - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
   - tests/cli_platform_release.rs::every_platform_command_refuses_without_the_release_of_the_sources_format
   - tests/cli_apply_sessions.rs::a_file_base_held_by_a_session_is_refused_with_the_session_list
+  - src/command_envelope.rs::the_environment_layer_set_is_closed_and_named_by_the_schema
+  - tests/cli_dump_agent.rs::a_rejected_password_is_an_environment_refusal_even_though_the_port_answers
 ---
 
 # Конверт ответа команды
@@ -17,7 +19,7 @@ check:
 `docs/schemas/command-envelope.schema.json`: `ok`, `command`, `duration_ms`, `data`,
 `warnings`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
 нужде `next` — следующий шаг структурой, — два поля поколений у отказа
-`non_fast_forward`, поле `platform_release` у отказа `platform_release_missing` и поле `sessions` у отказов `infobase_sessions` и `infobase_designer_busy`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
+`non_fast_forward`, поле `platform_release` у отказа `platform_release_missing`, поле `sessions` у отказов `infobase_sessions` и `infobase_designer_busy` и поле `layer` у отказа `environment_unavailable`, когда слой, который отказал, определён. Список полей конверта, шага и отказа закрыт: новое поле у любого из
 них валит проверку.
 
 Рода и коды — закрытые перечисления, а не строки. Рода: `capability`, `environment`,
@@ -27,7 +29,10 @@ check:
 цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. Коды рода `environment` тоже отвечают
 кодом выхода 2: `environment_unavailable` (утилиты нет или она не та) и
 `platform_release_missing` (при `tools.platform.version: sources` нет выпуска, который пишет
-формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`). Его
+формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`). Поле
+`layer` отказа `environment_unavailable` называет слой из закрытого набора `infobase_user`,
+`agent_endpoint`, `agent_start`, `platform`; без поля слой не определён
+(`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). У `platform_release_missing`
 поле `platform_release` несёт `source_format` — версию формата, файл и выпуск, как в ответе
 `platforms`, — и `installations`, опись установок, по которой решён отказ. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
@@ -88,6 +93,13 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
 
 **Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. В эту же версию вошёл код `source_set_ignored_by_git` рода `validation`, код выхода 2: правило игнорирования git прячет файл набора, изменения которого берутся у git ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)). Так же, родом `validation` с кодом выхода 2, в неё вошёл код `work_path_on_another_volume`: каталог набора и `workPath` на разных томах, и `pull` не начинается ([правило](../use-cases/the-dump-stage-lies-in-the-work-path-on-the-set-volume.md)). Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они. Роду `platform` прибавился код `agent_command_abandoned`, код выхода 4.
+
+**Что изменила версия 6.** У отказа появилось необязательное поле `layer`: его заполняет
+только `environment_unavailable`, когда слой, который отказал, определён, — `infobase_user`,
+`agent_endpoint`, `agent_start` или `platform`
+(`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). Рода, коды и тексты отказов прежние:
+поле только добавлено, и потребитель, который его не знает, читает конверт как раньше. Тем же
+полем слой едет у MCP — в отказе и в конверте ответа.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

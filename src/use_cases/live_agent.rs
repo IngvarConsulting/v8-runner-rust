@@ -26,7 +26,7 @@ use crate::platform::locator::UtilityType;
 use crate::platform::service::{process_facts, started_at};
 use crate::platform::service_record::ServiceRecord;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, EnvironmentLayer};
 use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_key};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
@@ -116,8 +116,16 @@ pub fn hold(
                 ),
             ))
         }
-        Err(error @ (KeeperStartError::Busy { .. } | KeeperStartError::Unavailable { .. })) => {
-            return Err(AppError::EnvironmentUnavailable(crate::support::error::chain(&error)))
+        // Агент занят другой командой — занятость, а не отказ подъёма: слой не определён.
+        Err(error @ KeeperStartError::Busy { .. }) => {
+            return Err(AppError::environment(crate::support::error::chain(&error)))
+        }
+        // Хранитель не поднялся или не ответил — агент не поднят.
+        Err(error @ KeeperStartError::Unavailable { .. }) => {
+            return Err(AppError::environment_at(
+                EnvironmentLayer::AgentStart,
+                crate::support::error::chain(&error),
+            ))
         }
         Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
     };
@@ -237,7 +245,7 @@ pub fn stop(
                 message: error.to_string(),
             }),
             Err(error) => {
-                return Err(AppError::EnvironmentUnavailable(format!(
+                return Err(AppError::environment(format!(
                     "the live agent {} was not stopped: {error}",
                     keeper.key
                 )))
@@ -479,7 +487,7 @@ fn refused(kind: UseCaseErrorKind, message: String) -> AppError {
 }
 
 fn keeper_io(error: std::io::Error) -> AppError {
-    AppError::EnvironmentUnavailable(format!("the live agent registry cannot be read: {error}"))
+    AppError::environment(format!("the live agent registry cannot be read: {error}"))
 }
 
 fn rfc3339(at: SystemTime) -> String {

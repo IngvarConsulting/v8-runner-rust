@@ -47,6 +47,38 @@ impl std::fmt::Display for CapabilityRefusal {
     }
 }
 
+/// Какой слой окружения отказал у `environment_unavailable`. Набор закрыт и едет в отказе
+/// полем `layer` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`): по нему потребитель
+/// решает, не читая прозы. Отказ, слой которого не определён, поля не несёт.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentLayer {
+    /// Агент отверг вход с учётными данными пользователя базы. Так же отвечает агент без
+    /// лицензии платформы (замер 8.5.4.1878).
+    InfobaseUser,
+    /// Точка входа агента не ответила, SSH-рукопожатие не прошло или ключ хоста не тот.
+    AgentEndpoint,
+    /// Агент не поднялся: запуск, порт, срок подъёма, хранитель живого агента.
+    AgentStart,
+    /// Утилиты платформы нет, она не той версии или не выбрана.
+    Platform,
+}
+
+/// Отказ окружения: слой, если он определён, и текст человеку.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentRefusal {
+    pub layer: Option<EnvironmentLayer>,
+    pub message: String,
+}
+
+impl std::fmt::Display for EnvironmentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Где команду остановила отмена. Код и род отказа от этого не зависят — отмена одна, — а
 /// ответ, который пишет прерывание, называет по нему фазу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +109,7 @@ pub enum AppError {
     CapabilityUnavailable(CapabilityRefusal),
 
     #[error("environment unavailable: {0}")]
-    EnvironmentUnavailable(String),
+    EnvironmentUnavailable(EnvironmentRefusal),
 
     #[error("workspace busy: {0}")]
     WorkspaceBusy(String),
@@ -205,6 +237,36 @@ impl AppError {
         })
     }
 
+    /// Отказ окружения, слой которого не определён.
+    pub fn environment(message: impl Into<String>) -> Self {
+        Self::EnvironmentUnavailable(EnvironmentRefusal {
+            layer: None,
+            message: message.into(),
+        })
+    }
+
+    /// Отказ окружения с названным слоем: его видит поле `layer` отказа.
+    pub fn environment_at(layer: EnvironmentLayer, message: impl Into<String>) -> Self {
+        Self::EnvironmentUnavailable(EnvironmentRefusal {
+            layer: Some(layer),
+            message: message.into(),
+        })
+    }
+
+    /// Слой окружения, который отказал, если он определён. Утилиты нет или она не той
+    /// версии — слой `platform` по самому виду отказа; у отсутствующего выпуска формата
+    /// исходников свой код и слоя нет.
+    pub fn environment_layer(&self) -> Option<EnvironmentLayer> {
+        match self {
+            Self::EnvironmentUnavailable(refusal) => refusal.layer,
+            Self::PlatformLocator(source) | Self::PlatformLocatorContext { source, .. } => source
+                .platform_release()
+                .is_none()
+                .then_some(EnvironmentLayer::Platform),
+            _ => None,
+        }
+    }
+
     /// Отказ выпуска формата исходников, если это он: ему положено дойти до ответа как есть
     /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
     pub const fn platform_release(
@@ -286,8 +348,12 @@ impl AppError {
                     message: format!("{context}; {}", refusal.message),
                 })
             }
-            Self::EnvironmentUnavailable(message) => {
-                Self::EnvironmentUnavailable(format!("{context}; {message}"))
+            // Слой переживает уточнение текста так же: иначе `push; agent at …` его теряет.
+            Self::EnvironmentUnavailable(refusal) => {
+                Self::EnvironmentUnavailable(EnvironmentRefusal {
+                    layer: refusal.layer,
+                    message: format!("{context}; {}", refusal.message),
+                })
             }
             Self::WorkspaceBusy(message) => Self::WorkspaceBusy(format!("{context}; {message}")),
             Self::InfobaseBusy(message) => Self::InfobaseBusy(format!("{context}; {message}")),
@@ -420,7 +486,7 @@ impl From<IbcmdError> for AppError {
     fn from(error: IbcmdError) -> Self {
         match error {
             IbcmdError::SnapshotBusy { .. } => Self::InfobaseBusy(error.to_string()),
-            IbcmdError::SnapshotProbe { .. } => Self::EnvironmentUnavailable(error.to_string()),
+            IbcmdError::SnapshotProbe { .. } => Self::environment(error.to_string()),
             IbcmdError::SnapshotUnsupported => {
                 Self::capability_for(CapabilityReason::Target, error.to_string())
             }
@@ -497,24 +563,30 @@ impl From<AgentError> for AppError {
             // а не отказ платформы: отказом платформа отвечает сообщением `error`.
             AgentError::InvalidReply { .. } => Self::InvalidOutput(error.to_string()),
             AgentError::Workspace { .. } => Self::Runtime(error.to_string()),
-            AgentError::HostKeyPathNotReadable { .. }
-            | AgentError::Unreachable { .. }
+            // Отказы окружения называют слой, который отказал
+            // (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+            AgentError::AuthenticationRejected { .. } => {
+                Self::environment_at(EnvironmentLayer::InfobaseUser, error.to_string())
+            }
+            AgentError::Unreachable { .. }
             | AgentError::Handshake { .. }
-            | AgentError::AuthenticationRejected { .. }
-            // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
+            // Тот же род, что и отвергнутые учётные данные: сервер ответил, но работать
             // с этой точкой входа как объявлено нельзя.
             | AgentError::HostKeyRejected { .. }
             | AgentError::ForeignAgentOnPort { .. }
+            | AgentError::Channel { .. } => {
+                Self::environment_at(EnvironmentLayer::AgentEndpoint, error.to_string())
+            }
+            AgentError::HostKeyPathNotReadable { .. }
             | AgentError::PortTaken { .. }
             | AgentError::NoFreePort { .. }
-            | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. }
             | AgentError::ExitedBeforeSession { .. }
             | AgentError::LiveAgentGone { .. }
             | AgentError::Keeper { .. }
             | AgentError::KeeperUnreachable { .. } => {
-                Self::EnvironmentUnavailable(error.to_string())
+                Self::environment_at(EnvironmentLayer::AgentStart, error.to_string())
             }
         }
     }

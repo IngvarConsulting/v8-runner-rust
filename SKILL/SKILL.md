@@ -240,6 +240,7 @@ v8-runner infobase create
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
+- Branch on `error.layer` of `environment_unavailable`, never on its text: `infobase_user` (agent rejected the infobase user/password; also an unlicensed agent), `agent_endpoint` (unreachable, SSH handshake, host key), `agent_start` (agent/keeper did not start, port), `platform` (utility missing/wrong/not selected); no field = layer unknown. MCP carries the same field.
 - Before an orchestrator applies `download` or `infobase dump`, append `--dry-run` to obtain the exact
   provider selection and output plan without creating `workPath`, locks, output paths, or a
   platform process. Treat `mode=preview` and `provider_dispatched=false` as the non-execution proof.

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.FULL-PULL-PUBLICATION
-version: 3
+version: 4
 artifact: docs/schemas/full-pull-publication.schema.json
 check:
   - src/cli/external_pull.rs::generated_publication_schema_is_current
@@ -40,6 +40,9 @@ check:
 неверный ответ или отмена до подтверждения дают `unknown` и `unchanged`.
 Подтверждённая публикация сохраняет `published`, в том числе при ошибке записи
 памяти. Состояние памяти называет результат её локального завершения.
+
+**Что изменила версия 4.** Отказ конверта в `result` знает необязательное поле `layer` у
+кода `environment_unavailable` (`CTR.WIRE.COMMAND-ENVELOPE` версии 6). Кадры прежние.
 
 **Что изменила версия 3.** Перечень значений `mode_reason` тот же, что у
 `CTR.WIRE.PULL-DATA` версии 9: добавилось `platform_rewrote_all`. Внешний полный pull —

@@ -17,7 +17,7 @@ use crate::platform::locator::{
     LocatorError, PlatformReleaseMissing, UtilityLocation, UtilityType,
 };
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, EnvironmentLayer};
 
 /// Исполнитель, выбранный для операции, вместе с найденной утилитой и квитанцией.
 ///
@@ -161,15 +161,23 @@ pub(crate) fn release_for_another_executor(
 /// за всеми утилитами платформы, поэтому, если не готов никто, отказом становится он сам, а не
 /// пересказ в перечне пропущенных: его код и опись нужны вызывающему
 /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+///
+/// Помнит и то, что хоть один кандидат пропущен из-за своей утилиты: тогда отказ «не готов
+/// никто» называет слой `platform`. Пропуски по другим причинам — нет файла базы, не объявлен
+/// путь, `--create` — слоя не определяют (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
 #[derive(Debug, Default)]
-pub(crate) struct ReleaseRefusal(Option<Box<PlatformReleaseMissing>>);
+pub(crate) struct ReleaseRefusal {
+    missing: Option<Box<PlatformReleaseMissing>>,
+    utility_not_ready: bool,
+}
 
 impl ReleaseRefusal {
     /// Причина пропуска исполнителя по ошибке поиска его утилиты; отказ выпуска запоминается.
     pub(crate) fn not_ready(&mut self, error: LocatorError) -> String {
         let reason = format!("environment is not ready: {error}");
+        self.utility_not_ready = true;
         if let LocatorError::PlatformReleaseMissing(missing) = error {
-            self.0.get_or_insert(missing);
+            self.missing.get_or_insert(missing);
         }
         reason
     }
@@ -223,7 +231,7 @@ pub(crate) fn nobody_ready(
     skipped: &[SkippedProvider],
     release: ReleaseRefusal,
 ) -> AppError {
-    if let Some(missing) = release.0 {
+    if let Some(missing) = release.missing {
         return AppError::PlatformLocator(LocatorError::PlatformReleaseMissing(missing));
     }
     let reason = skipped
@@ -235,8 +243,11 @@ pub(crate) fn nobody_ready(
         .candidates()
         .into_iter()
         .any(|provider| utilities_of(provider, config).is_some());
-    if had_an_adapter {
-        AppError::EnvironmentUnavailable(reason)
+    if had_an_adapter && release.utility_not_ready {
+        // Хоть одному кандидату не нашлось подходящей утилиты: поставьте её, и заработает.
+        AppError::environment_at(EnvironmentLayer::Platform, reason)
+    } else if had_an_adapter {
+        AppError::environment(reason)
     } else {
         AppError::capability(reason)
     }

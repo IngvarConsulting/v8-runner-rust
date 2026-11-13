@@ -935,11 +935,22 @@ fn adapter_error_envelope(
     Envelope::err(command.as_str(), 0, data).with_error(envelope_error(&business_error))
 }
 
+/// Каждое поле отказа MCP названо здесь по имени: новое поле, забытое переводом, не
+/// компилируется, а не пропадает из конверта молча.
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
+    let McpBusinessError {
+        code,
+        kind,
+        message,
+        next,
+        platform_release,
+        layer,
+    } = error;
     EnvelopeError {
-        platform_release: error.platform_release.clone(),
-        ..EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
-            .with_next(error.next.clone())
+        platform_release: platform_release.clone(),
+        layer: *layer,
+        ..EnvelopeError::new((*code).into(), (*kind).into(), message.clone())
+            .with_next(next.clone())
     }
 }
 
@@ -973,6 +984,7 @@ fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
         message: error.message().to_owned(),
         next: None,
         platform_release: None,
+        layer: None,
     }
 }
 
@@ -3044,5 +3056,26 @@ mod tests {
             log_read_warning: matches!(status, SyntaxCheckStatus::ToolFailed)
                 .then_some("log truncated".to_owned()),
         }
+    }
+
+    /// Конверт ответа MCP несёт слой отказа так же, как сам отказ MCP: перевод в конверт
+    /// его не теряет (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    #[test]
+    fn the_mcp_response_envelope_keeps_the_environment_layer() {
+        use crate::platform::agent::AgentError;
+        use crate::support::error::{AppError, EnvironmentLayer};
+        use crate::use_cases::result::UseCaseError;
+
+        let error = UseCaseError::from(AppError::from(AgentError::PortTaken {
+            port: 1543,
+            detail: "taken".to_owned(),
+        }));
+        let business = super::McpBusinessError::from_use_case(&error);
+        assert_eq!(business.layer, Some(EnvironmentLayer::AgentStart));
+
+        let envelope = super::envelope_error(&business);
+
+        assert_eq!(envelope.layer, Some(EnvironmentLayer::AgentStart));
+        assert_eq!(envelope.message, business.message);
     }
 }

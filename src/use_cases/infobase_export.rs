@@ -2237,7 +2237,7 @@ mod tests {
         let cases = || {
             vec![
                 AppError::capability("not here".to_owned()),
-                AppError::EnvironmentUnavailable("no infobase".to_owned()),
+                AppError::environment("no infobase"),
                 AppError::WorkspaceBusy("held".to_owned()),
                 AppError::TimedOut("agent session".to_owned()),
                 AppError::InvalidOutput("garbled".to_owned()),
