@@ -68,3 +68,5 @@ pub mod syntax;
 pub mod test;
 /// Tool download domain models.
 pub mod tools_download;
+/// Предупреждение ответа и его машинный код.
+pub mod warning;

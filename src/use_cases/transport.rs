@@ -2,6 +2,7 @@ use std::future::Future;
 
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::InfobaseTransferPhase;
+use crate::domain::warning::Warning;
 use crate::use_cases::command_lock::CommandLockGuard;
 use crate::use_cases::context::{CommandName, StandChange};
 use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
@@ -23,15 +24,21 @@ pub struct BoundaryRefusal {
     pub error: UseCaseError,
 }
 
-/// Что граница говорит сверх ответа команды: шаг, на котором это замечено, и текст.
+/// Что граница говорит сверх ответа команды: шаг, на котором это замечено, и предупреждение.
 ///
-/// Замок базы, который команде чтения не достался; запись в базу другой рабочей копии;
-/// взятие базы без метки и смена ушедшего владельца; метка, которую команда чтения не
-/// прочитала.
+/// Замок базы, который команде чтения не достался; запись в базу другой рабочей копии — с
+/// кодом `infobase_of_another_copy`; взятие базы без метки и смена ушедшего владельца; метка,
+/// которую команда чтения не прочитала.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryNote {
     pub phase: InfobaseTransferPhase,
-    pub message: String,
+    pub warning: Warning,
+}
+
+impl BoundaryNote {
+    pub fn message(&self) -> &str {
+        self.warning.message()
+    }
 }
 
 /// Runs an adapter dispatch under the shared workspace lock and, for a command that opens a
@@ -106,12 +113,12 @@ pub fn preview_boundary(
     base: BaseAccess,
 ) -> Result<Vec<BoundaryNote>, BoundaryRefusal> {
     check_infobase_owner(config, command.as_str(), base, OwnerCheck::Preview)
-        .map(|messages| {
-            messages
+        .map(|warnings| {
+            warnings
                 .into_iter()
-                .map(|message| BoundaryNote {
+                .map(|warning| BoundaryNote {
                     phase: InfobaseTransferPhase::InfobaseOwner,
-                    message,
+                    warning,
                 })
                 .collect()
         })
@@ -225,7 +232,7 @@ fn acquire(
         .warning()
         .map(|message| BoundaryNote {
             phase: InfobaseTransferPhase::InfobaseLock,
-            message: message.to_owned(),
+            warning: Warning::Plain(message.to_owned()),
         })
         .into_iter()
         .collect();
@@ -234,9 +241,9 @@ fn acquire(
             phase: InfobaseTransferPhase::InfobaseOwner,
             error,
         })?;
-    notes.extend(owner_notes.into_iter().map(|message| BoundaryNote {
+    notes.extend(owner_notes.into_iter().map(|warning| BoundaryNote {
         phase: InfobaseTransferPhase::InfobaseOwner,
-        message,
+        warning,
     }));
     Ok((workspace_lock, infobase_lock, notes))
 }
@@ -279,7 +286,7 @@ pub(crate) fn hold_source_base(
         .warning()
         .map(|message| BoundaryNote {
             phase: InfobaseTransferPhase::InfobaseLock,
-            message: message.to_owned(),
+            warning: Warning::Plain(message.to_owned()),
         })
         .into_iter()
         .collect();
@@ -671,7 +678,7 @@ mod tests {
                 assert_eq!(notes.len(), 1, "{notes:?}");
                 assert_eq!(notes[0].phase, InfobaseTransferPhase::InfobaseOwner);
                 assert!(
-                    notes[0].message.contains("of another working copy"),
+                    notes[0].message().contains("of another working copy"),
                     "{notes:?}"
                 );
                 warned.set(true);

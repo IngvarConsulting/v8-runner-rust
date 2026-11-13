@@ -86,8 +86,8 @@
 <p>Результаты: <a href="#init-address">адрес объявлен</a>, <a href="#init-address-conflict">конфликт адреса</a>.</p>
 <h2 class="command-variant" id="init-format">init --format / --output</h2>
 <pre data-output-command><code>v8-runner init --format edt --output config/v8project.yaml --force</code></pre>
-<p><code>--format auto</code> выбирает формат по найденным исходникам; <code>designer</code> и <code>edt</code> задают его явно. <code>--output</code> меняет путь основного файла. Местный файл и <code>.gitignore</code> располагаются рядом с ним, пути исходников записываются относительно этого каталога.</p>
-<p>Результаты: <a href="#init-output-written">файлы записаны по выбранному пути</a>, <a href="#init-output-refused">неподходящий ключ</a>.</p>
+<p><code>--format auto</code> выбирает формат по найденным исходникам; <code>designer</code> и <code>edt</code> задают его явно. <code>--output</code> меняет путь основного файла внутри проекта: проект — каталог запуска, там ищутся наборы и лежит его <code>.gitignore</code>. Местный файл располагается рядом с основным, пути исходников записываются относительно этого каталога.</p>
+<p>Результаты: <a href="#init-output-written">файлы записаны по выбранному пути</a>, <a href="#init-output-refused">неподходящий ключ</a>, <a href="#init-output-outside">путь вне проекта</a>.</p>
 <h2 id="init-source-format">Особенности исходников</h2>
 <dl class="mode-behavior" aria-label="Поведение по форматам исходников">
   <div class="mode-row"><dt><a class="mode-label mode-designer" href="glossary.html#format-designer"><span class="mode-icon" aria-hidden="true"></span>Конфигуратор</a></dt><dd>Находит XML-исходники платформы и записывает <code>format: DESIGNER</code>.</dd></div>
@@ -130,7 +130,7 @@ Config written successfully</code></pre>
 <p>Для <a href="#init-format">init --format / --output</a>. В ответе указан фактический путь каждого файла. В этом примере существующий основной файл перезаписан с <code>--force</code>:</p>
 <pre data-output-example="init-output-written" data-output-schema="planned"><code>path: config/v8project.yaml
 local path: config/v8project.local.yaml
-gitignore: config/.gitignore
+gitignore: .gitignore
 format: EDT
 source-set main: ../src/cf (CONFIGURATION)
 overwritten: yes
@@ -149,8 +149,11 @@ Config written successfully</code></pre>
 <h4 id="init-output-refused" data-response-class="refusal">Выбран неподходящий ключ</h4>
 <p>Для <a href="#init-format">init --format / --output</a>: глобальный <code>--config</code> отклоняется. Код <code>invalid_argument</code>, выход 2. Для пути нового файла используйте <code>--output</code>.</p>
 <pre data-output-example="init-output-refused" data-output-schema="refusal"><code>ERROR: validation error: --config is not allowed for init; use --output</code></pre>
+<h4 id="init-output-outside" data-response-class="refusal">Путь вне проекта</h4>
+<p>Для <a href="#init-format">init --format / --output</a>: <code>--output</code> называет файл вне каталога запуска, например при запуске из другого каталога. Отказ приходит до чтения исходников и записи чего-либо. Код <code>invalid_argument</code>, выход 2. Запустите <code>init</code> из каталога проекта.</p>
+<pre data-output-example="init-output-outside" data-output-schema="refusal"><code>ERROR: validation error: `init --output` points outside the project directory</code></pre>
 <h4 id="init-write-failed" data-response-class="failure">Файлы не удалось записать</h4>
-<p>Для <a href="#op-init">init</a>: ошибка файловой системы после начала записи. Часть файлов могла остаться; ответ не обещает общего отката. Код <code>runtime_failure</code>, выход 3. Проверьте права и оставшиеся файлы перед повторным запуском.</p>
+<p>Для <a href="#op-init">init</a>: ошибка файловой системы после начала записи. Уже записанные файлы получают прежнее содержимое, созданные каталоги убираются; что вернуть не удалось, называет сообщение. Код <code>runtime_failure</code>, выход 3. Проверьте права и повторите запуск.</p>
 <pre data-output-example="init-write-failed" data-output-schema="refusal"><code>ERROR: runtime error: project files could not be written</code></pre>
 <p>У <code>init</code> нет варианта <code>--dry-run</code>. Неизвестный ключ, команда или неверный синтаксис отклоняются парсером с диагностикой и Usage, выход CLI 2; JSON-конверт при этом не обещается. Исправьте вызов по подсказке Usage.</p>
 <p class="hint">Причины отказов и уровни ошибок — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
@@ -239,7 +242,7 @@ Config written successfully</code></pre>
       "ok": true,
       "path": "config/v8project.yaml",
       "local_path": "config/v8project.local.yaml",
-      "gitignore_path": "config/.gitignore",
+      "gitignore_path": ".gitignore",
       "format": "EDT",
       "source_sets": [
         {
@@ -312,6 +315,21 @@ Config written successfully</code></pre>
       "code": "invalid_argument",
       "kind": "validation",
       "message": "--config is not allowed for init; use --output"
+    }
+  },
+  "init-output-outside": {
+    "ok": false,
+    "command": "init",
+    "duration_ms": 0,
+    "data": {
+      "message": "`init --output` points outside the project directory"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "invalid_argument",
+      "kind": "validation",
+      "message": "`init --output` points outside the project directory"
     }
   },
   "init-write-failed": {
