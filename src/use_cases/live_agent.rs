@@ -26,7 +26,7 @@ use crate::platform::locator::UtilityType;
 use crate::platform::service::{process_facts, started_at};
 use crate::platform::service_record::ServiceRecord;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::{AppError, EnvironmentLayer};
+use crate::support::error::AppError;
 use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_key};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
@@ -116,18 +116,11 @@ pub fn hold(
                 ),
             ))
         }
-        // Агент занят другой командой — занятость, а не отказ подъёма: слой не определён.
-        Err(error @ KeeperStartError::Busy { .. }) => {
-            return Err(AppError::environment(crate::support::error::chain(&error)))
-        }
-        // Хранитель не поднялся или не ответил — агент не поднят.
-        Err(error @ KeeperStartError::Unavailable { .. }) => {
-            return Err(AppError::environment_at(
-                EnvironmentLayer::AgentStart,
-                crate::support::error::chain(&error),
-            ))
-        }
-        Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
+        Err(
+            error @ (KeeperStartError::Busy { .. }
+            | KeeperStartError::Unavailable { .. }
+            | KeeperStartError::Agent(_)),
+        ) => return Err(crate::use_cases::agent_session::keeper_start_refusal(error)),
     };
     Ok(AgentHoldResult {
         key: client.key().to_owned(),

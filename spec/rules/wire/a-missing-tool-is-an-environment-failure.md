@@ -13,7 +13,6 @@ check:
   - src/use_cases/infobase_export.rs::the_step_code_follows_the_envelope_kind_for_every_error
   - tests/cli_infobase.rs::infobase_dump_without_its_utility_records_an_environment_step_code
   - src/cli/output.rs::a_missing_utility_names_the_platform_layer_and_a_missing_release_names_none
-  - tests/cli_convert.rs::convert_without_the_edt_cli_answers_an_environment_failure
   - tests/cli_dump_agent.rs::a_managed_agent_without_the_local_platform_is_refused_before_any_connection
 ---
 

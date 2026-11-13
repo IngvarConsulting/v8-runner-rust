@@ -662,6 +662,44 @@ mod tests {
         }
     }
 
+    /// Номер вида отказа агента. Совпадение без `_`: новый вид не компилируется, пока ему не
+    /// дан номер, а тест ниже требует, чтобы перечень назвал каждый номер.
+    const fn variant_index(error: &AgentError) -> usize {
+        match error {
+            AgentError::Unreachable { .. } => 0,
+            AgentError::Handshake { .. } => 1,
+            AgentError::AuthenticationRejected { .. } => 2,
+            AgentError::HostKeyRejected { .. } => 3,
+            AgentError::Channel { .. } => 4,
+            AgentError::Transport { .. } => 5,
+            AgentError::SessionClosed { .. } => 6,
+            AgentError::TimedOut { .. } => 7,
+            AgentError::Cancelled { .. } => 8,
+            AgentError::Abandoned { .. } => 9,
+            AgentError::NotSent { .. } => 10,
+            AgentError::InvalidReply { .. } => 11,
+            AgentError::NoTerminalMessage { .. } => 12,
+            AgentError::Command { .. } => 13,
+            AgentError::Canceled { .. } => 14,
+            AgentError::Question { .. } => 15,
+            AgentError::HostKeyPathNotReadable { .. } => 16,
+            AgentError::Workspace { .. } => 17,
+            AgentError::Exchange { .. } => 18,
+            AgentError::UnsafeEntryName { .. } => 19,
+            AgentError::Launch(_) => 20,
+            AgentError::PortTaken { .. } => 21,
+            AgentError::NoFreePort { .. } => 22,
+            AgentError::ForeignAgentOnPort { .. } => 23,
+            AgentError::StartupTimedOut { .. } => 24,
+            AgentError::ExitedBeforeSession { .. } => 25,
+            AgentError::LiveAgentGone { .. } => 26,
+            AgentError::Keeper { .. } => 27,
+            AgentError::KeeperUnreachable { .. } => 28,
+            AgentError::UserDirUnknown { .. } => 29,
+        }
+    }
+    const AGENT_ERROR_VARIANTS: usize = 30;
+
     /// Каждый вид отказа агента, один раз.
     fn every_agent_error() -> Vec<AgentError> {
         let io = || std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
@@ -806,6 +844,14 @@ mod tests {
                     | AgentError::UserDirUnknown { .. }
             )
         };
+        let mut named: Vec<usize> = every_agent_error().iter().map(variant_index).collect();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(
+            named,
+            (0..AGENT_ERROR_VARIANTS).collect::<Vec<_>>(),
+            "the list names every kind of agent failure once"
+        );
         let mut layered = 0;
         for (direct, sent) in every_agent_error().into_iter().zip(every_agent_error()) {
             let shown = direct.to_string();

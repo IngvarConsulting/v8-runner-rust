@@ -283,8 +283,12 @@ impl UseCaseError {
         }
     }
 
-    /// Слой окружения, который отказал, у отказа `environment_unavailable`.
+    /// Слой окружения, который отказал, у отказа `environment_unavailable`. У отказа другого
+    /// рода — в том числе отмены, ставшей поверх него, — слоя нет, что бы ни лежало в подробности.
     pub fn environment_layer(&self) -> Option<EnvironmentLayer> {
+        if self.kind != UseCaseErrorKind::Environment(EnvironmentReason::Unavailable) {
+            return None;
+        }
         match self.detail.as_deref()? {
             RefusalDetail::EnvironmentLayer(layer) => Some(*layer),
             RefusalDetail::Generations(_)
@@ -327,21 +331,22 @@ impl UseCaseError {
         self
     }
 
-    /// Тот же отказ с другим текстом: род, шаг, поколения и опись выпуска остаются.
+    /// Тот же отказ с другим текстом: род, шаг и подробность — поколения, опись выпуска,
+    /// сеансы, слой окружения — остаются.
     #[must_use]
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
         self
     }
 
-    /// Уточняет текст отказа тем, что было до него; род, шаг и поколения остаются.
+    /// Уточняет текст отказа тем, что было до него; род, шаг и подробность остаются.
     #[must_use]
     pub fn with_context(mut self, context: impl AsRef<str>) -> Self {
         self.message = format!("{}; {}", context.as_ref(), self.message);
         self
     }
 
-    /// Дописывает к тексту отказа то, что из него следует; род, шаг и поколения остаются.
+    /// Дописывает к тексту отказа то, что из него следует; род, шаг и подробность остаются.
     #[must_use]
     pub fn followed_by(mut self, tail: impl AsRef<str>) -> Self {
         self.message = format!("{}; {}", self.message, tail.as_ref());

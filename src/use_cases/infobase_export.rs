@@ -1006,7 +1006,7 @@ fn select_provider(
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::use_cases::provider_selection::{
-        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way, ReleaseRefusal,
+        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way, UtilityRefusal,
     };
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
@@ -1032,7 +1032,7 @@ fn select_provider(
         ));
     }
     let mut utilities = PlatformUtilities::from_config(config);
-    let mut release = ReleaseRefusal::default();
+    let mut refused = UtilityRefusal::default();
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
@@ -1056,7 +1056,7 @@ fn select_provider(
         match readiness(
             config,
             &mut utilities,
-            &mut release,
+            &mut refused,
             intent,
             provider,
             utility,
@@ -1077,7 +1077,7 @@ fn select_provider(
         }
     }
 
-    let error = nobody_ready(config, &plan, &skipped, release);
+    let error = nobody_ready(config, &plan, &skipped, refused);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
@@ -1151,7 +1151,7 @@ fn database_configuration_plan(
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
-    release: &mut crate::use_cases::provider_selection::ReleaseRefusal,
+    refused: &mut crate::use_cases::provider_selection::UtilityRefusal,
     intent: InfobaseTransferIntent,
     provider: Provider,
     utility: Option<UtilityType>,
@@ -1197,7 +1197,7 @@ fn readiness(
     };
     let location = utilities
         .locate(utility)
-        .map_err(|error| release.not_ready(error))?;
+        .map_err(|error| refused.not_ready(error))?;
     if provider == Provider::Agent
         && matches!(intent, InfobaseTransferIntent::SnapshotRestore { .. })
     {

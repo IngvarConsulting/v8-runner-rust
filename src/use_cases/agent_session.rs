@@ -950,13 +950,25 @@ fn live_start_failure(
             tracing::warn!(error = %crate::support::error::chain(&error), ?reason, "the command works with a one-shot agent");
             Ok(Err(reason))
         }
-        None => match error {
-            KeeperStartError::Agent(error) => Err(AppError::from(error)),
-            other => Err(AppError::environment_at(
-                EnvironmentLayer::AgentStart,
-                crate::support::error::chain(&other),
-            )),
-        },
+        None => Err(keeper_start_refusal(error)),
+    }
+}
+
+/// Отказ подъёма живого агента как отказ команды — единственный владелец слоя у
+/// `KeeperStartError` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`): хранитель не
+/// поднялся или не ответил — `agent_start`; агент занят другой командой, Job или предел —
+/// занятость, а не отказ подъёма, и слой не определён. Свои коды Job и предела называет
+/// `agent hold` сам.
+pub(crate) fn keeper_start_refusal(error: KeeperStartError) -> AppError {
+    match error {
+        KeeperStartError::Agent(error) => AppError::from(error),
+        KeeperStartError::Unavailable { .. } => AppError::environment_at(
+            EnvironmentLayer::AgentStart,
+            crate::support::error::chain(&error),
+        ),
+        KeeperStartError::Busy { .. } | KeeperStartError::Job | KeeperStartError::Limit { .. } => {
+            AppError::environment(crate::support::error::chain(&error))
+        }
     }
 }
 
@@ -2726,5 +2738,43 @@ mod tests {
         };
         assert!(warning.contains("update_db_cfg"), "{warning}");
         assert!(warning.contains("critical phase"), "{warning}");
+    }
+
+    /// Хранитель не поднялся — слой `agent_start`; агент занят другой командой — занятость,
+    /// слой не определён (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). Один владелец
+    /// у `agent hold` и у команды, работающей с живым агентом.
+    #[test]
+    fn a_keeper_that_did_not_start_is_agent_start_and_a_busy_agent_names_no_layer() {
+        let unavailable = keeper_start_refusal(KeeperStartError::Unavailable {
+            detail: "the keeper did not answer".to_owned(),
+            source: None,
+        });
+        assert_eq!(
+            unavailable.environment_layer(),
+            Some(EnvironmentLayer::AgentStart),
+            "{unavailable}"
+        );
+        for error in [
+            KeeperStartError::Busy {
+                command: Some("dump".to_owned()),
+            },
+            KeeperStartError::Job,
+        ] {
+            let refused = keeper_start_refusal(error);
+            assert!(
+                matches!(&refused, AppError::EnvironmentUnavailable(refusal) if refusal.layer.is_none()),
+                "{refused}"
+            );
+        }
+        let rejected = keeper_start_refusal(KeeperStartError::Agent(
+            crate::platform::agent::AgentError::AuthenticationRejected {
+                endpoint: "127.0.0.1:1543".to_owned(),
+                user: String::new(),
+            },
+        ));
+        assert_eq!(
+            rejected.environment_layer(),
+            Some(EnvironmentLayer::InfobaseUser)
+        );
     }
 }
