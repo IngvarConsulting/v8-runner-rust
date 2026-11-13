@@ -302,10 +302,34 @@ pub enum AgentFailure {
     Question {
         message: String,
     },
-    /// Отказ без своего варианта: решать по нему нечего, код — «среда недоступна».
+    NotSent {
+        command: String,
+    },
+    Abandoned {
+        command: String,
+    },
+    Exchange {
+        path: String,
+        detail: String,
+    },
+    UnsafeEntryName {
+        path: String,
+        detail: String,
+    },
+    UserDirUnknown {
+        base_dir: PathBuf,
+        user: String,
+        detail: String,
+    },
+    /// Отказ без своего варианта: отказ хранителя, код — «среда недоступна», слой
+    /// `agent_start`. Так идут только отказы подъёма и самого хранителя.
     Other {
         message: String,
     },
+    /// Вид, которого эта сборка не знает: его прислал хранитель другой сборки. Кадр всё равно
+    /// читается — отказом хранителя, а не обрывом канала.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AgentFailure {
@@ -386,16 +410,26 @@ impl AgentFailure {
             },
             AgentError::Canceled { message } => Self::Canceled { message },
             AgentError::Question { message } => Self::Question { message },
-            // Сторож служит своему агенту, а бросают ожидание только чужого.
-            AgentError::NotSent { .. }
-            | AgentError::Abandoned { .. }
-            | AgentError::Exchange { .. }
-            | AgentError::UnsafeEntryName { .. }
-            | AgentError::Launch(_)
+            // Свой вид, а не `Other`: род ответа команды не должен зависеть от того, живой агент
+            // или разовый — отмена, брошенная команда и отказ платформы остаются собой.
+            AgentError::NotSent { command } => Self::NotSent { command },
+            AgentError::Abandoned { command } => Self::Abandoned { command },
+            AgentError::Exchange { path, detail } => Self::Exchange { path, detail },
+            AgentError::UnsafeEntryName { path, detail } => Self::UnsafeEntryName { path, detail },
+            AgentError::UserDirUnknown {
+                base_dir,
+                user,
+                detail,
+            } => Self::UserDirUnknown {
+                base_dir,
+                user,
+                detail,
+            },
+            // Отказы подъёма и самого хранителя: на стороне команды — отказ хранителя.
+            AgentError::Launch(_)
             | AgentError::LiveAgentGone { .. }
             | AgentError::Keeper { .. }
-            | AgentError::KeeperUnreachable { .. }
-            | AgentError::UserDirUnknown { .. } => Self::Other { message },
+            | AgentError::KeeperUnreachable { .. } => Self::Other { message },
         }
     }
 
@@ -464,7 +498,25 @@ impl AgentFailure {
             },
             Self::Canceled { message } => AgentError::Canceled { message },
             Self::Question { message } => AgentError::Question { message },
+            Self::NotSent { command } => AgentError::NotSent { command },
+            Self::Abandoned { command } => AgentError::Abandoned { command },
+            Self::Exchange { path, detail } => AgentError::Exchange { path, detail },
+            Self::UnsafeEntryName { path, detail } => AgentError::UnsafeEntryName { path, detail },
+            Self::UserDirUnknown {
+                base_dir,
+                user,
+                detail,
+            } => AgentError::UserDirUnknown {
+                base_dir,
+                user,
+                detail,
+            },
             Self::Other { message } => AgentError::Keeper { detail: message },
+            Self::Unknown => AgentError::Keeper {
+                detail:
+                    "the live agent keeper reported a failure of a kind this runner does not know"
+                        .to_owned(),
+            },
         }
     }
 }
@@ -820,8 +872,8 @@ mod tests {
 
     /// Слой отказа окружения переживает канал хранителя живого агента: живой агент или
     /// разовый — `error.layer` тот же (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
-    /// Род переживает канал тоже, кроме видов, которые канал сводит к отказу хранителя;
-    /// они перечислены здесь поимённо, чтобы новый такой вид не появился молча.
+    /// Род переживает канал тоже, у каждого вида без исключений: код ответа команды не зависит
+    /// от того, живой агент или разовый.
     #[test]
     fn an_environment_layer_and_a_kind_survive_the_keeper_channel() {
         use crate::support::error::AppError;
@@ -832,17 +884,6 @@ mod tests {
             serde_json::from_str::<KeeperError>(&line)
                 .unwrap()
                 .into_agent()
-        };
-        // Канал несёт их как `Other` → `AgentError::Keeper`: известное сведение, не слой.
-        let collapsed = |error: &AgentError| {
-            matches!(
-                error,
-                AgentError::NotSent { .. }
-                    | AgentError::Abandoned { .. }
-                    | AgentError::Exchange { .. }
-                    | AgentError::UnsafeEntryName { .. }
-                    | AgentError::UserDirUnknown { .. }
-            )
         };
         let mut named: Vec<usize> = every_agent_error().iter().map(variant_index).collect();
         named.sort_unstable();
@@ -855,13 +896,8 @@ mod tests {
         let mut layered = 0;
         for (direct, sent) in every_agent_error().into_iter().zip(every_agent_error()) {
             let shown = direct.to_string();
-            let is_collapsed = collapsed(&direct);
             let direct = UseCaseError::from(AppError::from(direct));
             let back = UseCaseError::from(AppError::from(through_channel(sent)));
-            if is_collapsed {
-                assert_eq!(direct.environment_layer(), None, "{shown}");
-                continue;
-            }
             assert_eq!(back.kind(), direct.kind(), "{shown}");
             assert_eq!(
                 back.environment_layer(),
@@ -874,6 +910,30 @@ mod tests {
             layered, 15,
             "every environment refusal of the agent crossed the channel"
         );
+    }
+
+    /// Вид отказа, которого эта сборка не знает, читается отказом хранителя, а не ошибкой
+    /// разбора кадра: хранитель другой сборки не обрывает канал.
+    #[test]
+    fn an_unknown_failure_kind_from_another_keeper_is_read_as_a_keeper_failure() {
+        let line = r#"{"frame":"error","error":{"error":"agent","failure":{"kind":"from_the_future","detail":"x"}}}"#;
+        let frame = serde_json::from_str::<Frame>(line).expect("the frame is read");
+        let Frame::Error {
+            error: KeeperError::Agent { failure },
+        } = frame
+        else {
+            panic!("an agent failure frame: {line}");
+        };
+        assert_eq!(failure, AgentFailure::Unknown);
+        assert!(matches!(failure.into_agent(), AgentError::Keeper { .. }));
+    }
+
+    /// Прежняя сборка слала эти виды как `other`: такой кадр по-прежнему читается.
+    #[test]
+    fn a_failure_folded_into_other_by_an_older_keeper_is_still_read() {
+        let line = r#"{"kind":"other","message":"agent command 'dump' was not sent: the command was cancelled"}"#;
+        let failure = serde_json::from_str::<AgentFailure>(line).expect("read");
+        assert!(matches!(failure.into_agent(), AgentError::Keeper { .. }));
     }
 
     /// Строка длиннее предела не читается: сторож не копит её в памяти.
