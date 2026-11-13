@@ -2209,7 +2209,10 @@ v8-runner mcp serve http
   между форматами исходников; `convert --to package` из набора EDT переводит его в XML здесь
   же и называет этот каталог в `data.workspace_path`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert` между форматами
-  исходников.
+  исходников. При подтверждённой устаревшей регистрации каталога стадии экспорт EDT → XML
+  повторяется в соседнем `edt-workspace-recovery-*`, который переиспользуется для этой записи.
+  Живая коллизия называет путь источника и зарегистрированный путь. `data.workspace_path`
+  показывает область последней попытки экспорта.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD: каждая команда к базе проекта; у базы сборки и у временной базы разбора пакета каталог свой; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/reports/diff/`: отчёты `diff --against`; раннер их не удаляет, каталог можно очистить.
 - `workPath/logs/platform/`: platform logs.

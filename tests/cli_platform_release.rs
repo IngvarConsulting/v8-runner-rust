@@ -88,15 +88,22 @@ fn project(format: &str) -> Project {
     }
 }
 
-fn run(project: &Project, arguments: &[&str]) -> (i32, Value) {
-    let output = v8_runner_command()
+fn project_command(project: &Project) -> std::process::Command {
+    let mut command = v8_runner_command();
+    command
         .current_dir(project.dir.path())
         .arg("--config")
         .arg(&project.config)
-        .arg("--json-message")
-        .args(arguments)
-        .output()
-        .expect("run v8-runner");
+        .arg("--json-message");
+    command
+}
+
+fn run(project: &Project, arguments: &[&str]) -> (i32, Value) {
+    run_command(&mut project_command(project), arguments)
+}
+
+fn run_command(command: &mut std::process::Command, arguments: &[&str]) -> (i32, Value) {
+    let output = command.args(arguments).output().expect("run v8-runner");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
         panic!(
@@ -276,4 +283,130 @@ fn an_installed_release_of_the_sources_format_is_chosen() {
     let designer = &envelope["data"]["selected"]["designer"];
     assert_eq!(designer["version"], "8.3.27.2074", "{envelope}");
     assert_eq!(designer["chosen_by"], "source_format", "{envelope}");
+}
+
+#[test]
+fn an_explicit_bin_directory_counts_for_the_sources_release() {
+    let project = project("2.20");
+    let root = project.dir.path();
+    let platform = root.join("platform");
+    let version = "8.3.27.2074";
+    let release = platform.join(version);
+    let bin = release.join("bin");
+    let executable = bin.join(format!("1cv8{EXE}"));
+    let other_bin = platform.join("8.5.4.1306").join("bin");
+    install(&platform, version, &["1cv8c"], &project.calls);
+    let config = fs::read_to_string(&project.config).expect("config");
+    let configure = |hint: &Path, requirement: &str| {
+        fs::write(
+            &project.config,
+            config.replace(
+                &format!("    path: '{}'\n    version: sources", platform.display()),
+                &format!(
+                    "    path: '{}'\n    version: {requirement}\n    strict: true",
+                    hint.display()
+                ),
+            ),
+        )
+        .expect("strict platform config");
+    };
+    let run = |arguments: &[&str]| {
+        run_command(project_command(&project).env("PATH", &other_bin), arguments)
+    };
+    let preview = ["make", "main", "--output", "out.cf", "--dry-run"];
+    let utilities = [
+        ("designer", "1cv8"),
+        ("thin_client", "1cv8c"),
+        ("ibcmd", "ibcmd"),
+    ];
+
+    for (hint, requirement, chosen_by) in [
+        (bin.as_path(), version, "version"),
+        (bin.as_path(), "sources", "source_format"),
+        (release.as_path(), "sources", "source_format"),
+        (executable.as_path(), "sources", "source_format"),
+    ] {
+        configure(hint, requirement);
+        let (code, envelope) = run(&["platforms"]);
+        assert_eq!(code, 0, "{}: {envelope}", hint.display());
+        assert_data_matches_its_command_form(&envelope, "platforms");
+        let data = &envelope["data"];
+        let inventory = data["installations"].as_array().expect("installations");
+        assert_eq!(inventory.len(), 1, "{}: {envelope}", hint.display());
+        assert_eq!(inventory[0]["version"], version, "{envelope}");
+        let inventory_root = inventory[0]["root"].as_str().expect("inventory root");
+        assert_eq!(
+            fs::canonicalize(inventory_root).expect("listed root"),
+            fs::canonicalize(&release).expect("release root"),
+            "{envelope}"
+        );
+        for (component, executable) in utilities {
+            assert_eq!(inventory[0]["components"][component], true, "{envelope}");
+            let selected = &data["selected"][component];
+            assert_eq!(selected["version"], version, "{envelope}");
+            assert_eq!(selected["chosen_by"], chosen_by, "{envelope}");
+            let expected = bin.join(format!("{executable}{EXE}"));
+            let selected_path = selected["path"].as_str().expect("selected path");
+            assert_eq!(
+                fs::canonicalize(selected_path).expect("selected executable"),
+                fs::canonicalize(expected).expect("fixture executable"),
+                "{envelope}"
+            );
+        }
+
+        let (code, envelope) = run(&preview);
+        assert_eq!(code, 0, "{}: {envelope}", hint.display());
+        assert_eq!(envelope["data"]["provider_dispatched"], false, "{envelope}");
+    }
+
+    let source = project.sources.join("Configuration.xml");
+    let xml = fs::read_to_string(&source).expect("Configuration.xml");
+    let newer_xml = xml.replace("2.20", "2.22");
+    fs::write(&source, &newer_xml).expect("format 2.22");
+    configure(&bin, "sources");
+    let (code, envelope) = run(&preview);
+    assert_eq!(code, 2, "{envelope}");
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "platform_release_missing", "{envelope}");
+    assert_eq!(error["kind"], "environment", "{envelope}");
+    let missing = &error["platform_release"];
+    assert_eq!(missing["source_format"]["release"], "8.5.4", "{envelope}");
+    let inventory = missing["installations"].as_array().expect("installations");
+    assert_eq!(inventory.len(), 1, "{envelope}");
+    assert_eq!(inventory[0]["version"], version, "{envelope}");
+
+    fs::copy(&executable, release.join(format!("1cv8{EXE}"))).expect("parent utility");
+    for (_, utility) in utilities {
+        fs::remove_file(bin.join(format!("{utility}{EXE}"))).expect("empty bin");
+    }
+    fs::write(&source, xml).expect("restore format 2.20");
+    let (code, envelope) = run(&preview);
+    assert_eq!(code, 2, "{envelope}");
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "platform_release_missing", "{envelope}");
+    assert_eq!(
+        error["platform_release"]["installations"],
+        serde_json::json!([]),
+        "{envelope}"
+    );
+
+    #[cfg(unix)]
+    {
+        fs::write(&source, &newer_xml).expect("format 2.22");
+        std::os::unix::fs::symlink(other_bin.join("1cv8"), &executable).expect("foreign utility");
+        let (code, envelope) = run(&preview);
+        assert_eq!(code, 2, "{envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "platform_release_missing",
+            "{envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["platform_release"]["installations"],
+            serde_json::json!([]),
+            "{envelope}"
+        );
+    }
+
+    assert!(!project.calls.exists(), "the platform was started");
+    assert!(!root.join("out.cf").exists(), "preview created an artifact");
 }
