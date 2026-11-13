@@ -43,7 +43,6 @@ class ReleaseAssetsTest(unittest.TestCase):
             struct.pack_into("<H", binary, 132, 0x8664)
             return bytes(binary)
         cpu = {
-            "x86_64-apple-darwin": 0x01000007,
             "aarch64-apple-darwin": 0x0100000C,
         }[target]
         binary = bytearray(b"\xcf\xfa\xed\xfe" + b"\x00" * 28)
@@ -84,14 +83,13 @@ class ReleaseAssetsTest(unittest.TestCase):
 
         module.write_manifest(dist, "v0.7.0", "a" * 40)
 
-    def test_public_release_has_exactly_seven_consolidated_assets(self) -> None:
+    def test_public_release_has_exactly_six_consolidated_assets(self) -> None:
         module = load_module()
         self.assertEqual(
             module.expected_release_files(),
             {
                 "v8-runner-linux-x86_64-musl.tar.gz",
                 "v8-runner-macos-aarch64.tar.gz",
-                "v8-runner-macos-x86_64.tar.gz",
                 "v8-runner-windows-x86_64.zip",
                 "license-v8-runner-AGPL-3.0-only.txt",
                 "notice-v8-runner-fork.txt",
@@ -109,7 +107,6 @@ class ReleaseAssetsTest(unittest.TestCase):
             {target: descriptor["name"] for target, descriptor in module.ARCHIVE_ASSETS.items()},
             {
                 "aarch64-apple-darwin": "v8-runner-macos-aarch64.tar.gz",
-                "x86_64-apple-darwin": "v8-runner-macos-x86_64.tar.gz",
                 "x86_64-pc-windows-msvc": "v8-runner-windows-x86_64.zip",
                 "x86_64-unknown-linux-musl": "v8-runner-linux-x86_64-musl.tar.gz",
             },
@@ -174,8 +171,8 @@ class ReleaseAssetsTest(unittest.TestCase):
             self.assertTrue(manifest_bytes.endswith(b"\n"))
             self.assertNotIn(b"\r\n", manifest_bytes)
             self.assertEqual(manifest["schemaVersion"], 2)
-            # 4 архива + манифест + 2 юридических файла, минус сам манифест.
-            self.assertEqual(len(manifest["assets"]), 6)
+            # 3 архива + манифест + 2 юридических файла, минус сам манифест.
+            self.assertEqual(len(manifest["assets"]), 5)
             self.assertEqual(
                 {entry["name"] for entry in manifest["assets"]},
                 module.expected_release_files() - {"v8-runner-assets.json"},

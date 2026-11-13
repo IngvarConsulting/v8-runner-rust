@@ -102,14 +102,6 @@ jobs:
             archive_ext: zip
             linux_deps: ""
             macos_deployment_target: ""
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            make_task: build-release-macos-x64
-            artifact_name: v8-runner-macos-x86_64
-            bin_suffix: ""
-            archive_ext: tar.gz
-            linux_deps: ""
-            macos_deployment_target: "10.12"
           - os: macos-latest
             target: aarch64-apple-darwin
             make_task: build-release-macos-arm64
@@ -238,10 +230,9 @@ jobs:
             | --- | --- | --- |
             | `v8-runner-linux-x86_64-musl.tar.gz` | Linux, any distribution (static musl build) | Intel/AMD 64-bit |
             | `v8-runner-macos-aarch64.tar.gz` | macOS | Apple Silicon (M1 and newer) |
-            | `v8-runner-macos-x86_64.tar.gz` | macOS | Intel |
             | `v8-runner-windows-x86_64.zip` | Windows | Intel/AMD 64-bit |
 
-            Run `uname -m` to tell an Apple Silicon Mac (`arm64`) from an Intel one (`x86_64`).
+            Intel Macs are not supported since v0.17.2: build from source with `cargo build --release`.
 
             Every archive is built from the same protected source commit.
             v8-runner-assets.json binds the source tag and commit to SHA-256 metadata for every other release asset,
@@ -270,9 +261,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: v8-runner-windows-x86_64.zip
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            asset: v8-runner-macos-x86_64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: v8-runner-macos-aarch64.tar.gz
