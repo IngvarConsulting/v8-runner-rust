@@ -169,10 +169,7 @@ fn run_provider(
         .location
         .as_ref()
         .ok_or_else(|| {
-            AppError::EnvironmentUnavailable(format!(
-                "{} has no executable for diff",
-                selected.provider
-            ))
+            AppError::environment(format!("{} has no executable for diff", selected.provider))
         })?
         .path
         .clone();

@@ -1216,6 +1216,39 @@ fn hinted_installations(hint: &Path) -> Vec<InstalledPlatform> {
         record_installation(&installation_root_for_executable(hint), &mut found);
         return sort_installations(found);
     }
+    if hint.is_dir() {
+        let canonical = canonical_boundary(hint);
+        if let Some(root) = canonical.parent().filter(|_| {
+            canonical
+                .file_name()
+                .is_some_and(|name| executable_component_matches(name, "bin"))
+        }) {
+            if let Some(version) = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(PlatformVersion::parse_strict)
+            {
+                // Опись учитывает только утилиты, доступные через указанный bin.
+                let components: Vec<_> = INVENTORIED_COMPONENTS
+                    .into_iter()
+                    .filter(|&utility| {
+                        let candidates =
+                            direct_candidates(hint, utility, ResolutionSource::Explicit);
+                        canonical_candidates(utility, candidates, Some(root))
+                            .iter()
+                            .any(|candidate| candidate.installation_root == root)
+                    })
+                    .collect();
+                if !components.is_empty() {
+                    found.push(InstalledPlatform {
+                        version,
+                        root: root.to_path_buf(),
+                        components,
+                    });
+                }
+            }
+        }
+    }
     record_installation(hint, &mut found);
     if let Ok(entries) = std::fs::read_dir(hint) {
         for entry in entries.flatten() {

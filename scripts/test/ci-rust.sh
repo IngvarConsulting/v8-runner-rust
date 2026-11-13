@@ -23,6 +23,7 @@ case "$CI_SCOPE" in
         cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'
         windows_contract_tests=(
           "a_closed_job_keeps_the_agent_one_shot"
+          "a_ctrl_break_from_another_process_group_cancels_like_ctrl_c"
           "config::loader::tests::load_config_normalizes_relative_platform_path_against_config_directory"
           "domain::source_set::tests::accepts_absolute_path"
           "platform::locator::tests::a_missing_component_is_named_together_with_the_installations_that_have_it"
@@ -36,6 +37,7 @@ case "$CI_SCOPE" in
           "platform::ibcmd::tests::config_save_passes_windows_paths_without_verbatim_prefix"
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
+          "platform::process::tests::windows_process_group::a_ctrl_break_to_the_runner_group_misses_its_managed_child"
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
           "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"

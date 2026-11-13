@@ -65,10 +65,12 @@ class ReleaseGovernanceTest(unittest.TestCase):
         for asset in (
             "v8-runner-linux-x86_64-musl",
             "v8-runner-macos-aarch64",
-            "v8-runner-macos-x86_64",
             "v8-runner-windows-x86_64",
         ):
             self.assertIn(asset, workflow)
+        # Intel macOS не собирается с 0.17.2 (#690): ни сборки, ни аудита на его машинах.
+        self.assertNotIn("macos-15-intel", workflow)
+        self.assertNotIn("x86_64-apple-darwin", workflow)
         self.assertIn("actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("attestations: write", workflow)
@@ -151,7 +153,6 @@ class ReleaseGovernanceTest(unittest.TestCase):
         for target in (
             "x86_64-unknown-linux-musl",
             "aarch64-apple-darwin",
-            "x86_64-apple-darwin",
             "x86_64-pc-windows-msvc",
         ):
             self.assertEqual(audit.count(f"target: {target}"), 1, f"{target} is audited once")
