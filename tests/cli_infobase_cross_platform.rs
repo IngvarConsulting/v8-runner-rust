@@ -495,3 +495,100 @@ fn concurrent_native_cli_processes_observe_the_workspace_lock() {
     );
     assert_eq!(fs::read(first_dt).expect("first DT"), b"payload");
 }
+
+#[cfg(windows)]
+#[test]
+fn ibcmd_dt_transfers_refuse_windows_during_provider_selection() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    fs::copy(&platform, platform.with_file_name("ibcmd.exe")).expect("native IBCMD fixture");
+    let config = write_config(root.path(), &platform);
+    let ibcmd_config = fs::read_to_string(&config)
+        .expect("config")
+        .replace("infobase.dump: designer", "infobase.dump: ibcmd")
+        .replace("infobase.restore: designer", "infobase.restore: ibcmd");
+    let existing = root.path().join("ib");
+    let absent = root.path().join("empty-ib");
+    let input = root.path().join("backup.dt");
+    let output = root.path().join("result.dt");
+    let calls = root.path().join("platform-calls.log");
+    let work = root.path().join("work");
+    fs::remove_dir(&work).expect("remove empty setup workPath");
+    fs::write(&input, b"backup").expect("input DT");
+    fs::write(&output, b"previous snapshot").expect("existing output DT");
+    let input_arg = input.to_str().expect("input DT path");
+    let output_arg = output.to_str().expect("output DT path");
+
+    for (target, arguments) in [
+        (&existing, &["dump", "--output", output_arg][..]),
+        (
+            &existing,
+            &["restore", "--input", input_arg, "--replace"][..],
+        ),
+        (&absent, &["restore", "--input", input_arg, "--create"][..]),
+    ] {
+        fs::write(
+            &config,
+            ibcmd_config.replace(
+                &format!("File={}", existing.display()),
+                &format!("File={}", target.display()),
+            ),
+        )
+        .expect("IBCMD config");
+        let mut preview_error = None;
+        for dry_run in [true, false] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_v8-runner"));
+            command
+                .arg("--config")
+                .arg(&config)
+                .arg("--json-message")
+                .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+                .arg("infobase")
+                .args(arguments);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let result = command.output().expect("run DT transfer");
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert_eq!(
+                result.status.code(),
+                Some(2),
+                "{arguments:?}, dry_run={dry_run}: {stdout}"
+            );
+            let envelope: Value = serde_json::from_str(&stdout).expect("envelope");
+            let error = &envelope["error"];
+            assert_eq!(envelope["ok"], false);
+            assert_eq!(error["kind"], "capability", "{stdout}");
+            assert_eq!(error["code"], "target", "{stdout}");
+            assert_eq!(
+                envelope["steps"][0]["name"], "provider selection",
+                "{stdout}"
+            );
+            assert_eq!(envelope["data"]["target_state"], "unchanged", "{stdout}");
+            let provider = &envelope["data"]["provider"];
+            assert!(provider["selected"].is_null(), "{stdout}");
+            assert_eq!(provider["skipped"][0]["provider"], "ibcmd", "{stdout}");
+            assert!(
+                provider["skipped"][0]["reason"].as_str().is_some_and(
+                    |reason| reason.contains("Windows session detection has not been measured")
+                ),
+                "{stdout}"
+            );
+            if dry_run {
+                assert_eq!(envelope["data"]["provider_dispatched"], false, "{stdout}");
+                preview_error = Some(error.clone());
+                assert!(!work.exists(), "preview created workPath");
+            } else {
+                assert_eq!(preview_error.as_ref(), Some(error), "{stdout}");
+            }
+            assert!(!calls.exists(), "DT refusal started the platform");
+            assert!(!absent.exists(), "DT refusal created the target");
+            assert_eq!(
+                fs::read(existing.join("1Cv8.1CD")).expect("database"),
+                b"database"
+            );
+            assert_eq!(fs::read(&input).expect("input DT"), b"backup");
+            assert_eq!(fs::read(&output).expect("output DT"), b"previous snapshot");
+        }
+    }
+}

@@ -1813,8 +1813,9 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 - Перед IBCMD DT раннер проверяет блокировку `1Cv8.1CD` через `F_GETLK`. Открытый сеанс
   даёт `infobase_busy` с PID держателя (или «неизвестный держатель» у OFD-блокировки) до
   запуска утилиты. Ошибка проверки также не допускает запуск. Снимок публикуется из staging только после успеха: сам `ibcmd` при отказе обрезает
-  выходной файл. Проверено на Linux и macOS; на Windows этот исполнитель DT отказывает,
-  пока признак сеанса не измерен. [Замеры](../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux).
+  выходной файл. Проверено на Linux и macOS. На Windows выбор `ibcmd` для `infobase dump`
+  и `infobase restore` отклоняется и в превью, и в обычном вызове, пока признак сеанса
+  не измерен. [Замеры](../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux).
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Push/source/test/EDT/client-MCP настройки для этих команд не валидируются.

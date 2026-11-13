@@ -32,12 +32,6 @@ ARCHIVE_ASSETS = {
         "binaryPath": "v8-runner-macos-aarch64/v8-runner",
         "format": "tar.gz",
     },
-    "x86_64-apple-darwin": {
-        "name": "v8-runner-macos-x86_64.tar.gz",
-        "root": "v8-runner-macos-x86_64",
-        "binaryPath": "v8-runner-macos-x86_64/v8-runner",
-        "format": "tar.gz",
-    },
     "x86_64-pc-windows-msvc": {
         "name": "v8-runner-windows-x86_64.zip",
         "root": "v8-runner-windows-x86_64",
@@ -94,7 +88,6 @@ def validate_binary_bytes(data: bytes, target: str) -> None:
         return
 
     expected_cpu = {
-        "x86_64-apple-darwin": 0x01000007,
         "aarch64-apple-darwin": 0x0100000C,
     }.get(target)
     if expected_cpu is not None:

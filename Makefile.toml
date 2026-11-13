@@ -14,7 +14,6 @@ args = [
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
   "x86_64-pc-windows-gnu",
-  "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ]
 
@@ -26,7 +25,6 @@ args = [
   "x86_64-pc-windows-msvc",
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
-  "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ]
 
@@ -35,7 +33,6 @@ command = "rustup"
 args = [
   "target",
   "add",
-  "x86_64-apple-darwin",
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
@@ -77,10 +74,6 @@ args = ["build", "--release", "--locked", "--bin", "${BINARY_NAME}", "--target",
 command = "cargo"
 args = ["build", "--release", "--locked", "--bin", "${BINARY_NAME}", "--target", "x86_64-pc-windows-msvc"]
 
-[tasks.build-release-macos-x64]
-command = "cargo"
-args = ["build", "--release", "--locked", "--bin", "${BINARY_NAME}", "--target", "x86_64-apple-darwin"]
-
 [tasks.build-release-macos-arm64]
 command = "cargo"
 args = ["build", "--release", "--locked", "--bin", "${BINARY_NAME}", "--target", "aarch64-apple-darwin"]
@@ -92,10 +85,7 @@ dependencies = ["build-release-linux-64"]
 dependencies = ["build-release-windows-64"]
 
 [tasks.release-macos]
-run_task = { name = [
-    "build-release-macos-x64",
-    "build-release-macos-arm64",
-], parallel = true }
+dependencies = ["build-release-macos-arm64"]
 
 [tasks.release.linux]
 run_task = { name = [
@@ -137,7 +127,6 @@ copy_artifact() {
 copy_artifact "target/x86_64-unknown-linux-gnu/release/$BINARY_NAME" "$BINARY_NAME-linux-x86_64-$VERSION"
 copy_artifact "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" "$BINARY_NAME-linux-x86_64-musl-$VERSION"
 copy_artifact "target/x86_64-pc-windows-gnu/release/$BINARY_NAME.exe" "$BINARY_NAME-windows-x86_64-$VERSION.exe"
-copy_artifact "target/x86_64-apple-darwin/release/$BINARY_NAME" "$BINARY_NAME-macos-x86_64-$VERSION"
 copy_artifact "target/aarch64-apple-darwin/release/$BINARY_NAME" "$BINARY_NAME-macos-aarch64-$VERSION"
 '''
 
@@ -162,7 +151,6 @@ copy_artifact() {
 copy_artifact "target/x86_64-unknown-linux-gnu/release/$BINARY_NAME" "$BINARY_NAME-linux-x86_64-$VERSION"
 copy_artifact "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" "$BINARY_NAME-linux-x86_64-musl-$VERSION"
 copy_artifact "target/x86_64-pc-windows-gnu/release/$BINARY_NAME.exe" "$BINARY_NAME-windows-x86_64-$VERSION.exe"
-copy_artifact "target/x86_64-apple-darwin/release/$BINARY_NAME" "$BINARY_NAME-macos-x86_64-$VERSION"
 copy_artifact "target/aarch64-apple-darwin/release/$BINARY_NAME" "$BINARY_NAME-macos-aarch64-$VERSION"
 '''
 
@@ -189,7 +177,6 @@ function Copy-Artifact {
 Copy-Artifact "target/x86_64-unknown-linux-gnu/release/$env:BINARY_NAME" "$env:BINARY_NAME-linux-x86_64-$Version"
 Copy-Artifact "target/x86_64-unknown-linux-musl/release/$env:BINARY_NAME" "$env:BINARY_NAME-linux-x86_64-musl-$Version"
 Copy-Artifact "target/x86_64-pc-windows-msvc/release/$env:BINARY_NAME.exe" "$env:BINARY_NAME-windows-x86_64-$Version.exe"
-Copy-Artifact "target/x86_64-apple-darwin/release/$env:BINARY_NAME" "$env:BINARY_NAME-macos-x86_64-$Version"
 Copy-Artifact "target/aarch64-apple-darwin/release/$env:BINARY_NAME" "$env:BINARY_NAME-macos-aarch64-$Version"
 '''
 

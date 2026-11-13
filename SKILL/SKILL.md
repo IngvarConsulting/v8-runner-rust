@@ -154,7 +154,8 @@ v8-runner infobase create
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`): the
   agent, then Designer; POSIX file DT transfers also accept explicit IBCMD via
   `providers.infobase.dump|restore: ibcmd`. Close all file-base sessions first; a busy base
-  refuses with its holder PID. Windows IBCMD DT is unavailable until its session probe is measured.
+  refuses with its holder PID. On Windows, both previews and actual DT requests refuse IBCMD
+  during provider selection until its session probe is measured.
   `restore --create` skips the agent.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`. Without a `providers` key a file-base `push`/`pull` where every set goes
