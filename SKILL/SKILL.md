@@ -206,7 +206,10 @@ v8-runner infobase create
   same texts in `warnings`, after the command's own.
 - An operator's interrupt is Ctrl+C, SIGTERM (Unix) or CTRL_BREAK (Windows; send it with
   `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` to a runner started with
-  `CREATE_NEW_PROCESS_GROUP` — CTRL_C cannot reach another group). A second one, at least 1 s
+  `CREATE_NEW_PROCESS_GROUP` — CTRL_C cannot reach another group). Only the runner gets it: its
+  console children (`ibcmd`, `1cedtcli`, `git`) run in their own groups and are ended by the
+  runner's cancellation, so a database write still finishes (`deferred: true`); a keyboard
+  Ctrl+Break reaches every process of the console. A second one, at least 1 s
   later, stops waiting for an external agent (below). Closing the console window is not an
   interrupt.
 - When an operator's interrupt ends a command, the CLI envelope answers
