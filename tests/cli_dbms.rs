@@ -189,4 +189,6 @@ fn other_systems_refuse_start_as_the_environment() {
         answer["error"]["code"], "environment_unavailable",
         "{answer}"
     );
+    // Вне пути агента и утилит слой не определён: поля нет.
+    assert!(answer["error"].get("layer").is_none(), "{answer}");
 }

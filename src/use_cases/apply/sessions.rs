@@ -401,14 +401,14 @@ pub(crate) fn restart_heals(config: &AppConfig) -> bool {
 /// исполнителя с выходом `standalone restart`.
 pub(crate) fn restart_refusal(cause: AppError) -> AppError {
     let cause = UseCaseError::from(cause);
-    let refusal = UseCaseError::new(
-        cause.kind(),
-        format!(
-            "the sessions were ended, but the update failed again: a standalone server the runner started over a file infobase may refuse updates after it ended a session until it is restarted (measured on 8.5.4.2028), so standalone restart is the likely way out; then repeat the command; {}",
-            cause.message()
-        ),
-    )
-    .with_next(NextStep::command("standalone restart"));
+    // Род и подробность отказа — слой окружения, опись выпуска — остаются; меняется текст.
+    let message = format!(
+        "the sessions were ended, but the update failed again: a standalone server the runner started over a file infobase may refuse updates after it ended a session until it is restarted (measured on 8.5.4.2028), so standalone restart is the likely way out; then repeat the command; {}",
+        cause.message()
+    );
+    let refusal = cause
+        .with_message(message)
+        .with_next(NextStep::command("standalone restart"));
     AppError::Refused(Box::new(refusal))
 }
 

@@ -662,6 +662,220 @@ mod tests {
         }
     }
 
+    /// Номер вида отказа агента. Совпадение без `_`: новый вид не компилируется, пока ему не
+    /// дан номер, а тест ниже требует, чтобы перечень назвал каждый номер.
+    const fn variant_index(error: &AgentError) -> usize {
+        match error {
+            AgentError::Unreachable { .. } => 0,
+            AgentError::Handshake { .. } => 1,
+            AgentError::AuthenticationRejected { .. } => 2,
+            AgentError::HostKeyRejected { .. } => 3,
+            AgentError::Channel { .. } => 4,
+            AgentError::Transport { .. } => 5,
+            AgentError::SessionClosed { .. } => 6,
+            AgentError::TimedOut { .. } => 7,
+            AgentError::Cancelled { .. } => 8,
+            AgentError::Abandoned { .. } => 9,
+            AgentError::NotSent { .. } => 10,
+            AgentError::InvalidReply { .. } => 11,
+            AgentError::NoTerminalMessage { .. } => 12,
+            AgentError::Command { .. } => 13,
+            AgentError::Canceled { .. } => 14,
+            AgentError::Question { .. } => 15,
+            AgentError::HostKeyPathNotReadable { .. } => 16,
+            AgentError::Workspace { .. } => 17,
+            AgentError::Exchange { .. } => 18,
+            AgentError::UnsafeEntryName { .. } => 19,
+            AgentError::Launch(_) => 20,
+            AgentError::PortTaken { .. } => 21,
+            AgentError::NoFreePort { .. } => 22,
+            AgentError::ForeignAgentOnPort { .. } => 23,
+            AgentError::StartupTimedOut { .. } => 24,
+            AgentError::ExitedBeforeSession { .. } => 25,
+            AgentError::LiveAgentGone { .. } => 26,
+            AgentError::Keeper { .. } => 27,
+            AgentError::KeeperUnreachable { .. } => 28,
+            AgentError::UserDirUnknown { .. } => 29,
+        }
+    }
+    const AGENT_ERROR_VARIANTS: usize = 30;
+
+    /// Каждый вид отказа агента, один раз.
+    fn every_agent_error() -> Vec<AgentError> {
+        let io = || std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let endpoint = || "127.0.0.1:7".to_owned();
+        vec![
+            AgentError::Unreachable {
+                endpoint: endpoint(),
+                source: io(),
+            },
+            AgentError::Handshake {
+                endpoint: endpoint(),
+                source: russh::Error::Disconnect,
+            },
+            AgentError::AuthenticationRejected {
+                endpoint: endpoint(),
+                user: "u".to_owned(),
+            },
+            AgentError::HostKeyRejected {
+                endpoint: endpoint(),
+                expected: "a".to_owned(),
+                presented: "b".to_owned(),
+            },
+            AgentError::Channel {
+                endpoint: endpoint(),
+                source: russh::Error::Disconnect,
+            },
+            AgentError::Transport {
+                endpoint: endpoint(),
+                source: russh::Error::Disconnect,
+            },
+            AgentError::SessionClosed {
+                endpoint: endpoint(),
+                stderr: String::new(),
+            },
+            AgentError::TimedOut {
+                command: "c".to_owned(),
+                timeout_ms: 5,
+            },
+            AgentError::Cancelled {
+                command: "c".to_owned(),
+                delivered: true,
+            },
+            AgentError::Abandoned {
+                command: "c".to_owned(),
+            },
+            AgentError::NotSent {
+                command: "c".to_owned(),
+            },
+            AgentError::InvalidReply {
+                detail: "d".to_owned(),
+                head: "h".to_owned(),
+            },
+            AgentError::NoTerminalMessage { count: 1 },
+            AgentError::Command {
+                error_type: AgentErrorType::InfoBaseNotFound,
+                message: "m".to_owned(),
+            },
+            AgentError::Canceled {
+                message: "m".to_owned(),
+            },
+            AgentError::Question {
+                message: "m".to_owned(),
+            },
+            AgentError::HostKeyPathNotReadable {
+                tried: vec![PathBuf::from("a")],
+            },
+            AgentError::Workspace {
+                path: PathBuf::from("w"),
+                source: io(),
+            },
+            AgentError::Exchange {
+                path: "p".to_owned(),
+                detail: "d".to_owned(),
+            },
+            AgentError::UnsafeEntryName {
+                path: "p".to_owned(),
+                detail: "d".to_owned(),
+            },
+            AgentError::Launch(crate::platform::process::ProcessError::SpawnFailed {
+                cmd: "1cv8".to_owned(),
+                source: io(),
+            }),
+            AgentError::PortTaken {
+                port: 7,
+                detail: "taken".to_owned(),
+            },
+            AgentError::NoFreePort { source: io() },
+            AgentError::ForeignAgentOnPort {
+                endpoint: endpoint(),
+                expected: "a".to_owned(),
+                presented: "b".to_owned(),
+            },
+            AgentError::StartupTimedOut {
+                timeout_ms: 5,
+                last: "x".to_owned(),
+            },
+            AgentError::ExitedBeforeSession {
+                status: "1".to_owned(),
+                out: "o".to_owned(),
+            },
+            AgentError::LiveAgentGone {
+                detail: "gone".to_owned(),
+            },
+            AgentError::Keeper {
+                detail: "k".to_owned(),
+            },
+            AgentError::KeeperUnreachable {
+                channel: "pipe".to_owned(),
+                source: io(),
+            },
+            AgentError::UserDirUnknown {
+                base_dir: PathBuf::from("b"),
+                user: "u".to_owned(),
+                detail: "d".to_owned(),
+            },
+        ]
+    }
+
+    /// Слой отказа окружения переживает канал хранителя живого агента: живой агент или
+    /// разовый — `error.layer` тот же (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    /// Род переживает канал тоже, кроме видов, которые канал сводит к отказу хранителя;
+    /// они перечислены здесь поимённо, чтобы новый такой вид не появился молча.
+    #[test]
+    fn an_environment_layer_and_a_kind_survive_the_keeper_channel() {
+        use crate::support::error::AppError;
+        use crate::use_cases::result::UseCaseError;
+
+        let through_channel = |error: AgentError| {
+            let line = serde_json::to_string(&KeeperError::from_agent(error)).unwrap();
+            serde_json::from_str::<KeeperError>(&line)
+                .unwrap()
+                .into_agent()
+        };
+        // Канал несёт их как `Other` → `AgentError::Keeper`: известное сведение, не слой.
+        let collapsed = |error: &AgentError| {
+            matches!(
+                error,
+                AgentError::NotSent { .. }
+                    | AgentError::Abandoned { .. }
+                    | AgentError::Exchange { .. }
+                    | AgentError::UnsafeEntryName { .. }
+                    | AgentError::UserDirUnknown { .. }
+            )
+        };
+        let mut named: Vec<usize> = every_agent_error().iter().map(variant_index).collect();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(
+            named,
+            (0..AGENT_ERROR_VARIANTS).collect::<Vec<_>>(),
+            "the list names every kind of agent failure once"
+        );
+        let mut layered = 0;
+        for (direct, sent) in every_agent_error().into_iter().zip(every_agent_error()) {
+            let shown = direct.to_string();
+            let is_collapsed = collapsed(&direct);
+            let direct = UseCaseError::from(AppError::from(direct));
+            let back = UseCaseError::from(AppError::from(through_channel(sent)));
+            if is_collapsed {
+                assert_eq!(direct.environment_layer(), None, "{shown}");
+                continue;
+            }
+            assert_eq!(back.kind(), direct.kind(), "{shown}");
+            assert_eq!(
+                back.environment_layer(),
+                direct.environment_layer(),
+                "{shown}"
+            );
+            layered += usize::from(direct.environment_layer().is_some());
+        }
+        assert_eq!(
+            layered, 15,
+            "every environment refusal of the agent crossed the channel"
+        );
+    }
+
     /// Строка длиннее предела не читается: сторож не копит её в памяти.
     #[test]
     fn a_line_over_the_limit_is_refused() {

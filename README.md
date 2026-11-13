@@ -38,8 +38,9 @@ AI-агент получают одну воспроизводимую точк�
 | --- | --- | --- |
 | `v8-runner-linux-x86_64-musl.tar.gz` | Linux, любой дистрибутив (статическая сборка musl) | Intel/AMD 64 |
 | `v8-runner-macos-aarch64.tar.gz` | macOS | Apple Silicon (M1 и новее) |
-| `v8-runner-macos-x86_64.tar.gz` | macOS | Intel |
 | `v8-runner-windows-x86_64.zip` | Windows | Intel/AMD 64 |
+
+Mac на Intel не поддерживается с 0.17.2: соберите из исходников `cargo build --release`.
 
 Проверить происхождение выпуска — `gh release verify <tag> --repo IngvarConsulting/v8-runner-rust`;
 проверка отдельного архива по манифесту и аттестациям, offline-проверка и история имён файлов —

@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::loader::{load_declared_infobases, ConfigLoadError};
 use crate::config::model::{default_project_file, AppConfig, InfobaseConfig};
+use crate::domain::status::HolderStatus;
+use crate::domain::warning::{CodedWarning, Warning};
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
 use crate::support::machine::{host_name, machine_hash, machine_id};
@@ -152,10 +154,26 @@ pub(crate) enum OwnerCheck {
     Preview,
 }
 
+/// Каталог файловой базы команды: строка соединения разрешается от каталога проекта,
+/// приведённого к абсолютному от текущего каталога процесса (как у `status`). `None` — база не
+/// файловая. Один источник у проверки владельца, у `holders` и у
+/// адреса `status`: адрес в предупреждении совпадает с адресом в `status` байт в байт.
+pub(crate) fn file_infobase_dir(config: &AppConfig) -> Option<PathBuf> {
+    let base_path = crate::support::path::absolute_from_current_dir(&config.base_path)
+        .unwrap_or_else(|_| config.base_path.clone());
+    config.v8_connection().file_infobase_dir(&base_path)
+}
+
+/// Адрес файловой базы без учётных данных — как его называет `status`.
+pub(crate) fn file_address(base_dir: &Path) -> String {
+    format!("file:{}", base_dir.display())
+}
+
 /// Проверяет, чья база, и записывает эту копию в метку, если должна.
 ///
-/// Возвращает то, что ответ команды говорит сверх своего: запись в базу другой живой копии,
-/// взятие базы без метки, смену ушедшего владельца, нечитаемую метку у команды чтения.
+/// Возвращает то, что ответ команды говорит сверх своего: запись в базу другой живой копии
+/// (с кодом `infobase_of_another_copy`), взятие базы без метки, смену ушедшего владельца,
+/// нечитаемую метку у команды чтения.
 /// `Runtime` — когда метку не прочитать, не понять или не записать.
 /// Метку пишет только прогон команды записи, и только под замком базы: его держит
 /// вызывающий.
@@ -164,7 +182,7 @@ pub(crate) fn check_infobase_owner(
     command_name: &str,
     access: BaseAccess,
     check: OwnerCheck,
-) -> Result<Vec<String>, UseCaseError> {
+) -> Result<Vec<Warning>, UseCaseError> {
     check_as(&ThisCopy::of(config), config, command_name, access, check)
 }
 
@@ -174,13 +192,13 @@ fn check_as(
     command_name: &str,
     access: BaseAccess,
     check: OwnerCheck,
-) -> Result<Vec<String>, UseCaseError> {
+) -> Result<Vec<Warning>, UseCaseError> {
     let writes = match access {
         BaseAccess::Untouched => return Ok(Vec::new()),
         BaseAccess::Reads => false,
         BaseAccess::Writes => true,
     };
-    let Some(base_dir) = config.v8_connection().file_infobase_dir(&config.base_path) else {
+    let Some(base_dir) = file_infobase_dir(config) else {
         return Ok(Vec::new());
     };
     let Some(marker_path) = owner_marker_path(&base_dir) else {
@@ -196,11 +214,11 @@ fn check_as(
         }
         return Ok(match read_marker(&marker_path) {
             Ok(_) => Vec::new(),
-            Err(error) => vec![format!(
+            Err(error) => vec![Warning::Plain(format!(
                 "{}; {command_name} reads the infobase '{}' without knowing who holds it",
                 error.describe(&beside),
                 base_dir.display()
-            )],
+            ))],
         });
     }
 
@@ -214,15 +232,7 @@ fn check_as(
             ),
         )
     })?;
-    let owners: Vec<(OwnerRecord, Standing)> = marker
-        .map(|marker| marker.owners)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|owner| {
-            let standing = standing(this, &owner, &base_dir);
-            (owner, standing)
-        })
-        .collect();
+    let owners = classified(this, marker, &base_dir);
     let nobody_held_it = owners.is_empty();
 
     let alive: Vec<(&OwnerRecord, &Alive)> = owners
@@ -239,12 +249,15 @@ fn check_as(
     // прогон, ни превью. Владельцем остаётся прежняя копия, и её следующая команда сама
     // увидит, что база ушла вперёд её памяти.
     if !alive.is_empty() {
-        return Ok(vec![another_copy_warning(
-            command_name,
-            &base_dir,
-            &marker_path,
-            &alive,
-        )]);
+        return Ok(vec![Warning::Coded(CodedWarning::InfobaseOfAnotherCopy {
+            message: another_copy_warning(command_name, &base_dir, &marker_path, &alive),
+            name: config.infobase_name.clone(),
+            address: file_address(&base_dir),
+            owners: alive
+                .iter()
+                .map(|(owner, _)| holder_status(this, owner))
+                .collect(),
+        })]);
     }
     // Превью ничего не берёт, а строка соединения владельцем не становится — даже на базе
     // без метки или с ушедшим владельцем.
@@ -263,11 +276,11 @@ fn check_as(
         return Ok(Vec::new());
     }
     let Some(machine) = this.machine.clone() else {
-        return Ok(vec![format!(
+        return Ok(vec![Warning::Plain(format!(
             "this machine gives neither an identifier nor a host name, so the working copy '{}' is not recorded as the owner of the infobase '{}'",
             this.project.display(),
             base_dir.display()
-        )]);
+        ))]);
     };
 
     let mut notes = Vec::new();
@@ -335,17 +348,47 @@ fn check_as(
             ),
         )
     })?;
-    Ok(notes)
+    Ok(notes.into_iter().map(Warning::Plain).collect())
 }
 
-/// Копии, которые держат выбранную файловую базу, по её метке — для `status --deep`
-/// (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Только читает: ни замка, ни записи в метку
-/// (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). `None` — база не файловая.
+/// Записи метки и где каждая по отношению к этой копии — один отбор у проверки записи и у
+/// `holders`.
+fn classified(
+    this: &ThisCopy,
+    marker: Option<OwnerMarker>,
+    base_dir: &Path,
+) -> Vec<(OwnerRecord, Standing)> {
+    marker
+        .map(|marker| marker.owners)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|owner| {
+            let standing = standing(this, &owner, base_dir);
+            (owner, standing)
+        })
+        .collect()
+}
+
+/// Запись метки, как её называет ответ: без хеша машины.
+fn holder_status(this: &ThisCopy, owner: &OwnerRecord) -> HolderStatus {
+    HolderStatus {
+        this_copy: this.is(owner),
+        this_machine: this.is_on_the_machine_of(owner),
+        project: owner.project.clone(),
+        host: owner.host.clone(),
+        since: owner.since,
+    }
+}
+
+/// Живые копии, которые держат выбранную файловую базу, по её метке — для `status`
+/// (`INV.CLI.STATUS-NAMES-THE-LIVE-HOLDERS-WITHOUT-THE-PLATFORM`), превью `infobase create
+/// --recreate` и `init --from`. Ушедших копий, которых команда записи сменила бы, в списке нет:
+/// отбор тот же, что у проверки записи. Только читает: ни замка, ни записи в метку
+/// (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`), платформа не запускается. `None` — база не
+/// файловая.
 pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::HoldersStatus> {
-    use crate::domain::status::{HolderStatus, HoldersStatus};
-    let base_dir = config
-        .v8_connection()
-        .file_infobase_dir(&config.base_path)?;
+    use crate::domain::status::HoldersStatus;
+    let base_dir = file_infobase_dir(config)?;
     let marker = owner_marker_path(&base_dir)?;
     let beside = marker.parent().unwrap_or(&base_dir).to_path_buf();
     // Названная копия проверяется так же, как у команд: не объявляющая базу ею не делает.
@@ -364,15 +407,10 @@ pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::Holde
     Some(match read_marker(&marker) {
         Ok(read) => HoldersStatus {
             owners: Some(
-                read.map(|marker| marker.owners)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|owner| HolderStatus {
-                        this_copy: this.is(&owner),
-                        project: owner.project,
-                        host: owner.host,
-                        since: owner.since,
-                    })
+                classified(&this, read, &base_dir)
+                    .iter()
+                    .filter(|(_, standing)| !matches!(standing, Standing::Gone(_)))
+                    .map(|(owner, _)| holder_status(&this, owner))
                     .collect(),
             ),
             reason: None,
@@ -872,7 +910,7 @@ mod tests {
         );
         for notes in &warned {
             assert_eq!(notes.len(), 1, "one ownership warning");
-            let warning = &notes[0];
+            let warning = notes[0].message();
             assert!(warning.contains(&first.base_path.display().to_string()));
             assert!(warning.contains(&marker_path.display().to_string()));
             assert!(warning.contains("cannot be parsed"));
@@ -1079,7 +1117,9 @@ mod tests {
         .expect("a write on a base of a live copy runs");
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0].contains(&first.base_path.display().to_string()),
+            warned[0]
+                .message()
+                .contains(&first.base_path.display().to_string()),
             "{warned:?}"
         );
         assert_eq!(marker(&base), recorded, "the owner stays");
@@ -1299,7 +1339,9 @@ mod tests {
 
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0].contains("perhaps it is this machine whose identifier changed"),
+            warned[0]
+                .message()
+                .contains("perhaps it is this machine whose identifier changed"),
             "{warned:?}"
         );
         assert_eq!(
@@ -1327,7 +1369,9 @@ mod tests {
         .expect("run");
 
         assert!(
-            notes.iter().any(|note| note.contains("not recorded")),
+            notes
+                .iter()
+                .any(|note| note.message().contains("not recorded")),
             "{notes:?}"
         );
         assert!(!owner_marker_path(&base).expect("marker path").exists());
@@ -1415,7 +1459,9 @@ mod tests {
         .expect("a write on a base of another copy runs");
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0].contains(&remote_project.display().to_string()),
+            warned[0]
+                .message()
+                .contains(&remote_project.display().to_string()),
             "{warned:?}"
         );
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), remote);
@@ -1492,7 +1538,9 @@ mod tests {
 
             assert_eq!(warned.len(), 1, "{name}: {warned:?}");
             assert!(
-                warned[0].contains(&format!("the working copy '{}'", owner.display())),
+                warned[0]
+                    .message()
+                    .contains(&format!("the working copy '{}'", owner.display())),
                 "{name}: {warned:?}"
             );
             assert_eq!(
@@ -1533,7 +1581,7 @@ mod tests {
 
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0].contains(&format!(
+            warned[0].message().contains(&format!(
                 "To free the infobase: delete the record of '{}'",
                 remote_project.display()
             )),
@@ -1577,11 +1625,13 @@ mod tests {
         )
         .expect("the write runs");
         assert!(
-            warned[0].contains(&ways_to_an_own_infobase("upstream")),
+            warned[0]
+                .message()
+                .contains(&ways_to_an_own_infobase("upstream")),
             "{warned:?}"
         );
         assert!(
-            warned[0].contains(&format!(
+            warned[0].message().contains(&format!(
                 "remove the infobase from v8project.local.yaml of '{}'",
                 first.base_path.display()
             )),
