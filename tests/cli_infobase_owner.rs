@@ -705,6 +705,186 @@ fn a_preview_names_the_warning_on_a_base_of_another_copy_and_writes_nothing() {
     assert_eq!(stand.marker_text(), marker);
 }
 
+/// Предупреждения с кодом из ответа: `warning_details`, а без них — пустой список.
+fn details(payload: &Value) -> Vec<Value> {
+    payload
+        .get("warning_details")
+        .map(|details| details.as_array().expect("warning_details").clone())
+        .unwrap_or_default()
+}
+
+/// Файлы каталога базы и их содержимое: команда, которая базу не пишет, её не меняет.
+fn base_files(stand: &Stand) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<_> = fs::read_dir(&stand.base)
+        .expect("base dir")
+        .map(|entry| {
+            let path = entry.expect("entry").path();
+            let bytes = fs::read(&path).expect("base file");
+            (path, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Предупреждение с кодом `infobase_of_another_copy` в ответе: ровно одно, его текст стоит в
+/// `warnings`, база названа своим именем и тем же адресом, что у `status`, а владелец — копией
+/// `owner` этой машины.
+fn assert_coded(payload: &Value, owner: &Copy, address: &Value) -> Value {
+    let details = details(payload);
+    assert_eq!(details.len(), 1, "{payload}");
+    let detail = details[0].clone();
+    assert_eq!(detail["code"], "infobase_of_another_copy", "{payload}");
+    assert!(
+        warnings(payload).contains(&detail["message"].as_str().expect("message").to_owned()),
+        "the coded warning repeats an entry of warnings: {payload}"
+    );
+    assert_eq!(detail["name"], "origin", "{payload}");
+    assert_eq!(
+        &detail["address"], address,
+        "the address of status: {payload}"
+    );
+    let owners = detail["owners"].as_array().expect("owners");
+    assert_eq!(owners.len(), 1, "{payload}");
+    assert_eq!(owners[0]["project"], owner.canonical_root(), "{payload}");
+    assert_eq!(owners[0]["this_copy"], false, "{payload}");
+    assert_eq!(owners[0]["this_machine"], true, "{payload}");
+    assert!(owners[0]["since"].is_string(), "{payload}");
+    assert!(
+        owners[0].get("machine").is_none(),
+        "no machine hash: {payload}"
+    );
+    detail
+}
+
+/// `--dry-run push` на базе другой живой копии отдаёт предупреждение с кодом
+/// `infobase_of_another_copy`, а база и метка не тронуты; прогон отдаёт то же самое.
+#[test]
+fn a_preview_on_a_base_of_another_copy_gives_the_warning_code_and_writes_nothing() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    let marker = stand.marker_text();
+    let base = base_files(&stand);
+    let status = succeeded(&second.run(&["status"]));
+    let address = status["data"]["infobases"][0]["address"].clone();
+
+    let preview = succeeded(&second.run(&["push", "--dry-run"]));
+
+    let previewed = assert_coded(&preview, &first, &address);
+    assert_eq!(stand.marker_text(), marker, "the preview leaves the marker");
+    assert_eq!(base_files(&stand), base, "the preview leaves the base");
+
+    let run = succeeded(&second.run(&["push"]));
+    assert_eq!(
+        assert_coded(&run, &first, &address),
+        previewed,
+        "the run gives the code of the preview"
+    );
+}
+
+/// Своя база и база без метки кода не дают: на своей базе предупреждения нет, а взятие базы
+/// без метки — предупреждение без кода.
+#[test]
+fn an_own_base_and_a_base_without_a_marker_give_no_warning_code() {
+    let stand = Stand::new();
+    let copy = stand.copy("copy");
+
+    let preview = succeeded(&copy.run(&["push", "--dry-run"]));
+    assert!(details(&preview).is_empty(), "{preview}");
+    let taken = succeeded(&copy.run(&["push"]));
+    assert!(
+        warnings(&taken)
+            .iter()
+            .any(|warning| warning.contains("now held by this working copy")),
+        "{taken}"
+    );
+    assert!(
+        details(&taken).is_empty(),
+        "the takeover has no code: {taken}"
+    );
+
+    for args in [&["push", "--dry-run"][..], &["push"]] {
+        let own = succeeded(&copy.run(args));
+        assert!(details(&own).is_empty(), "{args:?}: {own}");
+        assert!(own.get("warning_details").is_none(), "{args:?}: {own}");
+    }
+}
+
+/// `status` без `--deep` называет живых владельцев файловой базы по метке, не запуская
+/// платформу и ничего не записывая; копию, которую команда записи сменила бы как ушедшую,
+/// живой он не числит.
+#[test]
+fn status_without_deep_names_the_live_holders_without_the_platform() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    let third = stand.copy("third");
+    succeeded(&first.run(&["push"]));
+    // Платформа, которая оставляет след, если её запустить.
+    let started = second.root.join("platform-started");
+    write_shell_script(
+        &second.root.join("1cv8"),
+        &format!("touch '{}'\nexit 1", started.display()),
+    );
+    let marker = stand.marker_text();
+
+    let status = succeeded(&second.run(&["status"]));
+
+    assert!(!started.exists(), "status started the platform");
+    let base = &status["data"]["infobases"][0];
+    assert_eq!(status["data"]["deep"], false, "{status}");
+    let holders = &base["holders"];
+    assert!(
+        holders["marker"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(MARKER_NAME)),
+        "{status}"
+    );
+    assert_eq!(
+        holders["owners"],
+        json!([{
+            "project": first.canonical_root(),
+            "host": holders["owners"][0]["host"],
+            "since": holders["owners"][0]["since"],
+            "this_copy": false,
+            "this_machine": true
+        }]),
+        "{status}"
+    );
+    let all = succeeded(&second.run(&["status", "--all"]));
+    assert_eq!(
+        all["data"]["infobases"][0]["holders"], *holders,
+        "--all names the same holders: {all}"
+    );
+    assert!(!started.exists(), "status --all started the platform");
+    assert_eq!(stand.marker_text(), marker, "status leaves the marker");
+
+    // Копия, которая больше не объявляет базу, ушла: её запись ещё в метке, но живой она не
+    // числится — тот же отбор, что у команды записи, которая её сменила бы.
+    first.declare(&format!(
+        "File={}",
+        stand.dir.path().join("other").join("ib").display()
+    ));
+    let gone = succeeded(&second.run(&["status"]));
+    assert_eq!(
+        gone["data"]["infobases"][0]["holders"]["owners"],
+        json!([]),
+        "{gone}"
+    );
+    assert_eq!(stand.marker_text(), marker, "status replaces no gone owner");
+    assert_eq!(stand.owners(), [first.canonical_root()]);
+
+    // Сама копия-владелец видит себя.
+    succeeded(&third.run(&["push"]));
+    let own = succeeded(&third.run(&["status"]));
+    let owners = &own["data"]["infobases"][0]["holders"]["owners"];
+    assert_eq!(owners[0]["project"], third.canonical_root(), "{own}");
+    assert_eq!(owners[0]["this_copy"], true, "{own}");
+    assert_eq!(owners[0]["this_machine"], true, "{own}");
+}
+
 /// Инструмент MCP на базе другой копии идёт так же, как командная строка, метку не меняет
 /// и в `warnings` ответа несёт то же предупреждение, что ответ командной строки.
 #[test]
@@ -725,6 +905,15 @@ fn an_mcp_tool_on_a_base_of_another_copy_runs_like_the_cli() {
         warnings(&answer.envelope),
         warnings(&pushed),
         "the tool answer warns as the CLI does: {}",
+        answer.envelope
+    );
+    // Тот же код и та же структура, что у командной строки; превью у MCP нет — код приходит
+    // у прогона.
+    assert_eq!(details(&pushed).len(), 1, "{pushed}");
+    assert_eq!(
+        details(&answer.envelope),
+        details(&pushed),
+        "the tool answer gives the code as the CLI does: {}",
         answer.envelope
     );
 }

@@ -12,6 +12,7 @@ use super::output::failure_envelope;
 use crate::command_envelope::Envelope;
 use crate::config::model::SourceFormat;
 use crate::domain::capability::ProviderReceipt;
+use crate::domain::warning::Warning;
 use crate::support::error::AppError;
 use crate::support::path::{response_json, response_text};
 use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -527,14 +528,14 @@ fn execute(
     let context = context
         .with_command_line(command_line)
         .with_external_full_pull(publication);
-    let mut warnings = loaded.warnings;
+    let mut warnings: Vec<Warning> = loaded.warnings.into_iter().map(Warning::Plain).collect();
     let result = dispatch_with_workspace_boundary(
         &config,
         CommandName::Dump,
         BaseAccess::Writes,
         cli.dry_run,
         |notes| {
-            warnings.extend(notes.iter().map(|note| note.message.clone()));
+            warnings.extend(notes.iter().map(|note| note.warning.clone()));
             Ok(())
         },
         || crate::use_cases::dump_config::execute(&context, &config, &request),
@@ -556,7 +557,7 @@ fn execute(
         }
     };
     let mut envelope = envelope;
-    envelope.warnings.extend(warnings);
+    envelope.follow_with(&warnings);
     Ok((envelope, exit_code))
 }
 

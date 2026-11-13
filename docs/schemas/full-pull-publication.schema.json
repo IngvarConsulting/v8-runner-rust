@@ -112,6 +112,49 @@
       },
       "type": "object"
     },
+    "CodedWarning": {
+      "description": "Предупреждение с машинным кодом. Поле `message` равно строке, которая стоит в `warnings`\nтого же ответа; остальные поля — свои у каждого кода.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Команда записи идёт на файловой базе, которую держит другая живая рабочая копия\n(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).",
+          "properties": {
+            "address": {
+              "description": "Адрес базы без учётных данных, как `address` у `status`: `file:<каталог>`.",
+              "type": "string"
+            },
+            "code": {
+              "const": "infobase_of_another_copy",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "name": {
+              "description": "Имя базы в местном слое; `null` — база пришла строкой соединения.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owners": {
+              "description": "Живые копии-владельцы, кроме этой, — та же запись, что `holders.owners` у\n`status`.",
+              "items": {
+                "$ref": "#/$defs/HolderStatus"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "address",
+            "owners"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DumpMode": {
       "enum": [
         "FULL",
@@ -179,6 +222,13 @@
         "steps": {
           "items": {
             "$ref": "#/$defs/StepResult"
+          },
+          "type": "array"
+        },
+        "warning_details": {
+          "description": "Предупреждения из `warnings`, у которых есть машинный код, — в том же порядке и с тем же\nтекстом в `message`. Поля нет, когда таких предупреждений нет.",
+          "items": {
+            "$ref": "#/$defs/CodedWarning"
           },
           "type": "array"
         },
@@ -628,6 +678,42 @@
           "type": "object"
         }
       ]
+    },
+    "HolderStatus": {
+      "additionalProperties": false,
+      "description": "Копия из метки владельца.",
+      "properties": {
+        "host": {
+          "description": "Имя хоста на момент записи.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Каталог проекта копии.",
+          "type": "string"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "this_copy": {
+          "description": "Это та копия, из которой спрашивают.",
+          "type": "boolean"
+        },
+        "this_machine": {
+          "description": "Копия записана с этой машины: хеш идентификатора машины в метке — хеш этой.\n`false` — другая машина или машина, которая не называет ни идентификатора, ни имени\nхоста. У `this_copy: true` всегда `true`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project",
+        "since",
+        "this_copy",
+        "this_machine"
+      ],
+      "type": "object"
     },
     "InfobaseSessions": {
       "additionalProperties": false,

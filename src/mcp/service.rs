@@ -789,6 +789,7 @@ fn mcp_value_envelope<T: Serialize>(
         duration_ms,
         data,
         warnings,
+        warning_details,
         steps,
         error,
     } = envelope;
@@ -801,6 +802,7 @@ fn mcp_value_envelope<T: Serialize>(
         duration_ms,
         data,
         warnings,
+        warning_details,
         steps,
         error,
     })
@@ -833,16 +835,14 @@ pub(crate) fn with_boundary_warnings(
 }
 
 fn follow_with_notes(envelope: &mut McpCommandEnvelope, notes: Vec<BoundaryNote>) {
-    envelope
-        .warnings
-        .extend(notes.into_iter().map(|note| note.message));
+    envelope.follow_with(notes.iter().map(|note| &note.warning));
 }
 
 /// Сказанное границей, которому не досталось конверта: граница уже могла сменить метку,
 /// и это не должно пропасть бесследно.
 pub(crate) fn log_undelivered_notes(notes: &[BoundaryNote]) {
     for note in notes {
-        tracing::warn!("{}", note.message);
+        tracing::warn!("{}", note.message());
     }
 }
 
@@ -1160,7 +1160,7 @@ mod profile_tests {
 pub(crate) fn boundary_note(message: &str) -> BoundaryNote {
     BoundaryNote {
         phase: crate::domain::infobase_export::InfobaseTransferPhase::InfobaseOwner,
-        message: message.to_owned(),
+        warning: crate::domain::warning::Warning::Plain(message.to_owned()),
     }
 }
 

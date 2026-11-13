@@ -419,6 +419,11 @@ execution model для CLI и MCP.
   метку. Проверка одна — в `use_cases/transport.rs`, за замком базы, для CLI и MCP; превью
   читает метку без замка. Запись другой копии владелец замечает своей следующей отправкой по
   поколению (`non_fast_forward`).
+  Предупреждение о базе другой копии — `Warning::Coded` (`domain/warning.rs`): граница несёт его
+  в `BoundaryNote`, а конверт дописывает одним `Envelope::follow_with` — текст в `warnings`,
+  структуру с кодом `infobase_of_another_copy` в `warning_details`; так presenter CLI, ответ MCP
+  и итоговый кадр внешней выгрузки не расходятся. Отбор живых владельцев один у проверки записи
+  и у `holders` команды `status`, которая читает метку и без `--deep`.
 
 Interruption policy:
 
