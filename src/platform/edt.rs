@@ -18,6 +18,8 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::render_masked_command;
 
 const INTERACTIVE_EDT_ERROR_MARKER: &str = "Run '$exception printStackTrace' for error details";
+const INTERACTIVE_EDT_ERROR_MARKER_RU: &str =
+    "Введите '$exception printStackTrace' для получения детальной информации об ошибке.";
 
 #[derive(Debug, Error)]
 pub enum EdtError {
@@ -172,6 +174,39 @@ impl<'a> EdtDsl<'a> {
             &render_interactive_export_project_path_command(source, target),
             None,
         )
+    }
+
+    /// Resolves the registered path only after EDT reports a duplicate project name.
+    /// Older versions may not support project-info; in that case keep the export's refusal.
+    pub(crate) fn conflicting_project_path(
+        &self,
+        export: &PlatformCommandResult,
+    ) -> Result<Option<PathBuf>, EdtError> {
+        let Some(name) = duplicate_project_name(export) else {
+            return Ok(None);
+        };
+        let arguments = ["project-info".to_owned(), name.to_owned()];
+        // Gogo treats punctuation as syntax in unquoted arguments. The classifier
+        // excludes characters that could escape or interpolate this quoted literal.
+        let info = self.run(
+            &process_arguments(&self.workspace, &arguments),
+            &format!("project-info \"{name}\""),
+            None,
+        )?;
+        if info.process.outcome().is_err() || info.process.interruption.is_some() {
+            return Ok(None);
+        }
+        let stdout = &info.process.stdout;
+        if project_info_field(stdout, "Name") != Some(name) {
+            return Ok(None);
+        }
+        Ok(project_info_field(stdout, "Location")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()))
+    }
+
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     /// `-command validate --file <out_log> --project-list <source>`
@@ -663,14 +698,69 @@ fn render_interactive_output_for_log(output: &str) -> String {
 
     let mut rendered = trimmed.replace('\n', "\\n");
     if rendered.len() > MAX_LEN {
-        rendered.truncate(MAX_LEN);
+        rendered.truncate(rendered.floor_char_boundary(MAX_LEN));
         rendered.push_str("...");
     }
     rendered
 }
 
 fn output_indicates_interactive_command_error(stdout: &str, stderr: &str) -> bool {
-    stdout.contains(INTERACTIVE_EDT_ERROR_MARKER) || stderr.contains(INTERACTIVE_EDT_ERROR_MARKER)
+    [stdout, stderr].into_iter().any(|output| {
+        output.contains(INTERACTIVE_EDT_ERROR_MARKER)
+            || output.contains(INTERACTIVE_EDT_ERROR_MARKER_RU)
+    })
+}
+
+fn duplicate_project_name(export: &PlatformCommandResult) -> Option<&str> {
+    let process = &export.process;
+    if process.outcome().is_ok() || process.interruption.is_some() {
+        return None;
+    }
+    let mut names = [&process.stdout, &process.stderr]
+        .into_iter()
+        .flat_map(|output| output.lines())
+        .filter_map(|line| {
+            [
+                (
+                    "Other project with name \"",
+                    "\" already exists in workspace.",
+                ),
+                (
+                    "Другой проект с именем \"",
+                    "\" уже существует в рабочей области.",
+                ),
+            ]
+            .into_iter()
+            .find_map(|(prefix, suffix)| {
+                let (context, tail) = line.trim_end().split_once(prefix)?;
+                let name = tail.strip_suffix(suffix)?;
+                (context.trim().is_empty()
+                    || context
+                        .trim_end()
+                        .ends_with("org.eclipse.core.runtime.CoreException:"))
+                .then_some(name)
+            })
+        });
+    let name = names.next()?;
+    // EDT names are supplied as one command argument. Reject ambiguous or executable Gogo syntax.
+    (!name.is_empty()
+        && !name.starts_with('-')
+        && !name
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`'))
+        && names.all(|other| other == name))
+    .then_some(name)
+}
+
+fn project_info_field<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
+    let mut values = stdout.lines().filter_map(|line| {
+        let value = line.trim_start().strip_prefix(key)?;
+        value
+            .starts_with(char::is_whitespace)
+            .then(|| value.trim_start())
+    });
+    let value = values.next()?;
+    (values.next().is_none() && !value.is_empty()).then_some(value)
 }
 
 fn export_command_arguments(project_name: &str, target: &Path) -> Vec<String> {
@@ -774,6 +864,38 @@ mod tests {
     use crate::config::model::{
         AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
+
+    #[test]
+    fn russian_interactive_duplicate_uses_the_reported_project_name() {
+        let stdout = concat!(
+            "edtsh: org.eclipse.core.runtime.CoreException: Другой проект с именем ",
+            "\"Продажи (2026)+\" уже существует в рабочей области.\n",
+            "Введите '$exception printStackTrace' для получения детальной информации об ошибке.\n"
+        );
+        assert!(super::output_indicates_interactive_command_error(
+            stdout, ""
+        ));
+        let result = super::PlatformCommandResult {
+            process: super::super::process::ProcessResult {
+                exit_code: 1,
+                stdout: stdout.to_owned(),
+                stderr: String::new(),
+                interruption: None,
+            },
+            platform_log_path: None,
+            platform_log: None,
+            platform_log_read_error: None,
+        };
+        assert_eq!(
+            super::duplicate_project_name(&result),
+            Some("Продажи (2026)+")
+        );
+        let path = "/sample with spaces/configuration";
+        let info = format!("Name                Продажи (2026)+\nLocation            {path}\n");
+        assert_eq!(super::project_info_field(&info, "Location"), Some(path));
+        let ambiguous = format!("{info}Location            /another");
+        assert_eq!(super::project_info_field(&ambiguous, "Location"), None);
+    }
     use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,

@@ -11,6 +11,7 @@ check:
   - tests/cli_convert.rs::convert_to_package_reads_the_output_as_make_does
   - tests/cli_convert.rs::convert_needs_no_infobase_and_refuses_the_infobase_key
   - tests/cli_global_flags.rs::a_leaf_that_selects_no_base_refuses_the_base_key
+  - src/use_cases/convert_sources/workspace.rs::tests::stale_stage_recovers_but_live_projects_conflict
 ---
 
 # `convert` работает над наборами проекта
@@ -27,6 +28,16 @@ check:
 проверяется на пересечение с исходниками, базовым и рабочим каталогами. У `--to package` он
 читается как у `make`: без набора — каталог, а путь файла — отказ с выходом в `next`; с
 набором — сам файл пакета, чей суффикс совпадает с видом набора, или каталог для него.
+
+По решению владельца для #674 экспорт EDT → XML после отказа из-за одинакового имени
+может один раз обратиться к отдельной области. Для этого EDT должна подтвердить
+абсолютный зарегистрированный путь. В выделенной области раннера признак стадии —
+имя её каталога в формате `.convert-stage-<pid>-<hex>` или
+`.convert-base-project-<pid>-<hex>`. Родитель стадии должен быть доступен, а каталог
+стадии и зарегистрированный путь должны отсутствовать.
+Резервная область привязана к этой записи и используется повторно. Регистрации основной
+области сохраняются. При коллизии с существующим проектом в любой из двух областей отказ
+указывает оба пути. Проверка и повтор принадлежат только экспорту `convert`.
 
 Как называется набор, держит `INV.CLI.CONVERT-TAKES-A-SET-OR-A-PACKAGE-FILE`; направление —
 `INV.CLI.CONVERT-DIRECTION-IS-SET-BY-TO`; исполнителей для пакета —
