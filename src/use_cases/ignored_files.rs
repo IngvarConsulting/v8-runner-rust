@@ -90,7 +90,21 @@ impl ProjectGitignore {
         &self.path
     }
 
-    /// Дописывает недостающие шаблоны проекта.
+    /// Дописывает недостающие шаблоны проекта: [`Self::planned_content`] и запись.
+    pub(crate) fn ensure(&self) -> Result<(), AppError> {
+        let Some(content) = self.planned_content()? else {
+            return Ok(());
+        };
+        std::fs::write(&self.path, content).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to write gitignore file '{}': {error}",
+                self.path.display()
+            ))
+        })
+    }
+
+    /// Содержимое `.gitignore` с недостающими шаблонами; `None` — дописывать нечего.
+    /// Файл только читается: записать — дело вызывающего, когда все отказы позади.
     ///
     /// Шаблон пропускается, если гит говорит, что имя уже покрыто файлом
     /// `.gitignore` внутри рабочей копии — любым: вложенным, этим же или лежащим
@@ -98,7 +112,7 @@ impl ProjectGitignore {
     /// `core.excludesFile`) не считается: с репозиторием он не уезжает. Без гита
     /// решает текст самого файла: шаблон считается записанным, если в нём есть та
     /// же строка, с `/` или `**/` впереди. Повторный запуск ничего не дублирует.
-    pub(crate) fn ensure(&self) -> Result<(), AppError> {
+    pub(crate) fn planned_content(&self) -> Result<Option<String>, AppError> {
         let existing = match std::fs::read_to_string(&self.path) {
             Ok(content) => Some(content),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -120,7 +134,7 @@ impl ProjectGitignore {
             .map(|entry| entry.pattern)
             .collect();
         if missing.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let mut content = existing.unwrap_or_default();
@@ -131,12 +145,7 @@ impl ProjectGitignore {
             content.push_str(pattern);
             content.push('\n');
         }
-        std::fs::write(&self.path, content).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to write gitignore file '{}': {error}",
-                self.path.display()
-            ))
-        })
+        Ok(Some(content))
     }
 
     /// Покрыт ли шаблон по ответу гита; `None` — гит не ответил на пробу: гита
@@ -144,9 +153,20 @@ impl ProjectGitignore {
     fn covered_by_git(&self, entry: &IgnoredPattern) -> Option<bool> {
         for probe in entry.probes {
             let covered = match entry.reach {
-                Reach::BesideConfig => {
-                    ignored_by_worktree_gitignore(&self.config_dir, Path::new(probe))?
-                }
+                Reach::BesideConfig => match self.config_dir.strip_prefix(&self.project_dir) {
+                    // Из каталога проекта: каталога конфига до записи может ещё не быть,
+                    // а `git -C` в несуществующем каталоге не отвечает вовсе.
+                    Ok(relative) => {
+                        let beside = relative
+                            .components()
+                            .map(|part| part.as_os_str().to_string_lossy())
+                            .chain(std::iter::once((*probe).into()))
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        ignored_by_worktree_gitignore(&self.project_dir, Path::new(&beside))?
+                    }
+                    Err(_) => ignored_by_worktree_gitignore(&self.config_dir, Path::new(probe))?,
+                },
                 Reach::AnyDepth => {
                     // Строкой через `/`, а не `Path::join`: гит ждёт косую черту на
                     // любой платформе, а `join` на Windows вставил бы `\`.
@@ -271,6 +291,24 @@ mod tests {
                 "{probe}"
             );
         }
+    }
+
+    /// Каталога конфига до записи ещё нет: покрытие местного слоя гит проверяет из каталога
+    /// проекта, и шаблон-маска уже покрывает его — дублей не пишется.
+    #[test]
+    fn a_config_directory_not_yet_created_is_probed_from_the_project_dir() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        fs::write(dir.path().join(".gitignore"), "*.local.yaml\n").expect("seed");
+        let config_dir = dir.path().join("config");
+
+        let gitignore = ProjectGitignore::locate(dir.path(), &config_dir);
+
+        assert_eq!(
+            gitignore.planned_content().expect("plan").as_deref(),
+            Some("*.local.yaml\n.dump-*.lock*\n")
+        );
+        assert!(!config_dir.exists(), "planning creates nothing");
     }
 
     /// Проект — подкаталог чужого репозитория (монорепо, `git init` в домашнем

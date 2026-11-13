@@ -107,6 +107,9 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     };
 
     let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
+    // Проект — каталог запуска: в нём ищутся наборы и лежит его `.gitignore`. Проектный
+    // файл вне его — чужой проект, и отказ приходит раньше любого чтения и записи (#718).
+    refuse_output_outside_the_project(&project_dir, output_dir)?;
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
     // Проектный файл называет `localPath`, только пока остаётся: `--force` пишет его заново.
@@ -121,8 +124,12 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
 
     if project_declared && !request.force {
         let local = plan_local_config(&local_path, origin_request)?;
-        write_local_config(&local_path, &local)?;
-        gitignore.ensure()?;
+        let mut writes = Vec::new();
+        if let Some(content) = local.content.clone() {
+            writes.push(PlannedWrite::new(&local_path, LOCAL_CONFIG_FILE, content)?);
+        }
+        writes.extend(planned_gitignore(&gitignore)?);
+        apply_writes(output_dir, writes)?;
         return Ok(ConfigInitResult::Local(LocalLayerInitResult {
             ok: true,
             local_path: local_path.display().to_string(),
@@ -132,13 +139,6 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             duration_ms: started.elapsed().as_millis() as u64,
         }));
     }
-
-    std::fs::create_dir_all(output_dir).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to create config directory '{}': {error}",
-            output_dir.display()
-        ))
-    })?;
 
     let detected = discover_sources(&project_dir)?;
     let format = choose_format(request.format, &detected);
@@ -153,25 +153,24 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     // бы переписать проект, а команда ответила бы отказом.
     let local = plan_local_config(&local_path, origin_request)?;
 
-    let write_project_file = || {
-        std::fs::write(&output_path, &yaml).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to write config file '{}': {error}",
-                output_path.display()
-            ))
-        })
-    };
+    let project_write = PlannedWrite::new(&output_path, PROJECT_CONFIG_FILE, yaml)?;
+    let local_write = local
+        .content
+        .clone()
+        .map(|content| PlannedWrite::new(&local_path, LOCAL_CONFIG_FILE, content))
+        .transpose()?;
+    let mut writes = Vec::new();
     if project.is_some() {
         // Секция `infobase:` переезжает из проектного файла в местный слой: слой пишется
-        // первым, чтобы сбой записи не потерял единственную копию адреса и учётных данных.
-        write_local_config(&local_path, &local)?;
-        write_project_file()?;
+        // первым, чтобы и сбой отката не потерял единственную копию адреса и учётных данных.
+        writes.extend(local_write);
+        writes.push(project_write);
     } else {
-        // Без переезда первым пишется проектный файл: его сбой не оставляет следов.
-        write_project_file()?;
-        write_local_config(&local_path, &local)?;
+        writes.push(project_write);
+        writes.extend(local_write);
     }
-    gitignore.ensure()?;
+    writes.extend(planned_gitignore(&gitignore)?);
+    apply_writes(output_dir, writes)?;
 
     Ok(ConfigInitResult::Project(ProjectInitResult {
         ok: true,
@@ -353,16 +352,134 @@ fn plan_local_config(path: &Path, request: OriginRequest<'_>) -> Result<LocalLay
     Ok(plan)
 }
 
-fn write_local_config(path: &Path, plan: &LocalLayerPlan) -> Result<(), AppError> {
-    let Some(content) = plan.content.as_deref() else {
+const PROJECT_CONFIG_FILE: &str = "config file";
+const LOCAL_CONFIG_FILE: &str = "local config file";
+const GITIGNORE_FILE: &str = "gitignore file";
+
+/// Отказ, если проектный файл лежит вне каталога запуска. Сравнение — у проверки
+/// настроек: ссылки, `..` и регистр Windows здесь те же.
+fn refuse_output_outside_the_project(
+    project_dir: &Path,
+    output_dir: &Path,
+) -> Result<(), AppError> {
+    use crate::support::path::compared_path;
+    if compared_path(output_dir).starts_with(compared_path(project_dir)) {
+        return Ok(());
+    }
+    Err(AppError::Validation(format!(
+        "`init --output` points outside the project directory '{}': init works with the project it is run in, and the config directory '{}' is not inside it; run init from the project directory",
+        project_dir.display(),
+        output_dir.display()
+    )))
+}
+
+/// Файл, который `init` запишет, и что лежало на его месте: отказ записи возвращает
+/// прежнее содержимое уже записанным файлам.
+struct PlannedWrite {
+    path: PathBuf,
+    what: &'static str,
+    content: String,
+    /// Прежние байты файла; `None` — файла не было, и откат его удаляет.
+    previous: Option<Vec<u8>>,
+}
+
+impl PlannedWrite {
+    fn new(path: &Path, what: &'static str, content: String) -> Result<Self, AppError> {
+        let previous = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            // На месте файла каталог: запись откажет сама, и возвращать нечего.
+            Err(_) if path.is_dir() => None,
+            Err(error) => {
+                return Err(AppError::Runtime(format!(
+                    "failed to read {what} '{}': {error}",
+                    path.display()
+                )))
+            }
+        };
+        Ok(Self {
+            path: path.to_path_buf(),
+            what,
+            content,
+            previous,
+        })
+    }
+
+    /// Возвращает файлу прежнее содержимое. `fs::write`, а не замена файла: местный
+    /// слой бывает ссылкой на общий файл, и ссылка должна остаться ссылкой.
+    fn restore(&self) -> std::io::Result<()> {
+        match &self.previous {
+            Some(bytes) => std::fs::write(&self.path, bytes),
+            None => match std::fs::remove_file(&self.path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        }
+    }
+}
+
+fn planned_gitignore(gitignore: &ProjectGitignore) -> Result<Option<PlannedWrite>, AppError> {
+    gitignore
+        .planned_content()?
+        .map(|content| PlannedWrite::new(gitignore.path(), GITIGNORE_FILE, content))
+        .transpose()
+}
+
+/// Пишет запланированные файлы по порядку, создав каталог конфига. Отказ записи
+/// возвращает уже записанным файлам прежнее содержимое и убирает созданные каталоги:
+/// отказ `init` не оставляет изменённых файлов, а что вернуть не удалось, называет ошибка.
+fn apply_writes(config_dir: &Path, writes: Vec<PlannedWrite>) -> Result<(), AppError> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let created_dirs: Vec<&Path> = config_dir
+        .ancestors()
+        .take_while(|dir| !dir.exists())
+        .collect();
+    let mut done: Vec<&PlannedWrite> = Vec::with_capacity(writes.len());
+    let failure = match std::fs::create_dir_all(config_dir) {
+        Err(error) => Some(format!(
+            "failed to create config directory '{}': {error}",
+            config_dir.display()
+        )),
+        Ok(()) => {
+            writes
+                .iter()
+                .find_map(|write| match std::fs::write(&write.path, &write.content) {
+                    Ok(()) => {
+                        done.push(write);
+                        None
+                    }
+                    Err(error) => Some(format!(
+                        "failed to write {} '{}': {error}",
+                        write.what,
+                        write.path.display()
+                    )),
+                })
+        }
+    };
+    let Some(mut message) = failure else {
         return Ok(());
     };
-    std::fs::write(path, content).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write local config file '{}': {error}",
-            path.display()
-        ))
-    })
+    let mut unrestored = Vec::new();
+    for write in done.into_iter().rev() {
+        if let Err(error) = write.restore() {
+            unrestored.push(format!("'{}' ({error})", write.path.display()));
+        }
+    }
+    // Созданные каталоги убираются от глубокого к верхнему и только пустыми.
+    for dir in created_dirs {
+        if std::fs::remove_dir(dir).is_err() && dir.exists() {
+            unrestored.push(format!(
+                "'{}' (created directory left behind)",
+                dir.display()
+            ));
+        }
+    }
+    if !unrestored.is_empty() {
+        message.push_str(&format!("; could not restore {}", unrestored.join(", ")));
+    }
+    Err(AppError::Runtime(message))
 }
 
 fn with_local_schema_modeline(existing: &str) -> String {
@@ -1613,8 +1730,9 @@ fn escape_yaml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_sources, execute, ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin,
-        OriginKey, SourcePurpose,
+        apply_writes, discover_sources, execute, ConfigFormatRequest, ConfigInitRequest,
+        DeclaredOrigin, OriginKey, PlannedWrite, SourcePurpose, GITIGNORE_FILE, LOCAL_CONFIG_FILE,
+        PROJECT_CONFIG_FILE,
     };
     use crate::config::loader::load_config;
     use crate::config::model::InfobaseSelector;
@@ -2174,6 +2292,66 @@ mod tests {
         assert_eq!(result.origin.connection.as_deref(), Some("File=/srv/ib"));
         assert!(!dir.path().join("v8project.local.yaml").exists());
         assert_eq!(read(&dir.path().join("v8project.yaml")), project);
+    }
+
+    #[test]
+    fn a_failed_write_restores_the_written_files_and_removes_the_created_directories() {
+        let dir = tempdir().expect("tempdir");
+        let existing = dir.path().join("existing.yaml");
+        std::fs::write(&existing, "before\n").expect("existing");
+        let config_dir = dir.path().join("new").join("config");
+        let created = config_dir.join("v8project.yaml");
+        std::fs::write(dir.path().join("plain"), "file").expect("plain file");
+        let blocked = dir.path().join("plain").join(".gitignore");
+        let writes = vec![
+            PlannedWrite::new(&existing, LOCAL_CONFIG_FILE, "after\n".to_owned()).expect("plan"),
+            PlannedWrite::new(&created, PROJECT_CONFIG_FILE, "new\n".to_owned()).expect("plan"),
+            // Путь сквозь обычный файл: запись отказывает и у суперпользователя.
+            PlannedWrite {
+                path: blocked,
+                what: GITIGNORE_FILE,
+                content: "x\n".to_owned(),
+                previous: None,
+            },
+        ];
+
+        let error = apply_writes(&config_dir, writes).expect_err("the last write fails");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to write gitignore file"),
+            "{message}"
+        );
+        assert!(!message.contains("could not restore"), "{message}");
+        assert_eq!(read(&existing), "before\n");
+        assert!(
+            !dir.path().join("new").exists(),
+            "created directories are removed"
+        );
+    }
+
+    #[test]
+    fn an_output_outside_the_project_is_refused_before_anything_is_read_or_written() {
+        let project = tempdir().expect("project");
+        let elsewhere = tempdir().expect("elsewhere");
+        std::fs::write(project.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+        let output = elsewhere.path().join("config").join("v8project.yaml");
+
+        let error = execute(&ConfigInitRequest {
+            project_dir: project.path().to_path_buf(),
+            output_path: output,
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect_err("the output lies outside the project");
+
+        assert!(
+            matches!(error, crate::support::error::AppError::Validation(_)),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(elsewhere.path()).expect("dir").count(), 0);
+        assert_eq!(std::fs::read_dir(project.path()).expect("dir").count(), 1);
     }
 
     #[test]
