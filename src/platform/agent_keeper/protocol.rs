@@ -701,6 +701,25 @@ mod tests {
                 error_type: AgentErrorType::InfoBaseNotFound,
                 message: "m".to_owned(),
             },
+            AgentError::NotSent {
+                command: "dump".to_owned(),
+            },
+            AgentError::Abandoned {
+                command: "dump".to_owned(),
+            },
+            AgentError::Exchange {
+                path: "p".to_owned(),
+                detail: "d".to_owned(),
+            },
+            AgentError::UnsafeEntryName {
+                path: "p".to_owned(),
+                detail: "d".to_owned(),
+            },
+            AgentError::UserDirUnknown {
+                base_dir: PathBuf::from("b"),
+                user: "u".to_owned(),
+                detail: "d".to_owned(),
+            },
         ];
         for error in cases {
             let shown = error.to_string();
@@ -933,7 +952,26 @@ mod tests {
     fn a_failure_folded_into_other_by_an_older_keeper_is_still_read() {
         let line = r#"{"kind":"other","message":"agent command 'dump' was not sent: the command was cancelled"}"#;
         let failure = serde_json::from_str::<AgentFailure>(line).expect("read");
-        assert!(matches!(failure.into_agent(), AgentError::Keeper { .. }));
+        assert!(matches!(
+            failure.into_agent(),
+            AgentError::Keeper { detail }
+                if detail == "agent command 'dump' was not sent: the command was cancelled"
+        ));
+    }
+
+    /// Известный вид с испорченными полями — ошибка разбора, а не неизвестный вид: запасной
+    /// вариант не прячет поломку кадра, который эта сборка обязана понимать.
+    #[test]
+    fn a_known_failure_kind_with_broken_fields_is_not_read_as_unknown() {
+        for line in [
+            r#"{"kind":"not_sent"}"#,
+            r#"{"kind":"user_dir_unknown","base_dir":1,"user":"u","detail":"d"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AgentFailure>(line).is_err(),
+                "{line}"
+            );
+        }
     }
 
     /// Строка длиннее предела не читается: сторож не копит её в памяти.
