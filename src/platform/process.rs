@@ -4260,7 +4260,8 @@ mod tests {
     /// (`ManagedWait`, `ManagedDetached`, `ManagedTied`): тот возглавляет свою группу
     /// процессов консоли (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`).
     /// Раннера играет вложенный процесс тестов в своей группе: он запускает потомка, переживает
-    /// событие и снимает потомка прежним путём job-объекта — `terminate` или `remove`.
+    /// событие и снимает потомка прежними путями — `terminate` (`taskkill` дерева) или `remove`
+    /// (`TerminateJobObject`).
     #[cfg(windows)]
     mod windows_process_group {
         use std::fs;
@@ -4387,7 +4388,7 @@ mod tests {
                 };
                 assert!(
                     status.success(),
-                    "{mode}: the runner did not end its child through the job"
+                    "{mode}: the runner did not end its managed child"
                 );
             }
         }
@@ -4438,7 +4439,7 @@ mod tests {
             let ended = unsafe { WaitForSingleObject(process.as_raw_handle(), 10_000) };
             assert_eq!(
                 ended, WAIT_OBJECT_0,
-                "the job did not end the managed child"
+                "terminate/remove did not end the managed child"
             );
         }
 
