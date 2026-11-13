@@ -43,7 +43,7 @@ impl<'a> ConvertWorkspace<'a> {
     ) -> Result<(), AppError> {
         self.last_path = self.primary.workspace().to_path_buf();
         let first = self.primary.export_project_path(source, target)?;
-        let Some(registered) = registered_path(&self.primary, &first)? else {
+        let Some(registered) = registered_path(&self.primary, source, target, &first)? else {
             return ensure_platform_success(source_set, "edt-to-designer", &first);
         };
 
@@ -71,8 +71,8 @@ impl<'a> ConvertWorkspace<'a> {
             })?;
         self.last_path = fallback_path;
         let result = fallback.export_project_path(source, target)?;
-        if let Some(error) =
-            registered_path(&fallback, &result)?.and_then(|path| live_collision(&path, source))
+        if let Some(error) = registered_path(&fallback, source, target, &result)?
+            .and_then(|path| live_collision(&path, source))
         {
             return Err(error);
         }
@@ -82,9 +82,14 @@ impl<'a> ConvertWorkspace<'a> {
 
 fn registered_path(
     dsl: &EdtDsl<'_>,
+    source: &Path,
+    target: &Path,
     export: &PlatformCommandResult,
 ) -> Result<Option<PathBuf>, AppError> {
-    match dsl.conflicting_project_path(export).map_err(AppError::from) {
+    match dsl
+        .export_project_registration(source, target, export)
+        .map_err(AppError::from)
+    {
         Ok(path) => Ok(path),
         Err(error) if error.cancellation().is_some() => Err(error),
         Err(error) => {
@@ -182,9 +187,7 @@ mod tests {
                     let output = Path::new(&request.args[7]);
                     if registered.is_some_and(|path| *path != source) {
                         result.exit_code = 204;
-                        result.stderr =
-                            "Other project with name \"configuration\" already exists in workspace."
-                                .to_owned();
+                        result.stderr = "failure text is diagnostic only".to_owned();
                         fs::write(output.join("partial.xml"), "incomplete").unwrap();
                     } else {
                         assert!(!output.join("partial.xml").exists());
@@ -236,7 +239,11 @@ mod tests {
         let output = root.join("output");
         for source in [&first, &second] {
             fs::create_dir_all(source).unwrap();
-            fs::write(source.join(".project"), "original").unwrap();
+            fs::write(
+                source.join(".project"),
+                "<projectDescription><name>DifferentName</name></projectDescription>",
+            )
+            .unwrap();
         }
         fs::create_dir(&output).unwrap();
         let edt = Edt::default();
@@ -274,7 +281,7 @@ mod tests {
         for source in [first, second] {
             assert_eq!(
                 fs::read_to_string(source.join(".project")).unwrap(),
-                "original"
+                "<projectDescription><name>DifferentName</name></projectDescription>"
             );
         }
     }

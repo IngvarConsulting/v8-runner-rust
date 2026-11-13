@@ -18,8 +18,8 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::render_masked_command;
 
 const INTERACTIVE_EDT_ERROR_MARKER: &str = "Run '$exception printStackTrace' for error details";
-const INTERACTIVE_EDT_ERROR_MARKER_RU: &str =
-    "Введите '$exception printStackTrace' для получения детальной информации об ошибке.";
+// EDT 2026.2.2 uses this for command failures including a duplicate registration.
+const EDT_COMMAND_FAILED: i32 = 204;
 
 #[derive(Debug, Error)]
 pub enum EdtError {
@@ -176,17 +176,40 @@ impl<'a> EdtDsl<'a> {
         )
     }
 
-    /// Resolves the registered path only after EDT reports a duplicate project name.
-    /// Older versions may not support project-info; in that case keep the export's refusal.
-    pub(crate) fn conflicting_project_path(
+    /// Looks up the effective name of `export --project`: the source directory basename.
+    /// `project-info` returns structured fields even for a missing registered directory.
+    pub(crate) fn export_project_registration(
         &self,
+        source: &Path,
+        target: &Path,
         export: &PlatformCommandResult,
     ) -> Result<Option<PathBuf>, EdtError> {
-        let Some(name) = duplicate_project_name(export) else {
+        let process = &export.process;
+        if process.interruption.is_some() {
+            return Ok(None);
+        }
+        let should_inspect = match self.backend {
+            EdtBackend::OneShot { .. } => process.exit_code == EDT_COMMAND_FAILED,
+            _ => {
+                process.outcome().is_err()
+                    || std::fs::read_dir(target).is_ok_and(|mut entries| entries.next().is_none())
+            }
+        };
+        if !should_inspect {
+            return Ok(None);
+        }
+        let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
             return Ok(None);
         };
+        if name.starts_with('-')
+            || name
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`'))
+        {
+            return Ok(None);
+        }
         let arguments = ["project-info".to_owned(), name.to_owned()];
-        // Gogo treats punctuation as syntax in unquoted arguments. The classifier
+        // Gogo treats punctuation as syntax in unquoted arguments. The name check
         // excludes characters that could escape or interpolate this quoted literal.
         let info = self.run(
             &process_arguments(&self.workspace, &arguments),
@@ -705,51 +728,7 @@ fn render_interactive_output_for_log(output: &str) -> String {
 }
 
 fn output_indicates_interactive_command_error(stdout: &str, stderr: &str) -> bool {
-    [stdout, stderr].into_iter().any(|output| {
-        output.contains(INTERACTIVE_EDT_ERROR_MARKER)
-            || output.contains(INTERACTIVE_EDT_ERROR_MARKER_RU)
-    })
-}
-
-fn duplicate_project_name(export: &PlatformCommandResult) -> Option<&str> {
-    let process = &export.process;
-    if process.outcome().is_ok() || process.interruption.is_some() {
-        return None;
-    }
-    let mut names = [&process.stdout, &process.stderr]
-        .into_iter()
-        .flat_map(|output| output.lines())
-        .filter_map(|line| {
-            [
-                (
-                    "Other project with name \"",
-                    "\" already exists in workspace.",
-                ),
-                (
-                    "Другой проект с именем \"",
-                    "\" уже существует в рабочей области.",
-                ),
-            ]
-            .into_iter()
-            .find_map(|(prefix, suffix)| {
-                let (context, tail) = line.trim_end().split_once(prefix)?;
-                let name = tail.strip_suffix(suffix)?;
-                (context.trim().is_empty()
-                    || context
-                        .trim_end()
-                        .ends_with("org.eclipse.core.runtime.CoreException:"))
-                .then_some(name)
-            })
-        });
-    let name = names.next()?;
-    // EDT names are supplied as one command argument. Reject ambiguous or executable Gogo syntax.
-    (!name.is_empty()
-        && !name.starts_with('-')
-        && !name
-            .chars()
-            .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`'))
-        && names.all(|other| other == name))
-    .then_some(name)
+    stdout.contains(INTERACTIVE_EDT_ERROR_MARKER) || stderr.contains(INTERACTIVE_EDT_ERROR_MARKER)
 }
 
 fn project_info_field<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
@@ -866,30 +845,7 @@ mod tests {
     };
 
     #[test]
-    fn russian_interactive_duplicate_uses_the_reported_project_name() {
-        let stdout = concat!(
-            "edtsh: org.eclipse.core.runtime.CoreException: Другой проект с именем ",
-            "\"Продажи (2026)+\" уже существует в рабочей области.\n",
-            "Введите '$exception printStackTrace' для получения детальной информации об ошибке.\n"
-        );
-        assert!(super::output_indicates_interactive_command_error(
-            stdout, ""
-        ));
-        let result = super::PlatformCommandResult {
-            process: super::super::process::ProcessResult {
-                exit_code: 1,
-                stdout: stdout.to_owned(),
-                stderr: String::new(),
-                interruption: None,
-            },
-            platform_log_path: None,
-            platform_log: None,
-            platform_log_read_error: None,
-        };
-        assert_eq!(
-            super::duplicate_project_name(&result),
-            Some("Продажи (2026)+")
-        );
+    fn project_info_requires_unambiguous_structured_fields() {
         let path = "/sample with spaces/configuration";
         let info = format!("Name                Продажи (2026)+\nLocation            {path}\n");
         assert_eq!(super::project_info_field(&info, "Location"), Some(path));
