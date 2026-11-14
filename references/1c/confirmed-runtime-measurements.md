@@ -1184,6 +1184,32 @@ ssh -T -l '' -p <p> 127.0.0.1    # SSH_ASKPASS с пустым паролем, S
 агент отказываются удалять активное расширение с данными. После снятия активности `ibcmd`
 просит подтверждение в терминале, а агент упирается в запрет окон.
 
+## Имя CFE до записи в целевую базу (#665)
+
+Windows, Конфигуратор 8.3.27.2342, новые одноразовые файловые ИБ. Пакет
+`YAxUnit-25.12.cfe` из релиза 25.12, внутреннее имя `YAXUNIT`.
+
+| Команда в одноразовой ИБ | Наблюдение |
+| --- | --- |
+| `/LoadCfg YAxUnit-25.12.cfe -Extension DeliberatelyOtherName` | rc=0. `/DumpDBCfgList -AllExtensions` показывает рабочую запись `DeliberatelyOtherName` до применения |
+| `/DumpConfigToFiles <xml> -Extension DeliberatelyOtherName -partial -listFile <list>`, в списке строка `Configuration` | rc=0. В выгруженном `Configuration.xml` поле `Name` равно `YAXUNIT` |
+| `/UpdateDBCfg -Extension DeliberatelyOtherName`, имя `YAXUNIT` свободно | rc=0. После применения в списке `YAXUNIT`; тот же переход при замене существовавшего слота `DeliberatelyOtherName` |
+| `/LoadCfg … -Extension DeliberatelyOtherName`, затем `/UpdateDBCfg -Extension DeliberatelyOtherName`, `YAXUNIT` уже есть | загрузка rc=0 меняет рабочую конфигурацию, обновление rc=1 сообщает о занятом имени |
+
+Чтение дескриптора не требует `/UpdateDBCfg`. На 8.3.27.2342 оно прошло и для
+CFE с заимствованным языком в пустой ИБ, где применение отказало. На 8.3.24.1819
+та же последовательность `/LoadCfg` → частичная выгрузка вернула
+`Name=Расширение1` для пакета фикстуры, собранного на 8.3.24.
+Форму списка с одним идентификатором `Configuration` описывает
+[документация 1С](https://1c-dn.com/library/v8update_2079252606_new_functionality_and_changes/).
+
+В раннере `upload YAxUnit-25.12.cfe --ref YAXUNIT` вернул 0, а
+`extensions info --name YAXUNIT` подтвердил имя и версию 25.12. На второй базе
+с пустым составом `--ref DeliberatelyOtherName` и `--ref YAxUnit` вернули 2;
+списки рабочей конфигурации и конфигурации БД остались пустыми. В первой базе
+`--ref DeliberatelyOtherName` также вернул 2; оба списка содержали только
+`YAXUNIT`, хеш применённого расширения остался прежним.
+
 ## Частичная загрузка в базу под хранилищем
 
 Замер 06.10.2026. Задача: [#186](https://github.com/IngvarConsulting/v8-runner-rust/issues/186). Платформа 8.3.27.2074, macOS.

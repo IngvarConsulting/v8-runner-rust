@@ -305,6 +305,8 @@ v8-runner infobase create
 - EDT-to-XML may recover in a separate workspace if EDT confirms a missing convert stage. Use `data.workspace_path` to locate the last export attempt. For a live name conflict, the error identifies the source and the registered project.
 - Apply packages with `v8-runner upload <FILE>`. For an extension, `--ref <NAME>` is the
   extension name in the base: an extension source-set is named by its set name, as in `push`.
+  In `--mode load`, match the CFE's internal name exactly, including case. A mismatch is
+  rejected before loading into the target infobase.
   Vendor distribution `.cf` and update `.cfu` use `--mode update --settings <FILE>`.
 - Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in the persistent build infobase (Designer, then `ibcmd`) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Use `make --full` to recreate it. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.
 - Need to know which extensions are installed in an infobase, or to change that composition:

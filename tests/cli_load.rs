@@ -394,14 +394,121 @@ fn upload_update_failure_preserves_the_completed_load_receipt() {
 }
 
 #[test]
-fn first_extension_load_json_reports_absent_and_applies_in_order() {
-    let (_dir, config_path, binary_path, base_path, calls_log) = setup_project();
-    fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+fn upload_rejects_a_cfe_name_mismatch_before_loading_the_target() {
+    for (reference, installed, compatibility) in [
+        ("DeliberatelyOtherName", &[][..], "absent"),
+        ("DeliberatelyOtherName", &["YAXUNIT"][..], "absent"),
+        (
+            "DeliberatelyOtherName",
+            &["DeliberatelyOtherName"][..],
+            "supported",
+        ),
+        ("YAxUnit", &[][..], "absent"),
+    ] {
+        let (dir, config_path, binary, base_path, calls_log) = setup_project();
+        fs::write(base_path.join("release.cfe"), "YAXUNIT").expect("package");
+        write_extension_list_ibcmd(&dir.path().join("ibcmd"), installed);
+        write_cfe_probe_designer(&binary, &calls_log, "YAXUNIT");
+
+        let output = v8_runner_command()
+            .args(["--config"])
+            .arg(&config_path)
+            .args([
+                "--json-message",
+                "upload",
+                "release.cfe",
+                "--ref",
+                reference,
+            ])
+            .output()
+            .expect("upload");
+        let answer: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert!(!output.status.success(), "{answer}");
+        let data = &answer["data"];
+        assert_eq!(data["compatibility_state"], compatibility);
+        assert_eq!(data["execution"]["payload"]["applied"], false);
+        assert_eq!(data["execution"]["payload"]["update_db_cfg_ran"], false);
+        let message = data["message"].as_str().expect("diagnostic");
+        assert!(
+            message.contains(reference) && message.contains("YAXUNIT"),
+            "{message}"
+        );
+        let calls = fs::read_to_string(calls_log).expect("Designer calls");
+        assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+        assert_eq!(calls.matches("/LoadCfg").count(), 1, "{calls}");
+        assert!(calls.contains("-Extension UploadPackageProbe"), "{calls}");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+        assert!(
+            !calls.contains(&format!("File={}", base_path.join("ib").display())),
+            "{calls}"
+        );
+    }
+}
+
+fn write_cfe_probe_designer(path: &Path, calls_log: &Path, internal_name: &str) {
     let body = format!(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  printf \"Конфигурация 'Расширение конфигурации' недоступна\\n\" > \"$out\"\n  exit 19\nfi\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nexit 0",
+        r#"printf '%s\n' "$*" >> "{}"
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    /Out) : > "$arg" ;;
+    /DumpConfigToFiles)
+      mkdir -p "$arg"
+      printf '%s\n' '<MetaDataObject><Configuration><Properties><Name>{internal_name}</Name></Properties></Configuration></MetaDataObject>' > "$arg/Configuration.xml"
+      ;;
+  esac
+  prev="$arg"
+done
+exit 0"#,
         calls_log.display()
     );
-    write_script(&binary_path, &body);
+    write_script(path, &body);
+}
+
+#[test]
+fn upload_refuses_a_cfe_when_designer_did_not_export_its_descriptor() {
+    let (_dir, config_path, _binary, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cfe"), "cfe").expect("package");
+
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "upload",
+            "release.cfe",
+            "--ref",
+            "FirstExt",
+        ])
+        .output()
+        .expect("upload");
+    let answer: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(!output.status.success(), "{answer}");
+    let data = &answer["data"];
+    assert_eq!(data["execution"]["payload"]["applied"], false);
+    assert!(data["message"]
+        .as_str()
+        .expect("diagnostic")
+        .contains("cannot establish the CFE name before upload"));
+    let calls = fs::read_to_string(calls_log).expect("Designer calls");
+    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert_eq!(calls.matches("/LoadCfg").count(), 1, "{calls}");
+    assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+}
+
+#[test]
+fn first_extension_load_json_reports_absent_and_applies_in_order() {
+    let (dir, config_path, binary_path, base_path, calls_log) = setup_project();
+    let work_path = dir.path().join("work;part=release");
+    write_config(
+        &config_path,
+        &base_path,
+        &work_path,
+        &binary_path,
+        "DESIGNER",
+    );
+    fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+    write_cfe_probe_designer(&binary_path, &calls_log, "FirstExt");
 
     let output = v8_runner_command()
         .args([
@@ -432,13 +539,35 @@ fn first_extension_load_json_reports_absent_and_applies_in_order() {
         "absent"
     );
     let calls = fs::read_to_string(calls_log).expect("calls");
+    let scratch = format!("{}/temp/upload-cfe-", work_path.display());
+    assert!(
+        calls.contains(&format!("CREATEINFOBASE File='{scratch}")),
+        "{calls}"
+    );
+    assert!(calls.contains(&format!("/F {scratch}")), "{calls}");
     assert!(
         !calls.contains("/CompareCfg"),
         "absence comes from the infobase's own list, so nothing is compared: {calls}"
     );
-    let ordered =
-        ["/LoadCfg", "/UpdateDBCfg"].map(|needle| calls.find(needle).expect("expected call"));
-    assert!(ordered[0] < ordered[1]);
+    let ordered = [
+        calls
+            .find("/DumpConfigToFiles")
+            .expect("scratch descriptor"),
+        calls.rfind("/LoadCfg").expect("target load"),
+        calls.find("/UpdateDBCfg").expect("target update"),
+    ];
+    assert!(
+        ordered[0] < ordered[1] && ordered[1] < ordered[2],
+        "{calls}"
+    );
+    let packages: Vec<_> = calls
+        .lines()
+        .filter_map(|line| line.split_once("/LoadCfg "))
+        .map(|(_, rest)| rest.split_once(" -Extension ").expect("extension flag").0)
+        .collect();
+    assert_eq!(packages.len(), 2, "{calls}");
+    assert_eq!(packages[0], packages[1], "{calls}");
+    assert!(!Path::new(packages[0]).exists(), "private copy was removed");
 }
 
 #[test]
@@ -798,7 +927,7 @@ fn upload_with_ibcmd_push_receives_config_relative_paths_resolved_from_the_confi
     fs::create_dir_all(project.join("main")).expect("main");
     fs::create_dir_all(&elsewhere).expect("elsewhere");
     fs::write(project.join("release.cfe"), "cfe").expect("artifact");
-    write_designer_script(&platform.join("1cv8"), &calls_log);
+    write_cfe_probe_designer(&platform.join("1cv8"), &calls_log, "FirstExt");
     let records = platform.join("ibcmd.records");
     fs::write(&records, "").expect("records");
     write_script(
@@ -847,12 +976,10 @@ fn upload_with_ibcmd_push_receives_config_relative_paths_resolved_from_the_confi
         )),
         "{calls}"
     );
-    assert!(
-        calls.contains(&format!(
-            "/LoadCfg {}",
-            project.join("release.cfe").display()
-        )),
-        "{calls}"
+    let answer: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        answer["data"]["artifact_path"],
+        project.join("release.cfe").display().to_string()
     );
     assert!(
         calls.contains(&format!("File={}", infobase.display())),
