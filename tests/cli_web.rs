@@ -13,6 +13,7 @@ fn web_status_of_a_declared_cluster_writes_nothing() {
         "infobases:\n  origin:\n    cluster:\n      managed: {}\n    web:\n      managed: true\n      wsdir: demo\n",
     )
     .unwrap();
+    support::hold_workspace_lock(&project.path().join(".build/v8-runner"));
     let output = support::v8_runner_command()
         .current_dir(project.path())
         .env_remove("V8TR_CONFIG")
