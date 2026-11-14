@@ -11,7 +11,7 @@ window.RUNNER_ARTEFACTS = {
   reports: { label: 'отчёты тестов', kind: 'data' },
   issues:  { label: 'замечания', kind: 'data' },
   extlist: { label: 'состав расширений', kind: 'data' },
-  state:   { label: 'состояние изменений в workPath', kind: 'store' },
+  state:   { label: 'память о базе в localPath', kind: 'store' },
   genid:   { label: 'идентификатор поколения', kind: 'data' },
   pub:     { label: 'публикация на веб-сервере', kind: 'store' },
   browser: { label: 'браузер', kind: 'ext' },
