@@ -330,7 +330,7 @@ pub(crate) fn attached_live_agents_hint(config: &AppConfig) -> Option<String> {
     let registry = crate::platform::live_registry::Registry::of_account().ok()?;
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
     let attached: Vec<(Option<u32>, Option<String>)> =
-        crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
+        crate::platform::agent_keeper::client::keepers_of_seen(&registry, &infobase)
             .into_iter()
             .filter_map(|(keeper, status)| {
                 let status = status.ok().filter(|status| status.attached)?;
@@ -369,7 +369,7 @@ pub(crate) fn idle_live_agents(config: &AppConfig) -> Vec<Option<u32>> {
         return Vec::new();
     };
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
+    crate::platform::agent_keeper::client::keepers_of_seen(&registry, &infobase)
         .into_iter()
         .filter_map(|(_, status)| match status {
             Ok(status) if status.holds_the_infobase() => None,
@@ -384,12 +384,13 @@ pub(crate) fn idle_live_agents(config: &AppConfig) -> Vec<Option<u32>> {
 fn busy_live_agents(config: &AppConfig) -> Option<String> {
     let registry = crate::platform::live_registry::Registry::of_account().ok()?;
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    let busy: Vec<String> = crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
-        .into_iter()
-        .filter_map(|(_, status)| status.ok())
-        .filter(|status| status.holds_the_infobase())
-        .map(|status| live_agent_text(status.agent_pid, status.command(), &status.holders))
-        .collect();
+    let busy: Vec<String> =
+        crate::platform::agent_keeper::client::keepers_of_seen(&registry, &infobase)
+            .into_iter()
+            .filter_map(|(_, status)| status.ok())
+            .filter(|status| status.holds_the_infobase())
+            .map(|status| live_agent_text(status.agent_pid, status.command(), &status.holders))
+            .collect();
     (!busy.is_empty()).then(|| busy.join("; "))
 }
 

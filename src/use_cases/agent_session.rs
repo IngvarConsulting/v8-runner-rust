@@ -2058,6 +2058,27 @@ mod tests {
 
     use super::*;
 
+    /// Замок реестра учётной записи не дался — за срок или потому, что имя его канала заняла
+    /// другая учётная запись: команда не падает, а работает с разовым агентом
+    /// (`reason: keeper_failed`, `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    #[test]
+    fn a_failed_registry_lock_falls_back_to_a_one_shot_agent() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+        ] {
+            let error = crate::platform::agent_keeper::client::registry_unavailable(
+                std::io::Error::new(kind, "the registry lock"),
+            );
+            assert_eq!(
+                one_shot_reason(&error),
+                Some(LiveAgentReason::KeeperFailed),
+                "{kind:?}"
+            );
+        }
+    }
+
     /// Агент, поднятый заранее и не взятый командой, снимается за ограниченное время: снятие
     /// говорит подъёму «не ждать» и дожидается его, а подъём на это смотрит (#574).
     #[test]

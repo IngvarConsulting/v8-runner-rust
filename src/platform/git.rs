@@ -902,7 +902,11 @@ pub fn blob_ids_as_added(
     // Временный индекс лежит рядом с настоящим, в каталоге git рабочей копии, и уходит после
     // вопроса: временного каталога ОС раннер не трогает
     // (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
-    let git_dir = git_dir_of(toplevel, interrupted)?;
+    // git не создаёт файлов по пути с приставкой `\\?\` (`index.lock`: Invalid argument):
+    // путь временного индекса — без неё.
+    let git_dir = PathBuf::from(crate::support::path::strip_windows_verbatim_prefix(
+        &git_dir_of(toplevel, interrupted)?.to_string_lossy(),
+    ));
     sweep_stale_temp_indexes(&git_dir);
     let temp = tempfile::Builder::new()
         .prefix(TEMP_INDEX_PREFIX)

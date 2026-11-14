@@ -527,8 +527,7 @@ fn execute(
     let publication = Arc::new(ExternalFullPull::new(stage, control.clone()));
     let context = context
         .with_command_line(command_line)
-        .with_external_full_pull(publication)
-        .with_start_dir(crate::support::temp::temp_root_path(&config.work_path));
+        .with_external_full_pull(publication);
     let mut warnings: Vec<Warning> = loaded.warnings.into_iter().map(Warning::Plain).collect();
     let result = dispatch_with_workspace_boundary(
         &config,

@@ -384,8 +384,6 @@ impl McpToolServer {
         port: SharedMcpUseCasePort,
         call_context: McpCallContext,
     ) -> Result<Self, McpServerError> {
-        let call_context =
-            call_context.with_start_dir(crate::support::temp::temp_root_path(&config.work_path));
         let telemetry = Arc::new(McpTelemetry::default());
         Ok(Self {
             edt_session: Arc::new(

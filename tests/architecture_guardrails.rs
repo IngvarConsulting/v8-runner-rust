@@ -6857,7 +6857,10 @@ fn without_test_modules(source: &str) -> String {
 fn the_runner_creates_nothing_outside_the_working_copy() {
     const FORBIDDEN: &[&str] = &[
         "temp_dir()",
+        "env::temp_dir",
         "tempfile()",
+        "spooled_tempfile(",
+        "with_prefix(",
         "tempdir()",
         "NamedTempFile::new()",
         "TempDir::new()",
@@ -6871,6 +6874,9 @@ fn the_runner_creates_nothing_outside_the_working_copy() {
         "\"XDG_STATE_HOME\"",
         "\"XDG_CACHE_HOME\"",
         "\"XDG_RUNTIME_DIR\"",
+        "\"USERPROFILE\"",
+        "\"HOME\"",
+        "home_dir",
         "dirs::",
         "directories::",
         "SHGetKnownFolderPath",
@@ -6889,6 +6895,30 @@ fn the_runner_creates_nothing_outside_the_working_copy() {
             "\"LOCALAPPDATA\"",
             1,
             "где лежит каталог состояния учётной записи: он только называет реестр живых агентов и читается для уборки 0.17.0–0.17.3",
+        ),
+        (
+            "src/platform/agent.rs",
+            "env::temp_dir",
+            1,
+            "тот же вызов временного каталога ОС для ключа хоста",
+        ),
+        (
+            "src/support/machine.rs",
+            "\"HOME\"",
+            1,
+            "каталог состояния на Unix без XDG_STATE_HOME: ~/.local/state, только где сокеты сторожей",
+        ),
+        (
+            "src/platform/git.rs",
+            "\"HOME\"",
+            1,
+            "git.rs только читает глобальный файл исключений git, ничего не создаёт",
+        ),
+        (
+            "src/platform/git.rs",
+            "\"USERPROFILE\"",
+            1,
+            "git.rs только читает глобальный файл исключений git, ничего не создаёт",
         ),
         (
             "src/support/machine.rs",
@@ -6966,6 +6996,25 @@ fn the_working_copy_guard_sees_every_spelling() {
         ),
         ("fn f() { let _ = tempfile::tempfile(); }", "tempfile()"),
         ("fn f() { let _ = dirs::data_local_dir(); }", "dirs::"),
+        ("fn f() { let temp = std::env::temp_dir; }", "env::temp_dir"),
+        (
+            "fn f() { let _ = tempfile::spooled_tempfile(1); }",
+            "spooled_tempfile(",
+        ),
+        (
+            "fn f() { let _ = tempfile::Builder::new().tempfile(); }",
+            "tempfile()",
+        ),
+        (
+            "fn f() { let _ = tempfile::TempDir::with_prefix(\"x\"); }",
+            "with_prefix(",
+        ),
+        (
+            "fn f() { let _ = std::env::var_os(\"USERPROFILE\"); }",
+            "\"USERPROFILE\"",
+        ),
+        ("fn f() { let _ = std::env::var(\"HOME\"); }", "\"HOME\""),
+        ("fn f() { let _ = std::env::home_dir(); }", "home_dir"),
         (
             "fn f() { let _ = tempfile::Builder::new().prefix(\"x\").tempdir(); }",
             "tempdir()",

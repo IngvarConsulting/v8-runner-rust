@@ -4501,7 +4501,6 @@ fn cli_context(
             config.tools.edt_cli.command_timeout_ms,
         )))
         .with_cancellation(cancellation)
-        .with_start_dir(crate::support::temp::temp_root_path(&config.work_path))
 }
 
 fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCaseError> {

@@ -318,11 +318,6 @@ pub struct ProcessExecutionPolicy {
     /// `None` — у шага самой платформы, который работой команды не является; объявить так
     /// шаг может только платформа: поле за её пределами не видно.
     pub(in crate::platform) work: Option<WorkGiven>,
-    /// Текущий каталог процесса, чей запрос его не называет: `workPath/temp` команды
-    /// (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`). Платформа пишет в текущий
-    /// каталог свои файлы (`1cv8u.pfl`), и они остаются в рабочей копии, а не там, откуда запущен
-    /// раннер. `None` — каталог раннера, как прежде.
-    pub(crate) start_dir: Option<PathBuf>,
 }
 
 /// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
@@ -353,15 +348,6 @@ impl ProcessExecutionPolicy {
             safety,
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: Some(work),
-            start_dir: None,
-        }
-    }
-
-    /// Та же политика, чей процесс без своего текущего каталога начинает в `dir`.
-    pub fn starting_in(self, dir: Option<PathBuf>) -> Self {
-        Self {
-            start_dir: dir,
-            ..self
         }
     }
 
@@ -378,7 +364,6 @@ impl ProcessExecutionPolicy {
             safety,
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: None,
-            start_dir: None,
         }
     }
 
@@ -536,27 +521,6 @@ impl ProcessExecutor {
 /// Standard subprocess runner backed by `std::process::Command`.
 pub struct ProcessExecutor;
 
-/// Запрос, начинающий в каталоге политики ([`ProcessExecutionPolicy::start_dir`]), если свой
-/// каталог он не называет. Каталог заводится; не завёлся — процесс начинает, как прежде, в
-/// каталоге раннера, и это не отказ.
-fn started_in_policy_dir(
-    request: &ProcessRequest,
-    policy: &ProcessExecutionPolicy,
-) -> Option<ProcessRequest> {
-    if request.workdir.is_some() {
-        return None;
-    }
-    let dir = policy.start_dir.as_ref()?;
-    if let Err(error) = std::fs::create_dir_all(dir) {
-        debug!(dir = %dir.display(), %error, "the process starts in the runner's directory");
-        return None;
-    }
-    Some(ProcessRequest {
-        workdir: Some(dir.clone()),
-        ..request.clone()
-    })
-}
-
 impl ProcessRunner for ProcessExecutor {
     fn run_with_policy(
         &self,
@@ -635,14 +599,6 @@ impl ProcessExecutor {
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
     ) -> Result<ProcessResult, ProcessError> {
-        let started_in;
-        let request = match started_in_policy_dir(request, policy) {
-            Some(placed) => {
-                started_in = placed;
-                &started_in
-            }
-            None => request,
-        };
         let rendered_command = render_command(request);
         debug!(
             command = rendered_command.as_str(),
@@ -2042,48 +1998,6 @@ mod tests {
             startup_probe: None,
             windows_verbatim_args: Vec::new(),
         }
-    }
-
-    /// Процесс без своего текущего каталога начинает в каталоге политики — `workPath/temp`
-    /// команды, — а не там, откуда запущен раннер; свой каталог запроса важнее
-    /// (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
-    #[test]
-    fn a_process_without_its_own_directory_starts_in_the_policy_directory() {
-        let temp = tempfile::tempdir().expect("temp");
-        let start = temp.path().join("work").join("temp");
-        let policy = ProcessExecutionPolicy::default().starting_in(Some(start.clone()));
-        let (program, args) = if cfg!(windows) {
-            (
-                "cmd.exe",
-                vec!["/d".to_owned(), "/c".to_owned(), "cd".to_owned()],
-            )
-        } else {
-            ("pwd", Vec::new())
-        };
-        let mut request = plain_request(PathBuf::from(program));
-        request.args = args;
-        let result = ProcessExecutor
-            .run_with_policy(&request, &policy)
-            .expect("runs");
-        let printed = PathBuf::from(result.stdout.trim());
-        assert_eq!(
-            printed.canonicalize().expect("printed"),
-            start.canonicalize().expect("start"),
-            "the child starts in workPath/temp, which the run created"
-        );
-        let own = temp.path().join("own");
-        std::fs::create_dir_all(&own).expect("own");
-        request.workdir = Some(own.clone());
-        let result = ProcessExecutor
-            .run_with_policy(&request, &policy)
-            .expect("runs");
-        assert_eq!(
-            PathBuf::from(result.stdout.trim())
-                .canonicalize()
-                .expect("printed"),
-            own.canonicalize().expect("own"),
-            "a request's own directory wins"
-        );
     }
 
     /// Путь доходит до процесса без приставки `\\?\`, в том числе внутри значения, а путь тома

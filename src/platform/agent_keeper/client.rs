@@ -128,6 +128,8 @@ const WAIT_STEP: Duration = Duration::from_millis(100);
 /// Сколько раз клиент поднимает сторожа заново, если поднятый вышел, не ответив: так бывает,
 /// когда канал ещё держит уходящий сторож того же ключа.
 const RESPAWNS: u32 = 3;
+/// Сколько клиент ждёт, пока поднятый им сторож займёт канал, держа замок учётной записи.
+const BIND_PATIENCE: Duration = Duration::from_secs(5);
 /// Сколько клиент ждёт ответа на `end`: отключение от базы ограничено своим сроком у сторожа.
 const END_PATIENCE: Duration = Duration::from_secs(30);
 /// Сколько клиент ждёт подключения к каналу и ответа на `status`, `hold`, `release`: зависший
@@ -329,6 +331,16 @@ fn unavailable_by(
     }
 }
 
+/// Реестр живых агентов учётной записи недоступен: замок не дался за срок, его имя заняла другая
+/// учётная запись, или система не называет каталог состояния. Живого агента не будет, а команда
+/// работает с разовым (`reason: keeper_failed`), как при любом отказе сторожа.
+pub(crate) fn registry_unavailable(error: std::io::Error) -> KeeperStartError {
+    unavailable_by(
+        "the live agent registry of this OS account is not available",
+        error,
+    )
+}
+
 /// Отмена команды, пока она ждала сторожа: агенту ничего не отправлено.
 fn cancelled_waiting() -> KeeperStartError {
     KeeperStartError::Agent(AgentError::NotSent {
@@ -462,7 +474,7 @@ impl KeeperClient {
         launch: &KeeperLaunch,
         credentials: &Credentials,
     ) -> Result<Self, KeeperStartError> {
-        let registry = Registry::of_account()?;
+        let registry = Registry::of_account().map_err(registry_unavailable)?;
         // Остатки 0.17.0–0.17.3 убираются до замка учётной записи: медленное удаление его не
         // держит.
         sweep_former_layout(&registry);
@@ -498,7 +510,13 @@ impl KeeperClient {
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
         let mut evictions = 0;
+        // Копия раннера для сторожа кладётся до замка учётной записи: копирование файла его не
+        // держит. Нужна она, только когда своего сторожа нет.
+        let mut program: Option<std::io::Result<PathBuf>> = None;
         loop {
+            if program.is_none() && !self.home.paths().record().is_file() {
+                program = Some(keeper_exe(self.home.live()));
+            }
             if cancel.is_cancelled() || wait.stop.is_cancelled() {
                 return Err(cancelled_waiting());
             }
@@ -555,7 +573,15 @@ impl KeeperClient {
                 Found::Starting | Found::Orphan => {}
                 Found::Absent(account) => {
                     self.reused = false;
-                    let pid = match self.spawn(launch, credentials, at_open) {
+                    let copy = match program.get_or_insert_with(|| keeper_exe(self.home.live())) {
+                        Ok(copy) => Ok(copy.clone()),
+                        Err(error) => Err(unavailable(format!(
+                            "no copy of the runner for the keeper: {error}"
+                        ))),
+                    };
+                    let pid = match copy
+                        .and_then(|copy| self.spawn(&copy, launch, credentials, at_open))
+                    {
                         Ok(pid) => pid,
                         Err(error) => {
                             drop(account);
@@ -566,7 +592,7 @@ impl KeeperClient {
                     self.keeper = pid;
                     // Пока сторож не занял канал, другие команды учётной записи его не видят:
                     // замок учётной записи держится до тех пор, и предел не превысят.
-                    self.await_channel(pid, deadline);
+                    self.await_channel(pid, deadline.min(Instant::now() + BIND_PATIENCE));
                     drop(account);
                     match self.await_start(pid, deadline, wait)? {
                         Started::Answered => match self.take(take, wait.stop) {
@@ -689,8 +715,8 @@ impl KeeperClient {
     /// копий — предел вместе не превысят.
     fn find(&self, limit: u8) -> Result<Found, KeeperStartError> {
         let registry = self.home.registry();
-        let account = registry.lock()?;
-        let held = self.home.lock()?;
+        let account = registry.lock().map_err(registry_unavailable)?;
+        let held = self.home.lock().map_err(registry_unavailable)?;
         let paths = self.home.paths();
         let machine = machine_fingerprint();
         let observed = observe_service(paths, machine.as_deref(), &process_facts, &|record| {
@@ -734,9 +760,10 @@ impl KeeperClient {
         }
     }
 
-    /// Ждёт, пока поднятый сторож `pid` займёт канал или выйдет, не дольше срока подъёма
-    /// `deadline`: всё это время замок учётной записи держится, и сторожа, которого другие
-    /// команды ещё не видят, они не обгонят.
+    /// Ждёт, пока поднятый сторож `pid` займёт канал или выйдет, не дольше `deadline`: всё это
+    /// время замок учётной записи держится, и сторожа, которого другие команды ещё не видят, они
+    /// не обгонят. Сторож занимает канал первым делом, поэтому срок короткий
+    /// ([`BIND_PATIENCE`]).
     fn await_channel(&self, pid: u32, deadline: Instant) {
         while Instant::now() < deadline {
             if self.home.registry().has_channel(self.home.key()) || process_facts(pid).is_none() {
@@ -768,12 +795,12 @@ impl KeeperClient {
     /// Поднимает сторожа отделённым процессом из копии исполняемого файла раннера.
     fn spawn(
         &self,
+        program: &Path,
         launch: &KeeperLaunch,
         credentials: &Credentials,
         at_open: AtOpen,
     ) -> Result<u32, KeeperStartError> {
-        let program = keeper_exe(self.home.live())
-            .map_err(|error| unavailable_by("no copy of the runner for the keeper", error))?;
+        let program = program.to_path_buf();
         let start = KeeperStart {
             launch: launch.clone(),
             credentials: credentials.clone(),
@@ -1581,6 +1608,18 @@ pub fn keepers_of(
             Some((LiveKeeper { key, client }, status))
         })
         .collect()
+}
+
+/// [`keepers_of`] для подсказок и превью: без каналов сторожей и без каталога сторожей прежней
+/// раскладки — сразу пусто, без замка учётной записи и без каталогов.
+pub fn keepers_of_seen(
+    registry: &Registry,
+    infobase: &str,
+) -> Vec<(LiveKeeper, Result<KeeperStatus, AgentError>)> {
+    if registry.channels().is_empty() && !legacy_agents_path(registry.state()).is_dir() {
+        return Vec::new();
+    }
+    keepers_of(registry, infobase)
 }
 
 /// Снимает живого агента дома `home`, если он есть; ответ — был ли он. Агента, который

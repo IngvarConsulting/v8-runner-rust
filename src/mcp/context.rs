@@ -16,8 +16,6 @@ pub struct McpCallContext {
     /// Глобальные ключи, с которыми запущен сервер: совет отказа называет команду строки,
     /// и она должна попасть в тот же проект, ту же базу и тот же рабочий каталог.
     command_line: CommandLineTarget,
-    /// Текущий каталог процессов платформы без своего: `workPath/temp` проекта сервера.
-    start_dir: Option<std::path::PathBuf>,
 }
 
 impl McpCallContext {
@@ -29,19 +27,7 @@ impl McpCallContext {
             cancellation: CancellationToken::new(),
             abandonment: CancellationToken::new(),
             command_line: CommandLineTarget::default(),
-            start_dir: None,
         }
-    }
-
-    /// Процессы платформы без своего текущего каталога начинают в `dir`.
-    pub fn with_start_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.start_dir = Some(dir);
-        self
-    }
-
-    /// Текущий каталог процессов платформы без своего, если он назван.
-    pub fn start_dir(&self) -> Option<&std::path::Path> {
-        self.start_dir.as_deref()
     }
 
     /// Creates a stdio MCP call context.

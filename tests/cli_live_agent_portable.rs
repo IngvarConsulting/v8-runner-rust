@@ -1120,8 +1120,8 @@ fn the_live_agent_lives_in_the_working_copy_and_comes_back_when_its_home_is_gone
         "the key salt lives in localPath"
     );
 
-    // Дом агента убрали, пока сторож жив (`git clean`): запись пропала — следующая команда
-    // снимает сторожа без записи и поднимает нового, а не отказывает.
+    // Дом агента убрали, пока сторож жив (`git clean`): запись пропала — сторож уходит сам, а
+    // следующая команда ждёт его ухода и поднимает нового агента, а не отказывает.
     let first = bench.designer_pid();
     let _ = fs::remove_file(homes[0].join("record.json"));
     let _ = fs::remove_dir_all(homes[0].join("base"));
