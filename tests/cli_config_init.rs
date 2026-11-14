@@ -6,6 +6,21 @@ use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
+fn ordinary_canonical(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).expect("canonical path");
+    #[cfg(windows)]
+    {
+        let text = canonical.to_str().expect("UTF-8 path");
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(drive) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(drive);
+        }
+    }
+    canonical
+}
+
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
@@ -140,12 +155,17 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert!(output.status.success());
     assert!(config_path.exists());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(r"\\\\?\\"));
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "init");
     // Живая сверка формы: схема держит состав `data` только вместе с прогоном, иначе
     // команда вправе печатать не то, что за ней объявлено.
     assert_data_matches_its_command_form(&payload, "`config init --output`");
-    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
+    let canonical_dir = ordinary_canonical(dir.path());
+    assert_eq!(
+        payload["data"]["path"],
+        canonical_dir.join("custom.yaml").display().to_string()
+    );
     assert_eq!(
         payload["data"]["local_path"],
         canonical_dir
@@ -200,6 +220,29 @@ fn config_init_creates_local_overlay_next_to_output_override() {
     assert!(!dir.path().join("config").join(".gitignore").exists());
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
     assert!(gitignore.lines().any(|line| line == "v8project.local.yaml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn config_init_keeps_a_literal_backslash_in_a_source_directory_name() {
+    let dir = temp_workspace();
+    let main = dir.path().join("src").join(r"team\configuration");
+    fs::create_dir_all(&main).expect("source directory");
+    fs::write(main.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .arg("init")
+        .output()
+        .expect("run init");
+
+    assert!(output.status.success(), "{output:?}");
+    let config = fs::read_to_string(dir.path().join("v8project.yaml")).expect("config");
+    let config: serde_yaml::Value = serde_yaml::from_str(&config).expect("YAML");
+    assert_eq!(
+        config["source-set"][0]["path"].as_str(),
+        Some(r"src/team\configuration")
+    );
 }
 
 #[test]
@@ -1224,8 +1267,21 @@ fn init_with_a_nested_config_ignores_the_lock_of_every_source_set() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let config =
+        fs::read_to_string(dir.path().join("config").join("v8project.yaml")).expect("config");
+    let config: serde_yaml::Value = serde_yaml::from_str(&config).expect("YAML");
+    assert_eq!(
+        config["source-set"][0]["path"].as_str(),
+        Some("../src/configuration")
+    );
+
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(r"\\\\?\\"));
+    let canonical_dir = ordinary_canonical(dir.path());
+    assert_eq!(
+        payload["data"]["source_sets"][0]["path"],
+        "../src/configuration"
+    );
     assert_eq!(
         payload["data"]["gitignore_path"],
         canonical_dir.join(".gitignore").display().to_string()
