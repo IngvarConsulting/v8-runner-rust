@@ -314,7 +314,10 @@ v8-runner infobase create
 - Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in the persistent build infobase (Designer, then `ibcmd`) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Use `make --full` to recreate it. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
-  infobase, not the workspace — bare `v8-runner extensions` still means "update the security
+  infobase. Through the SSH gate, `create` reads the working configuration's language codes
+  before creating anything. Supply a configured code in `--synonym "ru='Text'"` if the base
+  has neither `ru` nor `en`. If the gate reports a failure after creation was attempted, check
+  the inventory with `extensions list`. Bare `v8-runner extensions` means "update the security
   properties of the configured extension source-sets". For `ibcmd`, a successful read
   reports `name_prefix` from the applied DB configuration; for the agent it is `null` (not
   attested, unlike `""`). With a live agent of the working copy up, `extensions list` on a file

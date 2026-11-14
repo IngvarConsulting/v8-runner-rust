@@ -291,6 +291,13 @@ impl AgentHandle {
         }
     }
 
+    pub(crate) fn gate_exchange(&self) -> Option<&Exchange> {
+        match &self.point {
+            AgentPoint::Gate { exchange, .. } => Some(exchange),
+            AgentPoint::Live(_) | AgentPoint::Managed(_, _) | AgentPoint::Attached { .. } => None,
+        }
+    }
+
     /// Канал обмена с точкой входа. У агента Конфигуратора это его каталог
     /// пользователя из карты `AgentBaseDir`, у шлюза автономного сервера — то, что
     /// объявил конфиг.
