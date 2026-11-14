@@ -407,7 +407,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 39,
+        report.accepted, 40,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -511,7 +511,7 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
-        "crate::use_cases::managed_stand::web_status",
+        "crate::use_cases::managed_stand::web::web_status",
         "читает запись Apache без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
