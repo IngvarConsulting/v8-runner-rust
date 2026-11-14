@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "ServiceAction": {
+      "description": "Что сделала команда.",
+      "enum": [
+        "started",
+        "already_running",
+        "stopped",
+        "nothing_to_stop",
+        "reported",
+        "planned"
+      ],
+      "type": "string"
+    },
+    "ServiceState": {
+      "description": "В каком состоянии служба сейчас.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_running",
+            "starting",
+            "started_by_this_copy"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Порт записи слушает процесс, которого раннер этой копии не запускал.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/web-stop.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ServiceAction"
+    },
+    "address": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_path": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "explicit": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "infobase": {
+      "type": "string"
+    },
+    "log_path": {
+      "type": "string"
+    },
+    "occupant_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "previous_port": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "program": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "publication_stale": {
+      "type": "boolean"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "state": {
+      "$ref": "#/$defs/ServiceState"
+    }
+  },
+  "required": [
+    "ok",
+    "infobase",
+    "state",
+    "action",
+    "ready",
+    "config_path",
+    "log_path",
+    "duration_ms"
+  ],
+  "title": "WebResult",
+  "type": "object"
+}

@@ -835,7 +835,7 @@ v8-runner cluster stop [--dry-run]
 v8-runner cluster restart [--dry-run]
 ```
 
-- Поднимают кластер базы из `cluster.managed` на Windows, без службы: `ragent` с `rmngr` и `rphost`, затем `ras`;
+- Поднимают кластер базы из `cluster.managed` на Windows и Linux, без службы: `ragent` с `rmngr` и `rphost`, затем `ras`;
   готовность — ответ `rac cluster list`. Адрес `Srvr=127.0.0.1:<regport>;Ref=<name>` называет `status`, остальные
   команды берут его из записи и работают с базой как с обычной кластерной.
 - Цикл: `cluster start` → `infobase create` → `push` → `test` → `cluster stop`. Без кластера рабочая команда отказывает и
@@ -2277,3 +2277,12 @@ v8-runner mcp serve http
 - Переименование расширения на месте по совпавшему внутреннему идентификатору и
   `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.
+
+### Управляемый Apache
+
+`web start|status|stop|restart` обслуживает частный Apache 2.4, объявленный через
+`infobase.web.managed`. `cluster start` поднимает его после готовности кластера.
+`cluster stop` останавливает Apache, который поднял кластер. `web start` делает
+экземпляр явным, после чего его останавливает `web stop`. `publish` возвращает
+loopback-адрес публикации. На Linux службы запускаются обычным пользователем,
+для `publish` утилита 1С требует root. Системные службы и конфиги не используются.

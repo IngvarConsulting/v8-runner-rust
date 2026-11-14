@@ -473,6 +473,8 @@ impl WebServerKind {
 /// Publication and client-address settings for the target infobase.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct InfobaseWebConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed: bool,
     /// Web server to publish on.
     #[serde(default)]
     pub server: Option<WebServerKind>,
@@ -1098,6 +1100,8 @@ pub struct ToolsConfig {
 
     #[serde(default)]
     pub postgres: PostgresToolConfig,
+    #[serde(default)]
+    pub apache: ApacheToolConfig,
 }
 
 /// The PostgreSQL build for 1C that `dbms start` runs.
@@ -1105,6 +1109,11 @@ pub struct ToolsConfig {
 #[serde(default, rename_all = "snake_case")]
 pub struct PostgresToolConfig {
     /// Directory of the build, or its `bin`.
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ApacheToolConfig {
     pub path: Option<PathBuf>,
 }
 

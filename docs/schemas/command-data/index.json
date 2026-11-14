@@ -121,6 +121,18 @@
     ],
     "version": [
       "version"
+    ],
+    "web restart": [
+      "web-restart"
+    ],
+    "web start": [
+      "web-start"
+    ],
+    "web status": [
+      "web-status"
+    ],
+    "web stop": [
+      "web-stop"
     ]
   },
   "shared": [

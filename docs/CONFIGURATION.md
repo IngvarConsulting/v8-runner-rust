@@ -735,7 +735,7 @@ infobases:
 
 #### Управляемый стенд
 
-`dbms.managed: {}` поручает PostgreSQL раннеру (команды `dbms`, только Windows); рядом с ним остаются
+`dbms.managed: {}` поручает PostgreSQL раннеру (команды `dbms`, Windows и Linux); рядом с ним остаются
 `dbms.name` и `dbms.locale`, а `kind`, `server`, `user`, `password` — отказ с именем ключа. Ключ
 принимается только рядом с `cluster.managed` или `standalone.managed`. `tools.postgres.path` — каталог
 сборки PostgreSQL для 1С или его `bin`. Раннер её не скачивает: без ключа или без `pg_ctl` в каталоге
@@ -743,7 +743,7 @@ infobases:
 
 `standalone.managed: { name, db-path }` поручает `ibsrv` раннеру (команды `standalone`, только Windows): `db-path` — файловая
 база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. Вместо `db-path` можно объявить секцию `dbms`: управляемую
-или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` поручает кластер раннеру (команды `cluster`, только Windows; `name` — имя базы в кластере, `Ref=`, по умолчанию — имя базы в `infobases`, так же у `standalone.managed`): `connection` рядом — отказ,
+или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` поручает кластер раннеру (команды `cluster`, Windows и Linux; `name` — имя базы в кластере, `Ref=`, по умолчанию — имя базы в `infobases`, так же у `standalone.managed`): `connection` рядом — отказ,
 адрес раннер выводит из своей записи. База кластера живёт в СУБД — `dbms.managed` или ваша секция `dbms`; без `dbms`
 кластер поднимается, но `infobase create` отказывает.
 
@@ -1509,3 +1509,12 @@ Linux под root и Windows (8.3.27, 8.5.1):
 - подсвечивается JSON Schema как unsupported key;
 - runtime loader отклоняет unsupported keys на YAML boundary;
 - рабочий каталог EDT session сейчас фиксирован: `workPath/edt-workspace`.
+
+### Apache управляемого кластера
+
+В местном слое у базы с `cluster.managed` задайте `web: { managed: true, wsdir: demo }`.
+`wsdir` — один сегмент из ASCII-букв, цифр, дефиса и подчёркивания. В этом режиме
+`server`, `dir`, `conf`, `url` и `os-auth` не задаются. Раннер берёт Apache 2.4 из
+`tools.apache.path` (исполняемый файл, каталог установки или `bin`) или ищет среди
+установленных. Путь отсчитывается от файла проекта. Apache и PostgreSQL заранее установите
+на машину. На Linux для `initdb` нужна локаль `ru_RU.utf8`.

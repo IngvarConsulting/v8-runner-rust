@@ -76,7 +76,14 @@ impl PostgresBuild {
                 SUPERUSER.to_owned(),
                 "-E".to_owned(),
                 "UTF8".to_owned(),
-                format!("--locale={WINDOWS_LOCALE}"),
+                format!(
+                    "--locale={}",
+                    if cfg!(target_os = "linux") {
+                        "ru_RU.utf8"
+                    } else {
+                        WINDOWS_LOCALE
+                    }
+                ),
                 "-A".to_owned(),
                 "scram-sha-256".to_owned(),
                 format!("--pwfile={}", password_file.display()),
@@ -98,7 +105,11 @@ impl PostgresBuild {
                 "-l".to_owned(),
                 log.display().to_string(),
                 "-o".to_owned(),
-                format!("-p {port} -c listen_addresses=127.0.0.1"),
+                if cfg!(target_os = "linux") {
+                    format!("-p {port} -c listen_addresses=127.0.0.1 -c unix_socket_directories=")
+                } else {
+                    format!("-p {port} -c listen_addresses=127.0.0.1")
+                },
             ],
             // Иначе служба держала бы каталог, из которого её запустили.
             workdir: data.parent().map(Path::to_path_buf),
@@ -222,7 +233,26 @@ pub fn refused_as_in_use(stderr: &str) -> bool {
 }
 
 /// Строка файла `passfile` для этого порта.
-pub fn passfile_line(port: u16, password: &str) -> String {
+pub fn write_passfile(path: &Path, port: u16, password: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let created = crate::support::fs::create_file_once(path, |file| {
+        file.write_all(passfile_line(port, password).as_bytes())
+    })?;
+    if !created {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "PostgreSQL passfile appeared concurrently",
+        ));
+    }
+    Ok(())
+}
+
+fn passfile_line(port: u16, password: &str) -> String {
     format!("127.0.0.1:{port}:*:{SUPERUSER}:{password}")
 }
 
@@ -286,8 +316,28 @@ mod tests {
         );
         assert!(start
             .args
-            .contains(&"-p 24432 -c listen_addresses=127.0.0.1".to_owned()));
+            .iter()
+            .any(|arg| arg.starts_with("-p 24432 -c listen_addresses=127.0.0.1")));
         assert_eq!(start.workdir.as_deref(), Some(Path::new("root")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passfile_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("passfile");
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_passfile(&path, 24432, "test-password").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "127.0.0.1:24432:*:postgres:test-password"
+        );
     }
 
     #[test]
@@ -346,6 +396,11 @@ mod tests {
         let request = build.initdb(Path::new("data"), Path::new("password"));
         assert!(request.args.contains(&"--pwfile=password".to_owned()));
         assert!(request.args.contains(&"scram-sha-256".to_owned()));
-        assert!(request.args.contains(&"--locale=Russian_Russia".to_owned()));
+        let locale = if cfg!(target_os = "linux") {
+            "--locale=ru_RU.utf8"
+        } else {
+            "--locale=Russian_Russia"
+        };
+        assert!(request.args.iter().any(|arg| arg == locale));
     }
 }

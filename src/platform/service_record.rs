@@ -24,12 +24,19 @@ pub enum StandService {
     Standalone,
     Cluster,
     Ras,
+    Web,
 }
 
 impl StandService {
     /// Все службы стенда: их обходят тесты.
     #[cfg(test)]
-    pub const ALL: [Self; 4] = [Self::Postgres, Self::Standalone, Self::Cluster, Self::Ras];
+    pub const ALL: [Self; 5] = [
+        Self::Postgres,
+        Self::Standalone,
+        Self::Cluster,
+        Self::Ras,
+        Self::Web,
+    ];
 
     /// Имя каталога службы, её журнала и слово, которым её называет ответ.
     pub const fn name(self) -> &'static str {
@@ -38,6 +45,7 @@ impl StandService {
             Self::Standalone => "standalone",
             Self::Cluster => "cluster",
             Self::Ras => "ras",
+            Self::Web => "web",
         }
     }
 }
@@ -340,7 +348,7 @@ pub struct PreviousRegistry {
 /// Работающий свой кластер объявленной базы. Посреди переноса реестра его нет.
 pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> {
     let paths = ServicePaths::new(local, infobase, StandService::Cluster);
-    let machine = machine_fingerprint();
+    let machine = stand_machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
     });
@@ -353,7 +361,11 @@ pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> 
 /// Работает ли своя служба PostgreSQL этой базы.
 pub fn running_postgres(local: &LocalDir, infobase: &str) -> bool {
     let paths = ServicePaths::new(local, infobase, StandService::Postgres);
-    record_names_own_process(&paths, machine_fingerprint().as_deref(), &process_facts)
+    record_names_own_process(
+        &paths,
+        stand_machine_fingerprint().as_deref(),
+        &process_facts,
+    )
 }
 
 /// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
@@ -369,9 +381,25 @@ pub fn record_names_own_process(
         .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
-/// Хеш `machine_id`; `None`, если система идентификатора не дала.
+/// Preserve the identity already written by the live agent keeper.
 pub fn machine_fingerprint() -> Option<String> {
     Some(machine_hash(&machine_id()?))
+}
+
+/// Linux stand process ticks are relative to the current boot.
+pub fn stand_machine_fingerprint() -> Option<String> {
+    let machine = machine_id()?;
+    #[cfg(target_os = "linux")]
+    {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let boot = boot.trim();
+        if boot.is_empty() {
+            return None;
+        }
+        Some(machine_hash(&format!("{machine}:{boot}")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Some(machine_hash(&machine))
 }
 
 /// Сервер, который поднял раннер этой копии, как его видят остальные команды.
@@ -408,6 +436,9 @@ pub fn observe_service(
         return Observed::Stale;
     }
     if record.state == RecordState::Starting {
+        if paths.local.is_some() && record.machine.as_deref() != machine {
+            return Observed::Stale;
+        }
         let starter_alive = record
             .starter
             .is_some_and(|(pid, started)| facts(pid).is_some_and(|facts| facts.started == started));
@@ -442,7 +473,7 @@ pub fn adopt_recorded_pid(
 /// Работающий свой сервер объявленной базы. Адрес такой цели не объявлен, его знает только запись.
 pub fn running_standalone(local: &LocalDir, infobase: &str) -> Option<RunningServer> {
     let paths = ServicePaths::new(local, infobase, StandService::Standalone);
-    let machine = machine_fingerprint();
+    let machine = stand_machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
     });

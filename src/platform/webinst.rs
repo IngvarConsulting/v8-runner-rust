@@ -110,6 +110,7 @@ mod tests {
     #[test]
     fn a_publication_names_the_server_directories_and_connection() {
         let web = InfobaseWebConfig {
+            managed: false,
             server: Some(WebServerKind::Apache24),
             wsdir: Some("demo".to_owned()),
             dir: Some(PathBuf::from("/var/www/demo")),
@@ -144,6 +145,7 @@ mod tests {
     #[test]
     fn a_deletion_carries_no_connection_and_no_os_auth() {
         let web = InfobaseWebConfig {
+            managed: false,
             server: Some(WebServerKind::Iis),
             wsdir: Some("demo".to_owned()),
             dir: Some(PathBuf::from("C:/inetpub/demo")),

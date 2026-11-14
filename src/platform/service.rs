@@ -123,6 +123,18 @@ pub struct ProcessRow {
 /// не запустился или не ответил вовремя): это не «процессов нет», и разрушительные шаги по нему не
 /// идут.
 pub fn processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_processes(images)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        windows_processes(images)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn windows_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
     if !cfg!(windows) || images.is_empty() {
         return Some(Vec::new());
     }
@@ -169,7 +181,49 @@ pub fn processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
         .then(|| process_rows(&String::from_utf8_lossy(&output.stdout)))
 }
 
+#[cfg(target_os = "linux")]
+fn proc_pids() -> std::io::Result<impl Iterator<Item = u32>> {
+    Ok(std::fs::read_dir("/proc")?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok()))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
+    use crate::support::machine::proc_stat_field;
+
+    let mut rows = Vec::new();
+    for pid in proc_pids().ok()? {
+        let path = PathBuf::from(format!("/proc/{pid}"));
+        let Ok(name) = std::fs::read_to_string(path.join("comm")) else {
+            continue;
+        };
+        if !images.contains(&name.trim_end()) {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
+            continue;
+        };
+        if matches!(proc_stat_field(&stat, 3), Some("Z" | "X")) {
+            continue;
+        }
+        let parent = proc_stat_field(&stat, 4)?.parse().ok()?;
+        let command = match std::fs::read(path.join("cmdline")) {
+            Ok(command) => command,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        rows.push(ProcessRow {
+            pid,
+            parent,
+            command: String::from_utf8_lossy(&command).into_owned(),
+        });
+    }
+    Some(rows)
+}
+
 /// Разбор строк `pid родитель командная строка`.
+#[cfg(any(test, not(target_os = "linux")))]
 fn process_rows(listing: &str) -> Vec<ProcessRow> {
     listing
         .lines()
@@ -184,11 +238,50 @@ fn process_rows(listing: &str) -> Vec<ProcessRow> {
         .collect()
 }
 
+/// Find a process using the same Apache configuration, including absolute aliases.
+pub fn process_using_config(rows: &[ProcessRow], config: &Path) -> Option<u32> {
+    let wanted = crate::support::path::compared_path(config);
+    rows.iter().find_map(|row| {
+        let tokens = if row.command.contains('\0') {
+            row.command
+                .split_terminator('\0')
+                .map(str::to_owned)
+                .collect()
+        } else {
+            command_tokens(&row.command)
+        };
+        let arg = tokens
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-f").then_some(&pair[1]))?;
+        let path = PathBuf::from(arg);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                let cwd = std::fs::read_link(format!("/proc/{}/cwd", row.pid)).ok()?;
+                crate::support::path::resolve_from(&cwd, &path)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return None;
+            }
+        };
+        (crate::support::path::compared_path(&path) == wanted).then_some(row.pid)
+    })
+}
+
 /// Первый процесс, в чьей командной строке есть все эти ключи.
 pub fn first_with_keys(rows: &[ProcessRow], keys: &[String]) -> Option<u32> {
     let keys: Vec<String> = keys.iter().map(|key| key.to_lowercase()).collect();
     rows.iter().find_map(|row| {
-        let tokens = spelled_keys(command_tokens(&row.command.to_lowercase()));
+        let command = row.command.to_lowercase();
+        let tokens = if command.contains('\0') {
+            command.split_terminator('\0').map(str::to_owned).collect()
+        } else {
+            command_tokens(&command)
+        };
+        let tokens = spelled_keys(tokens);
         keys.iter()
             .all(|key| tokens.contains(key))
             .then_some(row.pid)
@@ -1074,8 +1167,51 @@ mod imp {
         None
     }
 
-    /// Владельца порта на Unix раннер не ищет: управляемые службы стенда работают только на
-    /// Windows.
+    /// /proc lists socket inodes before file descriptors. Apache may share a listener
+    /// with workers, so prefer the oldest process holding that exact inode.
+    #[cfg(target_os = "linux")]
+    pub fn listening_pid(port: u16) -> Option<u32> {
+        use std::collections::HashSet;
+
+        let listeners: HashSet<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+            .into_iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .flat_map(|table| {
+                table
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| {
+                        let columns: Vec<_> = line.split_whitespace().take(10).collect();
+                        // The kernel supplies a fixed-width hex port (tcp and tcp6).
+                        let address = columns.get(1)?;
+                        let hex_port = address.get(address.len().checked_sub(4)?..)?;
+                        (columns.get(3) == Some(&"0A")
+                            && u16::from_str_radix(hex_port, 16).ok() == Some(port))
+                        .then(|| format!("socket:[{}]", columns[9]))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if listeners.is_empty() {
+            return None;
+        }
+        super::proc_pids()
+            .ok()?
+            .filter_map(|pid| {
+                let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+                let owns_socket = descriptors
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                    .any(|target| listeners.contains(target.to_string_lossy().as_ref()));
+                owns_socket
+                    .then(|| process_facts(pid).map(|facts| (facts.started, pid)))
+                    .flatten()
+            })
+            .min()
+            .map(|(_, pid)| pid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub fn listening_pid(_port: u16) -> Option<u32> {
         None
     }
@@ -1157,6 +1293,14 @@ mod imp {
             assert_eq!(group, pid);
         }
 
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_linux_listener_is_identified_by_its_socket() {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert_eq!(listening_pid(port), Some(std::process::id()));
+        }
+
         #[test]
         fn a_missing_program_is_refused_at_the_start() {
             let dir = tempfile::tempdir().unwrap();
@@ -1227,4 +1371,66 @@ mod imp {
     pub fn listening_pid(_port: u16) -> Option<u32> {
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn signal_owned_process(
+    pid: u32,
+    started: Option<u64>,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let pid = libc::pid_t::try_from(pid).map_err(std::io::Error::other)?;
+    // SAFETY: pidfd_open takes a PID and flags, and returns a new file descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful syscall returned an owned descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+    if process_facts(pid as u32).is_none_or(|facts| Some(facts.started) != started) {
+        return Err(std::io::Error::other("process identity changed"));
+    }
+    // SAFETY: fd is an open pidfd, and a null signal-info pointer requests the default signal data.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_session(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    crate::support::machine::proc_stat_field(&stat, 6)?
+        .parse()
+        .ok()
+}
+
+/// Keep the Windows process object alive until the taskkill operation finishes.
+#[cfg(windows)]
+pub fn with_process_identity(pid: u32, started: Option<u64>, action: impl FnOnce()) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: OpenProcess returns an owned handle when it succeeds.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: handle is non-null and was allocated by OpenProcess above.
+    let guard = unsafe { OwnedHandle::from_raw_handle(handle) };
+    if process_facts(pid).is_some_and(|facts| Some(facts.started) == started) {
+        action();
+    }
+    drop(guard);
 }

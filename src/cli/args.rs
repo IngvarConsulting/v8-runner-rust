@@ -89,6 +89,8 @@ pub enum Command {
     Standalone(StandaloneArgs),
     /// Start and stop the cluster (ragent and ras) of an infobase declared with cluster.managed
     Cluster(ClusterArgs),
+    /// Manage the private Apache of a declared cluster
+    Web(WebArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -303,6 +305,12 @@ pub struct BootstrapArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct WebArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommandArgs,
+}
+
+#[derive(Debug, Args)]
 pub struct DbmsArgs {
     #[command(subcommand)]
     pub command: ServiceCommandArgs,

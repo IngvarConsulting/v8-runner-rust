@@ -726,6 +726,9 @@ enum WebServerKindSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseWebSchema {
+    /// Publish to the local Apache of a managed cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<bool>,
     /// Web server to publish on with `v8-runner publish`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     server: Option<WebServerKindSchema>,
@@ -922,6 +925,8 @@ struct ToolsSchema {
     )]
     #[schemars(with = "PostgresToolSchema")]
     postgres: Option<PostgresToolSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    apache: Option<ApacheToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -985,6 +990,8 @@ struct PartialToolsSchema {
     )]
     #[schemars(with = "PostgresToolSchema")]
     postgres: Option<PostgresToolSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    apache: Option<ApacheToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1233,6 +1240,14 @@ struct ToolExtensionArtifactSchema {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct ApacheToolSchema {
+    /// Apache 2.4 executable, installation root or bin directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PostgresToolSchema {
     /// Directory of the build, or its `bin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

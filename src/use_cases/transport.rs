@@ -138,6 +138,9 @@ pub(crate) struct CommandLocks {
 
 /// Меняет ли команда стенд под `localPath` (`INV.CLI.THE-LOCAL-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
 fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
+    if command == CommandName::Publish {
+        return config.infobase.web.as_ref().is_some_and(|web| web.managed);
+    }
     match command.stand_change() {
         StandChange::Always => true,
         StandChange::Never => false,

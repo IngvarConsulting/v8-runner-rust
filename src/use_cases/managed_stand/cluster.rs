@@ -33,9 +33,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SOFT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(200);
+#[cfg(not(target_os = "linux"))]
 const AGENT_IMAGE: &str = "ragent.exe";
+#[cfg(target_os = "linux")]
+const AGENT_IMAGE: &str = "ragent";
 /// Процессы агента, которые переживают его конец (замер #534).
+#[cfg(not(target_os = "linux"))]
 const REMNANT_IMAGES: [&str; 2] = ["rmngr.exe", "rphost.exe"];
+#[cfg(target_os = "linux")]
+const REMNANT_IMAGES: [&str; 2] = ["rmngr", "rphost"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
 
@@ -108,12 +114,13 @@ fn sibling(ragent: &Path, name: &str) -> PathBuf {
 
 /// Версия платформы — имя каталога установки над `bin`.
 fn platform_version(ragent: &Path) -> Option<String> {
-    ragent
-        .parent()?
-        .parent()?
-        .file_name()?
-        .to_str()
-        .map(str::to_owned)
+    let bin = ragent.parent()?;
+    let release = if bin.ends_with("bin") {
+        bin.parent()?
+    } else {
+        bin
+    };
+    release.file_name()?.to_str().map(str::to_owned)
 }
 
 struct Cluster<'a> {
@@ -265,6 +272,22 @@ impl Cluster<'_> {
             None => None,
         };
         let rows = self.host.processes(&REMNANT_IMAGES)?;
+        // Linux reparents orphans. The session created by spawn_service survives while
+        // one of its members lives. PID reuse cannot substitute a new session member.
+        if cfg!(target_os = "linux") && reused.is_none() {
+            let inherited = rows.iter().filter_map(|row| {
+                let facts = self.host.facts(row.pid)?;
+                (self.host.process_session(row.pid) == Some(agent)
+                    && facts.started >= since
+                    && REMNANT_IMAGES.contains(&facts.image.as_str()))
+                .then_some((row.pid, facts.started))
+            });
+            let inherited: Vec<_> = inherited.collect();
+            if !inherited.is_empty() {
+                return Some(inherited);
+            }
+        }
+
         // Потомки агента: после его конца `rmngr` поднимает новые `rphost`, и их родитель — уже
         // остаток, а не агент (живой прогон #538).
         let mut found = Vec::new();
@@ -309,7 +332,8 @@ impl Cluster<'_> {
             platform("the process list did not answer, so the remnants of the fallen ragent cannot be told apart; repeat the command")
         })?;
         let (cleared, left): (Vec<_>, Vec<_>) = remnants.into_iter().partition(|(pid, started)| {
-            self.host.hard_stop(self.runner, *pid, self.context);
+            self.host
+                .hard_stop(self.runner, *pid, Some(*started), self.context);
             await_gone(
                 self.host,
                 *pid,
@@ -332,12 +356,14 @@ impl Cluster<'_> {
         let Some(pid) = record.pid else {
             return true;
         };
-        self.host.soft_stop(self.runner, pid, self.context);
+        self.host
+            .soft_stop(self.runner, pid, record.started, self.context);
         let patience = self.host.patience(SOFT_STOP_TIMEOUT);
         if await_gone(self.host, pid, record.started, patience) {
             return true;
         }
-        self.host.hard_stop(self.runner, pid, self.context);
+        self.host
+            .hard_stop(self.runner, pid, record.started, self.context);
         await_gone(self.host, pid, record.started, patience)
     }
 
@@ -490,6 +516,8 @@ impl Cluster<'_> {
     }
 
     fn stop(&self, dry_run: bool) -> Result<ClusterResult, UseCaseError> {
+        super::web::Web::new(self.config, self.context, self.runner, self.host)?
+            .stop(true, dry_run)?;
         let mut result = self.stop_cluster(dry_run)?;
         // Кластер гаснет первым: СУБД нужна ему до конца. Пока над ней работает свой автономный
         // сервер этой базы, она нужна ему.
@@ -577,9 +605,9 @@ impl Cluster<'_> {
         if dry_run {
             return Ok(self.plan());
         }
-        if !self.host.supported() {
+        if !self.host.supported() || !self.host.can_start_as_current_user() {
             return Err(environment(
-                "managed services run on Windows only: on this system the runner starts no cluster",
+                "managed clusters run on Windows or as an unprivileged user on Linux",
             ));
         }
         let Some(machine) = self.host.machine() else {
@@ -629,6 +657,10 @@ impl Cluster<'_> {
                     ServiceAction::AlreadyRunning,
                 );
                 result.ready = self.probe(&record.bin, ras.port).is_some();
+                if super::web::declared(self.config) {
+                    super::web::Web::new(self.config, self.context, self.runner, self.host)?
+                        .start(false, false)?;
+                }
                 return Ok(self.describe(result, Some(&record)));
             }
             Observed::Starting(_) => {
@@ -683,6 +715,20 @@ impl Cluster<'_> {
             ),
             (pins, _) => self.start_on_pins(&machine, stand.as_ref(), pins),
         };
+        let outcome = outcome.and_then(|result| {
+            if super::web::declared(self.config) {
+                let web = super::web::Web::new(self.config, self.context, self.runner, self.host)?;
+                if let Err(error) = web.start(false, false) {
+                    return match self.stop_cluster(false) {
+                        Ok(_) => Err(error),
+                        Err(stop) => {
+                            Err(error.followed_by(format!("cluster cleanup failed: {stop}")))
+                        }
+                    };
+                }
+            }
+            Ok(result)
+        });
         match outcome {
             Ok(mut result) => {
                 result.stale_record |= stale;
@@ -1668,6 +1714,7 @@ mod tests {
     const RMNGR_PID: u32 = 7004;
     const RPHOST_PID: u32 = 7005;
     const PG_PID: u32 = 7002;
+    const WEB_PID: u32 = 7006;
     const STARTED: u64 = 11;
     const MACHINE: &str = "machine";
     const CLUSTER_ID: &str = "6c5a8a62-3a8c-4e4b-b0a6-2f4c4b1f1d10";
@@ -1727,6 +1774,7 @@ mod tests {
                         known.remove(&quoted(&sql)[0]);
                     }
                 }
+                "httpd" => {}
                 "initdb" => {
                     let data = PathBuf::from(&request.args[1]);
                     std::fs::create_dir_all(&data).unwrap();
@@ -1895,20 +1943,39 @@ mod tests {
                     if !self.agent_exits_at_once.get() {
                         self.live(AGENT_PID, "ragent.exe");
                         let port = |key: &str| -> u16 {
-                            let at = request.args.iter().position(|arg| arg == key).unwrap();
+                            let at = request
+                                .args
+                                .iter()
+                                .position(|arg| arg.trim_start_matches(['/', '-']) == key)
+                                .unwrap();
                             request.args[at + 1].parse().unwrap()
                         };
-                        self.listeners.borrow_mut().insert(port("/port"), AGENT_PID);
+                        self.listeners.borrow_mut().insert(port("port"), AGENT_PID);
                         // `rmngr` и `rphost` — дети агента; `rmngr` держит `regport`.
-                        self.live(RMNGR_PID, "rmngr.exe");
-                        self.live(RPHOST_PID, "rphost.exe");
+                        self.live(RMNGR_PID, REMNANT_IMAGES[0]);
+                        self.live(RPHOST_PID, REMNANT_IMAGES[1]);
                         self.parents.borrow_mut().insert(RMNGR_PID, AGENT_PID);
                         self.parents.borrow_mut().insert(RPHOST_PID, AGENT_PID);
                         self.listeners
                             .borrow_mut()
-                            .insert(port("/regport"), RMNGR_PID);
+                            .insert(port("regport"), RMNGR_PID);
                     }
                     Ok(AGENT_PID)
+                }
+                "httpd" => {
+                    let conf = std::fs::read_to_string(request.args.last().unwrap()).unwrap();
+                    let port = conf
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Listen 127.0.0.1:"))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    self.live(
+                        WEB_PID,
+                        &crate::platform::service::image_name(&request.program),
+                    );
+                    self.listeners.borrow_mut().insert(port, WEB_PID);
+                    Ok(WEB_PID)
                 }
                 "ras" => {
                     self.live(RAS_PID, "ras.exe");
@@ -1929,7 +1996,13 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
-        fn soft_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn soft_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.kill(pid);
             // Мягкий конец агента уносит его процессы (замер #534).
             if pid == AGENT_PID {
@@ -1937,7 +2010,13 @@ mod tests {
                 self.kill(RPHOST_PID);
             }
         }
-        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn hard_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.hard_stops.borrow_mut().insert(pid);
             self.kill(pid);
         }
@@ -2068,7 +2147,13 @@ mod tests {
             new_regport: bool,
             host: &Host,
         ) -> Result<ClusterResult, UseCaseError> {
-            let locate = || Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"));
+            let locate = || {
+                if super::super::web::declared(&self.config) {
+                    Ok(self.config.base_path.join("ragent.exe"))
+                } else {
+                    Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"))
+                }
+            };
             let command = match command {
                 ServiceCommand::Start => ClusterCommand::Start { new_regport },
                 ServiceCommand::Status => ClusterCommand::Status,
@@ -2194,6 +2279,44 @@ mod tests {
         let second = setup.run(ServiceCommand::Start, &host).unwrap();
         assert_eq!(first.connection, second.connection);
         assert_eq!(first.registry_dir, second.registry_dir);
+    }
+
+    #[test]
+    fn cluster_stops_only_the_apache_it_started_as_a_step() {
+        let mut stand = setup();
+        let base = &stand.config.base_path;
+        let apache = base.join(if cfg!(windows) { "httpd.exe" } else { "httpd" });
+        std::fs::write(&apache, "").unwrap();
+        std::fs::write(
+            base.join(if cfg!(windows) {
+                "wsap24.dll"
+            } else {
+                "wsap24.so"
+            }),
+            "",
+        )
+        .unwrap();
+        stand.config.tools.apache.path = Some(apache);
+        stand.config.infobase.web = Some(crate::config::model::InfobaseWebConfig {
+            managed: true,
+            wsdir: Some("demo".to_owned()),
+            ..Default::default()
+        });
+        let host = Host::default();
+        stand.run(ServiceCommand::Start, &host).unwrap();
+        assert!(host.alive(WEB_PID));
+        stand.run(ServiceCommand::Stop, &host).unwrap();
+        assert!(!host.alive(WEB_PID));
+
+        stand.run(ServiceCommand::Start, &host).unwrap();
+        let context = ExecutionContext::cli(CommandName::WebStart);
+        let runner = Runner { host: &host };
+        let web = super::super::web::Web::new(&stand.config, &context, &runner, &host).unwrap();
+        assert_eq!(web.start(true, false).unwrap().explicit, Some(true));
+        stand.run(ServiceCommand::Stop, &host).unwrap();
+        assert!(host.alive(WEB_PID));
+        web.stop(false, false).unwrap();
+        assert!(!host.alive(WEB_PID));
     }
 
     #[test]
@@ -2323,7 +2446,7 @@ mod tests {
         setup.run(ServiceCommand::Start, &host).unwrap();
         host.kill(AGENT_PID);
         // `rmngr` поднял новый `rphost`, и тот держит порт диапазона.
-        host.live(7006, "rphost.exe");
+        host.live(7006, REMNANT_IMAGES[1]);
         host.parents.borrow_mut().insert(7006, RMNGR_PID);
         let range = setup.pins().ports.range_start;
         host.listeners.borrow_mut().insert(range, 7006);
@@ -2405,7 +2528,7 @@ mod tests {
         host.kill(AGENT_PID);
         // Система отдала pid мёртвого агента новому `ragent` другой копии; у того свой `rmngr`.
         host.live_since(AGENT_PID, "ragent.exe", STARTED + 100);
-        host.live_since(7020, "rmngr.exe", STARTED + 200);
+        host.live_since(7020, REMNANT_IMAGES[0], STARTED + 200);
         host.parents.borrow_mut().insert(7020, AGENT_PID);
         let status = setup.run(ServiceCommand::Status, &host).unwrap();
         let mut remnants = status.remnant_pids.clone();

@@ -5,7 +5,6 @@
 //! Только своя БД (`dbms.managed`): чужую СУБД раннер не трогает
 //! (`INV.USE-CASES.A-MANAGED-RECREATE-DROPS-ONLY-ITS-OWN-DATABASE`).
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use super::cluster::{register_again, registration_for_recreate, Registered};
@@ -347,10 +346,8 @@ impl OldDatabase {
         let stand = Stand::new(config, context, runner, host).map_err(Refused::Other)?;
         let passfile = stand.paths.passfile();
         let password = stand.password().map_err(Refused::Other)?;
-        crate::support::fs::write_file_atomically(&passfile, |file| {
-            file.write_all(postgres::passfile_line(self.port, &password).as_bytes())
-        })
-        .map_err(|error| Refused::Other(io_failure("cannot write", &passfile, &error)))?;
+        postgres::write_passfile(&passfile, self.port, &password)
+            .map_err(|error| Refused::Other(io_failure("cannot write", &passfile, &error)))?;
         let answer = runner.run_with_policy(
             &PostgresBuild::at(self.bin.clone()).statement(self.port, &passfile, sql),
             &policy(context),

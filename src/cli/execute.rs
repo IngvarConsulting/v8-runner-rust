@@ -278,6 +278,15 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Web(args) => execute_web(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Status(args) => execute_status(
             config,
             args,
@@ -817,6 +826,12 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Status => CommandName::DbmsStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
+        },
+        Command::Web(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::WebStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::WebStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::WebStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::WebRestart,
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
@@ -1576,6 +1591,71 @@ fn execute_dbms(
     };
     if command == ServiceCommand::Status {
         return present(dbms_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn execute_web(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{execute_web as run, web_status, ServiceCommand};
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::WebStart, ServiceCommand::Start),
+        Action::Status => (CommandName::WebStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::WebStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::WebRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::use_cases::managed_stand::WebResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                presenter.print_bare(&format!(
+                    "{}: {:?} {}",
+                    name.as_str(),
+                    result.state,
+                    result.address.as_deref().unwrap_or_default()
+                ));
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(web_status(&context, config));
     }
     with_cli_workspace_lock(
         config,

@@ -178,7 +178,7 @@ source-set:
     assert!(!text.contains("cluster start"), "{text}");
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn other_systems_refuse_start_as_the_environment() {
     let dir = temp_workspace();
@@ -191,4 +191,24 @@ fn other_systems_refuse_start_as_the_environment() {
     );
     // Вне пути агента и утилит слой не определён: поля нет.
     assert!(answer["error"].get("layer").is_none(), "{answer}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_start_reaches_postgres_build_discovery() {
+    let dir = temp_workspace();
+    let local = format!("{MANAGED}tools:\n  postgres:\n    path: missing-pg\n");
+    project(dir.path(), &local);
+    let (code, answer) = run(dir.path(), &["dbms", "start"]);
+    assert_ne!(code, 0, "{answer}");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("missing-pg")),
+        "{answer}"
+    );
+    assert!(!dir
+        .path()
+        .join(".local/infobases/origin/managed/postgres")
+        .exists());
 }
