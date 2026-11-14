@@ -1,5 +1,7 @@
 mod support;
 
+use std::env::consts::EXE_SUFFIX;
+
 /// Перечень прежних имён — тот же файл, что держит разбор: в тесте он не повторяется.
 #[path = "../src/cli/synonyms.rs"]
 mod synonyms;
@@ -216,10 +218,8 @@ fn push_help_exposes_source_set_selector() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Command options:"));
     // Набор называет позиционный аргумент; прежний ключ принимается, но в справке его нет.
-    assert!(
-        stdout.contains("Usage: v8-runner push [OPTIONS] [SET]"),
-        "{stdout}"
-    );
+    let usage = format!("Usage: v8-runner{EXE_SUFFIX} push [OPTIONS] [SET]");
+    assert!(stdout.lines().any(|line| line == usage), "{stdout}");
     assert!(!stdout.contains("--source-set"), "{stdout}");
     assert!(stdout.contains("--full"));
     assert!(stdout.contains("--json-message"));
@@ -376,10 +376,8 @@ fn convert_help_uses_output_target_root_name() {
     assert!(stdout.contains("Command options:"));
     assert!(stdout.contains("Global options:"));
     assert!(stdout.contains("--output <OUTPUT>"));
-    assert!(
-        stdout.contains("Usage: v8-runner convert [OPTIONS] [SET|FILE]"),
-        "{stdout}"
-    );
+    let usage = format!("Usage: v8-runner{EXE_SUFFIX} convert [OPTIONS] [SET|FILE]");
+    assert!(stdout.lines().any(|line| line == usage), "{stdout}");
     assert!(!stdout.contains("--source-set"), "{stdout}");
     assert!(stdout.contains("--json-message"));
 }
@@ -442,7 +440,10 @@ fn upload_help_shows_the_package_file_as_required_positional() {
 /// в справке не печатается.
 #[test]
 fn pull_and_make_help_name_the_source_set_positionally() {
-    for command in ["pull", "make"] {
+    for (command, arguments) in [
+        ("pull", "[OPTIONS] [SET]"),
+        ("make", "[OPTIONS] --output <OUTPUT> [SET]"),
+    ] {
         let output = v8_runner_command()
             .args([command, "--help"])
             .output()
@@ -450,11 +451,8 @@ fn pull_and_make_help_name_the_source_set_positionally() {
 
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains(&format!("Usage: v8-runner {command} [OPTIONS]")),
-            "{stdout}"
-        );
-        assert!(stdout.contains("[SET]"), "{stdout}");
+        let usage = format!("Usage: v8-runner{EXE_SUFFIX} {command} {arguments}");
+        assert!(stdout.lines().any(|line| line == usage), "{stdout}");
         assert!(!stdout.contains("--source-set"), "{stdout}");
     }
 }
