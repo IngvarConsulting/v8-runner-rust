@@ -553,6 +553,13 @@ impl<'a> Web<'a> {
     }
 }
 
+pub fn web_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<WebResult> {
+    refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
+    let web = Web::new(config, context, &ProcessExecutor, &RealHost)
+        .map_err(UseCaseFailure::without_payload)?;
+    Ok(web.result(ServiceAction::Reported))
+}
+
 pub fn execute_web(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -563,7 +570,7 @@ pub fn execute_web(
     let web = Web::new(config, context, &ProcessExecutor, &RealHost)
         .map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
-        ServiceCommand::Status => Ok(web.result(ServiceAction::Reported)),
+        ServiceCommand::Status => unreachable!("web status is a read-only entry point"),
         ServiceCommand::Start => web.start(true, dry_run),
         ServiceCommand::Stop => web.stop(false, dry_run),
         ServiceCommand::Restart if dry_run => web.start(true, true),

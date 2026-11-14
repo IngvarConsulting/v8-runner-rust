@@ -6,7 +6,7 @@ mod recreate;
 mod standalone;
 mod web;
 pub(crate) use web::publication;
-pub use web::{execute_web, WebResult};
+pub use web::{execute_web, web_status, WebResult};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;

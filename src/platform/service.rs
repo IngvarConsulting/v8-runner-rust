@@ -259,9 +259,8 @@ pub fn process_using_config(rows: &[ProcessRow], config: &Path) -> Option<u32> {
         } else {
             #[cfg(target_os = "linux")]
             {
-                std::fs::read_link(format!("/proc/{}/cwd", row.pid))
-                    .ok()?
-                    .join(path)
+                let cwd = std::fs::read_link(format!("/proc/{}/cwd", row.pid)).ok()?;
+                crate::support::path::resolve_from(&cwd, &path)
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -1183,7 +1182,9 @@ mod imp {
                     .skip(1)
                     .filter_map(|line| {
                         let columns: Vec<_> = line.split_whitespace().take(10).collect();
-                        let (_, hex_port) = columns.get(1)?.rsplit_once(':')?;
+                        // The kernel supplies a fixed-width hex port (tcp and tcp6).
+                        let address = columns.get(1)?;
+                        let hex_port = address.get(address.len().checked_sub(4)?..)?;
                         (columns.get(3) == Some(&"0A")
                             && u16::from_str_radix(hex_port, 16).ok() == Some(port))
                         .then(|| format!("socket:[{}]", columns[9]))

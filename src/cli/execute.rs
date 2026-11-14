@@ -1613,7 +1613,7 @@ fn execute_web(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::ServiceCommandArgs as Action;
-    use crate::use_cases::managed_stand::{execute_web as run, ServiceCommand};
+    use crate::use_cases::managed_stand::{execute_web as run, web_status, ServiceCommand};
 
     let (name, command) = match action {
         Action::Start => (CommandName::WebStart, ServiceCommand::Start),
@@ -1655,7 +1655,7 @@ fn execute_web(
         }
     };
     if command == ServiceCommand::Status {
-        return present(run(&context, config, command, false));
+        return present(web_status(&context, config));
     }
     with_cli_workspace_lock(
         config,
