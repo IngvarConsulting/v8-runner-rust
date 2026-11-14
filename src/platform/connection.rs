@@ -10,6 +10,20 @@ pub struct V8Connection {
 }
 
 impl V8Connection {
+    /// Use a single `/F` argument when the path could be parsed as a connection string.
+    pub(crate) fn for_file(path: &std::path::Path) -> Self {
+        let path = path.display().to_string();
+        if !path.contains([';', '"', '\'']) {
+            return Self::from_connection_string(&format!("File={path}"));
+        }
+        Self {
+            raw: format!("/F {path}"),
+            connection_args: vec!["/F".to_owned(), path],
+            user: None,
+            password: None,
+        }
+    }
+
     /// Build a reusable connection model from a raw connection string.
     pub fn from_connection_string(raw: &str) -> Self {
         let trimmed = raw.trim();
