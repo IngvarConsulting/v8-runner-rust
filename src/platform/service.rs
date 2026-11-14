@@ -134,7 +134,11 @@ pub fn processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
     let query = format!(
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"{filter}\" | ForEach-Object {{ [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId + ' ' + $_.CommandLine }}"
     );
-    let Ok(mut child) = std::process::Command::new("powershell")
+    let mut powershell = std::process::Command::new("powershell");
+    // `CTRL_BREAK` группе раннера не обрывает запрос посреди отмены.
+    #[cfg(windows)]
+    crate::platform::process::outside_the_runner_process_group(&mut powershell);
+    let Ok(mut child) = powershell
         .args(["-NoProfile", "-NonInteractive", "-Command", &query])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

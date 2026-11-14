@@ -1288,10 +1288,7 @@ fn execute_init(
                 Some(source) => match hold_source_base(&source, CommandName::Init) {
                     Ok((lock, notes)) => {
                         for note in &notes {
-                            presenter.note_leading_warnings(
-                                note.phase.as_str(),
-                                std::slice::from_ref(&note.message),
-                            );
+                            presenter.note_leading_warning(note.phase.as_str(), &note.warning);
                         }
                         Some(lock)
                     }
@@ -3061,10 +3058,7 @@ pub fn preview_prepared_infobase_command(
             match preview_boundary(config, CommandName::InfobaseRestore, BaseAccess::Writes) {
                 Ok(notes) => {
                     for note in &notes {
-                        presenter.note_leading_warnings(
-                            note.phase.as_str(),
-                            std::slice::from_ref(&note.message),
-                        );
+                        presenter.note_leading_warning(note.phase.as_str(), &note.warning);
                     }
                 }
                 Err(refusal) => {
@@ -4086,10 +4080,7 @@ pub(crate) fn with_cli_workspace_lock<T>(
         preview,
         |notes| {
             for note in notes {
-                presenter.note_leading_warnings(
-                    note.phase.as_str(),
-                    std::slice::from_ref(&note.message),
-                );
+                presenter.note_leading_warning(note.phase.as_str(), &note.warning);
             }
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
@@ -4125,10 +4116,7 @@ fn dispatch_under_cli_workspace_lock<T>(
         base,
         |notes| {
             for note in notes {
-                presenter.note_leading_warnings(
-                    note.phase.as_str(),
-                    std::slice::from_ref(&note.message),
-                );
+                presenter.note_leading_warning(note.phase.as_str(), &note.warning);
             }
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
@@ -5118,6 +5106,7 @@ fn build_load_envelope(result: &LoadResult, requested: Requested) -> Envelope<Lo
         command: CommandName::Load.as_str().to_owned(),
         duration_ms: result.duration_ms,
         warnings: Vec::new(),
+        warning_details: Vec::new(),
         steps: Vec::new(),
         error: None,
         data: LoadJsonData::from_result(result, requested),
@@ -5218,6 +5207,7 @@ fn build_artifacts_envelope(result: &ArtifactsResult) -> Envelope<ArtifactsJsonD
         command: CommandName::Artifacts.as_str().to_owned(),
         duration_ms: result.duration_ms,
         warnings: Vec::new(),
+        warning_details: Vec::new(),
         steps: Vec::new(),
         error: None,
         data: ArtifactsJsonData::from_result(result),

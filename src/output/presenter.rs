@@ -1,4 +1,5 @@
 use crate::command_envelope::Envelope;
+use crate::domain::warning::Warning;
 use crate::output::text::{JsonPresenter, TextPresenter, TimelineItem, TimelineStatus};
 use serde::Serialize;
 use std::cell::RefCell;
@@ -15,8 +16,9 @@ pub struct Presenter {
     /// Предупреждения до ответа команды — загрузки конфига, замка базы, — которые
     /// JSON-конверт понесёт вместе с ответом. В тексте они печатаются сразу, своим узлом,
     /// и здесь не копятся. Их отмечает и граница команды, у которой ведущий только по
-    /// ссылке, поэтому список — за `RefCell`.
-    leading_warnings: RefCell<Vec<String>>,
+    /// ссылке, поэтому список — за `RefCell`. Предупреждение с кодом лежит в том же списке:
+    /// `warnings` и `warning_details` конверта собираются из него одним проходом.
+    leading_warnings: RefCell<Vec<Warning>>,
 }
 
 impl Presenter {
@@ -39,18 +41,27 @@ impl Presenter {
     /// `warnings` любого конверта, который будет напечатан после. Пустой список ничего не
     /// печатает и ничего не запоминает.
     pub fn note_leading_warnings(&self, subject: &str, warnings: &[String]) {
+        let warnings: Vec<Warning> = warnings.iter().cloned().map(Warning::Plain).collect();
+        self.note_leading(subject, warnings);
+    }
+
+    /// То же для предупреждения границы команды: у предупреждения с кодом JSON-конверт
+    /// понесёт и его `warning_details`; текст печатается так же, как у прочих.
+    pub fn note_leading_warning(&self, subject: &str, warning: &Warning) {
+        self.note_leading(subject, vec![warning.clone()]);
+    }
+
+    fn note_leading(&self, subject: &str, warnings: Vec<Warning>) {
         if warnings.is_empty() {
             return;
         }
         if self.is_json() {
-            self.leading_warnings
-                .borrow_mut()
-                .extend(warnings.iter().cloned());
+            self.leading_warnings.borrow_mut().extend(warnings);
             return;
         }
         let details = warnings
             .iter()
-            .map(|warning| format!("[warning] {warning}"))
+            .map(|warning| format!("[warning] {}", warning.message()))
             .collect::<Vec<_>>()
             .join("\n");
         let node =
@@ -94,17 +105,17 @@ impl Presenter {
         // Ведущие предупреждения идут после предупреждений команды: команда говорит о
         // своём первой, а `config init` ждёт своё предупреждение первым. Конверт
         // собирается заново с теми же полями, чтобы порядок ключей не менялся.
-        let mut warnings = envelope.warnings.clone();
-        warnings.extend(leading.iter().cloned());
-        let merged = Envelope {
+        let mut merged = Envelope {
             ok: envelope.ok,
             command: envelope.command.clone(),
             duration_ms: envelope.duration_ms,
             data: &envelope.data,
-            warnings,
+            warnings: envelope.warnings.clone(),
+            warning_details: envelope.warning_details.clone(),
             steps: envelope.steps.clone(),
             error: envelope.error.clone(),
         };
+        merged.follow_with(leading.iter());
         self.json.print(&merged);
     }
 }

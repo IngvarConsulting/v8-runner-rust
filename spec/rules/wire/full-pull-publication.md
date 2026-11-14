@@ -1,11 +1,12 @@
 ---
 id: CTR.WIRE.FULL-PULL-PUBLICATION
-version: 3
+version: 4
 artifact: docs/schemas/full-pull-publication.schema.json
 check:
   - src/cli/external_pull.rs::generated_publication_schema_is_current
   - tests/cli_external_full_pull.rs::accepted_external_full_pull_remembers_the_original_source_for_the_next_push
   - tests/cli_external_full_pull.rs::invalid_decisions_after_ready_are_unknown_and_do_not_commit_memory
+  - tests/cli_external_full_pull.rs::the_terminal_frame_carries_the_code_of_a_base_of_another_copy
 ---
 
 # Полная выгрузка согласует внешнюю публикацию по JSONL
@@ -40,6 +41,11 @@ check:
 неверный ответ или отмена до подтверждения дают `unknown` и `unchanged`.
 Подтверждённая публикация сохраняет `published`, в том числе при ошибке записи
 памяти. Состояние памяти называет результат её локального завершения.
+
+**Что изменила версия 4.** Конверт в `result` — `CTR.WIRE.COMMAND-ENVELOPE` версии 6: у него
+необязательное поле `warning_details` с предупреждениями, у которых есть машинный код. На базе
+другой живой рабочей копии итоговый кадр несёт там `infobase_of_another_copy`. Кадры протокола
+не изменились. Отказ конверта знает необязательное поле `layer` у кода `environment_unavailable`.
 
 **Что изменила версия 3.** Перечень значений `mode_reason` тот же, что у
 `CTR.WIRE.PULL-DATA` версии 9: добавилось `platform_rewrote_all`. Внешний полный pull —
