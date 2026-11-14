@@ -1,4 +1,6 @@
-use std::io::{Read, Write};
+use std::ffi::OsString;
+use std::fs;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -7,15 +9,6 @@ fn main() {
     let mut output = None;
     let mut directory_output = None;
     let mut platform_log = None;
-
-    if let Some(calls) = std::env::var_os("V8_RUNNER_FAKE_PLATFORM_CALLS") {
-        let mut calls = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(calls)
-            .expect("open fake platform call log");
-        writeln!(calls, "{arguments:?}").expect("record fake platform call");
-    }
 
     for pair in arguments.windows(2) {
         let option = pair[0].to_string_lossy();
@@ -26,6 +19,30 @@ fn main() {
         } else if option == "/Out" {
             platform_log = Some(pair[1].as_os_str());
         }
+    }
+
+    // Unit tests run the use case in-process. Each installed executable carries
+    // its own scenario, so parallel tests need no process-wide environment changes.
+    let scenario = std::env::current_exe()
+        .expect("fake platform executable path")
+        .with_extension("dump-fixture");
+    if scenario.is_dir() {
+        run_dump_fixture(
+            &scenario,
+            &arguments,
+            directory_output.map(Path::new),
+            platform_log.map(Path::new),
+        );
+        return;
+    }
+
+    if let Some(calls) = std::env::var_os("V8_RUNNER_FAKE_PLATFORM_CALLS") {
+        let mut calls = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(calls)
+            .expect("open fake platform call log");
+        writeln!(calls, "{arguments:?}").expect("record fake platform call");
     }
 
     let checking = arguments.iter().any(|arg| arg == "/CheckConfig");
@@ -69,9 +86,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ibcmd_generation = arguments
-        .windows(2)
-        .any(|pair| pair[0] == "config" && pair[1] == "generation-id");
+    let ibcmd_generation = ibcmd_config_args(&arguments, "generation-id").is_some();
     let designer_generation = arguments
         .iter()
         .any(|argument| argument == "/GetConfigGenerationID");
@@ -86,10 +101,7 @@ fn main() {
         }
         return;
     }
-    if arguments
-        .windows(2)
-        .any(|pair| pair[0] == "config" && pair[1] == "export")
-    {
+    if ibcmd_config_args(&arguments, "export").is_some() {
         directory_output = arguments.last().map(|argument| argument.as_os_str());
     }
 
@@ -164,6 +176,99 @@ fn main() {
     write_artifact(Path::new(output), b"payload");
     if let Some(platform_log) = platform_log {
         write_artifact(Path::new(platform_log), b"platform log");
+    }
+}
+
+fn ibcmd_config_args<'a>(arguments: &'a [OsString], command: &str) -> Option<&'a [OsString]> {
+    let start = arguments
+        .windows(2)
+        .position(|pair| pair[0] == "config" && pair[1] == command)?;
+    Some(&arguments[start + 2..])
+}
+
+fn run_dump_fixture(
+    scenario: &Path,
+    arguments: &[OsString],
+    designer_target: Option<&Path>,
+    platform_log: Option<&Path>,
+) {
+    let joined = arguments
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let calls = fs::read_to_string(scenario.join("calls-path")).expect("call log path");
+    let mut calls = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(calls)
+        .expect("open dump call log");
+    writeln!(calls, "{joined}").expect("record dump call");
+    if let Some(log) = platform_log {
+        write_artifact(log, format!("designer log for {joined}\n").as_bytes());
+    }
+
+    // These scenarios exercise dumps without a readable generation.
+    if arguments.iter().any(|arg| arg == "/GetConfigGenerationID")
+        || ibcmd_config_args(arguments, "generation-id").is_some()
+    {
+        return;
+    }
+    let ibcmd_export = ibcmd_config_args(arguments, "export");
+    if ibcmd_export
+        .and_then(|args| args.first())
+        .is_some_and(|arg| arg == "status")
+    {
+        if let Some(forecast) = fixture_option(scenario, "forecast") {
+            print!("{forecast}");
+        }
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|arg| arg == "/DumpExternalDataProcessorOrReportToFiles")
+    {
+        // This scenario exercises a successful process that left no descriptor.
+        return;
+    }
+    let target = designer_target.or_else(|| ibcmd_export?.last().map(Path::new));
+    let Some(target) = target else {
+        panic!("unsupported fake dump command: {joined}");
+    };
+    if let Some(refusal) = fixture_option(scenario, "refusal") {
+        let (code, flag) = refusal
+            .split_once('\n')
+            .expect("exit code and refusal flag");
+        if arguments.iter().any(|arg| {
+            arg == flag || flag.ends_with('=') && arg.to_string_lossy().starts_with(flag)
+        }) {
+            std::process::exit(code.parse().expect("fake platform exit code"));
+        }
+    }
+    fs::create_dir_all(target).expect("create fake dump target");
+    if scenario.join("staged").is_file() {
+        if fs::read_dir(target)
+            .expect("read fake dump target")
+            .next()
+            .is_some()
+        {
+            eprintln!("fake platform requires an empty export directory");
+            std::process::exit(255);
+        }
+        write_artifact(&target.join("Configuration.xml"), b"new\n");
+        write_artifact(&target.join("Catalogs/Items.xml"), b"item\n");
+        write_artifact(
+            &target.join("ConfigDumpInfo.xml"),
+            b"<ConfigDumpInfo version=\"2.20\"/>\n",
+        );
+    }
+}
+
+fn fixture_option(scenario: &Path, name: &str) -> Option<String> {
+    match fs::read_to_string(scenario.join(name)) {
+        Ok(value) => Some(value),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read dump fixture option {name}: {error}"),
     }
 }
 

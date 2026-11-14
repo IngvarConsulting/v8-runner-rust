@@ -203,6 +203,10 @@ bash scripts/test/ci-designer-config.sh
 V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 ```
 
+The named Windows regressions also exercise staged `pull` with native Designer and
+`ibcmd` fixtures. They cover replacement, refusal, preservation of the previous version
+file after an overlay failure, and mode selection without an installed 1C platform.
+
 ### Ручной live smoke для Designer
 
 ```bash
