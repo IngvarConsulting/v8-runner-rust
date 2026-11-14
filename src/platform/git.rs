@@ -840,10 +840,8 @@ fn git_dir_of(
     toplevel: &Path,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<PathBuf, GitQueryError> {
-    let dot_git = toplevel.join(".git");
-    if dot_git.is_dir() {
-        return Ok(dot_git);
-    }
+    // Каталог называет git, а не `toplevel.join(".git")`: путь вершины может нести приставку
+    // `\\?\`, которой git не принимает, а снимать её вне запуска процесса нельзя.
     let mut command = git_in(toplevel, false);
     command.args(["rev-parse", "--absolute-git-dir"]);
     let named = run_git_query(command, None, OnCancel::Kill, interrupted)?;
@@ -903,10 +901,8 @@ pub fn blob_ids_as_added(
     // вопроса: временного каталога ОС раннер не трогает
     // (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
     // git не создаёт файлов по пути с приставкой `\\?\` (`index.lock`: Invalid argument):
-    // путь временного индекса — без неё.
-    let git_dir = PathBuf::from(crate::support::path::strip_windows_verbatim_prefix(
-        &git_dir_of(toplevel, interrupted)?.to_string_lossy(),
-    ));
+    // каталог git называет сам git, и в его ответе приставки нет.
+    let git_dir = git_dir_of(toplevel, interrupted)?;
     sweep_stale_temp_indexes(&git_dir);
     let temp = tempfile::Builder::new()
         .prefix(TEMP_INDEX_PREFIX)
