@@ -95,6 +95,38 @@ pub fn config(program: &Path, module: &Path, root: &Path, port: u16) -> std::io:
     Ok(result)
 }
 
+/// Update the generated directives. Other directives may have been added by webinst.
+pub fn reconfigure(previous: &str, rendered: &str) -> std::io::Result<String> {
+    const LISTEN: &str = "Listen 127.0.0.1:";
+    const PID_FILE: &str = "PidFile ";
+    const MODULE: &str = "LoadModule _1cws_module ";
+    let expected_pid = directive(rendered, PID_FILE)?;
+    if directive(previous, PID_FILE)? != expected_pid {
+        return Err(std::io::Error::other(
+            "Apache config belongs to a different stand path",
+        ));
+    }
+    let old_listen = directive(previous, LISTEN)?;
+    let old_module = directive(previous, MODULE)?;
+    let new_listen = directive(rendered, LISTEN)?;
+    let new_module = directive(rendered, MODULE)?;
+    Ok(previous
+        .replacen(old_module, new_module, 1)
+        .replacen(old_listen, new_listen, 1))
+}
+
+fn directive<'a>(config: &'a str, prefix: &str) -> std::io::Result<&'a str> {
+    let mut matching = config.lines().filter(|line| line.starts_with(prefix));
+    matching
+        .next()
+        .filter(|_| matching.next().is_none())
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "private Apache config requires one {prefix} directive"
+            ))
+        })
+}
+
 pub fn foreground(program: &Path, conf: &Path, log: &Path) -> ServiceRequest {
     let args = if cfg!(windows) {
         vec!["-f".to_owned(), conf.display().to_string()]

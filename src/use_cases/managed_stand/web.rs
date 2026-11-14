@@ -285,36 +285,8 @@ impl<'a> Web<'a> {
         };
         let content = match &previous {
             None => rendered,
-            Some(previous) => {
-                let old = previous
-                    .lines()
-                    .find(|line| line.starts_with("Listen 127.0.0.1:"))
-                    .ok_or_else(|| {
-                        validation("private Apache config has no expected Listen directive")
-                    })?;
-                // The path anchors the persisted config even when the service is stopped.
-                let local_pid = rendered.lines().find(|line| line.starts_with("PidFile "));
-                if !previous.lines().any(|line| Some(line) == local_pid) {
-                    return Err(validation(
-                        "Apache config belongs to a different stand path",
-                    ));
-                }
-                let prefix = "LoadModule _1cws_module ";
-                let expected_module = rendered
-                    .lines()
-                    .find(|line| line.starts_with(prefix))
-                    .ok_or_else(|| validation("generated Apache config has no 1C module"))?;
-                let mut modules = previous.lines().filter(|line| line.starts_with(prefix));
-                let old_module = modules
-                    .next()
-                    .filter(|_| modules.next().is_none())
-                    .ok_or_else(|| validation("private Apache config must have one 1C module"))?;
-                previous.replacen(old_module, expected_module, 1).replacen(
-                    old,
-                    &format!("Listen 127.0.0.1:{port}"),
-                    1,
-                )
-            }
+            Some(previous) => apache::reconfigure(previous, &rendered)
+                .map_err(|err| validation(err.to_string()))?,
         };
         self.replace_config(&conf, &content)?;
         let checked = self.check(&program).and_then(|()| {
