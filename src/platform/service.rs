@@ -1387,7 +1387,7 @@ pub fn signal_owned_process(
     }
     // SAFETY: the successful syscall returned an owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
-    if !process_facts(pid as u32).is_some_and(|facts| Some(facts.started) == started) {
+    if process_facts(pid as u32).is_none_or(|facts| Some(facts.started) != started) {
         return Err(std::io::Error::other("process identity changed"));
     }
     // SAFETY: fd is an open pidfd, and a null signal-info pointer requests the default signal data.
