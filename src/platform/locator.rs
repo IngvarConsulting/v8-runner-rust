@@ -574,13 +574,28 @@ impl Locator {
         }
     }
 
-    /// Установки платформы там, где их ищет поиск: под указанным путём, если он задан, иначе
-    /// в корнях по умолчанию; новейшие первыми.
+    /// Установки платформы под указанным путём или, без него, в корнях по умолчанию
+    /// и в канонических каталогах версий утилит из `PATH`. Новейшие первыми.
     pub fn installations(&self) -> Vec<InstalledPlatform> {
-        match self.platform_hint.as_deref() {
-            Some(hint) => hinted_installations(hint),
-            None => installed_platforms(&self.platform_roots),
+        if let Some(hint) = self.platform_hint.as_deref() {
+            return hinted_installations(hint);
         }
+
+        let mut found = installed_platforms(&self.platform_roots);
+        for utility in INVENTORIED_COMPONENTS {
+            for candidate in path_candidates(utility, &self.path_roots) {
+                if !is_valid_executable(&candidate.path) {
+                    continue;
+                }
+                // Ссылка в PATH числится установкой той версии, куда ведёт.
+                let Ok(canonical) = std::fs::canonicalize(&candidate.path) else {
+                    continue;
+                };
+                let canonical = normalize_windows_verbatim_path(&canonical);
+                record_installation(&installation_root_for_executable(&canonical), &mut found);
+            }
+        }
+        sort_installations(found)
     }
 
     /// Resolve an executable path for the requested utility.
@@ -927,7 +942,9 @@ impl Locator {
         if let Some(found) = &self.format_release {
             return Ok(found.clone());
         }
-        let installations = self.search_installations();
+        let mut installations = self.installations();
+        // Пустой каталог версии не подтверждает, что её выпуск установлен.
+        installations.retain(|installed| !installed.components.is_empty());
         let found = releases
             .iter()
             .find(|release| {
@@ -946,35 +963,6 @@ impl Locator {
         }
         self.format_release = Some(found.clone());
         Ok(found)
-    }
-
-    /// Установки там, где ищет поиск утилит платформы: опись [`Self::installations`], а без
-    /// указанного пути — и установки утилит из `PATH`, которые поиск тоже берёт. Каталог
-    /// версии без единого компонента — не установка, как и каталог в `PATH` без утилиты:
-    /// запись могла пережить удалённую платформу.
-    fn search_installations(&self) -> Vec<InstalledPlatform> {
-        let mut found = self.installations();
-        if self.platform_hint.is_none() {
-            for utility in INVENTORIED_COMPONENTS {
-                for candidate in path_candidates(utility, &self.path_roots) {
-                    if !is_valid_executable(&candidate.path) {
-                        continue;
-                    }
-                    // Поиск выбирает утилиту по канонической версии: ссылка в `PATH` числится
-                    // установкой той версии, куда ведёт, а не каталога, где лежит.
-                    let Ok(canonical) = std::fs::canonicalize(&candidate.path) else {
-                        continue;
-                    };
-                    let canonical = normalize_windows_verbatim_path(&canonical);
-                    record_installation(&installation_root_for_executable(&canonical), &mut found);
-                }
-            }
-            found = sort_installations(found);
-        }
-        found
-            .into_iter()
-            .filter(|installed| !installed.components.is_empty())
-            .collect()
     }
 
     fn pin_platform(&mut self, location: &UtilityLocation) {
@@ -1216,6 +1204,39 @@ fn hinted_installations(hint: &Path) -> Vec<InstalledPlatform> {
         record_installation(&installation_root_for_executable(hint), &mut found);
         return sort_installations(found);
     }
+    if hint.is_dir() {
+        let canonical = canonical_boundary(hint);
+        if let Some(root) = canonical.parent().filter(|_| {
+            canonical
+                .file_name()
+                .is_some_and(|name| executable_component_matches(name, "bin"))
+        }) {
+            if let Some(version) = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(PlatformVersion::parse_strict)
+            {
+                // Опись учитывает только утилиты, доступные через указанный bin.
+                let components: Vec<_> = INVENTORIED_COMPONENTS
+                    .into_iter()
+                    .filter(|&utility| {
+                        let candidates =
+                            direct_candidates(hint, utility, ResolutionSource::Explicit);
+                        canonical_candidates(utility, candidates, Some(root))
+                            .iter()
+                            .any(|candidate| candidate.installation_root == root)
+                    })
+                    .collect();
+                if !components.is_empty() {
+                    found.push(InstalledPlatform {
+                        version,
+                        root: root.to_path_buf(),
+                        components,
+                    });
+                }
+            }
+        }
+    }
     record_installation(hint, &mut found);
     if let Ok(entries) = std::fs::read_dir(hint) {
         for entry in entries.flatten() {
@@ -1255,6 +1276,9 @@ fn record_installation(dir: &Path, found: &mut Vec<InstalledPlatform>) {
 
     match found.iter_mut().find(|known| known.version == version) {
         Some(known) => {
+            if known.components.is_empty() && !components.is_empty() {
+                known.root = dir.to_path_buf();
+            }
             for component in components {
                 if !known.components.contains(&component) {
                     known.components.push(component);
@@ -2803,6 +2827,40 @@ mod tests {
             .map(|installation| installation.version.as_str())
             .collect();
         assert_eq!(versions, ["8.5.4.1306"], "{error}");
+    }
+
+    #[test]
+    fn installations_merge_components_of_the_same_version_from_default_roots_and_path() {
+        let dir = tempdir().expect("tempdir");
+        let default_root = dir.path().join("default");
+        let path_root = dir.path().join("path");
+        let version = "8.5.4.1306";
+        let designer =
+            touch_versioned_platform_executable(&default_root, version, UtilityType::V8, true);
+        let thin_client =
+            touch_versioned_platform_executable(&path_root, version, UtilityType::V8C, true);
+        let path_bin = thin_client.parent().expect("bin");
+        let locator = lenient_locator(
+            None,
+            None,
+            vec![default_root.clone()],
+            vec![path_bin.into()],
+        );
+
+        let installations = locator.installations();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].version.to_string(), version);
+        assert_eq!(installations[0].root, default_root.join(version));
+        assert_eq!(
+            installations[0].components,
+            [UtilityType::V8, UtilityType::V8C]
+        );
+
+        fs::remove_file(designer).expect("remove Designer from the default root");
+        let installations = locator.installations();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].root, canonical(&path_root.join(version)));
+        assert_eq!(installations[0].components, [UtilityType::V8C]);
     }
 
     /// `sources`, путь и `strict: true`: гарантии `strict` остаются — выпуск формата выбран

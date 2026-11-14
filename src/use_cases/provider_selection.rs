@@ -17,7 +17,7 @@ use crate::platform::locator::{
     LocatorError, PlatformReleaseMissing, UtilityLocation, UtilityType,
 };
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, EnvironmentLayer};
 
 /// Исполнитель, выбранный для операции, вместе с найденной утилитой и квитанцией.
 ///
@@ -102,7 +102,7 @@ pub fn select_from(
         ));
     }
     let mut skipped: Vec<SkippedProvider> = Vec::new();
-    let mut release = ReleaseRefusal::default();
+    let mut refused = UtilityRefusal::default();
 
     for provider in plan.candidates() {
         if let Some(skip) = without_a_way(config, operation, provider) {
@@ -119,7 +119,7 @@ pub fn select_from(
             match utilities.locate(utility) {
                 Ok(location) => located.push(location),
                 Err(error) => {
-                    not_ready = Some(release.not_ready(error));
+                    not_ready = Some(refused.not_ready(error));
                     break;
                 }
             }
@@ -138,7 +138,7 @@ pub fn select_from(
         }
     }
 
-    let error = nobody_ready(config, &plan, &skipped, release);
+    let error = nobody_ready(config, &plan, &skipped, refused);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
@@ -157,19 +157,45 @@ pub(crate) fn release_for_another_executor(
     }
 }
 
-/// Отказ выпуска формата исходников, замеченный при переборе исполнителей. Выпуск закреплён
-/// за всеми утилитами платформы, поэтому, если не готов никто, отказом становится он сам, а не
-/// пересказ в перечне пропущенных: его код и опись нужны вызывающему
-/// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+/// Что ответил поиск утилит при переборе исполнителей.
+///
+/// Отказ выпуска формата исходников закреплён за всеми утилитами платформы, поэтому, если не
+/// готов никто, отказом становится он сам, а не пересказ в перечне пропущенных: его код и опись
+/// нужны вызывающему (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+/// Иначе хоть один кандидат, пропущенный из-за своей утилиты, даёт отказу «не готов никто» слой
+/// `platform`; пропуски по другим причинам — нет файла базы, не объявлен путь, `--create` —
+/// слоя не определяют (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
 #[derive(Debug, Default)]
-pub(crate) struct ReleaseRefusal(Option<Box<PlatformReleaseMissing>>);
+pub(crate) enum UtilityRefusal {
+    /// Ни один кандидат не пропущен из-за утилиты.
+    #[default]
+    None,
+    /// Утилиты кандидата нет, она не той версии или её версию не прочитать.
+    NotReady,
+    /// Нет выпуска формата исходников; первый замеченный.
+    ReleaseMissing(Box<PlatformReleaseMissing>),
+}
 
-impl ReleaseRefusal {
+impl UtilityRefusal {
     /// Причина пропуска исполнителя по ошибке поиска его утилиты; отказ выпуска запоминается.
     pub(crate) fn not_ready(&mut self, error: LocatorError) -> String {
         let reason = format!("environment is not ready: {error}");
-        if let LocatorError::PlatformReleaseMissing(missing) = error {
-            self.0.get_or_insert(missing);
+        match error {
+            LocatorError::PlatformReleaseMissing(missing) => {
+                if !matches!(self, Self::ReleaseMissing(_)) {
+                    *self = Self::ReleaseMissing(missing);
+                }
+            }
+            LocatorError::NotFound { .. }
+            | LocatorError::StrictBoundaryNotFound { .. }
+            | LocatorError::UnknownVersion { .. }
+            | LocatorError::VersionMismatch { .. }
+            | LocatorError::MissingSibling { .. }
+            | LocatorError::BelowMinimumPlatform { .. } => {
+                if matches!(self, Self::None) {
+                    *self = Self::NotReady;
+                }
+            }
         }
         reason
     }
@@ -221,11 +247,15 @@ pub(crate) fn nobody_ready(
     config: &AppConfig,
     plan: &ProviderPlan,
     skipped: &[SkippedProvider],
-    release: ReleaseRefusal,
+    refused: UtilityRefusal,
 ) -> AppError {
-    if let Some(missing) = release.0 {
-        return AppError::PlatformLocator(LocatorError::PlatformReleaseMissing(missing));
-    }
+    let utility_not_ready = match refused {
+        UtilityRefusal::ReleaseMissing(missing) => {
+            return AppError::PlatformLocator(LocatorError::PlatformReleaseMissing(missing));
+        }
+        UtilityRefusal::NotReady => true,
+        UtilityRefusal::None => false,
+    };
     let reason = skipped
         .iter()
         .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
@@ -235,8 +265,11 @@ pub(crate) fn nobody_ready(
         .candidates()
         .into_iter()
         .any(|provider| utilities_of(provider, config).is_some());
-    if had_an_adapter {
-        AppError::EnvironmentUnavailable(reason)
+    if had_an_adapter && utility_not_ready {
+        // Хоть одному кандидату не нашлось подходящей утилиты: поставьте её, и заработает.
+        AppError::environment_at(EnvironmentLayer::Platform, reason)
+    } else if had_an_adapter {
+        AppError::environment(reason)
     } else {
         AppError::capability(reason)
     }
@@ -415,5 +448,72 @@ mod tests {
             .expect("the refusal carries its inventory");
         assert_eq!(refusal.source_format.release.as_deref(), Some("8.5.1"));
         assert_eq!(refusal.installations.len(), 1);
+    }
+
+    /// Не готов никто: слой `platform` — только если хоть один кандидат пропущен из-за своей
+    /// утилиты; пропуски по другим причинам слоя не определяют
+    /// (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    #[test]
+    fn nobody_ready_without_a_utility_names_the_platform_layer() {
+        use super::{nobody_ready, SkippedProvider, UtilityRefusal};
+        use crate::domain::capability::Provider;
+        use crate::support::error::EnvironmentLayer;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            local_path: dir.path().join(".local"),
+            base_path: dir.path().to_path_buf(),
+            work_path: dir.path().join("work"),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            working_copy: None,
+            project_file: crate::config::model::default_project_file(),
+            source_sets: Vec::new(),
+            tools: ToolsConfig {
+                platform: PlatformToolConfig::default(),
+                ..ToolsConfig::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+        let plan = config.provider_plan(Operation::Dump);
+        let mut not_ready = UtilityRefusal::default();
+        let skipped = vec![
+            SkippedProvider {
+                provider: Provider::Designer,
+                reason: not_ready.not_ready(LocatorError::NotFound {
+                    utility: UtilityType::V8,
+                    detail: None,
+                }),
+            },
+            SkippedProvider {
+                provider: Provider::Ibcmd,
+                reason: "file infobase is not ready: '/tmp/ib/1Cv8.1CD' is missing".to_owned(),
+            },
+        ];
+
+        let mixed = UseCaseError::from(nobody_ready(&config, &plan, &skipped, not_ready));
+        assert_eq!(
+            mixed.environment_layer(),
+            Some(EnvironmentLayer::Platform),
+            "{mixed}"
+        );
+
+        let elsewhere = UseCaseError::from(nobody_ready(
+            &config,
+            &plan,
+            &skipped[1..],
+            UtilityRefusal::default(),
+        ));
+        assert_eq!(
+            elsewhere.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{elsewhere}"
+        );
+        assert_eq!(elsewhere.environment_layer(), None, "{elsewhere}");
     }
 }

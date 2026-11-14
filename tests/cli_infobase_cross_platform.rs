@@ -67,6 +67,60 @@ fn run_json(config: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON envelope")
 }
 
+#[cfg(windows)]
+#[test]
+fn workdir_rejects_file_traversal_before_creating_a_directory() {
+    let root = tempdir().expect("tempdir");
+    fs::create_dir(root.path().join("src")).expect("source directory");
+    fs::write(root.path().join("blocker"), "data").expect("blocker");
+    let config = root.path().join("v8project.yaml");
+    fs::write(
+        &config,
+        "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+    )
+    .expect("config");
+    let infobase = format!("File={}", root.path().join("empty-base").display());
+    let run = |workdir: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+            .arg("--config")
+            .arg(&config)
+            .args([
+                "--infobase",
+                &infobase,
+                "--workdir",
+                workdir,
+                "--json-message",
+            ])
+            .args(args)
+            .output()
+            .expect("run v8-runner")
+    };
+    for workdir in ["blocker/../redirected", r"blocker\..\redirected"] {
+        for args in [&["push", "main", "--dry-run"][..], &["status"][..]] {
+            let output = run(workdir, args);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !root.path().join("redirected").exists(),
+                "{args:?}: {stdout}"
+            );
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {stdout}");
+            assert!(
+                stdout.contains("cannot traverse file") && stdout.contains("blocker"),
+                "{stdout}"
+            );
+        }
+    }
+
+    let output = run("missing/../redirected-control", &["status"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(root.path().join("redirected-control/.gitignore").is_file());
+    assert!(!root.path().join("missing").exists());
+}
+
 /// Проект с набором `main`, который выгружается фальшивым Конфигуратором.
 #[cfg(windows)]
 fn with_main_set(config: &Path) {
@@ -145,6 +199,62 @@ fn a_download_answers_with_an_ordinary_path() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn a_directory_in_place_of_the_base_lock_refuses_push_and_warns_download() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let lock = root.path().join(".ib.v8-runner.infobase.lock.system");
+    fs::create_dir(&lock).expect("directory at the lock path");
+    let calls = root.path().join("platform.calls");
+
+    let push = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args(["--json-message", "push", "--full"])
+        .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+        .output()
+        .expect("run push");
+    let envelope: Value = serde_json::from_slice(&push.stdout).expect("JSON envelope");
+    assert_eq!(push.status.code(), Some(3), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "runtime_failure", "{envelope}");
+    assert_eq!(envelope["steps"][0]["name"], "infobase lock", "{envelope}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    let lock_path = ordinary_canonical(&lock);
+    let lock_path = lock_path.to_str().expect("lock path");
+    assert!(
+        message.contains(lock_path) && message.contains("directory"),
+        "{message}"
+    );
+    assert!(!calls.exists(), "push must stop before Designer");
+
+    let cf = root.path().join("main.cf");
+    let download = run_json(
+        &config,
+        &[
+            "download",
+            "main",
+            "--output",
+            cf.to_str().expect("CF path"),
+        ],
+    );
+    let warnings = download["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|message| {
+                message.contains("infobase lock")
+                    && message.contains(lock_path)
+                    && message.contains("directory")
+            })),
+        "{download}"
+    );
+    assert_eq!(fs::read(&cf).expect("published CF"), b"payload");
+    assert!(lock.is_dir());
+}
+
 /// Предупреждение о владельце базы называет обе копии обычными путями, хотя метка на диске
 /// хранит канонический: она сверяется с другими копиями и не переписывается ради показа.
 #[cfg(windows)]
@@ -204,6 +314,121 @@ fn an_owner_warning_names_the_copies_with_ordinary_paths() {
         fs::read_to_string(&marker_path).expect("marker"),
         written,
         "the marker is not rewritten"
+    );
+}
+
+/// `CTRL_BREAK`, посланный группе раннера (`GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid
+/// раннера)`), достаётся только раннеру. Его консольный потомок — здесь подставной
+/// Конфигуратор, который переживает любое событие консоли и отмечает его файлом, — события
+/// не получает: он в своей группе процессов. Снимает его раннер по своей отмене, и ответ —
+/// `cancelled` (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`).
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_to_the_runner_group_leaves_its_console_child_to_the_runner() {
+    use std::io::Read;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, CTRL_BREAK_EVENT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, PROCESS_SYNCHRONIZE,
+    };
+
+    // Событие доходит только до процессов той же консоли; у теста без консоли её заводят.
+    // SAFETY: calls without pointer arguments on this test process's own console.
+    unsafe {
+        if GetConsoleWindow().is_null() {
+            AllocConsole();
+        }
+    }
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let ready = root.path().join("designer.ready");
+    let release = root.path().join("designer.release");
+    let pid_file = root.path().join("designer.pid");
+    let console_event = root.path().join("designer.console-event");
+
+    let runner = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            "out/main.cf",
+        ])
+        .env("V8_RUNNER_FAKE_PLATFORM_READY", &ready)
+        .env("V8_RUNNER_FAKE_PLATFORM_RELEASE", &release)
+        .env("V8_RUNNER_FAKE_PLATFORM_PID", &pid_file)
+        .env("V8_RUNNER_FAKE_PLATFORM_CONSOLE_EVENT", &console_event)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .expect("spawn v8-runner");
+    let mut runner = BlockedProcess::new(runner, release.clone());
+    let mut stdout = runner
+        .child
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .expect("piped stdout");
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    wait_for_file(&ready);
+    let designer: u32 = fs::read_to_string(&pid_file)
+        .expect("designer pid")
+        .trim()
+        .parse()
+        .expect("numeric designer pid");
+    // SAFETY: a plain open by PID while the designer is alive and held by the runner; the
+    // handle keeps the number from being reused and is owned right below.
+    let designer = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, designer) };
+    assert!(!designer.is_null(), "open the designer process");
+    // SAFETY: the successful open transfers this handle to the guard exactly once.
+    let designer = unsafe { OwnedHandle::from_raw_handle(designer) };
+
+    let runner_pid = runner.child.as_ref().expect("runner").id();
+    // SAFETY: no pointer arguments; the runner's group is its pid (`CREATE_NEW_PROCESS_GROUP`).
+    let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, runner_pid) };
+    assert_ne!(sent, 0, "CTRL_BREAK was not delivered");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        let child = runner.child.as_mut().expect("runner");
+        if let Some(status) = child.try_wait().expect("wait runner") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the runner did not answer the CTRL_BREAK"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = reader.join().expect("reader").expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(payload["error"]["kind"], "interruption", "{payload}");
+    assert_eq!(status.code(), Some(4), "{payload}");
+    // SAFETY: the handle is open and owned by `designer`.
+    let ended = unsafe { WaitForSingleObject(designer.as_raw_handle(), 10_000) };
+    assert_eq!(ended, WAIT_OBJECT_0, "the runner left its designer running");
+    assert!(
+        !console_event.exists(),
+        "the designer received the CTRL_BREAK sent to the runner's group: {}",
+        fs::read_to_string(&console_event).unwrap_or_default()
+    );
+    assert!(
+        !root.path().join("out/main.cf").exists(),
+        "an interrupted download published its file"
     );
 }
 
@@ -379,4 +604,101 @@ fn concurrent_native_cli_processes_observe_the_workspace_lock() {
         String::from_utf8_lossy(&first_output.stderr)
     );
     assert_eq!(fs::read(first_dt).expect("first DT"), b"payload");
+}
+
+#[cfg(windows)]
+#[test]
+fn ibcmd_dt_transfers_refuse_windows_during_provider_selection() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    fs::copy(&platform, platform.with_file_name("ibcmd.exe")).expect("native IBCMD fixture");
+    let config = write_config(root.path(), &platform);
+    let ibcmd_config = fs::read_to_string(&config)
+        .expect("config")
+        .replace("infobase.dump: designer", "infobase.dump: ibcmd")
+        .replace("infobase.restore: designer", "infobase.restore: ibcmd");
+    let existing = root.path().join("ib");
+    let absent = root.path().join("empty-ib");
+    let input = root.path().join("backup.dt");
+    let output = root.path().join("result.dt");
+    let calls = root.path().join("platform-calls.log");
+    let work = root.path().join("work");
+    fs::remove_dir(&work).expect("remove empty setup workPath");
+    fs::write(&input, b"backup").expect("input DT");
+    fs::write(&output, b"previous snapshot").expect("existing output DT");
+    let input_arg = input.to_str().expect("input DT path");
+    let output_arg = output.to_str().expect("output DT path");
+
+    for (target, arguments) in [
+        (&existing, &["dump", "--output", output_arg][..]),
+        (
+            &existing,
+            &["restore", "--input", input_arg, "--replace"][..],
+        ),
+        (&absent, &["restore", "--input", input_arg, "--create"][..]),
+    ] {
+        fs::write(
+            &config,
+            ibcmd_config.replace(
+                &format!("File={}", existing.display()),
+                &format!("File={}", target.display()),
+            ),
+        )
+        .expect("IBCMD config");
+        let mut preview_error = None;
+        for dry_run in [true, false] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_v8-runner"));
+            command
+                .arg("--config")
+                .arg(&config)
+                .arg("--json-message")
+                .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+                .arg("infobase")
+                .args(arguments);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let result = command.output().expect("run DT transfer");
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert_eq!(
+                result.status.code(),
+                Some(2),
+                "{arguments:?}, dry_run={dry_run}: {stdout}"
+            );
+            let envelope: Value = serde_json::from_str(&stdout).expect("envelope");
+            let error = &envelope["error"];
+            assert_eq!(envelope["ok"], false);
+            assert_eq!(error["kind"], "capability", "{stdout}");
+            assert_eq!(error["code"], "target", "{stdout}");
+            assert_eq!(
+                envelope["steps"][0]["name"], "provider selection",
+                "{stdout}"
+            );
+            assert_eq!(envelope["data"]["target_state"], "unchanged", "{stdout}");
+            let provider = &envelope["data"]["provider"];
+            assert!(provider["selected"].is_null(), "{stdout}");
+            assert_eq!(provider["skipped"][0]["provider"], "ibcmd", "{stdout}");
+            assert!(
+                provider["skipped"][0]["reason"].as_str().is_some_and(
+                    |reason| reason.contains("Windows session detection has not been measured")
+                ),
+                "{stdout}"
+            );
+            if dry_run {
+                assert_eq!(envelope["data"]["provider_dispatched"], false, "{stdout}");
+                preview_error = Some(error.clone());
+                assert!(!work.exists(), "preview created workPath");
+            } else {
+                assert_eq!(preview_error.as_ref(), Some(error), "{stdout}");
+            }
+            assert!(!calls.exists(), "DT refusal started the platform");
+            assert!(!absent.exists(), "DT refusal created the target");
+            assert_eq!(
+                fs::read(existing.join("1Cv8.1CD")).expect("database"),
+                b"database"
+            );
+            assert_eq!(fs::read(&input).expect("input DT"), b"backup");
+            assert_eq!(fs::read(&output).expect("output DT"), b"previous snapshot");
+        }
+    }
 }

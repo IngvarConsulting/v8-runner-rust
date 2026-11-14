@@ -27,6 +27,7 @@ text = source.read_text(encoding="utf-8")
 replacements = {
     "__ROOT_DIR__": root_dir.as_posix(),
     "__OUTPUT_ROOT__": output_root.as_posix(),
+    "__SMOKE_PROVIDER__": "ibcmd",
     "__VANESSA_EPF__": (root_dir / "tests/fixtures/vanessa-automation-single.epf").as_posix(),
     "__VANESSA_PARAMS_TEMPLATE__": (root_dir / "scripts/test/live-cli-designer.va-params.json").as_posix(),
     "__VANESSA_FEATURE_PATH__": (root_dir / "scripts/test/features/live-cli-designer").as_posix(),
@@ -35,13 +36,6 @@ replacements = {
 for old, new in replacements.items():
     text = text.replace(old, new)
 
-text = re.sub(
-    r"^builder:\s*DESIGNER\s*$",
-    "builder: IBCMD",
-    text,
-    count=1,
-    flags=re.MULTILINE,
-)
 text = re.sub(
     r"\n  - name: external-processor\n    type: EXTERNAL_DATA_PROCESSORS\n    path: external/processor",
     "",
@@ -76,4 +70,4 @@ fi
 export V8TR_DESIGNER_REAL_CONFIG="$CONFIG_PATH"
 export V8TR_LIVE_CLI_OUTPUT_ROOT="$OUTPUT_ROOT"
 
-bash "$ROOT_DIR/scripts/test/live-cli-fixture.sh"
+V8TR_LIVE_CLI_BACKEND=IBCMD bash "$ROOT_DIR/scripts/test/live-cli-fixture.sh"

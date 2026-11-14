@@ -789,6 +789,7 @@ fn mcp_value_envelope<T: Serialize>(
         duration_ms,
         data,
         warnings,
+        warning_details,
         steps,
         error,
     } = envelope;
@@ -801,6 +802,7 @@ fn mcp_value_envelope<T: Serialize>(
         duration_ms,
         data,
         warnings,
+        warning_details,
         steps,
         error,
     })
@@ -833,16 +835,14 @@ pub(crate) fn with_boundary_warnings(
 }
 
 fn follow_with_notes(envelope: &mut McpCommandEnvelope, notes: Vec<BoundaryNote>) {
-    envelope
-        .warnings
-        .extend(notes.into_iter().map(|note| note.message));
+    envelope.follow_with(notes.iter().map(|note| &note.warning));
 }
 
 /// Сказанное границей, которому не досталось конверта: граница уже могла сменить метку,
 /// и это не должно пропасть бесследно.
 pub(crate) fn log_undelivered_notes(notes: &[BoundaryNote]) {
     for note in notes {
-        tracing::warn!("{}", note.message);
+        tracing::warn!("{}", note.message());
     }
 }
 
@@ -935,11 +935,22 @@ fn adapter_error_envelope(
     Envelope::err(command.as_str(), 0, data).with_error(envelope_error(&business_error))
 }
 
+/// Каждое поле отказа MCP названо здесь по имени: новое поле, забытое переводом, не
+/// компилируется, а не пропадает из конверта молча.
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
+    let McpBusinessError {
+        code,
+        kind,
+        message,
+        next,
+        platform_release,
+        layer,
+    } = error;
     EnvelopeError {
-        platform_release: error.platform_release.clone(),
-        ..EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
-            .with_next(error.next.clone())
+        platform_release: platform_release.clone(),
+        layer: *layer,
+        ..EnvelopeError::new((*code).into(), (*kind).into(), message.clone())
+            .with_next(next.clone())
     }
 }
 
@@ -973,6 +984,7 @@ fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
         message: error.message().to_owned(),
         next: None,
         platform_release: None,
+        layer: None,
     }
 }
 
@@ -1160,7 +1172,7 @@ mod profile_tests {
 pub(crate) fn boundary_note(message: &str) -> BoundaryNote {
     BoundaryNote {
         phase: crate::domain::infobase_export::InfobaseTransferPhase::InfobaseOwner,
-        message: message.to_owned(),
+        warning: crate::domain::warning::Warning::Plain(message.to_owned()),
     }
 }
 
@@ -1208,12 +1220,27 @@ mod envelope_tests {
             },
         );
 
-        let answered = with_boundary_warnings(vec![boundary_note("boundary")], Err(refusal));
+        let coded = crate::domain::warning::CodedWarning::InfobaseOfAnotherCopy {
+            message: "coded".to_owned(),
+            name: Some("origin".to_owned()),
+            address: "file:/srv/ib".to_owned(),
+            owners: Vec::new(),
+        };
+        let notes = vec![
+            boundary_note("boundary"),
+            BoundaryNote {
+                phase: crate::domain::infobase_export::InfobaseTransferPhase::InfobaseOwner,
+                warning: crate::domain::warning::Warning::Coded(coded.clone()),
+            },
+        ];
+
+        let answered = with_boundary_warnings(notes, Err(refusal));
 
         let Err(McpServiceError::Business(failure)) = answered else {
             panic!("a refusal stays a refusal");
         };
-        assert_eq!(failure.response.warnings, ["own", "boundary"]);
+        assert_eq!(failure.response.warnings, ["own", "boundary", "coded"]);
+        assert_eq!(failure.response.warning_details, [coded]);
     }
 }
 
@@ -3044,5 +3071,26 @@ mod tests {
             log_read_warning: matches!(status, SyntaxCheckStatus::ToolFailed)
                 .then_some("log truncated".to_owned()),
         }
+    }
+
+    /// Конверт ответа MCP несёт слой отказа так же, как сам отказ MCP: перевод в конверт
+    /// его не теряет (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    #[test]
+    fn the_mcp_response_envelope_keeps_the_environment_layer() {
+        use crate::platform::agent::AgentError;
+        use crate::support::error::{AppError, EnvironmentLayer};
+        use crate::use_cases::result::UseCaseError;
+
+        let error = UseCaseError::from(AppError::from(AgentError::PortTaken {
+            port: 1543,
+            detail: "taken".to_owned(),
+        }));
+        let business = super::McpBusinessError::from_use_case(&error);
+        assert_eq!(business.layer, Some(EnvironmentLayer::AgentStart));
+
+        let envelope = super::envelope_error(&business);
+
+        assert_eq!(envelope.layer, Some(EnvironmentLayer::AgentStart));
+        assert_eq!(envelope.message, business.message);
     }
 }

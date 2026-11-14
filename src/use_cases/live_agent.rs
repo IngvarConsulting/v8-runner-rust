@@ -116,10 +116,11 @@ pub fn hold(
                 ),
             ))
         }
-        Err(error @ (KeeperStartError::Busy { .. } | KeeperStartError::Unavailable { .. })) => {
-            return Err(AppError::EnvironmentUnavailable(crate::support::error::chain(&error)))
-        }
-        Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
+        Err(
+            error @ (KeeperStartError::Busy { .. }
+            | KeeperStartError::Unavailable { .. }
+            | KeeperStartError::Agent(_)),
+        ) => return Err(crate::use_cases::agent_session::keeper_start_refusal(error)),
     };
     Ok(AgentHoldResult {
         key: client.key().to_owned(),
@@ -237,7 +238,7 @@ pub fn stop(
                 message: error.to_string(),
             }),
             Err(error) => {
-                return Err(AppError::EnvironmentUnavailable(format!(
+                return Err(AppError::environment(format!(
                     "the live agent {} was not stopped: {error}",
                     keeper.key
                 )))
@@ -479,7 +480,7 @@ fn refused(kind: UseCaseErrorKind, message: String) -> AppError {
 }
 
 fn keeper_io(error: std::io::Error) -> AppError {
-    AppError::EnvironmentUnavailable(format!("the live agent registry cannot be read: {error}"))
+    AppError::environment(format!("the live agent registry cannot be read: {error}"))
 }
 
 fn rfc3339(at: SystemTime) -> String {
