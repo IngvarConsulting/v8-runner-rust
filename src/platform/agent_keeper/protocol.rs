@@ -390,6 +390,7 @@ impl AgentFailure {
             AgentError::NotSent { .. }
             | AgentError::Abandoned { .. }
             | AgentError::Exchange { .. }
+            | AgentError::SftpStatus { .. }
             | AgentError::UnsafeEntryName { .. }
             | AgentError::Launch(_)
             | AgentError::LiveAgentGone { .. }
