@@ -75,19 +75,25 @@ pub fn start_agent(
     ports: ClusterPorts,
     log: &Path,
 ) -> ServiceRequest {
+    let mut args = if cfg!(target_os = "linux") {
+        Vec::new()
+    } else {
+        vec!["/agent".to_owned()]
+    };
+    let prefix = if cfg!(target_os = "linux") { "-" } else { "/" };
+    args.extend([
+        format!("{prefix}port"),
+        ports.agent.to_string(),
+        format!("{prefix}regport"),
+        ports.regport.to_string(),
+        format!("{prefix}range"),
+        ports.worker_range(),
+        format!("{prefix}d"),
+        registry.display().to_string(),
+    ]);
     ServiceRequest {
         program: ragent.to_path_buf(),
-        args: vec![
-            "/agent".to_owned(),
-            "/port".to_owned(),
-            ports.agent.to_string(),
-            "/regport".to_owned(),
-            ports.regport.to_string(),
-            "/range".to_owned(),
-            ports.worker_range(),
-            "/d".to_owned(),
-            registry.display().to_string(),
-        ],
+        args,
         workdir: registry.parent().map(Path::to_path_buf),
         log_path: log.to_path_buf(),
         stdin: None,
@@ -142,6 +148,22 @@ mod tests {
             ports,
             Path::new("w/cluster.log"),
         );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                agent.args,
+                [
+                    "-port",
+                    "24000",
+                    "-regport",
+                    "24001",
+                    "-range",
+                    "24002:24017",
+                    "-d",
+                    "w/data"
+                ]
+            );
+            return;
+        }
         assert_eq!(
             agent.args,
             [

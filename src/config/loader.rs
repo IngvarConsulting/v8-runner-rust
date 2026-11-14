@@ -1728,6 +1728,9 @@ fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
         normalize_infobase_paths(infobase, config_dir);
     }
 
+    if let Some(path) = config.tools.apache.path.as_mut() {
+        *path = resolve_from(config_dir, path);
+    }
     if let Some(path) = config.tools.postgres.path.as_mut() {
         *path = resolve_from(config_dir, path);
     }
@@ -3306,7 +3309,8 @@ source-set:
     fn a_running_cluster_without_its_base_or_postgres_names_the_next_command() {
         use crate::platform::ragent::ClusterPorts;
         use crate::platform::service_record::{
-            machine_fingerprint, write_json, ClusterPins, RecordState, ServicePaths, ServiceRecord,
+            stand_machine_fingerprint, write_json, ClusterPins, RecordState, ServicePaths,
+            ServiceRecord,
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
@@ -3344,7 +3348,7 @@ source-set:
                 pid: Some(pid),
                 started: Some(facts.started),
                 image: Some(facts.image),
-                machine: machine_fingerprint(),
+                machine: stand_machine_fingerprint(),
                 starter: None,
                 port: 24000,
                 explicit: true,
@@ -3375,7 +3379,7 @@ source-set:
     fn a_running_server_gives_the_target_its_addresses() {
         use crate::platform::ibsrv::ServerPorts;
         use crate::platform::service_record::{
-            machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
+            stand_machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
@@ -3394,7 +3398,7 @@ source-set:
                 pid: Some(pid),
                 started: Some(facts.started),
                 image: Some(facts.image),
-                machine: machine_fingerprint(),
+                machine: stand_machine_fingerprint(),
                 starter: None,
                 port: 24000,
                 explicit: true,
@@ -3417,7 +3421,7 @@ source-set:
     fn infobase_create_is_refused_under_the_running_server() {
         use crate::platform::ibsrv::ServerPorts;
         use crate::platform::service_record::{
-            machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
+            stand_machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
@@ -3436,7 +3440,7 @@ source-set:
                 pid: Some(pid),
                 started: Some(facts.started),
                 image: Some(facts.image),
-                machine: machine_fingerprint(),
+                machine: stand_machine_fingerprint(),
                 starter: None,
                 port: 24000,
                 explicit: true,

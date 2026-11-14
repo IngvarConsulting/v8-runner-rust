@@ -212,6 +212,17 @@ pub enum ConfigValidationError {
     )]
     WebConnectionIsNotAnAdministrativeChannel,
 
+    #[error("infobase.web.managed requires infobase.cluster.managed")]
+    ManagedWebNeedsCluster,
+
+    #[error(
+        "infobase.web.managed computes server, dir, conf and url and does not support os-auth"
+    )]
+    ManagedWebConflictingOptions,
+
+    #[error("infobase.web.wsdir must be a single ASCII segment of letters, digits, underscores, or hyphens")]
+    ManagedWebAliasInvalid,
+
     #[error("infobase.web.{field} is required to publish on {server}")]
     WebPublicationFieldMissing {
         field: &'static str,
@@ -569,6 +580,27 @@ fn validate_managed_declarations(
         .cluster
         .as_ref()
         .is_some_and(|cluster| cluster.managed.is_some());
+    if let Some(web) = infobase.web.as_ref().filter(|web| web.managed) {
+        if !cluster_managed {
+            return Err(ConfigValidationError::ManagedWebNeedsCluster);
+        }
+        if web.server.is_some()
+            || web.dir.is_some()
+            || web.conf.is_some()
+            || web.url.is_some()
+            || web.os_auth
+        {
+            return Err(ConfigValidationError::ManagedWebConflictingOptions);
+        }
+        if !web.wsdir.as_deref().is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(ConfigValidationError::ManagedWebAliasInvalid);
+        }
+    }
     if cluster_managed && !infobase.connection_projected && !infobase.connection.trim().is_empty() {
         return Err(ConfigValidationError::ManagedClusterWithConnection);
     }

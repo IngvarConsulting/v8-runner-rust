@@ -52,12 +52,23 @@ fn run_publish(
         "executing publish use case"
     );
 
-    let web = config.infobase.web.as_ref().ok_or_else(|| {
-        UseCaseFailure::without_payload(AppError::Validation(
-            "infobase.web is not declared: name the web server, wsdir and dir to publish"
-                .to_owned(),
-        ))
-    })?;
+    let managed = crate::use_cases::managed_stand::publication(
+        context,
+        config,
+        request.action,
+        request.dry_run,
+    )
+    .map_err(UseCaseFailure::without_payload)?;
+    let web = managed
+        .as_ref()
+        .map(|publication| &publication.target)
+        .or(config.infobase.web.as_ref())
+        .ok_or_else(|| {
+            UseCaseFailure::without_payload(AppError::Validation(
+                "infobase.web is not declared: name the web server, wsdir and dir to publish"
+                    .to_owned(),
+            ))
+        })?;
     let server = web.server.ok_or_else(|| {
         UseCaseFailure::without_payload(AppError::Validation(
             "infobase.web.server is not declared: iis, apache2, apache22 or apache24".to_owned(),
@@ -68,31 +79,41 @@ fn run_publish(
     let dir = web.dir.clone().unwrap_or_default();
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected =
-        crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Publish)
-            .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
-    if selected.provider != Provider::Webinst {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
-        ));
-    }
-    let receipt = selected.receipt;
-    let Some(location) = selected.location else {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(
-                crate::domain::capability::Operation::Publish,
-                selected.provider,
-            ),
-        ));
+    let (receipt, program) = if let Some(publication) = &managed {
+        let receipt = config
+            .provider_plan(Operation::Publish)
+            .receipt_for(Provider::Webinst, Vec::new());
+        (receipt, publication.webinst.clone())
+    } else {
+        let selected = crate::use_cases::provider_selection::select(
+            config,
+            &mut utilities,
+            Operation::Publish,
+        )
+        .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+        if selected.provider != Provider::Webinst {
+            return Err(UseCaseFailure::without_payload(
+                crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
+            ));
+        }
+        let Some(location) = selected.location else {
+            return Err(UseCaseFailure::without_payload(
+                crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
+            ));
+        };
+        (selected.receipt, location.path)
     };
-
     let args = webinst_args(
         request.action,
         server,
         web,
         &wsdir,
         &dir,
-        &config.infobase.connection,
+        managed
+            .as_ref()
+            .map_or(config.infobase.connection.as_str(), |target| {
+                target.connection.as_str()
+            }),
     );
     let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
     let result = |plan: Option<PublishPlan>| PublishResult {
@@ -118,7 +139,7 @@ fn run_publish(
             "[webinst] preview only, web server not touched",
         );
         let mut preview = result(Some(PublishPlan {
-            program: location.path.clone(),
+            program: program.clone(),
             // `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`.
             args: mask_preview_args(&args, &secrets),
         }));
@@ -127,12 +148,16 @@ fn run_publish(
             request.action.as_str(),
             wsdir,
             server.as_str(),
-            location.path.display()
+            program.display()
         ));
         return Ok(preview);
     }
 
-    let logs_dir = platform_logs_dir(&config.work_path).map_err(|error| {
+    let logs_dir = match &managed {
+        Some(publication) => Ok(publication.log_root.clone()),
+        None => platform_logs_dir(&config.work_path),
+    }
+    .map_err(|error| {
         UseCaseFailure::without_payload(AppError::Runtime(format!(
             "failed to create platform log directory under '{}': {error}",
             config.work_path.display()
@@ -154,8 +179,13 @@ fn run_publish(
             server.as_str()
         ),
     );
+    let snapshot = managed
+        .as_ref()
+        .map(|publication| publication.snapshot())
+        .transpose()
+        .map_err(UseCaseFailure::without_payload)?;
     let process = ProcessRequest {
-        program: location.path.clone(),
+        program,
         args,
         workdir: None,
         stdout_log_path: Some(log_path.clone()),
@@ -181,12 +211,37 @@ fn run_publish(
                 failed.message = Some(message);
                 failed
             })
-        })?;
+        });
+    let finished = match finished {
+        Ok(finished) => finished,
+        Err(mut failure) => {
+            if let Some(snapshot) = snapshot {
+                if let Err(rollback) = snapshot.restore() {
+                    failure.error = failure.error.followed_by(rollback.to_string());
+                }
+            }
+            return Err(failure);
+        }
+    };
 
     let mut done = result(None);
     done.platform_log_path = Some(log_path);
     match finished.outcome() {
         Ok(()) => {
+            if let Some(publication) = &managed {
+                if let Err(mut error) = publication.reload(false) {
+                    if let Some(snapshot) = snapshot {
+                        if let Err(rollback) =
+                            snapshot.restore().and_then(|()| publication.reload(true))
+                        {
+                            error = error.followed_by(rollback.to_string());
+                        }
+                    }
+                    done.ok = false;
+                    done.message = Some(error.to_string());
+                    return Err(UseCaseFailure::with_payload(error, done));
+                }
+            }
             done.message = Some(format!(
                 "{} '{}' on {} completed",
                 request.action.as_str(),
@@ -204,10 +259,14 @@ fn run_publish(
                 server.as_str()
             );
             done.message = Some(message.clone());
-            Err(UseCaseFailure::with_payload(
-                AppError::Platform(message),
-                done,
-            ))
+            let mut error =
+                crate::use_cases::result::UseCaseError::from(AppError::Platform(message));
+            if let Some(snapshot) = snapshot {
+                if let Err(rollback) = snapshot.restore() {
+                    error = error.followed_by(rollback.to_string());
+                }
+            }
+            Err(UseCaseFailure::with_payload(error, done))
         }
     }
 }

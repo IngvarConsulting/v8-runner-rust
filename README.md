@@ -96,7 +96,7 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
 | Проверка | `check`, `test` | Проверка конфигурации, YAxUnit и Vanessa Automation |
 | Файлы и пакеты | `pull`, `download`, `convert`, `upload`, `make` / `artifacts` | Выгружает исходники, собирает, конвертирует и загружает `.cf`, `.cfe`, `.epf`, `.erf` |
 | Образ базы | `infobase dump`, `infobase restore` | Сохраняет базу с данными в `.dt` и загружает из него |
-| Стенд | `dbms`, `standalone`, `cluster`, `agent`, `publish` | PostgreSQL, автономный сервер, кластер и агент Конфигуратора раннера, веб-публикация |
+| Стенд | `dbms`, `standalone`, `cluster`, `web`, `agent`, `publish` | PostgreSQL, автономный сервер, кластер и агент Конфигуратора раннера, веб-публикация |
 | Прямой запуск | `launch <designer\|thin\|thick\|ordinary>` | Запускает Конфигуратор и клиенты 1С |
 
 Полный каталог команд, исполнители, коды отказов и ограничения —

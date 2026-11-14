@@ -41,6 +41,10 @@ pub enum CommandName {
     ClusterStatus,
     ClusterStop,
     ClusterRestart,
+    WebStart,
+    WebStatus,
+    WebStop,
+    WebRestart,
     AgentHold,
     AgentRelease,
     AgentStop,
@@ -69,8 +73,11 @@ impl CommandName {
             | Self::StandaloneRestart
             | Self::ClusterStart
             | Self::ClusterStop
-            | Self::ClusterRestart => StandChange::Always,
-            Self::Init => StandChange::WhenManaged,
+            | Self::ClusterRestart
+            | Self::WebStart
+            | Self::WebStop
+            | Self::WebRestart => StandChange::Always,
+            Self::Init | Self::Publish => StandChange::WhenManaged,
             Self::Bootstrap
             | Self::ToolsDownload
             | Self::Extensions
@@ -88,11 +95,11 @@ impl CommandName {
             | Self::Artifacts
             | Self::Syntax
             | Self::Launch
-            | Self::Publish
             | Self::Platforms
             | Self::DbmsStatus
             | Self::StandaloneStatus
             | Self::ClusterStatus
+            | Self::WebStatus
             | Self::AgentHold
             | Self::AgentRelease
             | Self::AgentStop
@@ -152,6 +159,10 @@ impl CommandName {
             Self::ClusterStatus => "cluster status",
             Self::ClusterStop => "cluster stop",
             Self::ClusterRestart => "cluster restart",
+            Self::WebStart => "web start",
+            Self::WebStatus => "web status",
+            Self::WebStop => "web stop",
+            Self::WebRestart => "web restart",
             Self::AgentHold => "agent hold",
             Self::AgentRelease => "agent release",
             Self::AgentStop => "agent stop",

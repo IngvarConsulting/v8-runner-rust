@@ -88,6 +88,9 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         name: demo
     dbms:
       managed: {}
+    web:
+      managed: true
+      wsdir: demo
   server:
     standalone:
       managed:
@@ -96,6 +99,13 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
 ",
     )
     .expect("write local config");
+    fs::write(dir.join("test-httpd"), "").expect("fake Apache path");
+    let config = fs::read_to_string(&config_path).expect("read config");
+    fs::write(
+        &config_path,
+        config.replace("tools:\n", "tools:\n  apache:\n    path: test-httpd\n"),
+    )
+    .expect("fake Apache hint");
     config_path
 }
 
@@ -231,6 +241,24 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             &["--infobase", "stand", "cluster", "restart"],
             "cluster restart",
             "cluster restart",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "start"],
+            "web start",
+            "web start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "stop"],
+            "web stop",
+            "web stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "restart"],
+            "web restart",
+            "web restart",
             work.clone(),
         ),
         row(&["extensions"], "extensions", "extensions", work.clone()),

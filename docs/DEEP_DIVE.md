@@ -457,3 +457,12 @@ MCP deliberately narrower than CLI.
 - HTTP session capacity и execution admission являются разными guardrails.
 - Shared EDT under MCP reuses the same execution model instead of inventing a separate MCP-only
   runtime path.
+
+### Публикация на Apache стенда
+
+Для управляемого кластера с `infobase.web.managed` выполните `cluster start`,
+`infobase create`, если базы ещё нет, затем `publish`. На Linux только публикацию
+выполняйте с явным `sudo`, используя доверенный бинарник и доверенный проект.
+Отдельные HTTP-конфиг, PID и журналы находятся под `localPath`. Раннер берёт
+`webinst` и модуль Apache из выпуска кластера. После переноса порта кластера
+повторите `publish`, если `web status` сообщает `publication_stale`.

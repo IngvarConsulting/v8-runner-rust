@@ -4,6 +4,9 @@
 mod cluster;
 mod recreate;
 mod standalone;
+mod web;
+pub(crate) use web::publication;
+pub use web::{execute_web, WebResult};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
@@ -18,12 +21,12 @@ use sha2::{Digest, Sha256};
 use crate::config::model::AppConfig;
 use crate::domain::dbms::{DbmsResult, ServiceAction, ServiceState};
 use crate::platform::postgres::{self, PostgresBuild};
-use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessRunner, WorkGiven,
-};
+#[cfg(any(test, windows))]
+use crate::platform::process::ProcessRequest;
+use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner, WorkGiven};
 use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
-    machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
+    observe_service, read_json, record_names_own_process, stand_machine_fingerprint, write_json,
     Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord, StandService,
 };
 use crate::use_cases::context::ExecutionContext;
@@ -41,8 +44,6 @@ const POLL: Duration = Duration::from_millis(200);
 const PORT_BASE: u32 = 20_000;
 const PORT_SPAN: u32 = 29_000;
 const PORT_TRIES: u32 = 64;
-/// Шаг перебора: блок портов сервера занимает столько же, порт PostgreSQL не мешает.
-const PORT_STEP: u32 = 32;
 const PASSWORD_LENGTH: usize = 24;
 /// Службы сервера над этой СУБД: их запись делает `dbms stop` отказом.
 const SERVERS: [(StandService, &str); 2] = [
@@ -53,13 +54,31 @@ const SERVERS: [(StandService, &str); 2] = [
 /// Что о машине и её процессах нужно сценарию. Подменяется в тестах.
 pub(crate) trait ServiceHost {
     fn supported(&self) -> bool;
+    fn standalone_supported(&self) -> bool {
+        self.supported()
+    }
+    fn can_start_as_current_user(&self) -> bool {
+        true
+    }
     fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError>;
     fn facts(&self, pid: u32) -> Option<ProcessFacts>;
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
-    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
-    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
+    fn soft_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    );
+    fn hard_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    );
     fn sleep(&self, duration: Duration);
     /// Сколько ждать. Подмена в тестах не ждёт настоящего времени.
     fn patience(&self, default: Duration) -> Duration {
@@ -67,6 +86,10 @@ pub(crate) trait ServiceHost {
     }
     /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю. `None` —
     /// перечня нет.
+    fn process_session(&self, _pid: u32) -> Option<u32> {
+        None
+    }
+
     fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
         Some(Vec::new())
     }
@@ -76,7 +99,21 @@ struct RealHost;
 
 impl ServiceHost for RealHost {
     fn supported(&self) -> bool {
+        cfg!(any(windows, target_os = "linux"))
+    }
+    fn standalone_supported(&self) -> bool {
         cfg!(windows)
+    }
+    fn can_start_as_current_user(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: geteuid takes no pointers and has no side effects.
+            unsafe { libc::geteuid() != 0 }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
     }
     fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError> {
         ProcessExecutor.spawn_service(request, work)
@@ -85,7 +122,7 @@ impl ServiceHost for RealHost {
         service::process_facts(pid)
     }
     fn machine(&self) -> Option<String> {
-        machine_fingerprint()
+        stand_machine_fingerprint()
     }
     fn listening_pid(&self, port: u16) -> Option<u32> {
         service::listening_pid(port)
@@ -93,14 +130,51 @@ impl ServiceHost for RealHost {
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
     }
-    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        let request = taskkill(&["/PID", &pid.to_string()]);
-        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+    fn soft_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (runner, context);
+            let _ = service::signal_owned_process(pid, started, libc::SIGTERM);
+        }
+        #[cfg(windows)]
+        service::with_process_identity(pid, started, || {
+            let request = stop_request(pid, false);
+            let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        });
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let _ = (runner, pid, started, context);
     }
-    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
-        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+    fn hard_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (runner, context);
+            let _ = service::signal_owned_process(pid, started, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        service::with_process_identity(pid, started, || {
+            let request = stop_request(pid, true);
+            let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        });
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let _ = (runner, pid, started, context);
     }
+    #[cfg(target_os = "linux")]
+    fn process_session(&self, pid: u32) -> Option<u32> {
+        service::process_session(pid)
+    }
+
     fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
         service::processes(images)
     }
@@ -109,10 +183,17 @@ impl ServiceHost for RealHost {
     }
 }
 
-fn taskkill(args: &[&str]) -> ProcessRequest {
+#[cfg(windows)]
+fn stop_request(pid: u32, force: bool) -> ProcessRequest {
+    let pid = pid.to_string();
+    let (program, args) = if force {
+        ("taskkill", vec!["/PID", &pid, "/T", "/F"])
+    } else {
+        ("taskkill", vec!["/PID", &pid])
+    };
     ProcessRequest {
-        program: PathBuf::from("taskkill"),
-        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        program: PathBuf::from(program),
+        args: args.into_iter().map(str::to_owned).collect(),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: None,
@@ -161,9 +242,7 @@ fn sessions_refusal(
 }
 
 fn not_on_this_system() -> UseCaseError {
-    environment(
-        "managed services run on Windows only: on this system the runner starts no PostgreSQL",
-    )
+    environment("managed PostgreSQL is only supported on Windows and Linux")
 }
 
 fn being_started(what: &str, infobase: &str) -> UseCaseError {
@@ -281,10 +360,37 @@ fn occupant_name(pid: u32) -> String {
 fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
     let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    (0..PORT_TRIES).map(move |attempt| {
-        let offset = seed.wrapping_add(attempt.wrapping_mul(PORT_STEP)) % PORT_SPAN;
-        u16::try_from(PORT_BASE + offset).expect("the span stays below 49152")
+    let dynamic = dynamic_ports();
+    let allowed: Vec<u16> = (PORT_BASE..PORT_BASE + PORT_SPAN)
+        .map(|port| port as u16)
+        .filter(|port| !(*port..=port.saturating_add(31)).any(|port| dynamic.contains(&port)))
+        .collect();
+    (0..PORT_TRIES).filter_map(move |attempt| {
+        if cfg!(target_os = "linux") {
+            let index = seed.wrapping_add(attempt.wrapping_mul(32)) as usize;
+            allowed.get(index.checked_rem(allowed.len())?).copied()
+        } else {
+            let offset = seed.wrapping_add(attempt.wrapping_mul(32)) % PORT_SPAN;
+            u16::try_from(PORT_BASE + offset).ok()
+        }
     })
+}
+
+fn dynamic_ports() -> std::ops::RangeInclusive<u16> {
+    #[cfg(target_os = "linux")]
+    {
+        let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|text| {
+                let mut values = text.split_whitespace();
+                Some(values.next()?.parse().ok()?..=values.next()?.parse().ok()?)
+            });
+        range.unwrap_or(32_768..=60_999)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        49_152..=65_535
+    }
 }
 
 /// База команды: объявленная, с `dbms.managed`. Строка соединения — отказ
@@ -501,10 +607,8 @@ impl<'a> Stand<'a> {
     fn database_exists(&self, port: u16, bin: &Path, name: &str) -> Result<bool, UseCaseError> {
         let passfile = self.paths.passfile();
         let password = self.password()?;
-        crate::support::fs::write_file_atomically(&passfile, |file| {
-            file.write_all(postgres::passfile_line(port, &password).as_bytes())
-        })
-        .map_err(|error| io_failure("cannot write", &passfile, &error))?;
+        postgres::write_passfile(&passfile, port, &password)
+            .map_err(|error| io_failure("cannot write", &passfile, &error))?;
         let build = PostgresBuild::at(bin.to_path_buf());
         let asked = self.runner.run_with_policy(
             &build.database_exists(port, &passfile, name),
@@ -646,6 +750,11 @@ impl<'a> Stand<'a> {
             return Err(not_on_this_system());
         }
         // Без идентификатора машины свою службу не опознать и потому не остановить.
+        if !self.host.can_start_as_current_user() {
+            return Err(environment(
+                "run managed PostgreSQL as an unprivileged user",
+            ));
+        }
         let Some(machine) = self.host.machine() else {
             return Err(environment(
                 "this system gives no machine id: the runner could not tell its PostgreSQL from a foreign one",
@@ -917,7 +1026,8 @@ impl<'a> Stand<'a> {
         self.stop_tool(&build);
         let pid = record.pid.expect("an own service has a pid");
         if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
-            self.host.hard_stop(self.runner, pid, self.context);
+            self.host
+                .hard_stop(self.runner, pid, record.started, self.context);
             if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
                 return Err(UseCaseError::new(
                     UseCaseErrorKind::Platform,
@@ -1012,7 +1122,7 @@ fn write_password(path: &Path) -> std::io::Result<()> {
         .iter()
         .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
         .collect();
-    crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+    crate::support::fs::create_file_once(path, |file| file.write_all(text.as_bytes())).map(|_| ())
 }
 
 /// `standalone start|stop|restart`: команда записи, под замком `workPath`.
@@ -1528,8 +1638,21 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
-        fn soft_stop(&self, _runner: &dyn ProcessRunner, _pid: u32, _context: &ExecutionContext) {}
-        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn soft_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            _pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
+        }
+        fn hard_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.hard_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
         }

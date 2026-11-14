@@ -22,7 +22,7 @@ check:
 
 Под `localPath` лежит то, что нельзя пересобрать: память о базе в
 `<localPath>/infobases/<база>/` (`INV.USE-CASES.MEMORY-LIVES-UNDER-THE-BASE-IT-DESCRIBES`),
-данные стендов в `<localPath>/infobases/<база>/managed/{postgres,standalone,cluster,ras}/` и
+данные стендов в `<localPath>/infobases/<база>/managed/{postgres,standalone,cluster,ras,web}/` и
 файловая база,
 которую `init` без `--infobase` объявляет по умолчанию, — `File=<localPath>/db`. Путь базы
 пишется относительным, если он внутри каталога конфигурации, иначе абсолютным. Объявленный
