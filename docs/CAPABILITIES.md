@@ -940,7 +940,10 @@ v8-runner tools download client-mcp [--sources] [--force]
   сборку исполнял Конфигуратор, и скачивает `.cfe` в `workPath/tools`. Исходники
   расширения-инструмента под `workPath` разбираются чтением файлов, как прежде: то, что
   `workPath` спрятан от git, на них не влияет.
-- `vanessa` всегда скачивает `workPath/tools/vanessa-automation-single.epf`.
+- `vanessa` скачивает `workPath/tools/vanessa-automation-single.epf` и заполняет локальный
+  YAML в свежей копии без `origin` и при выключенном управляемом кластере. Команда проверяет
+  форму объявлений баз, включая явно указанную `--infobase`, и обходится без запуска служб
+  или выбора провайдера 1С.
 - `v8project.local.yaml` обновляется только для команд, которым нужны machine-local пути:
   `vanessa` заполняет `tools.va.epf_path`, `client-mcp` заполняет
   `tools.client_mcp.extension`; повторный запуск переиспользует уже скачанные файлы, а
