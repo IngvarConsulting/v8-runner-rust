@@ -28,6 +28,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "dbms status",
     "standalone status",
     "cluster status",
+    "web status",
     "diff",
     "mcp serve stdio",
     "mcp serve http",
