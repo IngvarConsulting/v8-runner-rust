@@ -526,6 +526,7 @@ mod tests {
 
     enum ObservationStep {
         Initialize,
+        LoseInitializeResponse,
         Initialized,
         Tools(&'static [&'static str]),
         ListFailure,
@@ -571,29 +572,44 @@ mod tests {
                     let step = steps
                         .get(completed)
                         .unwrap_or(&ObservationStep::InitializeFailure);
-                    let method = match step {
-                        ObservationStep::Initialize
-                        | ObservationStep::InitializeFailure
-                        | ObservationStep::CancelAfterInitializeFailure => "initialize",
-                        ObservationStep::Initialized => "notifications/initialized",
-                        ObservationStep::Tools(_) | ObservationStep::ListFailure => "tools/list",
-                        ObservationStep::Delete => "DELETE",
-                    };
-                    if method == "DELETE" {
-                        assert!(request.starts_with("DELETE "), "{request}");
+                    let body: Value;
+                    let method = if request.starts_with("DELETE ") {
+                        None
                     } else {
-                        let body: Value =
+                        body =
                             serde_json::from_str(request.split_once("\r\n\r\n").expect("body").1)
                                 .expect("json request");
-                        assert_eq!(body["method"], method, "{request}");
-                    }
-                    if method == "initialize" {
+                        Some(body["method"].as_str().expect("json-rpc method"))
+                    };
+                    // Only the notification proves the client received the initialize reply.
+                    let retry = matches!(step, ObservationStep::Initialized)
+                        && method == Some("initialize");
+                    let step = if retry {
+                        &ObservationStep::Initialize
+                    } else {
+                        step
+                    };
+                    let expected_method = match step {
+                        ObservationStep::Initialize
+                        | ObservationStep::LoseInitializeResponse
+                        | ObservationStep::InitializeFailure
+                        | ObservationStep::CancelAfterInitializeFailure => Some("initialize"),
+                        ObservationStep::Initialized => Some("notifications/initialized"),
+                        ObservationStep::Tools(_) | ObservationStep::ListFailure => {
+                            Some("tools/list")
+                        }
+                        ObservationStep::Delete => None,
+                    };
+                    assert_eq!(method, expected_method, "{request}");
+                    if method == Some("initialize") {
                         assert!(!request.to_ascii_lowercase().contains("mcp-session-id:"));
                     } else {
                         assert_protocol_header(&request);
                         assert_session_header(&request);
                     }
                     match step {
+                        // The server handled initialize, but the client gets EOF before any reply.
+                        ObservationStep::LoseInitializeResponse => {}
                         ObservationStep::Initialize => write_json_response(
                             &mut stream,
                             "200 OK",
@@ -623,7 +639,9 @@ mod tests {
                             cancellation.cancel();
                         }
                     }
-                    completed += 1;
+                    if !retry {
+                        completed += 1;
+                    }
                 }
                 assert!(
                     completed >= steps.len(),
@@ -767,8 +785,9 @@ mod tests {
     fn fresh_complete_tools_after_reinitialize_establish_readiness() {
         use ObservationStep::*;
         let mut steps = observed_then_disconnected();
+        // A lost reply must not leave ObservationServer stuck expecting the notification.
         steps.extend([
-            Initialize,
+            LoseInitializeResponse,
             Initialized,
             Tools(&["load_features", "run_scenario"]),
             Delete,
