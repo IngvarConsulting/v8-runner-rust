@@ -33,7 +33,7 @@ use crate::platform::agent_keeper::client::{
 use crate::platform::agent_keeper::protocol::Holder;
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, EnvironmentLayer};
 use crate::support::fs::copy_dir_recursively;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
@@ -669,9 +669,9 @@ fn open_handle(
         }
         DesignerAgentMode::Managed { port } => {
             let v8 = v8.ok_or_else(|| {
-                AppError::EnvironmentUnavailable(
-                    "the managed Designer agent needs the local platform; no 1cv8 was selected"
-                        .to_owned(),
+                AppError::environment_at(
+                    EnvironmentLayer::Platform,
+                    "the managed Designer agent needs the local platform; no 1cv8 was selected",
                 )
             })?;
             let reason = if agent.live_enabled() {
@@ -806,10 +806,13 @@ pub(crate) fn live_target(
     let agent = &config.tools.designer_agent;
     let connection = config.v8_connection();
     let state = crate::support::machine::account::account_state_dir().map_err(|error| {
-        AppError::EnvironmentUnavailable(format!(
-            "the live Designer agent needs the account state directory: {error}; \
+        AppError::environment_at(
+            EnvironmentLayer::AgentStart,
+            format!(
+                "the live Designer agent needs the account state directory: {error}; \
              set tools.designer_agent.live: false to work without it"
-        ))
+            ),
+        )
     })?;
     let key = live_key(&state, config, v8)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
@@ -880,7 +883,10 @@ fn open_live(
         Err(error) => return live_start_failure(error),
     };
     let port = client.port().ok_or_else(|| {
-        AppError::EnvironmentUnavailable("the live agent keeper names no agent port".to_owned())
+        AppError::environment_at(
+            EnvironmentLayer::AgentStart,
+            "the live agent keeper names no agent port",
+        )
     })?;
     let mut transcript = std::fs::OpenOptions::new()
         .create(true)
@@ -951,12 +957,25 @@ fn live_start_failure(
             tracing::warn!(error = %crate::support::error::chain(&error), ?reason, "the command works with a one-shot agent");
             Ok(Err(reason))
         }
-        None => match error {
-            KeeperStartError::Agent(error) => Err(AppError::from(error)),
-            other => Err(AppError::EnvironmentUnavailable(
-                crate::support::error::chain(&other),
-            )),
-        },
+        None => Err(keeper_start_refusal(error)),
+    }
+}
+
+/// Отказ подъёма живого агента как отказ команды — единственный владелец слоя у
+/// `KeeperStartError` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`): хранитель не
+/// поднялся или не ответил — `agent_start`; агент занят другой командой, Job или предел —
+/// занятость, а не отказ подъёма, и слой не определён. Свои коды Job и предела называет
+/// `agent hold` сам.
+pub(crate) fn keeper_start_refusal(error: KeeperStartError) -> AppError {
+    match error {
+        KeeperStartError::Agent(error) => AppError::from(error),
+        KeeperStartError::Unavailable { .. } => AppError::environment_at(
+            EnvironmentLayer::AgentStart,
+            crate::support::error::chain(&error),
+        ),
+        KeeperStartError::Busy { .. } | KeeperStartError::Job | KeeperStartError::Limit { .. } => {
+            AppError::environment(crate::support::error::chain(&error))
+        }
     }
 }
 
@@ -1024,13 +1043,14 @@ fn remove_live_agent(config: &AppConfig, v8: &Path) {
 /// (INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII).
 fn declared_launch_host_key(declared: Option<PathBuf>) -> Result<Option<PathBuf>, AppError> {
     match &declared {
-        Some(path) if !agent_reads_host_key_at(path) => {
-            Err(AppError::EnvironmentUnavailable(format!(
+        Some(path) if !agent_reads_host_key_at(path) => Err(AppError::environment_at(
+            EnvironmentLayer::AgentStart,
+            format!(
                 "tools.designer_agent.host-key '{}' is not an ASCII path: the Designer agent \
                  cannot read its host key there and exits; move the key to an ASCII path",
                 path.display()
-            )))
-        }
+            ),
+        )),
         _ => Ok(declared),
     }
 }
@@ -1139,7 +1159,7 @@ fn expose_output_with(
     })?;
     let _ = crate::support::fs::remove_link(&link);
     link_to(&target, &link).map_err(|error| {
-        AppError::EnvironmentUnavailable(format!(
+        AppError::environment(format!(
             "the agent cannot write into '{}': no link can be created at '{}' ({error}); name another executor in providers.pull or, at a gate, use exchange: sftp",
             target.display(),
             link.display()
@@ -2248,8 +2268,10 @@ mod tests {
         let declared = PathBuf::from("ключи").join("host_ed25519");
         let refused = declared_launch_host_key(Some(declared)).expect_err("refused");
         assert!(
-            matches!(&refused, AppError::EnvironmentUnavailable(message)
-                if message.contains("ключи") && message.contains("ASCII")),
+            matches!(&refused, AppError::EnvironmentUnavailable(refusal)
+                if refusal.layer == Some(EnvironmentLayer::AgentStart)
+                    && refusal.message.contains("ключи")
+                    && refusal.message.contains("ASCII")),
             "{refused}"
         );
         assert!(matches!(
@@ -2310,7 +2332,14 @@ mod tests {
         })
         .expect_err("no link, no output directory");
 
-        assert!(matches!(error, AppError::EnvironmentUnavailable(_)));
+        // Ссылка в каталоге агента — среда, слой которой не определён.
+        assert!(matches!(
+            error,
+            AppError::EnvironmentUnavailable(crate::support::error::EnvironmentRefusal {
+                layer: None,
+                ..
+            })
+        ));
         assert!(!user_dir.join("target/run").exists());
     }
 
@@ -2716,5 +2745,43 @@ mod tests {
         };
         assert!(warning.contains("update_db_cfg"), "{warning}");
         assert!(warning.contains("critical phase"), "{warning}");
+    }
+
+    /// Хранитель не поднялся — слой `agent_start`; агент занят другой командой — занятость,
+    /// слой не определён (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). Один владелец
+    /// у `agent hold` и у команды, работающей с живым агентом.
+    #[test]
+    fn a_keeper_that_did_not_start_is_agent_start_and_a_busy_agent_names_no_layer() {
+        let unavailable = keeper_start_refusal(KeeperStartError::Unavailable {
+            detail: "the keeper did not answer".to_owned(),
+            source: None,
+        });
+        assert_eq!(
+            unavailable.environment_layer(),
+            Some(EnvironmentLayer::AgentStart),
+            "{unavailable}"
+        );
+        for error in [
+            KeeperStartError::Busy {
+                command: Some("dump".to_owned()),
+            },
+            KeeperStartError::Job,
+        ] {
+            let refused = keeper_start_refusal(error);
+            assert!(
+                matches!(&refused, AppError::EnvironmentUnavailable(refusal) if refusal.layer.is_none()),
+                "{refused}"
+            );
+        }
+        let rejected = keeper_start_refusal(KeeperStartError::Agent(
+            crate::platform::agent::AgentError::AuthenticationRejected {
+                endpoint: "127.0.0.1:1543".to_owned(),
+                user: String::new(),
+            },
+        ));
+        assert_eq!(
+            rejected.environment_layer(),
+            Some(EnvironmentLayer::InfobaseUser)
+        );
     }
 }

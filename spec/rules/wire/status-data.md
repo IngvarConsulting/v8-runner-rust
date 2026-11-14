@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_status.rs::status_without_deep_starts_no_platform
+  - tests/cli_infobase_owner.rs::status_without_deep_names_the_live_holders_without_the_platform
   - tests/cli_status.rs::status_names_a_load_without_apply
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
@@ -21,13 +22,14 @@ check:
 проекта: `CONFIGURATION` или `EXTENSION`), память о базе (`memory`), запись журнала
 поколений (`recorded`) и число файлов каталога, изменившихся с последнего чтения
 (`changed_files`; `null` — сравнить не с чем) и каким путём эти изменения найдены
-(`detection`; `null` — изменений не искали).
+(`detection`; `null` — изменений не искали). У файловой базы есть и `holders` — живые копии
+из метки владельца: эта и другие, которых команда записи не сменила бы как ушедших. Метку
+раннер читает без платформы, поэтому поле есть и без `--deep`.
 
 У `--deep` к набору добавляется `base`: поколение, которое ответил исполнитель `push`, и его
 сверка с записью — `unchanged`, `moved_ahead`, `other_tool`, `no_record` или `no_answer`. К базе
 добавляются `extensions` — состав расширений базы рядом с наборами проекта, у
-расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
-базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
+расширения-инструмента клиентского MCP `tool: true`. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
 
 У подготовленного исполнителя поколения есть верхнеуровневая квитанция `provider`. Она
@@ -37,6 +39,15 @@ check:
 в своей сессии, это агент с той же точкой входа
 ([правило](../use-cases/the-generation-agent-lists-the-extensions.md)).
 Поле добавлено в версию 6 до выпуска 0.17.
+
+**Что изменила версия 7.** `holders` приходит у файловой базы и без `--deep`, и у `--all` — у
+каждой файловой базы. Список `holders.owners` называет только живые копии — с тем же отбором,
+что у проверки записи: запись ушедшей копии (её каталога нет, она больше не объявляет базу
+или выступает названной копией) в список не входит, хотя в метке ещё лежит. У записи новое
+обязательное поле `this_machine`: хеш идентификатора машины в метке — хеш этой машины;
+`false` — другая машина или машина без идентификатора и имени хоста. У `this_copy: true` оно
+всегда `true`. Ту же запись несёт предупреждение `infobase_of_another_copy` конверта
+(`CTR.WIRE.COMMAND-ENVELOPE` версии 6).
 
 **Что изменила версия 6.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)). Код и род отказа `no_memory` в этой версии называются `untracked_base`. У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). У набора новое обязательное поле `detection`: `path` — `git` (изменения назвал git), `git+fsmonitor` (git, которому о файлах сообщает демон `core.fsmonitor` репозитория) или `scan` (раннер прочёл файлы сам), и у `scan` — `reason`: `no_repository`, `submodule`, `nested_repository`, `sha256_repository`, `bytes_memory`,
 `git_failed` или `edt_format` ([правило](../use-cases/changes-are-detected-on-demand.md)). Отказ `source_set_ignored_by_git` ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)) формы не меняет: он едет в конверте.
@@ -104,7 +115,8 @@ check:
             "project": "/home/dev/demo",
             "host": "dev-box",
             "since": "2026-10-01T09:00:00Z",
-            "this_copy": true
+            "this_copy": true,
+            "this_machine": true
           }
         ]
       }

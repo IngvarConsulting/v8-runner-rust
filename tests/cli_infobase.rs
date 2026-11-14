@@ -314,6 +314,8 @@ fn missing_file_infobase_is_unavailable_before_designer_dispatch() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    // Нет файла базы, а не утилиты: слой не определён, и поля нет.
+    assert!(envelope["error"].get("layer").is_none(), "{envelope}");
     assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
     assert_eq!(
         envelope["data"]["provider"]["skipped"][0]["provider"],
@@ -2455,6 +2457,7 @@ fn a_taken_port_of_the_managed_agent_is_named() {
         envelope["error"]["code"], "environment_unavailable",
         "{envelope}"
     );
+    assert_eq!(envelope["error"]["layer"], "agent_start", "{envelope}");
     let message = envelope["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains(&format!(

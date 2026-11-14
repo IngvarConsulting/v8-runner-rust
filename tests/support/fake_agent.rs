@@ -1398,9 +1398,8 @@ fn serve_managed_launches_with(
 ///
 /// Порт не освобождается ни между тестами, ни между запусками агента одного теста: сокет
 /// привязан один раз, и другой тест того же процесса получить этот порт как свободный не
-/// может. Ключ хоста каждого соединения — тот, что раннер передал агенту последним
-/// (`/AgentSSHHostKey` из файла запроса поддельного `1cv8`); `presented` подменяет его, так
-/// проверяется отказ чужому ключу.
+/// может. При каждом соединении двойник читает `/AgentSSHHostKey` из опубликованного
+/// запроса поддельного `1cv8`. `presented` подменяет этот ключ для проверки отказа.
 pub fn serve_managed_launches_on_a_reserved_port(
     agent: FakeAgent,
     presented: Option<russh::keys::PrivateKey>,
@@ -1420,27 +1419,14 @@ pub fn serve_managed_launches_on_a_reserved_port(
             let listener =
                 tokio::net::TcpListener::from_std(listener).expect("fake agent listener");
             let mut agent = agent;
-            let mut current: Option<russh::keys::PrivateKey> = None;
             loop {
                 let Ok((socket, peer)) = listener.accept().await else {
                     continue;
                 };
-                // Запрос запуска пишет поддельный `1cv8` первым делом; первое соединение
-                // может его опередить — тогда двойник ждёт запрос, а не отвечает старым ключом.
-                let started = std::time::Instant::now();
-                loop {
-                    if let Ok(text) = fs::read_to_string(&request) {
-                        let _ = fs::remove_file(&request);
-                        current = Some(launch_key(&text));
-                    }
-                    if current.is_some() || started.elapsed() > Duration::from_secs(20) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                let Some(key) = presented.clone().or_else(|| current.clone()) else {
+                let Some(launch_key) = wait_for_reserved_launch_key(&request).await else {
                     continue;
                 };
+                let key = presented.clone().unwrap_or(launch_key);
                 let config = Arc::new(server::Config {
                     auth_rejection_time: Duration::from_millis(50),
                     auth_rejection_time_initial: Some(Duration::ZERO),
@@ -1460,14 +1446,46 @@ pub fn serve_managed_launches_on_a_reserved_port(
     port
 }
 
+/// Файл одноразового ключа уходит вместе с агентом. Если соединение опередило
+/// публикацию следующего запроса, ждём новый ключ. Сам запрос оставляем для
+/// повторных попыток рукопожатия того же запуска.
+pub async fn wait_for_reserved_launch_key(request: &Path) -> Option<russh::keys::PrivateKey> {
+    use std::io::ErrorKind::NotFound;
+
+    let started = std::time::Instant::now();
+    loop {
+        match fs::read_to_string(request) {
+            Ok(text) => {
+                let path = launch_key_path(&text).expect("fake 1cv8 names /AgentSSHHostKey");
+                match russh::keys::load_secret_key(path, None) {
+                    Ok(key) => return Some(key),
+                    Err(russh::keys::Error::IO(error)) if error.kind() == NotFound => {}
+                    Err(error) => panic!("load fake agent host key {path}: {error}"),
+                }
+            }
+            Err(error) if error.kind() == NotFound => {}
+            Err(error) => panic!(
+                "read fake agent launch request {}: {error}",
+                request.display()
+            ),
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Ключ хоста из файла запроса запуска: вторая строка — путь `/AgentSSHHostKey`.
-fn launch_key(text: &str) -> russh::keys::PrivateKey {
-    match text
-        .lines()
+fn launch_key_path(text: &str) -> Option<&str> {
+    text.lines()
         .nth(1)
         .map(str::trim)
         .filter(|line| !line.is_empty())
-    {
+}
+
+fn launch_key(text: &str) -> russh::keys::PrivateKey {
+    match launch_key_path(text) {
         Some(path) => {
             russh::keys::load_secret_key(path, None).expect("host key handed to the agent")
         }
