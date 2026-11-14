@@ -1099,7 +1099,12 @@ fn configure_process_group(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn configure_process_group(command: &mut Command) {
+    crate::platform::process::outside_the_runner_process_group(command);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_process_group(_command: &mut Command) {}
 
 /// Снимает группу неподобранного процесса. `ESRCH` значит, что группы уже нет. `EPERM`

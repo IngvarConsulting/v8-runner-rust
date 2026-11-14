@@ -57,8 +57,8 @@ pub struct InfobaseStatus {
     /// Состав расширений базы рядом с наборами проекта; только у `--deep`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<ExtensionsStatus>,
-    /// Копии, которые держат файловую базу, по её метке; только у `--deep` и только у
-    /// файловой базы.
+    /// Живые копии, которые держат файловую базу, по её метке; только у файловой базы.
+    /// Читается без платформы, с `--deep` и без него.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holders: Option<HoldersStatus>,
 }
@@ -211,8 +211,9 @@ pub struct InstalledExtensionStatus {
 pub struct HoldersStatus {
     /// Файл метки рядом с каталогом базы.
     pub marker: PathBuf,
-    /// Записи метки; `null` — метку не прочитать или `working-copy` местного слоя не
-    /// проходит проверку, причина в `reason`. Пустой список — базу никто не держит.
+    /// Живые копии из метки — эта и другие, которых команда записи не сменила бы как
+    /// ушедших; `null` — метку не прочитать или `working-copy` местного слоя не проходит
+    /// проверку, причина в `reason`. Пустой список — базу никто не держит.
     pub owners: Option<Vec<HolderStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -229,6 +230,10 @@ pub struct HolderStatus {
     pub since: DateTime<Utc>,
     /// Это та копия, из которой спрашивают.
     pub this_copy: bool,
+    /// Копия записана с этой машины: хеш идентификатора машины в метке — хеш этой.
+    /// `false` — другая машина или машина, которая не называет ни идентификатора, ни имени
+    /// хоста. У `this_copy: true` всегда `true`.
+    pub this_machine: bool,
 }
 
 /// Что стало с записью журнала поколений набора после шага, который меняет основную
