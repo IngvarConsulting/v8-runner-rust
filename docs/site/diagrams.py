@@ -796,7 +796,7 @@ def d_cluster_managed(id):
     host_fan(d, [('DES', FAN, 'r:0.25', 0.7), ('CLI', 'процесс на запуск', 'r:0.75', 0.7)])
     d.edge('R', 'WP', 'файл', fa='b', fb='t')
     d.edge('R', 'RAG', 'cluster start · stop', path='M165,182 C260,430 640,430 760,195', lx=300)
-    d.edge('DES', 'RAG', 'TCP, Srvr=localhost:<порт>', fa='r', fb='l:0.3', t=0.5)
+    d.edge('DES', 'RAG', 'TCP, Srvr=127.0.0.1:<regport>', fa='r', fb='l:0.3', t=0.5)
     d.edge('CLI', 'RAG', 'TCP', fa='r', fb='l:0.7', t=0.5)
     d.edge('RAG', 'RPH', fa='b', fb='t')
     d.edge('RPH', 'DBMS')
