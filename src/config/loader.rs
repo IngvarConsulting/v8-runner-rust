@@ -406,6 +406,23 @@ fn build_config(
     if let Some(wd) = workdir_override {
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
+    // Check traversals before any writer can pass the path to Win32, which
+    // folds `..`. Keep the configured spelling for target-side overlap checks.
+    #[cfg(windows)]
+    if config
+        .work_path
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        crate::support::path::nearest_existing_canonical_path(&config.work_path).map_err(
+            |error| {
+                ConfigValidationError::WorkPathInvalid(format!(
+                    "cannot resolve '{}': {error}",
+                    config.work_path.display()
+                ))
+            },
+        )?;
+    }
     crate::config::validate::validate_local_path(&config, config_dir)?;
     project_managed_standalone(&mut config, &validation_mode)?;
     project_managed_cluster(&mut config, &validation_mode)?;
