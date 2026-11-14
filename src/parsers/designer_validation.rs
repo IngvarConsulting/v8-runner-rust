@@ -80,28 +80,51 @@ fn parse_module_issue(line: &str) -> Option<Issue> {
 
 fn parse_object_issue(line: &str) -> Option<Issue> {
     let (first, tail) = line.split_once(' ')?;
-    let (second, rest) = match tail.split_once(' ') {
-        Some((second, rest)) => (second, Some(rest.trim())),
-        None => ("", None),
-    };
+    let tail = tail.trim();
 
-    let (object, message) = if contains_issue_marker(tail.trim()) {
-        (first.to_owned(), tail.trim().to_owned())
+    // The handler checks can prefix the metadata path with an extension name.
+    let extension_issue = tail.split_once(' ').filter(|(path, message)| {
+        is_handler_check_message(message.trim_start())
+            && is_identifier(first)
+            && is_metadata_path(path)
+    });
+    let (object, message, severity) = if let Some((path, message)) = extension_issue {
+        (
+            format!("{first} {path}"),
+            message.trim_start(),
+            IssueSeverity::Error,
+        )
+    } else if is_handler_check_message(tail) && is_metadata_path(first) {
+        (first.to_owned(), tail, IssueSeverity::Error)
+    } else if contains_issue_marker(tail) {
+        (first.to_owned(), tail, classify_severity(tail))
     } else {
-        let rest = rest?;
-        if contains_issue_marker(rest) {
-            (format!("{first} {second}"), rest.to_owned())
-        } else {
-            return None;
-        }
+        return None;
     };
-    let severity = classify_severity(&message);
 
     Some(Issue::Object(ObjectIssue {
         object,
-        message,
+        message: message.to_owned(),
         severity,
     }))
+}
+
+fn is_metadata_path(path: &str) -> bool {
+    path.contains('.') && path.split('.').all(is_identifier)
+}
+
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+fn is_handler_check_message(message: &str) -> bool {
+    message.starts_with("Пустой обработчик:")
+        || message.starts_with("Не обнаружено ссылок на функцию:")
+        || message.starts_with("Отсутствует обработчик:")
 }
 
 fn classify_severity(message: &str) -> IssueSeverity {
@@ -127,8 +150,9 @@ fn contains_issue_marker(message: &str) -> bool {
 }
 
 fn is_success_message(line: &str) -> bool {
-    let lower = line.to_lowercase();
-    lower.contains("ошибок не обнаружено")
+    let english = line.strip_suffix('.').unwrap_or(line);
+    english.eq_ignore_ascii_case("No errors found")
+        || line.to_lowercase().contains("ошибок не обнаружено")
 }
 
 fn contains_warning_marker(lower_message: &str) -> bool {
@@ -141,7 +165,7 @@ fn contains_warning_marker(lower_message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse, parse_path};
-    use crate::domain::issue::{Issue, IssueSeverity};
+    use crate::domain::issue::{Issue, IssueSeverity, ObjectIssue};
     use tempfile::tempdir;
 
     const DESIGNER_VALIDATION_FIXTURE: &str = include_str!(concat!(
@@ -256,6 +280,90 @@ mod tests {
         let issues = parse("Синтаксических ошибок не обнаружено!");
 
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn parses_empty_handler_issue() {
+        assert_eq!(
+            parse(
+                r#"ОбщаяКоманда.ОбщаяКоманда1.МодульКоманды Пустой обработчик: "ОбработкаКоманды""#
+            ),
+            vec![Issue::Object(ObjectIssue {
+                object: "ОбщаяКоманда.ОбщаяКоманда1.МодульКоманды".to_owned(),
+                message: r#"Пустой обработчик: "ОбработкаКоманды""#.to_owned(),
+                severity: IssueSeverity::Error,
+            })]
+        );
+    }
+
+    #[test]
+    fn handler_name_does_not_change_diagnostic_severity() {
+        let issues = parse(r#"ОбщаяКоманда.Тест.МодульКоманды Пустой обработчик: "ShowWarning""#);
+
+        assert!(
+            matches!(issues.as_slice(), [Issue::Object(issue)] if issue.severity == IssueSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn parses_extension_handler_and_reference_issues() {
+        let log = r#"client_mcp ОбщийМодуль.Мсп_ЗадачиКлиент.Модуль Не обнаружено ссылок на функцию: "ВыполнитьОповещение"
+YAXUNIT Обработка.ЮТПомощникДляСозданияТестовыхДанных.Форма.Форма.Форма Отсутствует обработчик:  СнятьВсеФлажки "СнятьВсеФлажки""#;
+
+        assert_eq!(
+            parse(log),
+            vec![
+                Issue::Object(ObjectIssue {
+                    object: "client_mcp ОбщийМодуль.Мсп_ЗадачиКлиент.Модуль".to_owned(),
+                    message: r#"Не обнаружено ссылок на функцию: "ВыполнитьОповещение""#.to_owned(),
+                    severity: IssueSeverity::Error,
+                }),
+                Issue::Object(ObjectIssue {
+                    object:
+                        "YAXUNIT Обработка.ЮТПомощникДляСозданияТестовыхДанных.Форма.Форма.Форма"
+                            .to_owned(),
+                    message: r#"Отсутствует обработчик:  СнятьВсеФлажки "СнятьВсеФлажки""#
+                        .to_owned(),
+                    severity: IssueSeverity::Error,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_handler_markers_in_service_text() {
+        let log = "Проверка: Пустой обработчик: образец\n\
+                   Проверка: строка Отсутствует обработчик: образец\n\
+                   ОбщаяКоманда.Тест Проверка: Пустой обработчик: образец\n\
+                   1. Пустой обработчик: образец\n\
+                   https://example.com Пустой обработчик: образец\n\
+                   Проверка 12.03 Отсутствует обработчик: образец";
+
+        assert!(parse(log).is_empty());
+    }
+
+    #[test]
+    fn ignores_english_success_messages() {
+        assert!(parse("No errors found\r\n  No errors found.  \r\nNO ERRORS FOUND").is_empty());
+    }
+
+    #[test]
+    fn preserves_english_diagnostics_containing_the_success_phrase() {
+        let log = "No errors found\n\
+                   Catalogs.Items Error: invalid reference\n\
+                   Catalogs.Other Error: unexpected result 'No errors found'\n\
+                   {CommonModules.TestModule(12,3)}: Error: unexpected result 'No errors found'";
+        let issues = parse(log);
+
+        assert!(matches!(
+            issues.as_slice(),
+            [Issue::Object(first), Issue::Object(second), Issue::Module(third)]
+                if first.object == "Catalogs.Items"
+                    && first.message == "Error: invalid reference"
+                    && first.severity == IssueSeverity::Error
+                    && second.message == "Error: unexpected result 'No errors found'"
+                    && third.message == second.message
+        ));
     }
 
     #[test]
