@@ -112,6 +112,50 @@
       },
       "type": "object"
     },
+    "CodedWarning": {
+      "description": "Предупреждение с машинным кодом. Поле `message` равно строке, которая стоит в `warnings`\nтого же ответа; остальные поля — свои у каждого кода.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Команда записи идёт на файловой базе, которую держит другая живая рабочая копия\n(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).",
+          "properties": {
+            "address": {
+              "description": "Адрес базы без учётных данных, как `address` у `status`: `file:<каталог>`.",
+              "type": "string"
+            },
+            "code": {
+              "const": "infobase_of_another_copy",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "name": {
+              "description": "Имя базы в местном слое; `null` — база пришла строкой соединения. Поле есть всегда.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owners": {
+              "description": "Живые копии-владельцы, кроме этой, — та же запись, что `holders.owners` у\n`status`.",
+              "items": {
+                "$ref": "#/$defs/HolderStatus"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "name",
+            "address",
+            "owners"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "EnvelopeError": {
       "additionalProperties": false,
       "description": "Structured business error metadata carried by machine-readable command envelopes.",
@@ -128,6 +172,17 @@
         },
         "kind": {
           "$ref": "#/$defs/ErrorKind"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentLayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Слой окружения, который отказал; заполняется отказом `environment_unavailable`, когда\nслой определён. Без поля слой не определён."
         },
         "local_generation": {
           "description": "Поколение, записанное после прошлого обмена; заполняется тем же отказом.",
@@ -179,6 +234,31 @@
         "message"
       ],
       "type": "object"
+    },
+    "EnvironmentLayer": {
+      "description": "Какой слой окружения отказал у `environment_unavailable`. Набор закрыт и едет в отказе\nполем `layer` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`): по нему потребитель\nрешает, не читая прозы. Отказ, слой которого не определён, поля не несёт.",
+      "oneOf": [
+        {
+          "const": "infobase_user",
+          "description": "Агент отверг вход с учётными данными пользователя базы. Так же отвечает агент без\nлицензии платформы (замер 8.5.4.1878).",
+          "type": "string"
+        },
+        {
+          "const": "agent_endpoint",
+          "description": "Точка входа агента не ответила, SSH-рукопожатие не прошло или ключ хоста не тот.",
+          "type": "string"
+        },
+        {
+          "const": "agent_start",
+          "description": "Агент не поднялся: запуск, порт, срок подъёма, хранитель живого агента.",
+          "type": "string"
+        },
+        {
+          "const": "platform",
+          "description": "Утилиты платформы нет, она не той версии или не выбрана.",
+          "type": "string"
+        }
+      ]
     },
     "ErrorCode": {
       "description": "Код отказа — та же причина подробнее. Набор закрыт вместе с родом.",
@@ -363,6 +443,42 @@
         "degraded"
       ],
       "type": "string"
+    },
+    "HolderStatus": {
+      "additionalProperties": false,
+      "description": "Копия из метки владельца.",
+      "properties": {
+        "host": {
+          "description": "Имя хоста на момент записи.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Каталог проекта копии.",
+          "type": "string"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "this_copy": {
+          "description": "Это та копия, из которой спрашивают.",
+          "type": "boolean"
+        },
+        "this_machine": {
+          "description": "Копия записана с этой машины: хеш идентификатора машины в метке — хеш этой.\n`false` — другая машина или машина, которая не называет ни идентификатора, ни имени\nхоста. У `this_copy: true` всегда `true`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project",
+        "since",
+        "this_copy",
+        "this_machine"
+      ],
+      "type": "object"
     },
     "InfobaseSessions": {
       "additionalProperties": false,
@@ -749,6 +865,13 @@
     "steps": {
       "items": {
         "$ref": "#/$defs/StepResult"
+      },
+      "type": "array"
+    },
+    "warning_details": {
+      "description": "Предупреждения из `warnings`, у которых есть машинный код, — в том же порядке и с тем же\nтекстом в `message`. Поля нет, когда таких предупреждений нет. Пишет его только\n`follow_with`; типом это не закреплено — держат тесты превью, прогона, MCP и внешней\nвыгрузки.",
+      "items": {
+        "$ref": "#/$defs/CodedWarning"
       },
       "type": "array"
     },

@@ -90,6 +90,80 @@ fn raw_process_spawn_apis_stay_inside_platform_layer() {
     }
 }
 
+/// Каждый запуск процесса в слое платформы на Windows уводит потомка из группы процессов
+/// раннера (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`, #717): флаг
+/// ставит один владелец, `process::outside_the_runner_process_group`. Новый `Command::new` в
+/// продуктовом коде платформы валит проверку, пока его не учтут здесь — с вызовом владельца в том
+/// же файле или с причиной, по которой группа ему не нужна.
+#[test]
+fn a_platform_spawn_leaves_the_runner_process_group() {
+    const OWNER_CALL: &str = "outside_the_runner_process_group(";
+    // Файл, число запусков в нём и причина, если группу файл не ставит.
+    const SPAWNS: &[(&str, usize, Option<&str>)] = &[
+        // `build_command` и `taskkill`.
+        ("src/platform/process.rs", 2, None),
+        // Единый `git()`.
+        ("src/platform/git.rs", 1, None),
+        // Интерактивные сеансы EDT.
+        ("src/platform/interactive.rs", 1, None),
+        // Опрос процессов через `powershell`; служба на Unix — в своём сеансе (`setsid`), а на
+        // Windows — `CreateProcessW` со своей консолью (`CREATE_NEW_CONSOLE`).
+        ("src/platform/service.rs", 2, None),
+        (
+            "src/platform/browser.rs",
+            1,
+            Some("отделённый запуск браузера, а не потомок, которого раннер снимает"),
+        ),
+        (
+            "src/platform/test_git.rs",
+            1,
+            Some("модуль только для тестов (`#[cfg(test)]` в `platform/mod.rs`)"),
+        ),
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut seen = Vec::new();
+    for file in collect_rust_files(&repo_path("src/platform")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let production: String = production_tokens(&file)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        let spawns = production.matches("Command::new(").count();
+        if spawns == 0 {
+            continue;
+        }
+        let Some((_, expected, exemption)) = SPAWNS.iter().find(|(path, ..)| *path == relative)
+        else {
+            panic!(
+                "{relative} starts {spawns} process(es) and is not listed here: on Windows its \
+                 children must leave the runner's process group through `{OWNER_CALL}..)`"
+            );
+        };
+        assert_eq!(
+            spawns, *expected,
+            "{relative}: the number of process starts changed; check each against the runner's \
+             process group and update this list"
+        );
+        if exemption.is_none() {
+            assert!(
+                production.contains(OWNER_CALL),
+                "{relative} starts processes without `{OWNER_CALL}..)`"
+            );
+        }
+        seen.push(relative);
+    }
+    for (path, ..) in SPAWNS {
+        assert!(
+            seen.iter().any(|relative| relative == path),
+            "{path} no longer starts a process: remove it from this list"
+        );
+    }
+}
+
 /// Служба стенда запускается одним путём: второй способ поднять долгоживущий процесс не появится
 /// незаметно (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`, #536).
 #[test]

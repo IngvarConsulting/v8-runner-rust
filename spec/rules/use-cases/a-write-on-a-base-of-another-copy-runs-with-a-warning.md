@@ -11,6 +11,8 @@ check:
   - src/use_cases/infobase_owner.rs::a_marker_with_this_copy_and_another_live_one_warns
   - tests/cli_infobase_owner.rs::reset_on_a_base_of_another_copy_warns_and_names_the_owner
   - tests/cli_infobase_recreate.rs::a_base_of_another_copy_is_recreated_with_a_warning
+  - tests/cli_infobase_owner.rs::a_preview_on_a_base_of_another_copy_gives_the_warning_code_and_writes_nothing
+  - tests/cli_infobase_owner.rs::an_own_base_and_a_base_without_a_marker_give_no_warning_code
 ---
 
 # Запись в базу другой копии идёт с предупреждением
@@ -23,7 +25,10 @@ check:
 другой машины или с непроверяемыми объявлениями — вручную удалить её запись из метки) и те же
 выходы к своей базе, что отказ
 `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`, с источником копии `upstream`. Кода
-отказа для базы другой копии нет. Так же — когда в метке записана и эта копия: предупреждает
+отказа для базы другой копии нет, а у предупреждения код есть: `infobase_of_another_copy` в
+`warning_details` конверта называет базу и живые копии-владельцы
+(`CTR.WIRE.COMMAND-ENVELOPE`), у прогона и у превью командной строки и у прогона инструмента
+MCP — превью у MCP нет. На своей базе и на базе без метки этого кода нет. Так же — когда в метке записана и эта копия: предупреждает
 любая другая живая копия-владелец. Так же идёт и `infobase create --recreate`: базу другой
 копии он заменяет с тем же предупреждением, а его превью его называет. База без метки
 владельца считается своей.
