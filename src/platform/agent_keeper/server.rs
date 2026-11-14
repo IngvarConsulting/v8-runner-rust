@@ -352,22 +352,15 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
     // принимает подключения.
     let leaving = Arc::clone(&shared);
     let _ = tokio::task::spawn_blocking(move || remove_record(&leaving.home, home)).await;
-    let _ = shared.stopped.send(true);
-    // Ответы `stop` уходят в канал, затем канал закрывается.
-    let flush = tokio::time::sleep(STOP_FLUSH);
-    tokio::pin!(flush);
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                if let Ok(stream) = accepted {
-                    tokio::spawn(handle(Arc::clone(&shared), stream));
-                }
-            }
-            () = &mut flush => break,
-        }
-    }
+    // Агента и записи больше нет: канал закрывается до ответа `stop`. Ответ пишут задачи уже
+    // принятых подключений, когда поток уступит; команда, получившая `stopped`, считает живых
+    // сторожей по каналам и этого уже не видит — иначе место на пределе освобождалось бы позже
+    // ответа, и команда, снявшая простаивающего агента ради места, его бы не получила.
     listener.remove();
     drop(listener);
+    let _ = shared.stopped.send(true);
+    // Ответы `stop` уходят в канал, затем процесс выходит.
+    tokio::time::sleep(STOP_FLUSH).await;
     info!("the keeper is done");
     Ok(())
 }

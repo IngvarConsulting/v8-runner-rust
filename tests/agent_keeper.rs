@@ -886,6 +886,23 @@ fn stop_releases_and_removes_the_agent_and_its_record() {
     assert!(log.contains("common disconnect-ib"), "{log}");
 }
 
+/// Когда сторож ответил `stopped`, его канала уже нет: команда, снявшая простаивающего агента
+/// ради места на пределе, считает сторожей по каналам и место видит свободным сразу (#735).
+#[test]
+fn a_stopped_keeper_has_no_channel_when_it_answers() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let stopped = keeper.last(json!({"op": "stop"}));
+    assert_eq!(stopped["frame"], "stopped", "{stopped}");
+    let reopened = keeper.runtime.block_on(open(&keeper.channel));
+    assert!(
+        reopened.is_err(),
+        "the channel of a stopped keeper still takes connections"
+    );
+    assert!(keeper.exited_within(GONE_WITHIN));
+}
+
 /// Дом агента убрали, пока сторож жив (`git clean` рабочей копии): без записи команды сторожа не
 /// найдут, и он уходит сам вместе с агентом, а не держит сеанс лицензии до простоя (#735).
 #[test]
