@@ -1778,8 +1778,10 @@ pub struct AgentLaunch {
     pub port: Option<u16>,
     /// Объявленный ключ для `/AgentSSHHostKey`. Иначе каждая попытка получает одноразовый.
     pub host_key: Option<PathBuf>,
-    /// Корень для одноразовых ключей до применения ASCII fallback.
-    pub key_work_path: PathBuf,
+    /// Каталог одноразовых ключей в рабочей копии: `workPath/agent/host-keys` у разового агента,
+    /// `workPath/agent/live/<key16>/host-keys` у живого. Путь не в ASCII — ключ ложится во
+    /// временный каталог ОС (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    pub host_key_dir: PathBuf,
     pub user: String,
     pub password: String,
     pub transcript_log: Option<PathBuf>,
@@ -1833,7 +1835,7 @@ impl AgentLaunch {
     fn host_key_for_attempt(&self) -> Result<LaunchHostKey, AgentError> {
         match &self.host_key {
             Some(path) => Ok(LaunchHostKey::Declared(path.clone())),
-            None => EphemeralHostKey::create_for(&self.key_work_path, &host_key_fallback_roots())
+            None => EphemeralHostKey::create_for(&self.host_key_dir, &host_key_fallback_roots())
                 .map(LaunchHostKey::OneTime),
         }
     }
@@ -2041,6 +2043,13 @@ impl ManagedAgent {
             }
             thread::sleep(RETRY_INTERVAL);
         };
+        // Ключ вне рабочей копии агент уже прочёл: сессия с ним открыта, а других сессий раннер
+        // этому процессу агента не открывает. Файл уходит сразу
+        // (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`); отпечаток остаётся.
+        let mut host_key = host_key;
+        if let LaunchHostKey::OneTime(key) = &mut host_key {
+            key.forget_copy_outside_the_working_copy();
+        }
         Ok(Self {
             process: Some(process),
             session: Some(opened),
@@ -2262,16 +2271,12 @@ pub(crate) fn agent_reads_host_key_at(path: &Path) -> bool {
     !cfg!(windows) || path.to_str().is_some_and(str::is_ascii)
 }
 
-/// Корни, где ложится одноразовый ключ, когда агент не прочтёт его в `workPath`: временный
-/// каталог ОС, на Windows ещё `%ProgramData%\v8-runner`.
+/// Корень, где ложится одноразовый ключ, когда агент не прочтёт его в рабочей копии: только
+/// временный каталог ОС. Это единственное исключение из
+/// `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY` для агента: ключ там живёт до первой
+/// сессии агента (#735).
 pub(crate) fn host_key_fallback_roots() -> Vec<PathBuf> {
-    let mut roots = vec![std::env::temp_dir()];
-    if cfg!(windows) {
-        if let Some(data) = std::env::var_os("ProgramData") {
-            roots.push(PathBuf::from(data).join("v8-runner"));
-        }
-    }
-    roots
+    vec![std::env::temp_dir()]
 }
 
 impl EphemeralHostKey {
@@ -2321,14 +2326,14 @@ impl EphemeralHostKey {
         })
     }
 
-    /// Одноразовый ключ для агента рабочей копии `work_path`
-    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`). Агент читает путь `workPath` — ключ там. Иначе
+    /// Одноразовый ключ для агента рабочей копии в её каталоге ключей `own`
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`). Агент читает этот путь — ключ там. Иначе
     /// ключ ложится в новый каталог со случайным именем под первым корнем из `roots`, путь к
     /// которому агент прочтёт. Каталог создаётся только для владельца и только этим вызовом, так
     /// что заранее подложенный чужой каталог не годится. Ни одного такого корня — отказ до
     /// запуска со всеми испробованными путями.
-    pub fn create_for(work_path: &Path, roots: &[PathBuf]) -> Result<Self, AgentError> {
-        let own = work_path.join("agent").join("host-keys");
+    pub fn create_for(own: &Path, roots: &[PathBuf]) -> Result<Self, AgentError> {
+        let own = own.to_path_buf();
         if agent_reads_host_key_at(&own) {
             return Self::create(&own);
         }
@@ -2367,6 +2372,15 @@ impl EphemeralHostKey {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Убирает файл ключа, если он лежит вне рабочей копии (во временном каталоге ОС): агент его
+    /// уже прочёл. Ключ в рабочей копии живёт, пока жив агент.
+    pub fn forget_copy_outside_the_working_copy(&mut self) {
+        if let Some(dir) = self.private_dir.take() {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(&dir);
+        }
     }
 
     /// Ожидание сессии: только этот ключ.
@@ -3024,14 +3038,17 @@ mod tests {
     #[test]
     fn a_one_time_host_key_leaves_a_cyrillic_work_path_for_a_private_ascii_directory() {
         let temp = tempfile::tempdir().expect("dir");
-        let ascii_work = temp.path().join("work");
-        let key = EphemeralHostKey::create_for(&ascii_work, &[]).expect("key in workPath");
-        assert!(key
-            .path()
-            .starts_with(ascii_work.join("agent").join("host-keys")));
+        let ascii_keys = temp.path().join("work").join("agent").join("host-keys");
+        let key = EphemeralHostKey::create_for(&ascii_keys, &[]).expect("key in workPath");
+        assert!(key.path().starts_with(&ascii_keys));
         drop(key);
 
-        let cyrillic_work = temp.path().join("Рабочая папка").join("ws3");
+        let cyrillic_work = temp
+            .path()
+            .join("Рабочая папка")
+            .join("ws3")
+            .join("agent")
+            .join("host-keys");
         let root = temp.path().join("keys");
         // Каталог, подложенный заранее под похожим именем, ключ не получает.
         let planted = root.join(format!(
@@ -3052,6 +3069,19 @@ mod tests {
         drop(key);
         assert!(!dir.exists(), "the key directory outlived the key");
 
+        // Ключ вне рабочей копии уходит, как только агент его прочёл; отпечаток остаётся (#735).
+        let mut key = EphemeralHostKey::create_for(&cyrillic_work, &[root.clone()]).expect("key");
+        let dir = key.path().parent().expect("dir").to_path_buf();
+        key.forget_copy_outside_the_working_copy();
+        assert!(!dir.exists(), "the key outside the working copy stayed");
+        assert!(matches!(key.expectation(), HostKeyExpectation::Pinned(_)));
+        let mut own = EphemeralHostKey::create_for(&ascii_keys, &[]).expect("key in workPath");
+        own.forget_copy_outside_the_working_copy();
+        assert!(
+            own.path().is_file(),
+            "a key in the working copy lives with the agent"
+        );
+
         let refused = EphemeralHostKey::create_for(&cyrillic_work, &[temp.path().join("ключи")])
             .err()
             .expect("refused");
@@ -3068,7 +3098,7 @@ mod tests {
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
             port: Some(1543),
             host_key: Some(PathBuf::from("/work/host_key")),
-            key_work_path: PathBuf::from("/work"),
+            host_key_dir: PathBuf::from("/work/agent/host-keys"),
             user: String::new(),
             password: String::new(),
             transcript_log: None,
@@ -3107,7 +3137,7 @@ mod tests {
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
             port: Some(1543),
             host_key: Some(PathBuf::from("/work/host_key")),
-            key_work_path: PathBuf::from("/work"),
+            host_key_dir: PathBuf::from("/work/agent/host-keys"),
             user: String::new(),
             password: String::new(),
             transcript_log: None,
@@ -3135,7 +3165,7 @@ mod tests {
             infobase_args: connection.infobase_args(),
             port: Some(1543),
             host_key: Some(PathBuf::from("/work/host_key")),
-            key_work_path: PathBuf::from("/work"),
+            host_key_dir: PathBuf::from("/work/agent/host-keys"),
             user: String::new(),
             password: String::new(),
             transcript_log: None,

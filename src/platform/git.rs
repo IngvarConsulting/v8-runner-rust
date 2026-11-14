@@ -834,6 +834,56 @@ fn status_command(toplevel: &Path, optional_locks: bool) -> Command {
     status
 }
 
+/// Каталог git рабочей копии `toplevel`: `.git`, если это каталог, иначе — что называет сам git
+/// (`rev-parse --absolute-git-dir`: рабочее дерево `git worktree`, подмодуль, иная раскладка).
+fn git_dir_of(
+    toplevel: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<PathBuf, GitQueryError> {
+    // Каталог называет git, а не `toplevel.join(".git")`: путь вершины может нести приставку
+    // `\\?\`, которой git не принимает, а снимать её вне запуска процесса нельзя.
+    let mut command = git_in(toplevel, false);
+    command.args(["rev-parse", "--absolute-git-dir"]);
+    let named = run_git_query(command, None, OnCancel::Kill, interrupted)?;
+    let dir = PathBuf::from(String::from_utf8_lossy(&named).trim());
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(GitQueryError::failed(format!(
+            "temporary index: '{}' names no git directory",
+            toplevel.display()
+        )))
+    }
+}
+
+/// Префикс временного индекса в каталоге git.
+const TEMP_INDEX_PREFIX: &str = "v8-runner-index-";
+/// Сколько живёт временный индекс, который раннер не убрал (его процесс сняли): старше — мусор.
+const STALE_TEMP_INDEX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Убирает временные индексы прошлых вопросов, чей процесс сняли посреди вопроса.
+fn sweep_stale_temp_indexes(git_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(git_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(TEMP_INDEX_PREFIX));
+        let stale = ours
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STALE_TEMP_INDEX);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Хеши blob, которые сохранил бы `git add` для файлов `paths` (от корня рабочей копии), в их
 /// порядке. Считает их сам git во временном индексе: `known` — записи настоящего индекса для
 /// этих путей, и преобразование концов строк видит то, что лежит в индексе, как у
@@ -847,7 +897,16 @@ pub fn blob_ids_as_added(
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let temp = tempfile::tempdir()
+    // Временный индекс лежит рядом с настоящим, в каталоге git рабочей копии, и уходит после
+    // вопроса: временного каталога ОС раннер не трогает
+    // (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    // git не создаёт файлов по пути с приставкой `\\?\` (`index.lock`: Invalid argument):
+    // каталог git называет сам git, и в его ответе приставки нет.
+    let git_dir = git_dir_of(toplevel, interrupted)?;
+    sweep_stale_temp_indexes(&git_dir);
+    let temp = tempfile::Builder::new()
+        .prefix(TEMP_INDEX_PREFIX)
+        .tempdir_in(&git_dir)
         .map_err(|error| GitQueryError::failed(format!("temporary index: {error}")))?;
     let index = temp.path().join("index");
     let in_temp_index = || {

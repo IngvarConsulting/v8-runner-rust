@@ -22,12 +22,14 @@ use crate::platform::agent_keeper::client::{
     live_keepers, KeeperClient, KeeperStartError, LiveKeeper, Removal,
 };
 use crate::platform::agent_keeper::protocol::{Holder, KeeperStatus};
+use crate::platform::agent_keeper::KeeperHome;
+use crate::platform::live_registry::Registry;
 use crate::platform::locator::UtilityType;
 use crate::platform::service::{process_facts, started_at};
 use crate::platform::service_record::ServiceRecord;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_key};
+use crate::use_cases::agent_session::{holder_receipt, live_target, own_live_home};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -148,10 +150,11 @@ pub fn release(
         disconnected: false,
         duration_ms: elapsed_ms(started),
     };
-    let Some((state, key)) = own_key(config)? else {
+    let Some(home) = own_home(config)? else {
         return Ok(nothing(None));
     };
-    let Some(client) = KeeperClient::attach(&state, &key).map_err(keeper_io)? else {
+    let key = home.key().to_owned();
+    let Some(client) = KeeperClient::attach(home).map_err(keeper_io)? else {
         return Ok(nothing(None));
     };
     let status = client.status().map_err(AppError::from)?;
@@ -200,21 +203,23 @@ pub fn stop(
         refused: Vec::new(),
         duration_ms: elapsed_ms(started),
     };
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    // Реестр учётной записи не назван (система не называет каталог состояния) — живых
+    // агентов не найти, и снимать нечего.
+    let Ok(registry) = Registry::of_account() else {
         return Ok(nothing(started));
     };
     let all = matches!(scope, AgentScope::Account);
     let own = match scope {
         AgentScope::Account => None,
-        AgentScope::Project(config) => match own_key(config)? {
-            Some((_, key)) => Some(key),
+        AgentScope::Project(config) => match own_home(config)? {
+            Some(home) => Some(home.key().to_owned()),
             None => return Ok(nothing(started)),
         },
     };
     let cancel = context.cancellation();
     let mut stopped = Vec::new();
     let mut refused = Vec::new();
-    for (keeper, record) in live_keepers(&state) {
+    for (keeper, record) in live_keepers(&registry) {
         // Отмена кончает обход между агентами: остальные не тронуты.
         if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
             context,
@@ -260,7 +265,7 @@ pub fn status(
     scope: AgentScope<'_>,
 ) -> Result<AgentStatusResult, AppError> {
     let started = Instant::now();
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    let Ok(registry) = Registry::of_account() else {
         return Ok(AgentStatusResult {
             agents: Vec::new(),
             duration_ms: elapsed_ms(started),
@@ -268,8 +273,8 @@ pub fn status(
     };
     let own = match scope {
         AgentScope::Account => None,
-        AgentScope::Project(config) => match own_key(config)? {
-            Some((_, key)) => Some(key),
+        AgentScope::Project(config) => match own_home(config)? {
+            Some(home) => Some(home.key().to_owned()),
             None => {
                 return Ok(AgentStatusResult {
                     agents: Vec::new(),
@@ -278,7 +283,7 @@ pub fn status(
             }
         },
     };
-    let agents = live_keepers(&state)
+    let agents = live_keepers(&registry)
         .into_iter()
         .filter(|(keeper, _)| own.as_ref().is_none_or(|own| *own == keeper.key))
         .map(|(keeper, record)| {
@@ -326,10 +331,10 @@ fn locate_v8(config: &AppConfig) -> Result<PathBuf, AppError> {
         .map_err(AppError::from)
 }
 
-/// Каталог состояния и ключ живого агента цели проекта, если они уже есть: ничего не создаёт.
-fn own_key(config: &AppConfig) -> Result<Option<(PathBuf, String)>, AppError> {
+/// Дом и ключ живого агента цели проекта, если соль рабочей копии уже есть: ничего не создаёт.
+fn own_home(config: &AppConfig) -> Result<Option<KeeperHome>, AppError> {
     managed_port(config)?;
-    own_live_key(config, &locate_v8(config)?)
+    own_live_home(config, &locate_v8(config)?)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))
 }
 

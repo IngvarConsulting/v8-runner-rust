@@ -233,9 +233,11 @@ fn system_machine_id() -> Option<String> {
     None
 }
 
-/// The OS account the runner runs as and its state directory: where records live that
-/// outlive a command and belong to no single working copy, such as live Designer agents.
-/// What those records are and how they are locked belongs to their owners in `platform`.
+/// The OS account the runner runs as, where its state directory lies and the keyed salt.
+/// The runner keeps nothing of its own in the state directory any more (#735,
+/// `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`): its location names the account's
+/// live-agent registry, Unix keepers keep their sockets there, and what 0.17.0–0.17.3 left
+/// there is swept. The salt lives where its caller says — `localPath/agent` for live agents.
 pub mod account {
     use std::path::{Path, PathBuf};
 
@@ -489,21 +491,17 @@ pub mod account {
             .filter(|path| path.is_absolute())
     }
 
-    /// The state directory of this OS account, created owner-only when missing: records that
-    /// outlive a command and do not belong to one working copy. An existing one must belong
-    /// to the account; on Unix it is narrowed to 0700.
-    pub fn account_state_dir() -> std::io::Result<PathBuf> {
-        let dir = state_dir_location(&|name| std::env::var_os(name))?;
-        ensure_private_dir(&dir)?;
-        Ok(dir)
+    /// Where the state directory of this OS account lies, without creating it: it names the
+    /// account's live-agent registry (`platform::live_registry`). On Unix the keepers' sockets
+    /// live there; on Windows nothing does (#735).
+    pub fn account_state_location() -> std::io::Result<PathBuf> {
+        state_dir_location(&|name| std::env::var_os(name))
     }
 
-    /// The state directory of this OS account if it already exists: a reader that only looks
-    /// for records does not create it.
-    pub fn existing_account_state_dir() -> Option<PathBuf> {
-        state_dir_location(&|name| std::env::var_os(name))
-            .ok()
-            .filter(|dir| dir.is_dir())
+    /// Whether the state location is the system's, not one `V8_RUNNER_STATE_DIR` names: only
+    /// the system's is removed once it is empty.
+    pub fn state_location_is_default() -> bool {
+        std::env::var_os(STATE_DIR_ENV).is_none()
     }
 
     /// Creates `dir` owner-only, with its parents as usual. An existing one is kept only when
@@ -609,13 +607,13 @@ pub mod account {
     /// Length of the account's salt in bytes.
     const SALT_LEN: usize = 32;
 
-    /// Name of the salt file in the state directory.
+    /// Name of the salt file in its directory.
     const SALT_FILE: &str = "account-salt";
 
-    /// The account's salt in `<state>/account-salt`, made on first use. No lock is taken, so
-    /// a caller may hold any: each racer writes its own candidate, one publishes it without
-    /// replacing another's, and the rest read what was published. The file is readable by
-    /// the account only: the state directory is owner-only, and on Unix the file is 0600.
+    /// The salt in `<dir>/account-salt`, made on first use. No lock is taken, so a caller may
+    /// hold any: each racer writes its own candidate, one publishes it without replacing
+    /// another's, and the rest read what was published. The file is readable by the account
+    /// only: the caller keeps `dir` owner-only, and on Unix the file is 0600.
     pub fn account_salt(state: &Path) -> std::io::Result<[u8; SALT_LEN]> {
         let path = state.join(SALT_FILE);
         if let Some(salt) = read_salt(&path)? {

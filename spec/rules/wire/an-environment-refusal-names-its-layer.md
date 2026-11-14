@@ -33,7 +33,7 @@ check:
 | --- | --- | --- |
 | `infobase_user` | агент отверг вход с учётными данными пользователя базы | `AgentError::AuthenticationRejected` |
 | `agent_endpoint` | точка входа агента: не ответила, рукопожатие SSH не прошло, ключ хоста не тот | `Unreachable`, `Handshake`, `HostKeyRejected`, `ForeignAgentOnPort`, `Channel` |
-| `agent_start` | агент не поднялся | `Launch`, `PortTaken`, `NoFreePort`, `StartupTimedOut`, `ExitedBeforeSession`, `LiveAgentGone`, `Keeper`, `KeeperUnreachable`, `HostKeyPathNotReadable`; нет каталога состояния учётной записи, хранитель не назвал порт, хранитель не поднялся, `host-key` не в ASCII |
+| `agent_start` | агент не поднялся | `Launch`, `PortTaken`, `NoFreePort`, `StartupTimedOut`, `ExitedBeforeSession`, `LiveAgentGone`, `Keeper`, `KeeperUnreachable`, `HostKeyPathNotReadable`; соль ключа в `localPath` не заводится, хранитель не назвал порт, хранитель не поднялся, `host-key` не в ASCII |
 | `platform` | утилиты платформы нет, она не той версии или не выбрана | `AppError::PlatformLocator*`; управляемому агенту не выбран `1cv8`; не готов ни один исполнитель, и хоть одному не нашлось утилиты |
 
 `agent_endpoint` — любая точка входа агента: чужая, шлюз автономного сервера и порт агента,
