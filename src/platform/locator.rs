@@ -574,13 +574,28 @@ impl Locator {
         }
     }
 
-    /// Установки платформы там, где их ищет поиск: под указанным путём, если он задан, иначе
-    /// в корнях по умолчанию; новейшие первыми.
+    /// Установки платформы под указанным путём или, без него, в корнях по умолчанию
+    /// и в канонических каталогах версий утилит из `PATH`. Новейшие первыми.
     pub fn installations(&self) -> Vec<InstalledPlatform> {
-        match self.platform_hint.as_deref() {
-            Some(hint) => hinted_installations(hint),
-            None => installed_platforms(&self.platform_roots),
+        if let Some(hint) = self.platform_hint.as_deref() {
+            return hinted_installations(hint);
         }
+
+        let mut found = installed_platforms(&self.platform_roots);
+        for utility in INVENTORIED_COMPONENTS {
+            for candidate in path_candidates(utility, &self.path_roots) {
+                if !is_valid_executable(&candidate.path) {
+                    continue;
+                }
+                // Ссылка в PATH числится установкой той версии, куда ведёт.
+                let Ok(canonical) = std::fs::canonicalize(&candidate.path) else {
+                    continue;
+                };
+                let canonical = normalize_windows_verbatim_path(&canonical);
+                record_installation(&installation_root_for_executable(&canonical), &mut found);
+            }
+        }
+        sort_installations(found)
     }
 
     /// Resolve an executable path for the requested utility.
@@ -927,7 +942,9 @@ impl Locator {
         if let Some(found) = &self.format_release {
             return Ok(found.clone());
         }
-        let installations = self.search_installations();
+        let mut installations = self.installations();
+        // Пустой каталог версии не подтверждает, что её выпуск установлен.
+        installations.retain(|installed| !installed.components.is_empty());
         let found = releases
             .iter()
             .find(|release| {
@@ -946,35 +963,6 @@ impl Locator {
         }
         self.format_release = Some(found.clone());
         Ok(found)
-    }
-
-    /// Установки там, где ищет поиск утилит платформы: опись [`Self::installations`], а без
-    /// указанного пути — и установки утилит из `PATH`, которые поиск тоже берёт. Каталог
-    /// версии без единого компонента — не установка, как и каталог в `PATH` без утилиты:
-    /// запись могла пережить удалённую платформу.
-    fn search_installations(&self) -> Vec<InstalledPlatform> {
-        let mut found = self.installations();
-        if self.platform_hint.is_none() {
-            for utility in INVENTORIED_COMPONENTS {
-                for candidate in path_candidates(utility, &self.path_roots) {
-                    if !is_valid_executable(&candidate.path) {
-                        continue;
-                    }
-                    // Поиск выбирает утилиту по канонической версии: ссылка в `PATH` числится
-                    // установкой той версии, куда ведёт, а не каталога, где лежит.
-                    let Ok(canonical) = std::fs::canonicalize(&candidate.path) else {
-                        continue;
-                    };
-                    let canonical = normalize_windows_verbatim_path(&canonical);
-                    record_installation(&installation_root_for_executable(&canonical), &mut found);
-                }
-            }
-            found = sort_installations(found);
-        }
-        found
-            .into_iter()
-            .filter(|installed| !installed.components.is_empty())
-            .collect()
     }
 
     fn pin_platform(&mut self, location: &UtilityLocation) {
@@ -1288,6 +1276,9 @@ fn record_installation(dir: &Path, found: &mut Vec<InstalledPlatform>) {
 
     match found.iter_mut().find(|known| known.version == version) {
         Some(known) => {
+            if known.components.is_empty() && !components.is_empty() {
+                known.root = dir.to_path_buf();
+            }
             for component in components {
                 if !known.components.contains(&component) {
                     known.components.push(component);
@@ -1870,6 +1861,8 @@ fn default_edt_roots() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::consts::EXE_SUFFIX;
+
     use super::{
         normalize_path_roots, normalize_windows_verbatim_path, EdtVersion, Locator, LocatorError,
         PlatformChoice, PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement,
@@ -2325,14 +2318,13 @@ mod tests {
 
     #[test]
     fn empty_path_component_is_captured_as_current_directory() {
-        let current = PathBuf::from("/captured/current-directory");
+        let dir = tempdir().expect("tempdir");
+        let current = dir.path().join("current-directory");
+        let configured = dir.path().join("configured").join("bin");
 
         assert_eq!(
-            normalize_path_roots(
-                vec![PathBuf::new(), PathBuf::from("/configured/bin")],
-                &current,
-            ),
-            vec![current, PathBuf::from("/configured/bin")]
+            normalize_path_roots(vec![PathBuf::new(), configured.clone()], &current),
+            vec![current, configured]
         );
     }
 
@@ -2838,6 +2830,40 @@ mod tests {
         assert_eq!(versions, ["8.5.4.1306"], "{error}");
     }
 
+    #[test]
+    fn installations_merge_components_of_the_same_version_from_default_roots_and_path() {
+        let dir = tempdir().expect("tempdir");
+        let default_root = dir.path().join("default");
+        let path_root = dir.path().join("path");
+        let version = "8.5.4.1306";
+        let designer =
+            touch_versioned_platform_executable(&default_root, version, UtilityType::V8, true);
+        let thin_client =
+            touch_versioned_platform_executable(&path_root, version, UtilityType::V8C, true);
+        let path_bin = thin_client.parent().expect("bin");
+        let locator = lenient_locator(
+            None,
+            None,
+            vec![default_root.clone()],
+            vec![path_bin.into()],
+        );
+
+        let installations = locator.installations();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].version.to_string(), version);
+        assert_eq!(installations[0].root, default_root.join(version));
+        assert_eq!(
+            installations[0].components,
+            [UtilityType::V8, UtilityType::V8C]
+        );
+
+        fs::remove_file(designer).expect("remove Designer from the default root");
+        let installations = locator.installations();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].root, canonical(&path_root.join(version)));
+        assert_eq!(installations[0].components, [UtilityType::V8C]);
+    }
+
     /// `sources`, путь и `strict: true`: гарантии `strict` остаются — выпуск формата выбран
     /// внутри границы пути, и соседние утилиты берутся из той же закреплённой установки.
     #[test]
@@ -3023,8 +3049,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) \
-             but has no full client; full client found in 8.5.4.1306"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) \
+             but has no full client; full client found in 8.5.4.1306")
         );
     }
 
@@ -3050,8 +3076,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: no installation matches version 8.6; \
+            format!(
+                "utility '1cv8{EXE_SUFFIX}' was not found: no installation matches version 8.6; \
              full client found in 8.3.27.2074"
+            )
         );
     }
 
@@ -3076,8 +3104,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: no installation matches version 8.6; \
+            format!(
+                "utility '1cv8{EXE_SUFFIX}' was not found: no installation matches version 8.6; \
              installed: 8.5.1.1519; no version has full client"
+            )
         );
     }
 
@@ -3099,8 +3129,10 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility 'ibcmd' was not found: no installation has server tools; \
+            format!(
+                "utility 'ibcmd{EXE_SUFFIX}' was not found: no installation has server tools; \
              installed: 8.3.27.2074"
+            )
         );
     }
 
@@ -3125,8 +3157,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility 'webinst' was not found: no installation has web server extensions; \
-             installed: 8.3.27.2074"
+            format!("utility 'webinst{EXE_SUFFIX}' was not found: no installation has web server extensions; \
+             installed: 8.3.27.2074")
         );
     }
 
@@ -3149,7 +3181,7 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "utility '1cv8' was not found: no 1C platform installation was found in {}",
+                "utility '1cv8{EXE_SUFFIX}' was not found: no 1C platform installation was found in {}",
                 root.display()
             )
         );
@@ -3177,8 +3209,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519) \
-             but has no full client; full client found in 8.3.27.2074"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519) \
+             but has no full client; full client found in 8.3.27.2074")
         );
     }
 
@@ -3210,8 +3242,8 @@ mod tests {
 
         assert_eq!(
             message,
-            "utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519) \
-             but has no full client; full client found in 8.5.4.1306"
+            format!("utility '1cv8{EXE_SUFFIX}' was not found: version 8.5.1 is installed (8.5.1.1519) \
+             but has no full client; full client found in 8.5.4.1306")
         );
     }
 
@@ -3226,7 +3258,10 @@ mod tests {
             .expect_err("no edt cli")
             .to_string();
 
-        assert_eq!(message, "utility '1cedtcli' was not found");
+        assert_eq!(
+            message,
+            format!("utility '1cedtcli{EXE_SUFFIX}' was not found")
+        );
     }
 
     #[test]

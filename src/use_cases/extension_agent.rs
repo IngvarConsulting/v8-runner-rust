@@ -11,6 +11,8 @@
 //! 15.09.2026). Перестановка узнаётся по типам значений, а не по тексту, и
 //! выправляется; запись, где ни один из двух ключей не логический, — отказ.
 
+mod gate;
+
 use std::path::Path;
 
 use serde_json::Value;
@@ -102,12 +104,9 @@ impl ExtensionAgent {
         self.run(action, &command, deferrals)
     }
 
-    /// Агент требует синоним в форме `NStr()` и не принимает ни пустой, ни простую строку, а
-    /// код языка, которого нет в конфигурации, отвергает `LanguageNotFound`, ничего не создав
-    /// (замер 06.11.2026: 8.3.24, 8.3.26, 8.3.27). Узнать
-    /// языки конфигурации у агента нечем, поэтому простой синоним пробует формы по очереди
-    /// (`synonym_forms`). Многоязычная строка пользователя уходит один раз: её языки названы
-    /// им самим. Без синонима им становится имя.
+    /// Конфигуратор перебирает формы после безопасного `LanguageNotFound` (#518).
+    /// Шлюз сначала читает коды языков, поскольку отказ на создании может оставить
+    /// расширение (#656, #676). Без синонима используется имя.
     pub(crate) fn create(
         &mut self,
         action: &str,
@@ -117,10 +116,46 @@ impl ExtensionAgent {
         purpose: Option<&str>,
         deferrals: &mut Deferrals,
     ) -> Result<(), AppError> {
-        let (mut form, fallbacks) = synonym_forms(synonym.unwrap_or(name));
+        let synonym = synonym.unwrap_or(name);
+        if let Some(exchange) = self.handle.gate_exchange().cloned() {
+            if [name, name_prefix, synonym, purpose.unwrap_or_default()]
+                .iter()
+                .any(|value| value.contains(['\r', '\n', '\0']))
+            {
+                return Err(AppError::Validation(
+                    "SSH gate extension arguments must be a single line without NUL".to_owned(),
+                ));
+            }
+            let form = gate::prepare_synonym(&mut self.handle, &exchange, &self.wait, synonym)?;
+            let command = create_command(name, name_prefix, &form, purpose, gate::shell_argument);
+            return run_critical_typed(&mut self.handle, action, &command, &self.wait, deferrals)
+                .map(|_| ())
+                .map_err(|error| {
+                    let uncertain = matches!(
+                        &error,
+                        AgentError::Command { .. }
+                            | AgentError::Transport { .. }
+                            | AgentError::SessionClosed { .. }
+                            | AgentError::TimedOut { .. }
+                            | AgentError::InvalidReply { .. }
+                            | AgentError::NoTerminalMessage { .. }
+                            | AgentError::Question { .. }
+                            | AgentError::Canceled { .. }
+                    );
+                    let failure = critical_failure(action, error);
+                    if uncertain {
+                        failure.with_context(
+                            "the SSH gate may have changed the extension inventory; check with extensions list",
+                        )
+                    } else {
+                        failure
+                    }
+                });
+        }
+        let (mut form, fallbacks) = synonym_forms(synonym);
         let tried_every_language = !fallbacks.is_empty();
         for fallback in fallbacks {
-            let command = create_command(name, name_prefix, &form, purpose);
+            let command = create_command(name, name_prefix, &form, purpose, argument);
             match run_critical_typed(&mut self.handle, action, &command, &self.wait, deferrals) {
                 Ok(_) => return Ok(()),
                 // Отмена, пришедшая за время отказа, останавливает перебор: база не тронута.
@@ -133,7 +168,7 @@ impl ExtensionAgent {
                 Err(error) => return Err(critical_failure(action, error)),
             }
         }
-        let command = create_command(name, name_prefix, &form, purpose);
+        let command = create_command(name, name_prefix, &form, purpose, argument);
         run_critical_typed(&mut self.handle, action, &command, &self.wait, deferrals)
             .map(|_| ())
             .map_err(|error| {
@@ -224,15 +259,21 @@ fn names_a_language(value: &str) -> bool {
         })
 }
 
-fn create_command(name: &str, name_prefix: &str, synonym: &str, purpose: Option<&str>) -> String {
+fn create_command(
+    name: &str,
+    name_prefix: &str,
+    synonym: &str,
+    purpose: Option<&str>,
+    quote: fn(&str) -> String,
+) -> String {
     let mut command = format!(
         "config extensions create --extension={} --name-prefix={} --synonym={}",
-        argument(name),
-        argument(name_prefix),
-        argument(synonym)
+        quote(name),
+        quote(name_prefix),
+        quote(synonym)
     );
     if let Some(purpose) = purpose {
-        command.push_str(&format!(" --purpose={}", argument(purpose)));
+        command.push_str(&format!(" --purpose={}", quote(purpose)));
     }
     command
 }

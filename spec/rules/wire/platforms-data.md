@@ -6,6 +6,8 @@ check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_platforms.rs::platforms_name_every_installation_and_the_choice_without_starting_anything
   - tests/cli_platforms.rs::without_a_version_the_sources_format_chooses_the_release
+  - tests/cli_platforms.rs::platforms_inventory_includes_the_canonical_path_installation
+  - src/platform/locator.rs::installations_merge_components_of_the_same_version_from_default_roots_and_path
   - tests/cli_platform_release.rs::platforms_name_the_release_refusal_in_the_warnings
 ---
 

@@ -406,6 +406,13 @@ pub enum AgentError {
     #[error("sftp exchange with the agent failed at '{path}': {detail}")]
     Exchange { path: String, detail: String },
 
+    #[error("sftp exchange with the agent failed at '{path}': {detail}")]
+    SftpStatus {
+        path: String,
+        code: u32,
+        detail: String,
+    },
+
     /// Точка входа назвала запись каталога именем, непригодным как компонент пути.
     /// Отдельный вид, а не текст внутри `Exchange`: по нему решают, и решать по прозе
     /// нельзя (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
@@ -1199,7 +1206,14 @@ impl AgentSession {
                         detail: error.to_string(),
                     })
                 }
-                Err(error) => {
+                Err(error @ SftpError::Status { code, .. }) => {
+                    return Err(AgentError::SftpStatus {
+                        path: path.to_owned(),
+                        code,
+                        detail: error.to_string(),
+                    })
+                }
+                Err(error @ SftpError::Io(_)) => {
                     return Err(AgentError::Exchange {
                         path: path.to_owned(),
                         detail: error.to_string(),

@@ -312,6 +312,11 @@ pub enum AgentFailure {
         path: String,
         detail: String,
     },
+    SftpStatus {
+        path: String,
+        code: u32,
+        detail: String,
+    },
     UnsafeEntryName {
         path: String,
         detail: String,
@@ -417,6 +422,9 @@ impl AgentFailure {
             AgentError::NotSent { command } => Self::NotSent { command },
             AgentError::Abandoned { command } => Self::Abandoned { command },
             AgentError::Exchange { path, detail } => Self::Exchange { path, detail },
+            AgentError::SftpStatus { path, code, detail } => {
+                Self::SftpStatus { path, code, detail }
+            }
             AgentError::UnsafeEntryName { path, detail } => Self::UnsafeEntryName { path, detail },
             AgentError::UserDirUnknown {
                 base_dir,
@@ -503,6 +511,9 @@ impl AgentFailure {
             Self::NotSent { command } => AgentError::NotSent { command },
             Self::Abandoned { command } => AgentError::Abandoned { command },
             Self::Exchange { path, detail } => AgentError::Exchange { path, detail },
+            Self::SftpStatus { path, code, detail } => {
+                AgentError::SftpStatus { path, code, detail }
+            }
             Self::UnsafeEntryName { path, detail } => AgentError::UnsafeEntryName { path, detail },
             Self::UserDirUnknown {
                 base_dir,
@@ -717,6 +728,11 @@ mod tests {
                 user: "u".to_owned(),
                 detail: "d".to_owned(),
             },
+            AgentError::SftpStatus {
+                path: "p".to_owned(),
+                code: 4,
+                detail: "d".to_owned(),
+            },
         ];
         for error in cases {
             let shown = error.to_string();
@@ -764,9 +780,10 @@ mod tests {
             AgentError::Keeper { .. } => 27,
             AgentError::KeeperUnreachable { .. } => 28,
             AgentError::UserDirUnknown { .. } => 29,
+            AgentError::SftpStatus { .. } => 30,
         }
     }
-    const AGENT_ERROR_VARIANTS: usize = 30;
+    const AGENT_ERROR_VARIANTS: usize = 31;
 
     /// Каждый вид отказа агента, один раз.
     fn every_agent_error() -> Vec<AgentError> {
@@ -881,6 +898,11 @@ mod tests {
             AgentError::UserDirUnknown {
                 base_dir: PathBuf::from("b"),
                 user: "u".to_owned(),
+                detail: "d".to_owned(),
+            },
+            AgentError::SftpStatus {
+                path: "p".to_owned(),
+                code: 4,
                 detail: "d".to_owned(),
             },
         ]

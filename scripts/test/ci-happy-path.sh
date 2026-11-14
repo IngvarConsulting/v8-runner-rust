@@ -46,6 +46,9 @@ fi
 export V8TR_BIN="${V8TR_BIN:-$(detect_bin_path)}"
 export V8TR_DESIGNER_SMOKE_PROFILE="${V8TR_DESIGNER_SMOKE_PROFILE:-mandatory}"
 
+stage "check live smoke configs and receipts without 1C"
+bash "$ROOT_DIR/scripts/test/live-cli-smoke-test.sh"
+
 stage "package deploy-ready 1C artifacts"
 # The deploy-ready step is still a bash helper contract; the Windows job must
 # run this entrypoint from bash with python3 available in PATH.

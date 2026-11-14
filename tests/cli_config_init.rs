@@ -6,6 +6,21 @@ use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
+fn ordinary_canonical(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).expect("canonical path");
+    #[cfg(windows)]
+    {
+        let text = canonical.to_str().expect("UTF-8 path");
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(drive) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(drive);
+        }
+    }
+    canonical
+}
+
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
@@ -140,12 +155,17 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert!(output.status.success());
     assert!(config_path.exists());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(r"\\\\?\\"));
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "init");
     // Живая сверка формы: схема держит состав `data` только вместе с прогоном, иначе
     // команда вправе печатать не то, что за ней объявлено.
     assert_data_matches_its_command_form(&payload, "`config init --output`");
-    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
+    let canonical_dir = ordinary_canonical(dir.path());
+    assert_eq!(
+        payload["data"]["path"],
+        canonical_dir.join("custom.yaml").display().to_string()
+    );
     assert_eq!(
         payload["data"]["local_path"],
         canonical_dir
@@ -200,6 +220,29 @@ fn config_init_creates_local_overlay_next_to_output_override() {
     assert!(!dir.path().join("config").join(".gitignore").exists());
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
     assert!(gitignore.lines().any(|line| line == "v8project.local.yaml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn config_init_keeps_a_literal_backslash_in_a_source_directory_name() {
+    let dir = temp_workspace();
+    let main = dir.path().join("src").join(r"team\configuration");
+    fs::create_dir_all(&main).expect("source directory");
+    fs::write(main.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .arg("init")
+        .output()
+        .expect("run init");
+
+    assert!(output.status.success(), "{output:?}");
+    let config = fs::read_to_string(dir.path().join("v8project.yaml")).expect("config");
+    let config: serde_yaml::Value = serde_yaml::from_str(&config).expect("YAML");
+    assert_eq!(
+        config["source-set"][0]["path"].as_str(),
+        Some(r"src/team\configuration")
+    );
 }
 
 #[test]
@@ -1224,8 +1267,21 @@ fn init_with_a_nested_config_ignores_the_lock_of_every_source_set() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let config =
+        fs::read_to_string(dir.path().join("config").join("v8project.yaml")).expect("config");
+    let config: serde_yaml::Value = serde_yaml::from_str(&config).expect("YAML");
+    assert_eq!(
+        config["source-set"][0]["path"].as_str(),
+        Some("../src/configuration")
+    );
+
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(r"\\\\?\\"));
+    let canonical_dir = ordinary_canonical(dir.path());
+    assert_eq!(
+        payload["data"]["source_sets"][0]["path"],
+        "../src/configuration"
+    );
     assert_eq!(
         payload["data"]["gitignore_path"],
         canonical_dir.join(".gitignore").display().to_string()
@@ -1258,4 +1314,210 @@ fn init_with_a_nested_config_ignores_the_lock_of_every_source_set() {
         .status()
         .expect("run git");
     assert!(!status.success(), "the version file pattern is not written");
+}
+
+/// Объявленный проект с местным слоем, который `--infobase` перенаправил бы: проектный
+/// файл, слой и исходники.
+fn declared_project_with_a_local_origin(project: &Path) -> (Vec<u8>, Vec<u8>) {
+    fs::write(project.join("Configuration.xml"), "<Configuration/>").expect("xml");
+    let declared = v8_runner_command()
+        .current_dir(project)
+        .args(["init", "--infobase", "File=copied/ib"])
+        .output()
+        .expect("declare the project");
+    assert!(declared.status.success(), "{declared:?}");
+    fs::remove_file(project.join(".gitignore")).expect("start without a gitignore");
+    (
+        fs::read(project.join("v8project.yaml")).expect("project file"),
+        fs::read(project.join("v8project.local.yaml")).expect("local layer"),
+    )
+}
+
+#[test]
+fn init_run_outside_the_project_refuses_before_writing_anything() {
+    let project = temp_workspace();
+    let (project_file, local_layer) = declared_project_with_a_local_origin(project.path());
+    let elsewhere = temp_workspace();
+
+    for json in [false, true] {
+        let mut command = v8_runner_command();
+        command.current_dir(elsewhere.path());
+        if json {
+            command.arg("--json-message");
+        }
+        let output = command
+            .args([
+                "--infobase",
+                "File=.local/db",
+                "init",
+                "--output",
+                &project.path().join("v8project.yaml").display().to_string(),
+            ])
+            .output()
+            .expect("run init outside the project");
+
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.status.code(), Some(2), "{printed}");
+        assert!(
+            printed.contains("points outside the project directory"),
+            "the refusal says why: {printed}"
+        );
+        if json {
+            let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+        }
+        assert_eq!(
+            fs::read_dir(elsewhere.path()).expect("elsewhere").count(),
+            0,
+            "the launch directory is not touched"
+        );
+        assert_eq!(
+            fs::read(project.path().join("v8project.local.yaml")).expect("local layer"),
+            local_layer,
+            "the refusal leaves the local layer byte for byte"
+        );
+        assert_eq!(
+            fs::read(project.path().join("v8project.yaml")).expect("project file"),
+            project_file
+        );
+        assert!(!project.path().join(".gitignore").exists());
+    }
+}
+
+#[test]
+fn init_run_outside_an_undeclared_project_refuses_before_writing_anything() {
+    let project = temp_workspace();
+    fs::write(project.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+    let elsewhere = temp_workspace();
+    fs::write(
+        elsewhere.path().join("Configuration.xml"),
+        "<Configuration/>",
+    )
+    .expect("xml");
+    let output_dir = project.path().join("config");
+
+    let output = v8_runner_command()
+        .current_dir(elsewhere.path())
+        .args([
+            "init",
+            "--output",
+            &output_dir.join("v8project.yaml").display().to_string(),
+        ])
+        .output()
+        .expect("run init outside the project");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(!output_dir.exists(), "no config directory is created");
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(project.path()), ["Configuration.xml"]);
+    assert_eq!(names(elsewhere.path()), ["Configuration.xml"]);
+}
+
+#[test]
+fn init_with_a_nested_output_and_no_sources_leaves_no_config_directory() {
+    let dir = temp_workspace();
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--output", "config/v8project.yaml"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
+
+/// `.gitignore` — висячая ссылка в несуществующий каталог: прочитать его можно (файла
+/// нет), а запись отказывает и у суперпользователя. Отказ приходит после записи слоя.
+#[cfg(unix)]
+#[test]
+fn a_gitignore_write_failure_leaves_the_local_layer_as_it_was() {
+    let project = temp_workspace();
+    let (project_file, local_layer) = declared_project_with_a_local_origin(project.path());
+    std::os::unix::fs::symlink(
+        project.path().join("missing").join("gitignore"),
+        project.path().join(".gitignore"),
+    )
+    .expect("dangling gitignore link");
+
+    let output = v8_runner_command()
+        .current_dir(project.path())
+        .args(["init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{printed}");
+    assert!(
+        printed.contains("failed to write gitignore file"),
+        "{printed}"
+    );
+    assert!(!printed.contains("could not restore"), "{printed}");
+    assert_eq!(
+        fs::read(project.path().join("v8project.local.yaml")).expect("local layer"),
+        local_layer,
+        "the refusal leaves the local layer byte for byte"
+    );
+    assert_eq!(
+        fs::read(project.path().join("v8project.yaml")).expect("project file"),
+        project_file
+    );
+    assert!(!project.path().join("missing").exists());
+}
+
+/// Тот же отказ после `--force`: проектный файл переписан и возвращён.
+#[cfg(unix)]
+#[test]
+fn a_gitignore_write_failure_after_force_restores_the_project_file() {
+    let project = temp_workspace();
+    let (project_file, local_layer) = declared_project_with_a_local_origin(project.path());
+    fs::write(
+        project.path().join("v8project.yaml"),
+        [project_file.as_slice(), b"# hand edit\n"].concat(),
+    )
+    .expect("edited project file");
+    let project_file = fs::read(project.path().join("v8project.yaml")).expect("project file");
+    std::os::unix::fs::symlink(
+        project.path().join("missing").join("gitignore"),
+        project.path().join(".gitignore"),
+    )
+    .expect("dangling gitignore link");
+
+    let output = v8_runner_command()
+        .current_dir(project.path())
+        .args(["init", "--force", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(project.path().join("v8project.yaml")).expect("project file"),
+        project_file
+    );
+    assert_eq!(
+        fs::read(project.path().join("v8project.local.yaml")).expect("local layer"),
+        local_layer
+    );
 }

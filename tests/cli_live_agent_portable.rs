@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches_on_a_reserved_port, FakeAgent, Hold, HoldReply,
-    AGENT_PASSWORD,
+    fingerprint_of, launch_request_file, random_host_key, read_or_empty,
+    serve_managed_launches_on_a_reserved_port, wait_for_reserved_launch_key, write_host_key_file,
+    FakeAgent, Hold, HoldReply, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command};
 
@@ -787,6 +788,46 @@ fn pull_all_lists_the_extensions_with_the_agent_and_not_with_ibcmd() {
         calls.iter().all(|call| !call.contains("extension list")),
         "{calls:?}"
     );
+}
+
+/// Рукопожатие может начаться, пока новый поддельный `1cv8` ещё не опубликовал ключ.
+#[tokio::test]
+async fn reserved_agent_waits_for_a_new_key_after_the_previous_launch_ends() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let dir = temp_workspace();
+    let request = launch_request_file(&dir.path().join("base-dir.txt"));
+    let publish = |name: &str| {
+        let path = dir.path().join(name);
+        let key = random_host_key();
+        write_host_key_file(&path, &key);
+        let staged = request.with_extension("tmp");
+        fs::write(&staged, format!("12345\n{}\n", path.display())).expect("stage launch request");
+        fs::rename(staged, &request).expect("publish launch request");
+        (path, fingerprint_of(&key))
+    };
+
+    let (first_path, first_fingerprint) = publish("first");
+    let first = wait_for_reserved_launch_key(&request)
+        .await
+        .expect("first launch key");
+    assert_eq!(fingerprint_of(&first), first_fingerprint);
+    fs::remove_file(first_path).expect("retire the first launch key");
+
+    let mut next = std::pin::pin!(wait_for_reserved_launch_key(&request));
+    let mut context = Context::from_waker(Waker::noop());
+    match next.as_mut().poll(&mut context) {
+        Poll::Pending => {}
+        Poll::Ready(key) => panic!(
+            "answered before the second launch published its key: {:?}",
+            key.as_ref().map(fingerprint_of)
+        ),
+    }
+
+    let (_, second_fingerprint) = publish("second");
+    let second = next.await.expect("second launch key");
+    assert_eq!(fingerprint_of(&second), second_fingerprint);
 }
 
 /// С `live: false` команда работает с разовым агентом и снимает живого агента своей рабочей

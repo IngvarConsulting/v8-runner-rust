@@ -10,8 +10,8 @@ use crate::config::schema::{
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
-    validate_read_only, validate_tools_download_bootstrap, validate_without_infobase,
-    ConfigValidationError,
+    validate_read_only, validate_tools_download_bootstrap, validate_vanessa_download,
+    validate_without_infobase, ConfigValidationError,
 };
 use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
 
@@ -110,6 +110,19 @@ pub fn load_config_for_tools_download(
         workdir_override,
         selector,
         ConfigValidationMode::ToolsDownload,
+    )
+}
+
+pub fn load_config_for_vanessa_download(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::VanessaDownload,
     )
 }
 
@@ -288,6 +301,7 @@ enum ConfigValidationMode {
     InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
     ToolsDownload,
+    VanessaDownload,
     Launch,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
@@ -381,14 +395,24 @@ fn build_config(
     // отвергли выше, до границы.
     validate_main_config_schema_boundary(root.clone())
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
-    if matches!(
+    let has_selected_infobase = if matches!(
         validation_mode,
         ConfigValidationMode::WithoutInfobase { .. }
     ) {
         select_no_infobase(&mut root)?;
+        false
     } else {
-        select_infobase(&mut root, selector)?;
-    }
+        match select_infobase(&mut root, selector) {
+            Ok(()) => true,
+            Err(ConfigValidationError::OriginNotDeclared { .. })
+                if matches!(validation_mode, ConfigValidationMode::VanessaDownload) =>
+            {
+                select_no_infobase(&mut root)?;
+                false
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
@@ -406,9 +430,28 @@ fn build_config(
     if let Some(wd) = workdir_override {
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
+    // Check traversals before any writer can pass the path to Win32, which
+    // folds `..`. Keep the configured spelling for target-side overlap checks.
+    #[cfg(windows)]
+    if config
+        .work_path
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        crate::support::path::nearest_existing_canonical_path(&config.work_path).map_err(
+            |error| {
+                ConfigValidationError::WorkPathInvalid(format!(
+                    "cannot resolve '{}': {error}",
+                    config.work_path.display()
+                ))
+            },
+        )?;
+    }
     crate::config::validate::validate_local_path(&config, config_dir)?;
-    project_managed_standalone(&mut config, &validation_mode)?;
-    project_managed_cluster(&mut config, &validation_mode)?;
+    if !matches!(validation_mode, ConfigValidationMode::VanessaDownload) {
+        project_managed_standalone(&mut config, &validation_mode)?;
+        project_managed_cluster(&mut config, &validation_mode)?;
+    }
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
@@ -419,6 +462,9 @@ fn build_config(
         }
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
+        ConfigValidationMode::VanessaDownload => {
+            validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
+        }
         ConfigValidationMode::Launch => validate_launch(&config)?,
         ConfigValidationMode::ManagedDbms => {
             crate::config::validate::validate_managed_dbms(&config)?
@@ -648,8 +694,7 @@ fn fold_push_synonym(
     )))
 }
 
-/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`, чтобы
-/// `AppConfig` собрался без сентинела: конфига без выбранной базы не бывает.
+/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`.
 fn select_infobase(
     root: &mut serde_yaml::Value,
     selector: &InfobaseSelector,
@@ -726,9 +771,8 @@ fn select_infobase(
     Ok(())
 }
 
-/// Команда, которой база проекта не нужна (`make`), базу не выбирает: в документ ложится
-/// пустая секция без адреса и без имени. Её никто не читает — сценарий работает во временной
-/// базе раннера, — а `origin` может быть и не объявлен.
+/// Оставляет в `AppConfig` пустую секцию без адреса и имени для сценариев, которые
+/// обходятся без выбранной базы проекта, например `make` или загрузки Vanessa без `origin`.
 fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidationError> {
     let mapping = root_mapping_mut(root)?;
     mapping.insert(
@@ -804,6 +848,8 @@ pub fn load_declared_infobases(
     #[cfg(test)]
     run_declared_read_hook(DeclaredReadPoint::AfterProjectRecheck);
     local_file.recheck()?;
+    // Keep the shared notification check last, including for writes to the
+    // project file after its individual recheck.
     route.recheck()?;
     Ok(infobases)
 }
@@ -885,7 +931,8 @@ struct CapturedConfigDirectory {
 
 /// Ownership reads one pair through its held project directory. Route identity
 /// and self-move witnesses reject an ancestor replaced and restored during the
-/// read; its namespace witness also protects captured missing files.
+/// read; its namespace witness also protects captured missing files. On Linux
+/// the same queue records modifications to the held YAML inodes.
 struct CapturedConfigRoute {
     // Field order keeps the route bound until its notification handle is closed.
     #[cfg(windows)]
@@ -996,7 +1043,7 @@ impl CapturedConfigRoute {
     }
 }
 
-/// One synchronous native queue binds the held route objects for this read.
+/// One synchronous native queue records changes to the objects held for this read.
 /// The route drops it before closing the directory descriptors it watches.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 struct ConfigRouteChanges {
@@ -1048,28 +1095,17 @@ impl ConfigRouteChanges {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let changes = Self {
+            queue,
+            #[cfg(target_os = "macos")]
+            changed: std::cell::Cell::new(false),
+        };
         for directory in movable_directories {
             #[cfg(target_os = "linux")]
-            {
-                // Bind the watch to the held inode, not a name which could
-                // already designate another directory while watches are set up.
-                let path = std::ffi::CString::new(format!(
-                    "/proc/self/fd/{}",
-                    directory.file.as_raw_fd()
-                ))?;
-                // SAFETY: the fd and its NUL-terminated kernel link stay live.
-                // Deliberately follow this owned fd link; no project alias is read.
-                let watch = unsafe {
-                    libc::inotify_add_watch(
-                        fd,
-                        path.as_ptr(),
-                        libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_ONLYDIR,
-                    )
-                };
-                if watch < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
+            changes.watch_inode(
+                &directory.file,
+                libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_ONLYDIR,
+            )?;
             #[cfg(target_os = "macos")]
             {
                 let change = libc::kevent {
@@ -1093,11 +1129,23 @@ impl ConfigRouteChanges {
                 }
             }
         }
-        Ok(Self {
-            queue,
-            #[cfg(target_os = "macos")]
-            changed: std::cell::Cell::new(false),
-        })
+        Ok(changes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn watch_inode(&self, file: &std::fs::File, mask: u32) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        // The kernel fd link binds the watch to the object already opened,
+        // including modifications through other hardlinks or existing fds.
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        // SAFETY: both descriptors and the NUL-terminated fd link stay live
+        // throughout the call.
+        let watch = unsafe { libc::inotify_add_watch(self.queue.as_raw_fd(), path.as_ptr(), mask) };
+        if watch < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     fn filesystem_supported(filesystem: &libc::statfs) -> bool {
@@ -1129,8 +1177,8 @@ impl ConfigRouteChanges {
                 revents: 0,
             };
             // SAFETY: state is one live pollfd and a zero timeout never blocks.
-            // Poll does not drain the queue: move, deletion, overflow, ignored
-            // watch and unmount events all permanently invalidate this read.
+            // Poll does not drain the queue: any queued notification (including
+            // modification, overflow or a lost watch) permanently invalidates this read.
             match unsafe { libc::poll(&mut state, 1, 0) } {
                 0 => Ok(()),
                 -1 => Err(std::io::Error::last_os_error().into()),
@@ -1337,6 +1385,10 @@ impl<'a> CapturedYamlFile<'a> {
             }
             Err(error) => return Err(error.into()),
         };
+        // Register before sampling the file. An ordinary write can restore
+        // its bytes and mtime within the same ctime tick.
+        #[cfg(target_os = "linux")]
+        route.route_changes.watch_inode(&file, libc::IN_MODIFY)?;
         let stamp = ConfigObjectStamp::read(&file)?;
         let mut text = String::new();
         file.read_to_string(&mut text)?;
@@ -1992,7 +2044,10 @@ mod tests {
         assert_eq!(config.work_path, config.base_path.join("work"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -2356,7 +2411,10 @@ source-set:
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
         assert_eq!(config.infobases.len(), 2, "{:?}", config.infobases.keys());
         assert_eq!(
@@ -2365,7 +2423,10 @@ source-set:
         );
         assert_eq!(
             config.infobases["test"].connection,
-            format!("File={}", config.base_path.join("build/test-ib").display()),
+            format!(
+                "File={}",
+                config.base_path.join("build").join("test-ib").display()
+            ),
             "every declared section is normalized against the config dir"
         );
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
@@ -3047,7 +3108,10 @@ source-set:
         assert_eq!(config.work_path, config.base_path.join("build"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -3566,7 +3630,8 @@ source-set:
             config.v8_connection().file_path(),
             Some(
                 canonical(&config_dir)
-                    .join("build/my ib")
+                    .join("build")
+                    .join("my ib")
                     .to_string_lossy()
                     .as_ref()
             )
@@ -3951,11 +4016,12 @@ source-set:
         let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
             .map(|loaded| loaded.config)
             .expect("load config");
-        let config_dir = std::fs::canonicalize(dir.path()).expect("canonical config dir");
+        let config_dir = canonical(dir.path());
+        let expected = config_dir.join("platform").join("bin");
 
         assert_eq!(
-            config.tools.platform.path.as_deref(),
-            Some(config_dir.join("platform/bin").as_path())
+            config.tools.platform.path.as_deref().map(Path::as_os_str),
+            Some(expected.as_os_str())
         );
     }
 
@@ -4188,7 +4254,69 @@ source-set:
         );
         assert!(
             matches!(result, Err(ConfigLoadError::ReadError(_))),
-            "restoring writable mtime cannot restore the native change generation"
+            "restoring bytes and mtime must not hide a rewrite"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn declared_infobases_refuse_a_hardlink_rewrite_after_the_primary_recheck() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let bytes = b"format: DESIGNER\n";
+        std::fs::write(&primary, bytes).unwrap();
+        std::fs::write(
+            project.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:\n  origin:\n    connection: File=ib\n",
+        )
+        .unwrap();
+        let alias = root.join("writer.yaml");
+        std::fs::hard_link(&primary, &alias).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&alias)
+            .unwrap();
+        let before = writer.metadata().unwrap();
+        let accessed = before.accessed().unwrap();
+        let modified = before.modified().unwrap();
+
+        let result = super::with_declared_read_hook(
+            move |point| {
+                // No primary stamp is read after this hook. The outcome must
+                // therefore be independent of whether the kernel changes ctime.
+                if matches!(point, super::DeclaredReadPoint::AfterProjectRecheck) {
+                    writer.write_all(b"format: TEMPORAR\n").unwrap();
+                    writer.seek(SeekFrom::Start(0)).unwrap();
+                    writer.write_all(bytes).unwrap();
+                    // Restore both times so the restoration generates IN_ATTRIB,
+                    // leaving the writes as the source of IN_MODIFY.
+                    writer
+                        .set_times(
+                            std::fs::FileTimes::new()
+                                .set_accessed(accessed)
+                                .set_modified(modified),
+                        )
+                        .unwrap();
+                    let after = writer.metadata().unwrap();
+                    assert_eq!(after.ino(), before.ino());
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after.modified().unwrap(), modified);
+                    assert_eq!(std::fs::read(&primary).unwrap(), bytes);
+                    // The hook owns the writer until after the final queue check.
+                }
+            },
+            || super::load_declared_infobases(&project, super::DEFAULT_CONFIG_FILE_NAME.as_ref()),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(ref error))
+                if error.to_string() == "project configuration changed while its declared infobases were read"),
+            "a write after the primary recheck must invalidate the pair: {result:?}"
         );
     }
 

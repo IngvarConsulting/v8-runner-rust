@@ -272,7 +272,7 @@ fn cluster_designer_names_are_used_by_status_and_extension_upload() {
     write_script(
         &platform,
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\nout=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = /Out ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncase \"$*\" in\n  *'/DumpDBCfgList -AllExtensions'*) printf 'Проба\\r\\n' > \"$out\" ;;\n  *) if [ -n \"$out\" ]; then : > \"$out\"; fi ;;\nesac",
+            "printf '%s\\n' \"$*\" >> '{}'\nout=\nxml=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = /Out ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = /DumpConfigToFiles ]; then xml=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncase \"$*\" in\n  *'/DumpDBCfgList -AllExtensions'*) printf 'Проба\\r\\n' > \"$out\" ;;\n  *'/DumpConfigToFiles'*) printf '%s\\n' '<MetaDataObject><Configuration><Properties><Name>Проба</Name></Properties></Configuration></MetaDataObject>' > \"$xml/Configuration.xml\" ;;\n  *) if [ -n \"$out\" ]; then : > \"$out\"; fi ;;\nesac",
             calls_log.display()
         ),
     );
@@ -319,6 +319,7 @@ fn cluster_designer_names_are_used_by_status_and_extension_upload() {
         2,
         "{calls}"
     );
+    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
 }
 
 #[test]

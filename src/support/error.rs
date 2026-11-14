@@ -583,7 +583,8 @@ impl From<AgentError> for AppError {
             | AgentError::Transport { .. }
             | AgentError::UserDirUnknown { .. }
             | AgentError::UnsafeEntryName { .. }
-            | AgentError::Exchange { .. } => Self::Platform(error.to_string()),
+            | AgentError::Exchange { .. }
+            | AgentError::SftpStatus { .. } => Self::Platform(error.to_string()),
             // Ответ, который не читается как массив сообщений, — неверный вывод инструмента,
             // а не отказ платформы: отказом платформа отвечает сообщением `error`.
             AgentError::InvalidReply { .. } => Self::InvalidOutput(error.to_string()),

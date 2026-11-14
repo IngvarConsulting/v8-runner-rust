@@ -67,6 +67,60 @@ fn run_json(config: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON envelope")
 }
 
+#[cfg(windows)]
+#[test]
+fn workdir_rejects_file_traversal_before_creating_a_directory() {
+    let root = tempdir().expect("tempdir");
+    fs::create_dir(root.path().join("src")).expect("source directory");
+    fs::write(root.path().join("blocker"), "data").expect("blocker");
+    let config = root.path().join("v8project.yaml");
+    fs::write(
+        &config,
+        "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+    )
+    .expect("config");
+    let infobase = format!("File={}", root.path().join("empty-base").display());
+    let run = |workdir: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+            .arg("--config")
+            .arg(&config)
+            .args([
+                "--infobase",
+                &infobase,
+                "--workdir",
+                workdir,
+                "--json-message",
+            ])
+            .args(args)
+            .output()
+            .expect("run v8-runner")
+    };
+    for workdir in ["blocker/../redirected", r"blocker\..\redirected"] {
+        for args in [&["push", "main", "--dry-run"][..], &["status"][..]] {
+            let output = run(workdir, args);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !root.path().join("redirected").exists(),
+                "{args:?}: {stdout}"
+            );
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {stdout}");
+            assert!(
+                stdout.contains("cannot traverse file") && stdout.contains("blocker"),
+                "{stdout}"
+            );
+        }
+    }
+
+    let output = run("missing/../redirected-control", &["status"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(root.path().join("redirected-control/.gitignore").is_file());
+    assert!(!root.path().join("missing").exists());
+}
+
 /// Проект с набором `main`, который выгружается фальшивым Конфигуратором.
 #[cfg(windows)]
 fn with_main_set(config: &Path) {
@@ -143,6 +197,62 @@ fn a_download_answers_with_an_ordinary_path() {
         stdout.contains(expected.to_str().expect("utf-8")),
         "{stdout}"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_directory_in_place_of_the_base_lock_refuses_push_and_warns_download() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let lock = root.path().join(".ib.v8-runner.infobase.lock.system");
+    fs::create_dir(&lock).expect("directory at the lock path");
+    let calls = root.path().join("platform.calls");
+
+    let push = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args(["--json-message", "push", "--full"])
+        .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+        .output()
+        .expect("run push");
+    let envelope: Value = serde_json::from_slice(&push.stdout).expect("JSON envelope");
+    assert_eq!(push.status.code(), Some(3), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "runtime_failure", "{envelope}");
+    assert_eq!(envelope["steps"][0]["name"], "infobase lock", "{envelope}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    let lock_path = ordinary_canonical(&lock);
+    let lock_path = lock_path.to_str().expect("lock path");
+    assert!(
+        message.contains(lock_path) && message.contains("directory"),
+        "{message}"
+    );
+    assert!(!calls.exists(), "push must stop before Designer");
+
+    let cf = root.path().join("main.cf");
+    let download = run_json(
+        &config,
+        &[
+            "download",
+            "main",
+            "--output",
+            cf.to_str().expect("CF path"),
+        ],
+    );
+    let warnings = download["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|message| {
+                message.contains("infobase lock")
+                    && message.contains(lock_path)
+                    && message.contains("directory")
+            })),
+        "{download}"
+    );
+    assert_eq!(fs::read(&cf).expect("published CF"), b"payload");
+    assert!(lock.is_dir());
 }
 
 /// Предупреждение о владельце базы называет обе копии обычными путями, хотя метка на диске
@@ -407,6 +517,105 @@ fn designer_configuration_and_dt_exports_publish_through_native_cli() {
     assert_eq!(dt_json["data"]["artifact_kind"], "dt");
     assert_eq!(dt_json["data"]["published"], true);
     assert_eq!(fs::read(&dt).expect("published DT"), b"payload");
+}
+
+#[test]
+fn designer_dt_restore_authenticates_only_existing_targets() {
+    const USER: &str = "fixture-restore-user";
+    const PASSWORD: &str = "fixture-restore-password";
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    let input = root.path().join("backup.dt");
+    fs::write(&input, b"fixture").expect("DT input");
+    let calls = root.path().join("calls");
+    let marker = root.path().join("ib/1Cv8.1CD");
+    fs::remove_file(&marker).expect("absent target");
+    let file_connection = format!("File={}", root.path().join("ib").display());
+    let local_config = root.path().join("v8project.local.yaml");
+
+    for (connection, mode, state) in [
+        (file_connection.as_str(), "--create", "created"),
+        (file_connection.as_str(), "--replace", "replaced"),
+        (r"Srvr=fixture;Ref=restore", "--replace", "replaced"),
+    ] {
+        fs::write(
+            &local_config,
+            format!(
+                "infobases:\n  origin:\n    connection: '{connection}'\n    user: {USER}\n    password: {PASSWORD}\n"
+            ),
+        )
+        .expect("local config");
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_v8-runner"));
+            command
+                .arg("--config")
+                .arg(&config)
+                .args(["--json-message", "infobase", "restore", mode, "--input"])
+                .arg(&input)
+                .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls);
+            command
+        };
+
+        let preview = command().arg("--dry-run").output().expect("preview");
+        assert!(preview.status.success(), "{preview:?}");
+        let preview_data: Value = serde_json::from_slice(&preview.stdout).expect("JSON envelope");
+        assert_eq!(preview_data["data"]["plan"]["provider"], "designer");
+        assert_eq!(preview_data["data"]["plan"]["target_mode"], &mode[2..]);
+        assert_eq!(preview_data["data"]["target_state"], "unchanged");
+        assert_eq!(preview_data["data"]["provider_dispatched"], false);
+        assert!(!calls.exists(), "preview must not dispatch Designer");
+
+        let execution = command().output().expect("restore");
+        assert!(execution.status.success(), "{execution:?}");
+        let data: Value = serde_json::from_slice(&execution.stdout).expect("JSON envelope");
+        assert_eq!(data["data"]["provider"]["selected"], "designer");
+        assert_eq!(data["data"]["restored"], true);
+        assert_eq!(data["data"]["target_state"], state);
+        for output in [&preview, &execution] {
+            for stream in [&output.stdout, &output.stderr] {
+                let text = String::from_utf8_lossy(stream);
+                assert!(!text.contains(USER) && !text.contains(PASSWORD), "{text}");
+            }
+        }
+        let argv = fs::read_to_string(&calls).expect("Designer argv");
+        assert!(argv.contains("\"/RestoreIB\""), "{argv}");
+        for argument in ["\"/N\"", USER, "\"/P\"", PASSWORD] {
+            assert_eq!(argv.contains(argument), mode == "--replace", "{argv}");
+        }
+        fs::remove_file(&calls).expect("clear argv");
+        if mode == "--create" {
+            fs::write(&marker, b"existing database").expect("existing target");
+        }
+
+        if mode == "--replace" {
+            let failure = command()
+                .env("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD", "1")
+                .output()
+                .expect("failed restore");
+            assert_eq!(failure.status.code(), Some(4), "{failure:?}");
+            let stdout = String::from_utf8_lossy(&failure.stdout);
+            let stderr = String::from_utf8_lossy(&failure.stderr);
+            for stream in [&stdout, &stderr] {
+                assert!(
+                    !stream.contains(USER) && !stream.contains(PASSWORD),
+                    "{stream}"
+                );
+            }
+            let data: Value = serde_json::from_str(&stdout).expect("JSON envelope");
+            assert_eq!(data["error"]["code"], "platform_failure");
+            assert!(
+                data["error"]["message"]
+                    .as_str()
+                    .expect("error message")
+                    .contains("platform restore failed"),
+                "{stdout}"
+            );
+            assert_eq!(data["data"]["restored"], false);
+            assert_eq!(data["data"]["target_state"], "uncertain");
+            fs::remove_file(&calls).expect("clear argv");
+        }
+    }
 }
 
 #[test]
