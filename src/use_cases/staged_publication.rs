@@ -37,8 +37,7 @@ pub(super) struct StagedPublicationOutcome {
 }
 
 /// Как уходит прежнее дерево после успешной подмены каталога.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BackupRemoval {
+pub(super) enum BackupRemoval<'a> {
     /// На месте, до ответа команды.
     Inline,
     /// Отделённым процессом раннера, который переживает ответ команды (#616,
@@ -46,6 +45,8 @@ pub(super) enum BackupRemoval {
     /// уборка остатков следующей команды: прежнее дерево помечено `superseded`. Процесс не
     /// запустился — дерево удаляется на месте.
     Background,
+    /// Скрыть резерв сразу, а удаление запустить после обновления памяти.
+    AfterMemory(&'a mut Option<SupersededBackup>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +197,7 @@ impl StagedPublication {
         error_prefix: &str,
         consent: &DestructionConsent,
         regenerated: &[&str],
-        removal: BackupRemoval,
+        removal: BackupRemoval<'_>,
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
         let discarded = guard_replacement(
@@ -349,35 +350,59 @@ impl StagedPublication {
 }
 
 /// Убирает прежнее дерево успешной подмены так, как велено; текст — предупреждение ответа.
-fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval) -> Option<String> {
+fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval<'_>) -> Option<String> {
     match removal {
         BackupRemoval::Inline => backup.remove(),
-        BackupRemoval::Background => match hide_from_git(&backup)
-            .and_then(|()| crate::platform::backup_removal::spawn(backup.path()))
-        {
-            Ok(pid) => {
-                tracing::debug!(
-                    backup = %backup.path().display(),
-                    pid,
-                    "removing the replaced tree in the background"
-                );
-                None
+        BackupRemoval::Background | BackupRemoval::AfterMemory(_) => {
+            if !std::fs::symlink_metadata(backup.path())
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            {
+                return backup.remove();
             }
-            Err(refusal) => {
+            if let Err(refusal) = hide_from_git(&backup) {
                 tracing::debug!(%refusal, "removing the replaced tree in place");
-                backup.remove()
+                return backup.remove();
             }
-        },
+            if let BackupRemoval::AfterMemory(pending) = removal {
+                *pending = Some(backup);
+                None
+            } else {
+                finish_background_removal(Some(backup))
+            }
+        }
+    }
+}
+
+pub(super) fn finish_background_removal(backup: Option<SupersededBackup>) -> Option<String> {
+    let backup = backup?;
+    match crate::platform::backup_removal::spawn(backup.path()) {
+        Ok(pid) => {
+            tracing::debug!(
+                backup = %backup.path().display(),
+                pid,
+                "removing the replaced tree in the background"
+            );
+            None
+        }
+        Err(refusal) => {
+            tracing::debug!(%refusal, "removing the replaced tree in place");
+            backup.remove()
+        }
     }
 }
 
 /// Прежнее дерево лежит рядом с набором и после ответа: git его не видит, и `git add -A`
 /// сразу после `pull --force` его не возьмёт.
-fn hide_from_git(
-    backup: &SupersededBackup,
-) -> Result<(), crate::platform::backup_removal::SpawnRefusal> {
-    std::fs::write(backup.path().join(".gitignore"), "*\n")
-        .map_err(|error| crate::platform::backup_removal::SpawnRefusal::Spawn(error.into()))
+fn hide_from_git(backup: &SupersededBackup) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    // Replace the entry itself: a previous .gitignore may refer to another file.
+    let mut ignore = tempfile::NamedTempFile::new_in(backup.path())?;
+    ignore.write_all(b"*\n")?;
+    ignore
+        .persist(backup.path().join(".gitignore"))
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Переносит дерево `source` поверх `target`, кроме файла `skip` в корне: каталоги
@@ -876,6 +901,78 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from("target")]);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_replaced_directory_link_does_not_change_its_referent() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let referent = dir.path().join("referent");
+        fs::create_dir(&referent).expect("referent");
+        fs::write(referent.join(".gitignore"), "keep me").expect("original ignore");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&referent, &target).expect("link");
+        #[cfg(windows)]
+        junction::create(&referent, &target).expect("junction");
+        let publication =
+            StagedPublication::prepare_dir(&target, "identity", ".stage").expect("prepare");
+        fs::write(publication.staging_path().join("payload.txt"), "payload").expect("payload");
+        let mut pending = None;
+        let outcome = publication
+            .publish_dir(
+                &ExecutionContext::cli(CommandName::Dump),
+                ".backup",
+                "failed to publish staged test dir",
+                &DestructionConsent::RunnerOwned,
+                &[],
+                super::BackupRemoval::AfterMemory(&mut pending),
+            )
+            .expect("publish");
+        assert_eq!(outcome.cleanup_warning, None);
+        assert_eq!(
+            fs::read_to_string(referent.join(".gitignore")).expect("original ignore"),
+            "keep me"
+        );
+        assert!(pending.is_none(), "a directory link is removed inline");
+        assert!(target.join("payload.txt").is_file());
+    }
+
+    #[test]
+    fn an_ignore_link_in_a_replaced_directory_does_not_change_its_referent() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let referent = dir.path().join("original-ignore");
+        fs::create_dir(&target).expect("target");
+        fs::write(&referent, "keep me").expect("original ignore");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&referent, target.join(".gitignore")).expect("link");
+        #[cfg(not(unix))]
+        fs::hard_link(&referent, target.join(".gitignore")).expect("hard link");
+        let publication =
+            StagedPublication::prepare_dir(&target, "identity", ".stage").expect("prepare");
+        let mut pending = None;
+        publication
+            .publish_dir(
+                &ExecutionContext::cli(CommandName::Dump),
+                ".backup",
+                "failed to publish staged test dir",
+                &DestructionConsent::RunnerOwned,
+                &[],
+                super::BackupRemoval::AfterMemory(&mut pending),
+            )
+            .expect("publish");
+
+        let backup = pending.expect("ordinary directory stays until memory is written");
+        assert_eq!(
+            fs::read_to_string(&referent).expect("original ignore"),
+            "keep me"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.path().join(".gitignore")).expect("backup ignore"),
+            "*\n"
+        );
+        assert_eq!(backup.remove(), None);
     }
 
     /// Проверяется цель из записи резерва, а не корень уборки: у потомка он есть всегда.

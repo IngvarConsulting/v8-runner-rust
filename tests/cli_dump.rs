@@ -951,8 +951,12 @@ fn an_explicit_request_replaces_the_directory_and_keeps_nothing() {
         "the directory was replaced, so the hand-written file is gone"
     );
     assert!(
-        kept_backups(&base_path).is_empty(),
-        "nothing was asked to be kept: {:?}",
+        support::wait_until(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(100),
+            || kept_backups(&base_path).is_empty()
+        ),
+        "background cleanup left a backup or its metadata: {:?}",
         kept_backups(&base_path)
     );
 }
@@ -963,11 +967,9 @@ fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(".dump-backup"))
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".dump-backup"))
         })
         .collect()
 }

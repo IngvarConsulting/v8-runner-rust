@@ -3642,6 +3642,22 @@ fn a_full_pull_records_the_staged_tree_it_publishes() {
         full_dump_memory_follows_each_publication(&tokens),
         "publish_full_dump must prepare staging, then acknowledge external or finish native publication, then record that branch's memory"
     );
+    let native_memory = tokens
+        .rfind("commit_full_snapshot(")
+        .expect("native memory");
+    let native_publication = tokens.find(".publish_dir(").expect("native publication");
+    assert!(
+        tokens[native_publication..native_memory]
+            .contains("BackupRemoval::AfterMemory(&mutprevious_tree)"),
+        "native publication must defer the replaced tree's removal"
+    );
+    let backup_cleanup = tokens
+        .find("finish_background_removal(previous_tree)")
+        .expect("full pull finishes deferred cleanup");
+    assert!(
+        native_memory < backup_cleanup,
+        "the replaced tree must not be removed while git refreshes the published tree"
+    );
     for rescan in ["rescan_and_commit_full(", "scanner::", "analyze_context("] {
         assert!(
             !tokens.contains(rescan),

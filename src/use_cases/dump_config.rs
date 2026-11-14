@@ -66,7 +66,9 @@ use self::helpers::{
 };
 #[cfg(test)]
 use super::staged_publication::cleanup_staging_path;
-use super::staged_publication::{interruption_before_publish, BackupRemoval, StagedPublication};
+use super::staged_publication::{
+    finish_background_removal, interruption_before_publish, BackupRemoval, StagedPublication,
+};
 use super::version_file::VERSION_FILE_NAME;
 #[cfg(test)]
 use crate::support::fs::metadata_sidecar_path;
@@ -642,6 +644,7 @@ fn publish_full_dump(
         });
     }
 
+    let mut previous_tree = None;
     let published = publication
         .publish_dir(
             context,
@@ -650,8 +653,8 @@ fn publish_full_dump(
             resolved.platform_consent(),
             // Прежний `ConfigDumpInfo.xml` в корне переходит в новое дерево: это не потеря.
             &[VERSION_FILE_NAME],
-            // Прежнее дерево полной выгрузки ответу не нужно (#616).
-            BackupRemoval::Background,
+            // Удаление прежнего дерева не должно конкурировать с перечитыванием нового (#692).
+            BackupRemoval::AfterMemory(&mut previous_tree),
         )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
@@ -690,10 +693,14 @@ fn publish_full_dump(
                 resolved.source_set_name
             ))
     });
+    let cleanup_warning = merge_optional_messages(
+        published.cleanup_warning,
+        finish_background_removal(previous_tree),
+    );
     Ok(DumpNotes {
         message: merge_optional_messages(
             merge_optional_messages(
-                merge_optional_messages(published.cleanup_warning, memory_warning),
+                merge_optional_messages(cleanup_warning, memory_warning),
                 copy_warning,
             ),
             dump_publication_warning(context.command(), published.deferred_interruption),
@@ -3723,6 +3730,174 @@ exit 0"#,
         // Следующая уборка с уже существующей целью ничего не теряет.
         cleanup_orphan_dirs(&resolved).expect("second cleanup");
         assert!(resolved.target_path.join("kept.txt").exists());
+    }
+
+    #[test]
+    fn a_backup_marker_left_before_the_first_rename_is_removed() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup = dir.path().join(".dump-backup-interrupted");
+        write_temp_dir_metadata(
+            &backup,
+            TempDirKind::Backup,
+            "interrupted",
+            &resolved.target_path,
+            &resolved.target_identity,
+        )
+        .expect("marker");
+        let marker = metadata_sidecar_path(&backup);
+        assert!(marker.is_file());
+
+        cleanup_orphan_dirs(&resolved).expect("clean up the marker");
+
+        assert!(resolved.target_path.is_dir());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn an_interruption_after_the_first_rename_leaves_a_recoverable_tree() {
+        use crate::support::fs::{swap_dir_atomically, AFTER_DIR_BACKUP_TEST_HOOK};
+
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let target = &resolved.target_path;
+        fs::create_dir_all(target.join("nested")).expect("target");
+        fs::write(target.join("old.xml"), "old configuration").expect("old configuration");
+        fs::write(target.join("nested/Module.bsl"), "old module").expect("old module");
+        let stage = dir.path().join("stage");
+        fs::create_dir(&stage).expect("stage");
+        fs::write(stage.join("new.xml"), "new configuration").expect("new configuration");
+
+        // Unwind from the actual swap before its second rename, without running its rollback.
+        AFTER_DIR_BACKUP_TEST_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(|| std::panic::panic_any("interrupted swap"))));
+        });
+        let panic = std::panic::catch_unwind(|| {
+            swap_dir_atomically(
+                &stage,
+                target,
+                "interrupted",
+                &resolved.target_identity,
+                DUMP_BACKUP_PREFIX,
+            )
+        })
+        .expect_err("the swap stopped after moving the old tree");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"interrupted swap"));
+        assert!(!target.exists());
+
+        cleanup_orphan_dirs(&resolved).expect("recover the interrupted swap");
+        assert_eq!(
+            fs::read_to_string(target.join("old.xml")).expect("old configuration restored"),
+            "old configuration"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("nested/Module.bsl")).expect("old module restored"),
+            "old module"
+        );
+        assert!(!target.join("new.xml").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_interrupted_link_replacement_waits_for_the_original_lock_and_restores_the_link() {
+        use crate::support::fs::{
+            swap_dir_atomically, try_acquire_advisory_lock, AFTER_DIR_BACKUP_TEST_HOOK,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("project");
+        let referent = dir.path().join("old-source");
+        let target = base.join("main");
+        let stage = dir.path().join("stage");
+        for path in [&base, &referent, &stage] {
+            fs::create_dir(path).expect("directory");
+        }
+        fs::write(referent.join("old.txt"), "old content").expect("old tree");
+        fs::write(stage.join("new.txt"), "new content").expect("new tree");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../old-source", &target).expect("link");
+        #[cfg(windows)]
+        junction::create(&referent, &target).expect("junction");
+        let config = build_config(&base, &dir.path().join("work"), &dir.path().join("1cv8"));
+        let before = resolve_target(&config, &incremental_main()).expect("resolve old link");
+        let original_lock = try_acquire_advisory_lock(&before.lock_path).expect("original lock");
+
+        // An older marker with a retargeted link must not shadow the latest backup.
+        let stale = base.join(".dump-backup-older-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../stage", &stale).expect("stale link");
+        #[cfg(windows)]
+        junction::create(&stage, &stale).expect("stale junction");
+        write_temp_dir_metadata(
+            &stale,
+            TempDirKind::Backup,
+            "older-link",
+            &target,
+            &before.target_identity,
+        )
+        .expect("older marker");
+
+        AFTER_DIR_BACKUP_TEST_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(|| {
+                std::panic::panic_any("interrupted link swap")
+            })));
+        });
+        let panic = std::panic::catch_unwind(|| {
+            swap_dir_atomically(
+                &stage,
+                &target,
+                "interrupted-link",
+                &before.target_identity,
+                DUMP_BACKUP_PREFIX,
+            )
+        })
+        .expect_err("stopped after the first rename");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"interrupted link swap"));
+
+        let missing = resolve_target(&config, &incremental_main()).expect("resolve missing link");
+        assert_ne!(before.lock_path, missing.lock_path);
+        let _retry_lock = try_acquire_advisory_lock(&missing.lock_path).expect("retry lock");
+        let busy = cleanup_orphan_dirs(&missing).expect_err("the old lock is held");
+        assert!(busy.to_string().contains("lock"), "{busy}");
+        assert!(
+            fs::symlink_metadata(&target).is_err(),
+            "leave the target alone"
+        );
+        drop(original_lock);
+
+        #[cfg(windows)]
+        {
+            let mut differently_spelled =
+                resolve_target(&config, &incremental_main()).expect("resolve missing link");
+            differently_spelled.target_path = base.join("MAIN");
+            let refused = cleanup_orphan_dirs(&differently_spelled)
+                .expect_err("ambiguous spelling must not create a new target");
+            assert!(
+                refused.to_string().contains("recorded target spelling"),
+                "{refused}"
+            );
+            assert!(fs::symlink_metadata(&target).is_err());
+        }
+
+        let retry =
+            cleanup_orphan_dirs(&missing).expect_err("the restored link needs re-resolution");
+        assert!(retry.to_string().contains("retry"), "{retry}");
+        assert!(fs::symlink_metadata(&target)
+            .expect("restored link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(target.join("old.txt")).unwrap(),
+            "old content"
+        );
+        assert!(stage.join("new.txt").is_file());
+        assert!(stale.exists(), "older backup left alone");
+        assert_eq!(
+            resolve_target(&config, &incremental_main())
+                .expect("resolve restored link")
+                .lock_path,
+            before.lock_path
+        );
     }
 
     /// Резерв, оставшийся от завершённой замены, старше удалённой цели: вернуть его значило
