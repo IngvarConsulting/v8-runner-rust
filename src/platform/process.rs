@@ -876,6 +876,8 @@ fn spawn_checked_child(
 
     if let Some(startup_probe) = request.startup_probe {
         std::thread::sleep(startup_probe);
+        #[cfg(all(test, windows))]
+        tests::before_startup_observation(&mut spawned.child);
         if let Some(status) = startup_probe_status(&mut spawned).map_err(|source| {
             ProcessError::StartupCheckFailed {
                 cmd: rendered_command.to_owned(),
@@ -3689,52 +3691,219 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn spawn_managed_cleans_windows_job_when_startup_probe_detects_early_exit() {
-        let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("spawn-child-and-exit.ps1");
-        let child_pid_path = dir.path().join("child.pid");
-        fs::write(
-            &script,
-            format!(
-                "$child = Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru\nSet-Content -LiteralPath {} -Value $child.Id\nexit 0\n",
-                powershell_literal(&child_pid_path)
-            ),
-        )
-        .expect("write script");
+        windows_startup_probe::exercise();
+    }
 
-        let runner = ProcessExecutor;
-        let err = match runner.spawn_managed(
-            &ProcessRequest {
-                program: PathBuf::from("powershell.exe"),
-                args: vec![
-                    "-NoProfile".to_owned(),
-                    "-ExecutionPolicy".to_owned(),
-                    "Bypass".to_owned(),
-                    "-File".to_owned(),
-                    script.display().to_string(),
-                ],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(200)),
-                windows_verbatim_args: Vec::new(),
-            },
-            ManagedSpawnMode::Detached,
-            None,
-        ) {
-            Ok(managed) => {
-                managed.terminate();
-                panic!("expected managed startup probe to detect early exit");
-            }
-            Err(error) => error,
+    #[cfg(windows)]
+    pub(super) use windows_startup_probe::before_startup_observation;
+
+    #[cfg(windows)]
+    mod windows_startup_probe {
+        use super::*;
+        use crate::platform::process::ChildHandle;
+        use std::cell::{OnceCell, RefCell};
+        use std::io::{self, Read, Write};
+        use std::net::{SocketAddr, TcpListener, TcpStream};
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use std::process::Command;
+        use std::rc::Rc;
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
         };
 
-        assert!(matches!(err, ProcessError::ExitedEarly { .. }));
-        let child_pid = read_pid(&child_pid_path);
-        if !wait_for_process_exit(child_pid, Duration::from_secs(2)) {
-            let cleanup = terminate_windows_process_tree_for_test(child_pid);
-            panic!(
-                "managed startup failure should terminate Windows job child {child_pid}; fallback cleanup: {cleanup:?}"
+        const LEADER: &str = "platform::process::tests::windows_startup_probe::leader_fixture";
+        const DESCENDANT: &str =
+            "platform::process::tests::windows_startup_probe::descendant_fixture";
+        const ADDRESS_FILE: &str = "startup-probe-address";
+        const OBSERVER_READY: u8 = b'R';
+        const SETUP_TIMEOUT_MS: u32 = 10_000;
+        const SETUP_TIMEOUT: Duration = Duration::from_millis(SETUP_TIMEOUT_MS as u64);
+
+        type BeforeObservation = Box<dyn FnOnce(&mut ChildHandle)>;
+
+        thread_local! {
+            static BEFORE_OBSERVATION: RefCell<Option<BeforeObservation>> = const { RefCell::new(None) };
+        }
+
+        pub(in crate::platform::process) fn before_startup_observation(leader: &mut ChildHandle) {
+            if let Some(synchronize) = BEFORE_OBSERVATION.with(|hook| hook.take()) {
+                synchronize(leader);
+            }
+        }
+
+        #[test]
+        #[ignore = "subprocess fixture"]
+        fn leader_fixture() {
+            assert!(
+                Path::new(ADDRESS_FILE).is_file(),
+                "fixture workdir required"
             );
+            // The probe must remove this descendant after the leader has already exited.
+            let _descendant = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", DESCENDANT, "--ignored"])
+                .spawn()
+                .expect("spawn fixture descendant");
+            std::process::exit(7);
+        }
+
+        #[test]
+        #[ignore = "subprocess fixture"]
+        fn descendant_fixture() {
+            let address: SocketAddr = fs::read_to_string(ADDRESS_FILE)
+                .expect("fixture address file")
+                .parse()
+                .expect("fixture address");
+            let mut peer = TcpStream::connect_timeout(&address, SETUP_TIMEOUT)
+                .expect("connect to fixture observer");
+            peer.set_read_timeout(Some(SETUP_TIMEOUT))
+                .expect("bound observer handshake");
+            let mut ready = [0];
+            peer.read_exact(&mut ready)
+                .expect("fixture observer is ready");
+            assert_eq!(ready, [OBSERVER_READY]);
+            peer.set_read_timeout(None).expect("wait for observer EOF");
+            peer.write_all(&std::process::id().to_le_bytes())
+                .expect("announce live descendant PID");
+            // EOF releases the fixture even if its observer panics. A timer here could
+            // let the descendant exit before the test observes a missed Job cleanup.
+            let _ = io::copy(&mut peer, &mut io::sink());
+        }
+
+        pub(super) fn exercise() {
+            let dir = tempdir().expect("fixture directory");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            fs::write(
+                dir.path().join(ADDRESS_FILE),
+                listener.local_addr().expect("listener address").to_string(),
+            )
+            .expect("publish fixture address");
+
+            let mut request = plain_request(std::env::current_exe().expect("test executable"));
+            request.args = ["--exact", LEADER, "--ignored"].map(str::to_owned).to_vec();
+            request.workdir = Some(dir.path().to_owned());
+            request.startup_probe = Some(Duration::ZERO);
+
+            let observed = Rc::new(OnceCell::new());
+            let fixture = Rc::clone(&observed);
+            BEFORE_OBSERVATION.with(|hook| {
+                hook.replace(Some(Box::new(move |leader| {
+                    let _ = fixture.set(observe_live_descendant(leader, &listener));
+                })));
+            });
+            let outcome = ProcessExecutor.spawn_managed(&request, ManagedSpawnMode::Detached, None);
+            // A spawn error can bypass observation entirely.
+            BEFORE_OBSERVATION.with(|hook| hook.take());
+            let descendant = observed.get().unwrap_or_else(|| {
+                panic!(
+                    "startup observation was not reached: {:?}",
+                    outcome.as_ref().err()
+                );
+            });
+            let descendant = descendant
+                .as_ref()
+                .expect("observe live fixture descendant");
+            assert!(
+                matches!(outcome, Err(ProcessError::ExitedEarly { exit_code: 7, .. })),
+                "expected the fixture leader's early exit"
+            );
+            assert!(
+                process_signaled(&descendant.process, 5_000).expect("wait on descendant process"),
+                "managed startup failure left Windows job descendant {} alive",
+                descendant.pid
+            );
+        }
+
+        fn observe_live_descendant(
+            leader: &mut ChildHandle,
+            listener: &TcpListener,
+        ) -> io::Result<Descendant> {
+            let child = match leader {
+                ChildHandle::Standard(child) => child,
+                ChildHandle::Wrapped(child) => child.inner_child(),
+            };
+            let wait_error = match process_signaled(child, SETUP_TIMEOUT_MS) {
+                Ok(true) => None,
+                Ok(false) => Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "fixture leader did not exit",
+                )),
+                Err(error) => Some(error),
+            };
+            if let Some(error) = wait_error {
+                if let Err(cleanup) = leader.start_kill() {
+                    return Err(io::Error::other(format!(
+                        "{error}; fixture leader cleanup: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+
+            let deadline = std::time::Instant::now() + SETUP_TIMEOUT;
+            let mut peer = loop {
+                match listener.accept() {
+                    Ok((peer, _)) => break peer,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "descendant did not connect",
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            peer.set_nonblocking(false)?;
+            peer.set_read_timeout(Some(SETUP_TIMEOUT))?;
+            peer.write_all(&[OBSERVER_READY])?;
+            let mut pid = [0; 4];
+            peer.read_exact(&mut pid)?;
+            let pid = u32::from_le_bytes(pid);
+            if pid == 0 {
+                return Err(io::Error::other("fixture reported an invalid PID"));
+            }
+            // SAFETY: OpenProcess returns a new handle with wait-only access.
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let descendant = Descendant {
+                peer: Some(peer),
+                // SAFETY: the successful OpenProcess call transferred ownership.
+                process: unsafe { OwnedHandle::from_raw_handle(handle) },
+                pid,
+            };
+            if process_signaled(&descendant.process, 0)? {
+                return Err(io::Error::other("fixture descendant was already dead"));
+            }
+            Ok(descendant)
+        }
+
+        struct Descendant {
+            peer: Option<TcpStream>,
+            process: OwnedHandle,
+            pid: u32,
+        }
+
+        impl Drop for Descendant {
+            fn drop(&mut self) {
+                drop(self.peer.take());
+                let _ = process_signaled(&self.process, SETUP_TIMEOUT_MS);
+            }
+        }
+
+        fn process_signaled(process: &impl AsRawHandle, timeout_ms: u32) -> io::Result<bool> {
+            // SAFETY: the owner keeps this process handle valid throughout the wait.
+            match unsafe { WaitForSingleObject(process.as_raw_handle(), timeout_ms) } {
+                WAIT_OBJECT_0 => Ok(true),
+                WAIT_TIMEOUT => Ok(false),
+                _ => Err(io::Error::last_os_error()),
+            }
         }
     }
 

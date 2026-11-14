@@ -17,7 +17,7 @@ use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRequest;
 use crate::platform::secrets::mask_preview_args;
 use crate::platform::utilities::PlatformUtilities;
-use crate::platform::webinst::webinst_args;
+use crate::platform::webinst::{webinst_args, write_diagnostics};
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
@@ -188,8 +188,8 @@ fn run_publish(
         program,
         args,
         workdir: None,
-        stdout_log_path: Some(log_path.clone()),
-        stderr_log_path: Some(log_path.clone()),
+        stdout_log_path: None,
+        stderr_log_path: None,
         startup_probe: None,
         windows_verbatim_args: Vec::new(),
     };
@@ -199,6 +199,10 @@ fn run_publish(
             &process,
             &context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
+        .and_then(|finished| {
+            write_diagnostics(&log_path, &finished, &secrets)?;
+            Ok(finished)
+        })
         .map_err(|error| {
             // Отказ после старта `webinst` отвечает формой `publish`. Журнала у оборванного
             // запуска нет — исполнитель пишет его только после выхода, — поэтому и пути к

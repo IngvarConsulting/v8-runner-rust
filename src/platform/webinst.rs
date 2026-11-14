@@ -4,10 +4,15 @@
 //! -dir <каталог> -connstr <строка> [-confpath <файл>] [-descriptor <файл>] [-osauth]`.
 //! Публикация замещает `default.vrd` целиком; удаление не требует строки соединения.
 
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::model::{InfobaseWebConfig, WebServerKind};
 use crate::domain::publish::PublishAction;
+
+use super::process::{ProcessError, ProcessResult};
+use super::secrets::{mask_known_secrets, mask_text};
 
 /// Аргументы `webinst` для объявленной публикации.
 pub fn webinst_args(
@@ -41,6 +46,60 @@ pub fn webinst_args(
         args.push("-osauth".to_owned());
     }
     args
+}
+
+/// Write both captured streams to the platform log, in stdout then stderr order.
+pub(crate) fn write_diagnostics(
+    path: &Path,
+    result: &ProcessResult,
+    secrets: &[&str],
+) -> Result<(), ProcessError> {
+    let stdout = mask_diagnostics(&result.stdout, secrets);
+    let stderr = mask_diagnostics(&result.stderr, secrets);
+    let mut log = File::create(path)
+        .and_then(|mut log| {
+            log.write_all(stdout.as_bytes())?;
+            Ok(log)
+        })
+        .map_err(|source| ProcessError::StdoutLogIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let separator: &[u8] = if !stdout.is_empty() && !stderr.is_empty() && !stdout.ends_with('\n') {
+        b"\n"
+    } else {
+        b""
+    };
+    log.write_all(separator)
+        .and_then(|()| log.write_all(stderr.as_bytes()))
+        .map_err(|source| ProcessError::StderrLogIo {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn mask_diagnostics(output: &str, secrets: &[&str]) -> String {
+    let multiline_secrets: Vec<_> = secrets
+        .iter()
+        .copied()
+        .filter(|secret| secret.contains(['\r', '\n']))
+        .collect();
+    let output = if multiline_secrets.is_empty() {
+        std::borrow::Cow::Borrowed(output)
+    } else {
+        std::borrow::Cow::Owned(mask_known_secrets(output, &multiline_secrets))
+    };
+
+    // A trailing Pwd value can consume the rest of the input to the masker.
+    // Keep each diagnostic and its original line ending independent.
+    let mut masked = String::with_capacity(output.len());
+    for line in output.split_inclusive('\n') {
+        let (text, ending) = line.split_at(line.trim_end_matches(['\r', '\n']).len());
+        masked.push_str(&mask_text(text, secrets));
+        masked.push_str(ending);
+    }
+    masked
 }
 
 #[cfg(test)]

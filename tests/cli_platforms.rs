@@ -7,6 +7,7 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -166,6 +167,93 @@ fn without_a_version_the_sources_format_chooses_the_release() {
             .any(|warning| warning.as_str().is_some_and(|w| w.contains("2.99"))),
         "{envelope}"
     );
+    assert!(!calls.exists(), "the platform was started");
+}
+
+#[test]
+fn platforms_inventory_includes_the_canonical_path_installation() {
+    let dir = temp_workspace();
+    let root = dir.path().join("platforms");
+    let calls = dir.path().join("calls.log");
+    let version = "8.5.4.4294967295";
+    let utilities = ["1cv8", "1cv8c", "ibcmd"];
+    let wanted = install(&root, version, &utilities, &calls);
+    let older_version = "8.5.4.999999999";
+    let older = install(&root, older_version, &["1cv8"], &calls);
+    let alias_version = "8.5.1.4294967295";
+    let alias = dir.path().join(alias_version);
+    fs::create_dir(&alias).expect("alias directory");
+    for utility in utilities {
+        symlink(wanted.join(utility), alias.join(utility)).expect("utility symlink");
+    }
+    let path = std::env::join_paths([&older, &alias]).expect("PATH");
+    let path = path.to_str().expect("UTF-8 PATH");
+    let canonical_root = wanted.canonicalize().expect("canonical version directory");
+
+    for tools in ["", "tools:\n  platform:\n    version: sources\n"] {
+        let config = project(dir.path(), "2.22", tools);
+        let envelope = platforms(&config, Some(path));
+        let data = &envelope["data"];
+        for (component, utility) in ["designer", "thin_client", "ibcmd"]
+            .into_iter()
+            .zip(utilities)
+        {
+            let selected = &data["selected"][component];
+            assert_eq!(selected["version"], version, "{data}");
+            assert_eq!(selected["source"], "path", "{data}");
+            assert_eq!(selected["chosen_by"], "source_format", "{data}");
+            assert_eq!(
+                selected["installation_root"],
+                canonical_root.to_str().unwrap()
+            );
+            assert_eq!(
+                selected["path"],
+                canonical_root.join(utility).to_str().unwrap()
+            );
+        }
+
+        let installations = data["installations"].as_array().expect("installations");
+        let versions: Vec<_> = installations
+            .iter()
+            .map(|installation| installation["version"].as_str().expect("version"))
+            .collect();
+        let index = versions
+            .iter()
+            .position(|&found| found == version)
+            .expect("PATH installation");
+        let older_index = versions
+            .iter()
+            .position(|&found| found == older_version)
+            .expect("older PATH installation");
+        assert!(index < older_index, "{data}");
+        assert_eq!(
+            versions
+                .iter()
+                .copied()
+                .filter(|&found| found == version)
+                .count(),
+            1
+        );
+        assert!(!versions.contains(&alias_version), "{data}");
+        let installation = &installations[index];
+        assert_eq!(installation["root"], canonical_root.to_str().unwrap());
+        assert_eq!(
+            installation["components"],
+            serde_json::json!({"designer": true, "thin_client": true, "ibcmd": true, "web_extension": false})
+        );
+    }
+
+    let config = project(
+        dir.path(),
+        "2.22",
+        &format!("tools:\n  platform:\n    path: {}\n", older.display()),
+    );
+    let envelope = platforms(&config, Some(path));
+    let installations = envelope["data"]["installations"]
+        .as_array()
+        .expect("installations");
+    assert_eq!(installations.len(), 1, "{envelope}");
+    assert_eq!(installations[0]["version"], older_version, "{envelope}");
     assert!(!calls.exists(), "the platform was started");
 }
 
