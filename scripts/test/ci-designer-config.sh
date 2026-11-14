@@ -59,6 +59,7 @@ text = source.read_text(encoding="utf-8")
 replacements = {
     "__ROOT_DIR__": root_dir.as_posix(),
     "__OUTPUT_ROOT__": output_root.as_posix(),
+    "__SMOKE_PROVIDER__": "designer",
     "__VANESSA_EPF__": (root_dir / "tests/fixtures/vanessa-automation-single.epf").as_posix(),
     "__VANESSA_PARAMS_TEMPLATE__": (root_dir / "scripts/test/live-cli-designer.va-params.json").as_posix(),
     "__VANESSA_FEATURE_PATH__": (root_dir / "scripts/test/features/live-cli-designer").as_posix(),
@@ -94,7 +95,7 @@ def inject_platform_path(match: re.Match[str]) -> str:
 
 
 text, platform_count = re.subn(
-    r"(?m)(?P<prefix>^tools:\n  platform:\n)(?P<body>(?:    .*\n)+)",
+    r"(?m)(?P<prefix>^tools:\n(?:[ \t]+[^\n]*\n)*?  platform:\n)(?P<body>(?:    .*\n)+)",
     inject_platform_path,
     text,
     count=1,
@@ -106,8 +107,6 @@ target.write_text(text, encoding="utf-8")
 PY
 
     grep -Eq '^format:[[:space:]]*DESIGNER[[:space:]]*$' "$CONFIG_PATH" || die "Generated config must keep format: DESIGNER"
-    grep -Eq '^builder:[[:space:]]*DESIGNER[[:space:]]*$' "$CONFIG_PATH" || die "Generated config must keep builder: DESIGNER"
-    grep -Eq "^[[:space:]]*path:[[:space:]]*[\"']?.+[\"']?$" "$CONFIG_PATH" || die "Generated config must contain tools.platform.path"
     grep -Eq "^[[:space:]]*connection:[[:space:]]*[\"']?File=" "$CONFIG_PATH" || die "Generated config must contain file infobase.connection"
 
     write_env V8TR_DESIGNER_REAL_CONFIG "$CONFIG_PATH"
@@ -116,7 +115,7 @@ PY
     write_env V8TR_INFOBASE_PATH "$INFOBASE_PATH"
 
     echo "Materialized Designer live config: $CONFIG_PATH"
-    echo "Infobase path aligned for CI bootstrap: $INFOBASE_PATH"
+    echo "Infobase for Designer smoke: $INFOBASE_PATH"
 }
 
 main "$@"

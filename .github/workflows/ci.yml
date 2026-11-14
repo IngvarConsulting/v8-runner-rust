@@ -288,19 +288,9 @@ jobs:
         run: |
           bash scripts/test/ci-designer-config.sh
 
-      - name: Bootstrap file infobase through ibsrv
-        if: steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-ibsrv.sh start
-
       - name: Run happy-path scope
         run: |
           V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
-
-      - name: Stop ibsrv sidecar
-        if: always() && steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-ibsrv.sh stop
 
       - name: Upload deploy-ready artifacts
         if: success() && steps.live.outputs.live_available == 'true'
