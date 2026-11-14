@@ -6842,3 +6842,157 @@ fn without_test_modules(source: &str) -> String {
     kept.push_str(rest);
     kept
 }
+
+/// Защита от повторения #735 (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`): всё, что
+/// создаёт раннер, лежит в рабочей копии — в `workPath` или `localPath`. Причина #735 — живой
+/// агент держал `AgentBaseDir` в `%LOCALAPPDATA%`, где Конфигуратор не выгружает файлы за
+/// ссылкой; прежде так же уходили во временный каталог ОС опись выгрузки, индекс git и ключ
+/// хоста. Продуктовый код не берёт временный каталог ОС (`temp_dir()`, `tempfile()`,
+/// `tempdir()`, `NamedTempFile::new()`, `TempDir::new()`, `Builder` без `_in`) и не читает
+/// переменные и известные каталоги учётной записи (`LOCALAPPDATA`, `APPDATA`, `ProgramData`,
+/// `TEMP`, …, крейты `dirs`/`directories`, `SHGetKnownFolderPath`) нигде, кроме названных
+/// исключений правила. Новое место под другим именем валит проверку,
+/// пока его не назовут здесь с причиной — и в правиле.
+#[test]
+fn the_runner_creates_nothing_outside_the_working_copy() {
+    const FORBIDDEN: &[&str] = &[
+        "temp_dir()",
+        "tempfile()",
+        "tempdir()",
+        "NamedTempFile::new()",
+        "TempDir::new()",
+        "\"LOCALAPPDATA\"",
+        "\"APPDATA\"",
+        "\"ProgramData\"",
+        "\"PROGRAMDATA\"",
+        "\"TEMP\"",
+        "\"TMP\"",
+        "\"TMPDIR\"",
+        "\"XDG_STATE_HOME\"",
+        "\"XDG_CACHE_HOME\"",
+        "\"XDG_RUNTIME_DIR\"",
+        "dirs::",
+        "directories::",
+        "SHGetKnownFolderPath",
+        "FOLDERID_",
+    ];
+    // Файл, образец, сколько раз и почему — исключения правила.
+    const ALLOWED: &[(&str, &str, usize, &str)] = &[
+        (
+            "src/platform/agent.rs",
+            "temp_dir()",
+            1,
+            "ключ хоста агента, когда путь workPath не в ASCII: агент другого пути не прочтёт, и файл уходит после первой сессии",
+        ),
+        (
+            "src/support/machine.rs",
+            "\"LOCALAPPDATA\"",
+            1,
+            "где лежит каталог состояния учётной записи: он только называет реестр живых агентов и читается для уборки 0.17.0–0.17.3",
+        ),
+        (
+            "src/support/machine.rs",
+            "\"XDG_STATE_HOME\"",
+            1,
+            "каталог состояния на Unix: сокеты сторожей и замок реестра (путь сокета ограничен)",
+        ),
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found: Vec<(String, &str, usize)> = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let production: String = production_tokens(&file)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        for pattern in FORBIDDEN {
+            // Образец считается с начала имени: `runner_dirs::` — не крейт `dirs`.
+            let count = production
+                .match_indices(pattern)
+                .filter(|(at, _)| {
+                    production[..*at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|before| !(before.is_alphanumeric() || before == '_'))
+                })
+                .count();
+            if count > 0 {
+                found.push((relative.clone(), pattern, count));
+            }
+        }
+    }
+    for (file, pattern, count) in &found {
+        let allowed = ALLOWED
+            .iter()
+            .find(|(allowed_file, allowed_pattern, _, _)| {
+                allowed_file == file && allowed_pattern == pattern
+            });
+        assert!(
+            allowed.is_some_and(|(_, _, allowed_count, _)| allowed_count == count),
+            "{file} reaches outside the working copy with `{pattern}` ({count}x): put it in \
+             workPath or localPath, or name it as an exception of \
+             INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY"
+        );
+    }
+    for (file, pattern, _, _) in ALLOWED {
+        assert!(
+            found
+                .iter()
+                .any(|(seen, seen_pattern, _)| seen == file && seen_pattern == pattern),
+            "{file} no longer uses `{pattern}`: drop the exception here and in the rule"
+        );
+    }
+}
+
+/// Страж выше видит каждое написание: полный путь, импорт имени и строитель без `_in`; путь
+/// в каталог и тестовый модуль он не трогает.
+#[test]
+fn the_working_copy_guard_sees_every_spelling() {
+    let compact = |sample: &str| -> String {
+        production_tokens_of(sample)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
+    };
+    for (sample, pattern) in [
+        ("fn f() { let _ = std::env::temp_dir(); }", "temp_dir()"),
+        (
+            "use std::env::temp_dir; fn f() { let _ = temp_dir(); }",
+            "temp_dir()",
+        ),
+        ("fn f() { let _ = tempfile::tempfile(); }", "tempfile()"),
+        ("fn f() { let _ = dirs::data_local_dir(); }", "dirs::"),
+        (
+            "fn f() { let _ = tempfile::Builder::new().prefix(\"x\").tempdir(); }",
+            "tempdir()",
+        ),
+        (
+            "fn f() { let _ = tempfile::NamedTempFile::new(); }",
+            "NamedTempFile::new()",
+        ),
+        (
+            "fn f() { let _ = std::env::var_os(\"LOCALAPPDATA\"); }",
+            "\"LOCALAPPDATA\"",
+        ),
+    ] {
+        assert!(
+            compact(sample).contains(pattern),
+            "{sample} hides `{pattern}`"
+        );
+    }
+    for sample in [
+        "fn f(dir: &std::path::Path) { let _ = tempfile::tempdir_in(dir); }",
+        "fn f(dir: &std::path::Path) { let _ = tempfile::Builder::new().tempfile_in(dir); }",
+        "#[cfg(test)] mod tests { fn f() { let _ = tempfile::tempdir(); } }",
+    ] {
+        let production = compact(sample);
+        assert!(
+            !production.contains("tempdir()") && !production.contains("tempfile()"),
+            "{sample} is not a reach outside the working copy"
+        );
+    }
+}

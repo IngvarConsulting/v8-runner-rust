@@ -137,12 +137,12 @@ pub(crate) fn settle_live_agents(
     agents: LiveAgents,
 ) -> Result<Vec<Option<u32>>, AppError> {
     let mut removed = Vec::new();
-    // Нет каталога состояния — нет и живых агентов.
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    // Реестр учётной записи не назван — живых агентов не найти.
+    let Some(registry) = crate::platform::live_registry::Registry::of_account().ok() else {
         return Ok(removed);
     };
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
+    let found = crate::platform::agent_keeper::client::keepers_of(&registry, &infobase);
     use crate::platform::agent_keeper::client::Stopped;
     let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
         AppError::InfobaseBusy(format!(
@@ -228,10 +228,10 @@ pub(crate) fn release_idle_connections_of(
     command_name: &str,
     keep: Option<&str>,
 ) -> Result<(), AppError> {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    let Some(registry) = crate::platform::live_registry::Registry::of_account().ok() else {
         return Ok(());
     };
-    let found = crate::platform::agent_keeper::client::keepers_of(&state, infobase);
+    let found = crate::platform::agent_keeper::client::keepers_of(&registry, infobase);
     let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
         AppError::InfobaseBusy(format!(
             "cannot start {command_name}: infobase '{infobase}' is in use: {}; retry when it finishes",
@@ -245,10 +245,10 @@ pub(crate) fn release_idle_connections_of(
 /// остановка или перезапуск кластера и его СУБД оставили бы их подключение устаревшим. Занятого
 /// агента не трогают: его команда сама получит отказ платформы.
 pub(crate) fn release_server_connections() {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    let Some(registry) = crate::platform::live_registry::Registry::of_account().ok() else {
         return;
     };
-    let found = crate::platform::agent_keeper::client::live_keepers(&state)
+    let found = crate::platform::agent_keeper::client::live_keepers(&registry)
         .into_iter()
         .filter(|(_, record)| {
             record.agent.as_ref().is_some_and(|agent| {
@@ -327,10 +327,10 @@ fn disconnect_attached(
 /// Подключённые к базе живые агенты для текста отказа «базу держат» (#644): pid, рабочая копия
 /// и выход — `v8-runner agent release`. Пусто — таких агентов нет. Каталогов не создаёт.
 pub(crate) fn attached_live_agents_hint(config: &AppConfig) -> Option<String> {
-    let state = crate::support::machine::account::existing_account_state_dir()?;
+    let registry = crate::platform::live_registry::Registry::of_account().ok()?;
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
     let attached: Vec<(Option<u32>, Option<String>)> =
-        crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+        crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
             .into_iter()
             .filter_map(|(keeper, status)| {
                 let status = status.ok().filter(|status| status.attached)?;
@@ -365,11 +365,11 @@ pub(crate) fn attached_agents_text(agents: &[(Option<u32>, Option<String>)]) -> 
 /// Простаивающие живые агенты базы, которых сняла бы команда, пересоздающая её: pid каждого
 /// (`None` — агент без процесса). Каталогов не создаёт, никого не снимает — для превью.
 pub(crate) fn idle_live_agents(config: &AppConfig) -> Vec<Option<u32>> {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+    let Some(registry) = crate::platform::live_registry::Registry::of_account().ok() else {
         return Vec::new();
     };
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+    crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
         .into_iter()
         .filter_map(|(_, status)| match status {
             Ok(status) if status.holds_the_infobase() => None,
@@ -382,9 +382,9 @@ pub(crate) fn idle_live_agents(config: &AppConfig) -> Vec<Option<u32>> {
 /// Живые агенты базы, которые сейчас с ней работают: их команда и держатели. Каталогов не
 /// создаёт; без живых агентов — `None`.
 fn busy_live_agents(config: &AppConfig) -> Option<String> {
-    let state = crate::support::machine::account::existing_account_state_dir()?;
+    let registry = crate::platform::live_registry::Registry::of_account().ok()?;
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
-    let busy: Vec<String> = crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+    let busy: Vec<String> = crate::platform::agent_keeper::client::keepers_of(&registry, &infobase)
         .into_iter()
         .filter_map(|(_, status)| status.ok())
         .filter(|status| status.holds_the_infobase())

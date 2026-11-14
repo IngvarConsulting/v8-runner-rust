@@ -2,7 +2,8 @@
 //! что сценарий оболочки `fake_agent::write_fake_designer`: пишет ключи запуска и свой pid,
 //! раскладку `AgentBaseDir`, как платформа, и файл запроса для двойника агента, затем живёт,
 //! пока его не снимут. Куда писать, называет переменная `V8R_FAKE_DESIGNER_DIR`: в ней
-//! `designer-args.log`, `designer.pid`, `base-dir.txt` и `base-dir.txt.launch`.
+//! `designer-args.log`, `designer.pid`, `designer-cwd.txt` (текущий каталог), `base-dir.txt` и
+//! `base-dir.txt.launch`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -38,6 +39,9 @@ fn main() {
     let staged = dir.join("base-dir.txt.launch.tmp");
     std::fs::write(&staged, format!("{port}\n{key}\n")).expect("launch request");
     std::fs::rename(&staged, &launch).expect("publish launch request");
+    if let Ok(cwd) = std::env::current_dir() {
+        std::fs::write(dir.join("designer-cwd.txt"), cwd.display().to_string()).expect("cwd");
+    }
     std::fs::write(dir.join("base-dir.txt"), base.display().to_string()).expect("base dir");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));

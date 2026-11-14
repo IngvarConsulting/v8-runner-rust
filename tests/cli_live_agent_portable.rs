@@ -3,7 +3,8 @@
 //! оболочки, поэтому стенд работает и на Windows. Команда берёт агента у настоящего сторожа
 //! `v8-runner agent keeper`, а тот держит двойника агента (`support::fake_agent`).
 //!
-//! У каждого стенда свой каталог состояния учётной записи (`V8_RUNNER_STATE_DIR`); в конце
+//! У каждого стенда свой каталог состояния учётной записи (`V8_RUNNER_STATE_DIR`: он называет
+//! реестр живых агентов учётной записи) и своя рабочая копия, в которой живут его агенты; в конце
 //! стенд снимает своих сторожей и их агентов.
 #![cfg(any(unix, windows))]
 
@@ -325,13 +326,34 @@ impl Bench {
             .expect("designer pid")
     }
 
-    /// Записи сторожей этого каталога состояния.
-    fn records(&self) -> Vec<Value> {
-        let Ok(keys) = fs::read_dir(self.state.path().join("agents")) else {
+    /// Каталог живых агентов рабочей копии стенда: `workPath/agent/live` (#735).
+    fn live_dir(&self) -> PathBuf {
+        self.dir.path().join("work").join("agent").join("live")
+    }
+
+    /// Дома живых агентов рабочей копии стенда: `workPath/agent/live/<key16>`.
+    fn homes(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.live_dir()) else {
             return Vec::new();
         };
-        keys.flatten()
-            .filter_map(|key| fs::read(key.path().join("agent").join("record.json")).ok())
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.len() == 16)
+            })
+            .collect()
+    }
+
+    /// Записи сторожей этой рабочей копии.
+    fn records(&self) -> Vec<Value> {
+        self.homes()
+            .iter()
+            .filter_map(|home| fs::read(home.join("record.json")).ok())
             .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
             .collect()
     }
@@ -1040,6 +1062,84 @@ fn agent_hold_over_the_limit_waits_for_an_agent_busy_with_a_command() {
     assert!(
         wait_until(Duration::from_secs(20), || !alive(busy.designer_pid())),
         "the agent that finished its command gave way"
+    );
+}
+
+/// Живой агент живёт в рабочей копии: его `AgentBaseDir`, текущий каталог и запись — в
+/// `workPath/agent/live/<key16>`, соль ключа — в `localPath`, а в каталоге состояния учётной
+/// записи раннер ничего не держит. Дом, убранный при живом стороже, следующая команда поднимает
+/// заново; `agent stop` убирает дом (#735, `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+#[test]
+fn the_live_agent_lives_in_the_working_copy_and_comes_back_when_its_home_is_gone() {
+    let bench = Bench::new("");
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    // `AgentBaseDir` и текущий каталог живого агента — в его доме в `workPath`, не в каталоге
+    // состояния учётной записи (#735, `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    let base = PathBuf::from(read_or_empty(&bench.marks.join("base-dir.txt")));
+    let cwd = PathBuf::from(read_or_empty(&bench.marks.join("designer-cwd.txt")));
+    let homes = bench.homes();
+    assert_eq!(homes.len(), 1, "{homes:?}");
+    let home = homes[0].canonicalize().expect("home");
+    assert!(
+        base.canonicalize().expect("base").starts_with(&home),
+        "{} is not in {}",
+        base.display(),
+        home.display()
+    );
+    assert!(
+        cwd.canonicalize().expect("cwd").starts_with(&home),
+        "{} is not in {}",
+        cwd.display(),
+        home.display()
+    );
+    let state = bench.state.path();
+    assert!(
+        !state.join("agents").exists()
+            && !state.join("account-salt").exists()
+            && !state.join("bin").exists(),
+        "the runner keeps nothing of the live agent in the account state directory"
+    );
+    if cfg!(windows) {
+        assert!(
+            fs::read_dir(state).map_or(true, |mut entries| entries.next().is_none()),
+            "nothing at all in the account state directory on Windows"
+        );
+    }
+    assert!(
+        bench
+            .dir
+            .path()
+            .join(".local")
+            .join("agent")
+            .join("account-salt")
+            .is_file(),
+        "the key salt lives in localPath"
+    );
+
+    // Дом агента убрали, пока сторож жив (`git clean`): запись пропала — следующая команда
+    // снимает сторожа без записи и поднимает нового, а не отказывает.
+    let first = bench.designer_pid();
+    let _ = fs::remove_file(homes[0].join("record.json"));
+    let _ = fs::remove_dir_all(homes[0].join("base"));
+    let (code, payload) = bench.download();
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(bench.launches(), 2, "a new agent comes up: {payload}");
+    assert!(
+        wait_until(Duration::from_secs(20), || !alive(first)),
+        "the agent of the keeper without a record is gone"
+    );
+
+    // `agent stop` снимает агента, и сторож убирает его дом.
+    let (code, payload) = bench.run(&["agent", "stop"]);
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        wait_until(Duration::from_secs(20), || bench.homes().is_empty()),
+        "the keeper removes the agent's home when it closes: {:?}",
+        bench.homes()
     );
 }
 

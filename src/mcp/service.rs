@@ -751,11 +751,15 @@ pub(crate) fn execution_context(
 ) -> Result<ExecutionContext, McpInternalError> {
     match call_context.transport() {
         transport @ (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp) => {
-            Ok(ExecutionContext::new(command, transport)
+            let context = ExecutionContext::new(command, transport)
                 .with_command_line(call_context.command_line().clone())
                 .with_edt_timeout(call_context.edt_timeout())
                 .with_cancellation(call_context.cancellation())
-                .with_abandonment(call_context.abandonment()))
+                .with_abandonment(call_context.abandonment());
+            Ok(match call_context.start_dir() {
+                Some(dir) => context.with_start_dir(dir.to_path_buf()),
+                None => context,
+            })
         }
         ExecutionTransport::Cli => Err(McpInternalError::new(format!(
             "mcp service received non-MCP transport for {}",

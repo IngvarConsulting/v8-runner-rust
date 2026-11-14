@@ -395,6 +395,9 @@ pub struct ExecutionContext {
     >,
     /// Политика чужих сеансов у применения (`--sessions`) и её исход; без ключа — `disable`.
     sessions: super::apply::sessions::SessionsGate,
+    /// Текущий каталог процессов платформы, которые команда запускает без своего:
+    /// `workPath/temp` (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    start_dir: Option<std::path::PathBuf>,
 }
 
 impl ExecutionContext {
@@ -412,7 +415,15 @@ impl ExecutionContext {
             full_pull: None,
             detections: std::sync::Arc::default(),
             sessions: super::apply::sessions::SessionsGate::default(),
+            start_dir: None,
         }
+    }
+
+    /// Процессы платформы без своего текущего каталога начинают в `dir` — `workPath/temp`
+    /// команды, а не в каталоге, откуда запущен раннер.
+    pub fn with_start_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.start_dir = Some(dir);
+        self
     }
 
     /// Creates a CLI execution context for the specified command.
@@ -566,6 +577,7 @@ impl ExecutionContext {
             safety.process_safety(),
             self.work.clone(),
         )
+        .starting_in(self.start_dir.clone())
     }
 
     /// Политика шага, который снимает поднятое этой командой. Отмена его не касается: отменённая
@@ -577,6 +589,7 @@ impl ExecutionContext {
             InterruptionSafetyClass::GracefulThenKill.process_safety(),
             self.work.clone(),
         )
+        .starting_in(self.start_dir.clone())
     }
 
     /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
