@@ -338,7 +338,10 @@ command-specific validation, а не ослабление `push`, source `pull`,
 - `workPath/infobases/<база>/designer/<набор>` — у формата EDT выгрузка набора в формат
   Конфигуратора по ключу базы; без неё следующая выгрузка EDT идёт полной
 - `workPath/tool-extensions/<имя>` — выгрузка расширения-инструмента с исходниками EDT
-- `workPath/agent/host-keys` — ключи узла своего агента
+- `workPath/agent/` — каталоги агента Конфигуратора (`AgentBaseDir`, текущий каталог);
+  `workPath/agent/host-keys` — ключ хоста разового агента. Ключ хоста живого агента и запись
+  и журнал его сторожа лежат не здесь, а в каталоге состояния учётной записи ОС (см.
+  [`tools.designer_agent.live`](#toolsdesigner_agentlive))
 - `workPath/tools` — загрузки `tools download`: `.cfe`, EPF Vanessa и исходники
   onec-client-mcp-devkit; после удаления их скачивает заново `tools download`
 
@@ -380,10 +383,11 @@ Pure provider selection для infobase export не создаёт `workPath` и
     copied-from.json                   откуда скопирована база
     .lock                              замок памяти базы
     managed/
+      owner.json  метка владельца стенда: каталог и проект копии
       postgres/   data/ password record.json ports.json postgres.log
-      standalone/ data/ record.json ports.json
+      standalone/ data/ host-key record.json ports.json standalone.log
       cluster/    registry-<regport>/ record.json ports.json cluster.log
-      ras/        record.json
+      ras/        record.json ras.log
   tools/.tests.v8-runner-tools-download.json  метка: набор `tests` скачан `tools download yaxunit --sources`
   .lock                                замок команд, меняющих стенд
   .gitignore                           строка `*`
@@ -1355,10 +1359,13 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 
 Ключ хоста сверяется, когда есть с чем. У управляемого агента — всегда: с открытой частью
 файла `host-key`, а без него — с одноразовым ED25519-ключом, который раннер создаёт на
-каждый запуск под `workPath/agent/host-keys/` и отдаёт агенту тем же `/AgentSSHHostKey`.
-На Unix права файла — только владельцу, на Windows они наследуются от `workPath`:
-для закрытого ключа выбирают каталог с ограниченным доступом. При `workPath` не в ASCII ключ
-ложится в свой закрытый каталог вне `workPath` (см. `tools.designer_agent.host-key`)
+каждый запуск и отдаёт агенту тем же `/AgentSSHHostKey`. Ключ живого агента лежит в его
+каталоге в каталоге состояния учётной записи ОС (`agents/<ключ>/agent/host-keys/`, см.
+[`tools.designer_agent.live`](#toolsdesigner_agentlive)), созданном только для владельца;
+ключ разового агента — под `workPath/agent/host-keys/`.
+На Unix права файла — только владельцу, на Windows у разового агента они наследуются от
+`workPath`: для закрытого ключа выбирают каталог с ограниченным доступом. При пути не в ASCII
+ключ ложится в свой закрытый каталог вне этого каталога (см. `tools.designer_agent.host-key`)
 ([замер ACL 07.11.2026](../references/1c/confirmed-runtime-measurements.md#управляемый-агент-ключ-порт-и-windows-acl-на-linux-и-windows-429)).
 Файл удаляется вместе с агентом, а ключи, оставшиеся после аварийного выхода раннера,
 убирает следующий запуск управляемого агента — по номеру процесса в имени файла.
@@ -1437,9 +1444,11 @@ Linux под root и Windows (8.3.27, 8.5.1):
 
 На Windows агент читает ключ хоста только по пути в ASCII: по пути с кириллицей он выходит с
 «Ошибка установки ключа хоста». Поэтому объявленный ключ по пути не в ASCII отказывает до запуска
-(`environment_unavailable`). Одноразовый ключ при `workPath` с кириллицей ложится в свой каталог,
+(`environment_unavailable`). Одноразовый ключ, чей каталог не в ASCII, ложится в свой каталог,
 доступный только владельцу, во временном каталоге ОС, а если и тот не в ASCII — в
-`%ProgramData%\v8-runner`.
+`%ProgramData%\v8-runner`. У разового агента это `workPath` с кириллицей, у живого — каталог
+состояния учётной записи под `%LOCALAPPDATA%`, например при кириллическом имени пользователя
+Windows.
 
 ### `tools.designer_agent.host-fingerprint`
 
@@ -1477,6 +1486,17 @@ Linux под root и Windows (8.3.27, 8.5.1):
 остановка кластера), отключают его сами; чужому Конфигуратору или чужой монопольной операции
 базу отпускает `v8-runner agent release`. Живой агент без держателя закрывается после 15 минут
 простоя; держимый остаётся подключённым, пока его держат.
+
+Каталог состояния учётной записи лежит в профиле пользователя, обычно на системном диске,
+и `workPath` его не содержит. В нём:
+
+- `agents/<ключ>/agent/` — каталог сторожа живого агента: `record.json` — запись сторожа и
+  его агента, `agent.log` — журнал сторожа (его путь называет отказ `agent_start`, когда
+  сторож не поднялся или не ответил), `host-keys/` — одноразовый ключ хоста агента;
+- `bin/<версия>/` — копия исполняемого файла, из которой запущен сторож;
+- `account-salt` — соль ключей живых агентов учётной записи.
+
+Удаление `workPath` записи сторожей не задевает.
 
 С `live: false` команда снимает своего агента после работы, как раньше, и снимает живого
 агента своей рабочей копии, если такой остался. Если раннер запущен в Job, из которого нельзя

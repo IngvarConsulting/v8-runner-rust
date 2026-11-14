@@ -2245,7 +2245,11 @@ v8-runner mcp serve http
   набора должен лежать на томе `workPath` (иначе `work_path_on_another_volume`).
 - `workPath/designer/<набор>`: выгрузки внешних обработок и отчётов формата EDT.
 - `workPath/tool-extensions/<имя>`: выгрузка расширения-инструмента с исходниками EDT.
-- `workPath/agent/host-keys/`: ключи узла своего агента.
+- `workPath/agent/`: каталоги агента Конфигуратора (`AgentBaseDir`, текущий каталог);
+  `workPath/agent/host-keys/` — ключ хоста разового агента. Ключ хоста живого агента, запись и
+  журнал его сторожа лежат в каталоге состояния учётной записи ОС
+  (`%LOCALAPPDATA%\v8-runner\agents\<ключ>\agent\` на Windows, под `$XDG_STATE_HOME/v8-runner`
+  или `~/.local/state/v8-runner` на Unix), а не в `workPath`.
 - `workPath/hash-storages/`: общий кеш экспорта EDT и подготовки внешних артефактов.
   Смена базы или исполнителя не требует повторного экспорта EDT.
 - `workPath/ignore-check/`: проверка правил игнорирования git, которая ничего не задела, с
