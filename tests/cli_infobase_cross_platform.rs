@@ -145,6 +145,62 @@ fn a_download_answers_with_an_ordinary_path() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn a_directory_in_place_of_the_base_lock_refuses_push_and_warns_download() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let lock = root.path().join(".ib.v8-runner.infobase.lock.system");
+    fs::create_dir(&lock).expect("directory at the lock path");
+    let calls = root.path().join("platform.calls");
+
+    let push = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args(["--json-message", "push", "--full"])
+        .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+        .output()
+        .expect("run push");
+    let envelope: Value = serde_json::from_slice(&push.stdout).expect("JSON envelope");
+    assert_eq!(push.status.code(), Some(3), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "runtime_failure", "{envelope}");
+    assert_eq!(envelope["steps"][0]["name"], "infobase lock", "{envelope}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    let lock_path = ordinary_canonical(&lock);
+    let lock_path = lock_path.to_str().expect("lock path");
+    assert!(
+        message.contains(lock_path) && message.contains("directory"),
+        "{message}"
+    );
+    assert!(!calls.exists(), "push must stop before Designer");
+
+    let cf = root.path().join("main.cf");
+    let download = run_json(
+        &config,
+        &[
+            "download",
+            "main",
+            "--output",
+            cf.to_str().expect("CF path"),
+        ],
+    );
+    let warnings = download["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|message| {
+                message.contains("infobase lock")
+                    && message.contains(lock_path)
+                    && message.contains("directory")
+            })),
+        "{download}"
+    );
+    assert_eq!(fs::read(&cf).expect("published CF"), b"payload");
+    assert!(lock.is_dir());
+}
+
 /// Предупреждение о владельце базы называет обе копии обычными путями, хотя метка на диске
 /// хранит канонический: она сверяется с другими копиями и не переписывается ради показа.
 #[cfg(windows)]
