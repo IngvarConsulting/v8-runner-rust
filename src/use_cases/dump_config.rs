@@ -2621,55 +2621,51 @@ mod tests {
         make_executable(path);
     }
 
-    fn write_dump_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>, sleep_ms: u64) {
-        let pattern_branch = fail_pattern
-            .map(|pattern| {
-                format!(
-                    "if printf '%s' \"$args\" | grep -F -q -- '{}'; then exit 17; fi",
-                    pattern
-                )
-            })
-            .unwrap_or_default();
-        let sleep_branch = if sleep_ms == 0 {
-            String::new()
-        } else {
-            format!("sleep {}", sleep_ms as f64 / 1000.0)
-        };
-        let body = format!(
-            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" /GetConfigGenerationID\"*) exit 0;; esac\n{}\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
-            calls_log.display(),
-            sleep_branch,
-            pattern_branch
-        );
-        write_script(path, &body);
+    #[derive(Default)]
+    struct DumpFixture {
+        staged: bool,
+        refusal: Option<(i32, &'static str)>,
+        forecast: Option<&'static str>,
     }
 
-    fn write_ibcmd_dump_script(
-        path: &Path,
-        calls_log: &Path,
-        fail_pattern: Option<&str>,
-        sleep_ms: u64,
-    ) {
-        let pattern_branch = fail_pattern
-            .map(|pattern| {
-                format!(
-                    "if printf '%s' \"$args\" | grep -F -q -- '{}'; then exit 17; fi",
-                    pattern
-                )
-            })
-            .unwrap_or_default();
-        let sleep_branch = if sleep_ms == 0 {
-            String::new()
-        } else {
-            format!("sleep {}", sleep_ms as f64 / 1000.0)
-        };
-        let body = format!(
-            "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\n{}\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
-            calls_log.display(),
-            sleep_branch,
-            pattern_branch
-        );
-        write_script(path, &body);
+    impl DumpFixture {
+        fn install(self, path: &Path, calls: &Path) -> PathBuf {
+            let mut path = path.to_path_buf();
+            path.as_mut_os_string().push(std::env::consts::EXE_SUFFIX);
+            let source =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_platform.rs");
+            let compile = std::process::Command::new("rustc")
+                .arg("--edition=2021")
+                .arg(source)
+                .arg("-o")
+                .arg(&path)
+                .output()
+                .expect("compile fake platform");
+            assert!(
+                compile.status.success(),
+                "fake platform compilation failed: {}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+
+            let scenario = path.with_extension("dump-fixture");
+            fs::create_dir(&scenario).expect("dump scenario directory");
+            fs::write(
+                scenario.join("calls-path"),
+                calls.to_str().expect("UTF-8 test path"),
+            )
+            .expect("record call log path");
+            if self.staged {
+                fs::write(scenario.join("staged"), "").expect("configure staged export");
+            }
+            if let Some((code, flag)) = self.refusal {
+                fs::write(scenario.join("refusal"), format!("{code}\n{flag}"))
+                    .expect("configure dump refusal");
+            }
+            if let Some(forecast) = self.forecast {
+                fs::write(scenario.join("forecast"), forecast).expect("configure dump forecast");
+            }
+            path
+        }
     }
 
     fn write_designer_dump_script_for_edt(
@@ -3838,7 +3834,12 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_staging_ibcmd_script(&script, &calls, true);
+        let script = DumpFixture {
+            staged: true,
+            refusal: Some((3, "export")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -3855,14 +3856,23 @@ exit 0"#,
         write_temp_dir_metadata(&backup, TempDirKind::Backup, "killed", &target, &identity)
             .expect("metadata");
 
-        let failed = run_dump(&config, &incremental_main());
-
-        assert!(failed.is_err(), "the platform refused");
+        let failure = run_dump(&config, &incremental_main()).expect_err("the platform refused");
         assert_eq!(
             fs::read_to_string(target.join("Configuration.xml")).expect("returned"),
             "old"
         );
         assert!(!backup.exists());
+        assert!(
+            failure.error.message().contains("exit code 3"),
+            "{failure:?}"
+        );
+        let calls = fs::read_to_string(calls).expect("platform calls");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.contains(" config export ") && call.contains(".dump-stage-")),
+            "{calls}"
+        );
     }
 
     #[test]
@@ -3985,7 +3995,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config(&base, &work, &script);
         fs::remove_dir_all(base.join("main")).expect("remove target");
 
@@ -4111,7 +4121,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config(&base, &work, &script);
         let copy = seed_runner_copy(&config, "ext", "<ConfigDumpInfo version=\"2.17\"/>");
 
@@ -4355,7 +4365,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config(&base, &work, &script);
 
         let result = run_dump(
@@ -4387,7 +4397,11 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, Some("-partial"), 0);
+        let script = DumpFixture {
+            refusal: Some((17, "-partial")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config(&base, &work, &script);
 
         let failure = run_dump(
@@ -4420,7 +4434,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4468,7 +4482,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4521,7 +4535,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4571,7 +4585,11 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, Some("--force"), 0);
+        let script = DumpFixture {
+            refusal: Some((17, "--force")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4615,7 +4633,11 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, Some("/DumpConfigToFiles"), 0);
+        let script = DumpFixture {
+            refusal: Some((17, "/DumpConfigToFiles")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "keep me").expect("old");
         commit_sources(&base);
@@ -4639,20 +4661,36 @@ exit 0"#,
             fs::read_to_string(base.join("main").join("old.txt")).expect("old"),
             "keep me"
         );
-        // Конфигуратору назван промежуточный каталог, а не цель.
-        let calls = fs::read_to_string(&calls).expect("calls");
-        assert!(calls.contains(".dump-stage-"), "{calls}");
+
+        assert!(
+            failure.error.message().contains("exit code 17"),
+            "{failure:?}"
+        );
+        let calls = fs::read_to_string(calls).expect("platform calls");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.contains("/DumpConfigToFiles") && call.contains(".dump-stage-")),
+            "{calls}"
+        );
     }
 
     #[test]
     fn dump_full_success_replaces_old_target() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("designer staged dump ")
+            .tempdir()
+            .expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture {
+            staged: true,
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
         commit_sources(&base);
@@ -4673,17 +4711,35 @@ exit 0"#,
 
         assert!(result.ok);
         assert!(!base.join("main").join("old.txt").exists());
+        assert_eq!(
+            fs::read_to_string(base.join("main/Configuration.xml")).expect("published dump"),
+            "new\n"
+        );
+        let calls = fs::read_to_string(calls).expect("Designer calls");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.contains("/DumpConfigToFiles") && call.contains(".dump-stage-")),
+            "{calls}"
+        );
     }
 
     #[test]
     fn ibcmd_dump_full_uses_staging_dir_and_atomic_publish() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("ibcmd staged dump ")
+            .tempdir()
+            .expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture {
+            staged: true,
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4712,6 +4768,10 @@ exit 0"#,
         assert!(calls.contains("--force"));
         assert!(calls.contains(".dump-stage-"));
         assert!(!base.join("main").join("old.txt").exists());
+        assert_eq!(
+            fs::read_to_string(base.join("main/Configuration.xml")).expect("published dump"),
+            "new\n"
+        );
     }
 
     /// `ibcmd` в непустой каталог не выгружает (замер #403). Без файла версий выгрузка идёт в
@@ -4726,13 +4786,11 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         // Как настоящий `ibcmd`: непустой каталог — отказ, пустой — выгрузка с файлом версий.
-        write_script(
-            &script,
-            &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then echo \"Каталог $last не пуст.\" >&2; exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
-                calls.display()
-            ),
-        );
+        let script = DumpFixture {
+            staged: true,
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -4779,10 +4837,7 @@ exit 0"#,
         .path()
         .to_path_buf();
         assert_eq!(
-            // `printf` у `dash` оставляет `\"` как есть, у `bash` — нет.
-            fs::read_to_string(copy)
-                .expect("the description became the runner copy")
-                .replace('\\', ""),
+            fs::read_to_string(copy).expect("the description became the runner copy"),
             "<ConfigDumpInfo version=\"2.20\"/>\n"
         );
         assert_eq!(
@@ -4796,19 +4851,6 @@ exit 0"#,
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(!calls.contains("--sync"), "{calls}");
-    }
-
-    /// Скрипт как настоящий `ibcmd`: в непустой каталог не пишет, в пустой кладёт
-    /// `Configuration.xml`, `Catalogs/Items.xml` и файл версий; `fail` — отказ выгрузки.
-    fn write_staging_ibcmd_script(script: &Path, calls: &Path, fail: bool) {
-        let failure = if fail { "exit 3\n" } else { "" };
-        write_script(
-            script,
-            &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\n{failure}for last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last/Catalogs\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf 'item\\n' > \"$last/Catalogs/Items.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
-                calls.display()
-            ),
-        );
     }
 
     /// Промежуточные каталоги выгрузки рядом с набором и в `workPath/stage` проекта `base`:
@@ -4843,7 +4885,12 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_staging_ibcmd_script(&script, &calls, true);
+        let script = DumpFixture {
+            staged: true,
+            refusal: Some((3, "export")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -4854,19 +4901,27 @@ exit 0"#,
         fs::write(target.join("Configuration.xml"), "old").expect("old");
         commit_sources(&base);
 
-        let failed = run_dump(&config, &incremental_main());
-
-        assert!(failed.is_err(), "the platform refused");
+        let failure = run_dump(&config, &incremental_main()).expect_err("the platform refused");
         assert_eq!(
             fs::read_to_string(target.join("Configuration.xml")).expect("old"),
             "old"
         );
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
+        assert!(
+            failure.error.message().contains("exit code 3"),
+            "{failure:?}"
+        );
+        let calls = fs::read_to_string(calls).expect("platform calls");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.contains(" config export ") && call.contains(".dump-stage-")),
+            "{calls}"
+        );
     }
 
     /// Оборванный перенос копию раннера не трогает: прежняя опись старше дерева, и следующая
     /// выгрузка по ней выгрузит больше, а не меньше (#646). Стадия убрана, описи в каталоге нет.
-    #[cfg(unix)]
     #[test]
     fn a_broken_overlay_keeps_the_runner_copy_as_it_was() {
         let dir = tempdir().expect("tempdir");
@@ -4874,7 +4929,11 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_staging_ibcmd_script(&script, &calls, false);
+        let script = DumpFixture {
+            staged: true,
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -5316,17 +5375,6 @@ exit 0"#,
         );
     }
 
-    /// `ibcmd`: `export status` отвечает `status`; выгрузка без `--sync` пишет в пустой каталог.
-    fn write_forecasting_ibcmd_script(script: &Path, calls: &Path, status: &str) {
-        write_script(
-            script,
-            &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; *\" export status \"*) printf '%b' '{status}'; exit 0;; *\" --sync \"*) exit 0;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
-                calls.display()
-            ),
-        );
-    }
-
     /// Без файла версий выгрузка полная по плану, и прогноз не спрашивается.
     #[test]
     fn a_dump_without_a_version_file_asks_for_no_forecast() {
@@ -5357,7 +5405,12 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
-        write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
+        let script = DumpFixture {
+            staged: true,
+            forecast: Some("modified: all\n"),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -5402,7 +5455,12 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
-        write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
+        let script = DumpFixture {
+            staged: true,
+            forecast: Some("modified: all\n"),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -5430,7 +5488,6 @@ exit 0"#,
     /// Выгрузка `ibcmd` по копии описи отказывает кодом `-1` («Требуется экспортировать
     /// конфигурацию полностью», удаление объекта, замер #646): раннер выгружает полностью в
     /// чистую стадию, и ответ называет режим `FULL`.
-    #[cfg(unix)]
     #[test]
     fn an_ibcmd_refusal_to_export_by_changes_falls_back_to_a_full_export() {
         use crate::domain::dump::DumpModeReason;
@@ -5438,13 +5495,12 @@ exit 0"#,
         let base = dir.path().join("base");
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
-        write_script(
-            &script,
-            &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; *\" export status \"*) printf 'modified: CommonModule.A\\n'; exit 0;; *\" --base=\"*) echo 'Требуется экспортировать конфигурацию полностью' >&2; exit 255;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
-                calls.display()
-            ),
-        );
+        let script = DumpFixture {
+            staged: true,
+            refusal: Some((-1, "--base=")),
+            forecast: Some("modified: CommonModule.A\n"),
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &dir.path().join("work"),
@@ -5458,8 +5514,21 @@ exit 0"#,
         assert_eq!(result.mode, ReportedDumpMode::Full);
         assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--base="), "{calls}");
-        assert!(calls.contains("--force"), "{calls}");
+        let staged_exports: Vec<_> = calls
+            .lines()
+            .filter(|call| call.contains(" config export ") && call.contains(".dump-stage-"))
+            .collect();
+        let [by_changes, full] = staged_exports.as_slice() else {
+            panic!("expected two staged exports: {calls}");
+        };
+        assert!(
+            by_changes.contains("--base=") && !by_changes.contains("--force"),
+            "{calls}"
+        );
+        assert!(
+            full.contains("--force") && !full.contains("--base="),
+            "{calls}"
+        );
         assert_eq!(
             fs::read_to_string(base.join("main/Configuration.xml")).expect("dumped"),
             "new\n"
@@ -5541,7 +5610,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let mut config = build_config_with_builder(
             &base,
             &work,
@@ -5588,7 +5657,11 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, Some("--force"), 0);
+        let script = DumpFixture {
+            refusal: Some((17, "--force")),
+            ..DumpFixture::default()
+        }
+        .install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -5617,6 +5690,17 @@ exit 0"#,
             fs::read_to_string(base.join("main").join("old.txt")).expect("old"),
             "keep me"
         );
+        assert!(
+            failure.error.message().contains("exit code 17"),
+            "{failure:?}"
+        );
+        let calls = fs::read_to_string(calls).expect("platform calls");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.contains(" config export ") && call.contains(".dump-stage-")),
+            "{calls}"
+        );
     }
 
     #[test]
@@ -5627,7 +5711,7 @@ exit 0"#,
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config_with_builder(
             &base,
             &work,
@@ -6626,7 +6710,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(dir.path());
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config(dir.path(), &dir.path().join("work"), &script);
         let runner = crate::platform::process::ProcessExecutor;
         let context = crate::use_cases::context::ExecutionContext::cli(
@@ -6681,7 +6765,7 @@ exit 0"#,
         let work = dir.path().join("work");
         let root_xml = dir.path().join("out").join("root.xml");
         create_source_tree(dir.path());
-        write_dump_script(&script, &calls, None, 0);
+        let script = DumpFixture::default().install(&script, &calls);
         let config = build_config(dir.path(), &work, &script);
         let runner = crate::platform::process::ProcessExecutor;
         let context = crate::use_cases::context::ExecutionContext::cli(

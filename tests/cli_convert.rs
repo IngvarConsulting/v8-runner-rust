@@ -867,6 +867,8 @@ fn convert_without_the_edt_cli_answers_an_environment_failure() {
         payload["error"]["code"], "environment_unavailable",
         "{payload}"
     );
+    // Утилиты нет — слой `platform` (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+    assert_eq!(payload["error"]["layer"], "platform", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()

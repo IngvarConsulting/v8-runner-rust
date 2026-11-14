@@ -6,7 +6,7 @@ use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
 use crate::domain::sessions::InfobaseSessions;
 use crate::platform::process::{ProcessError, WorkGiven};
-use crate::support::error::{AppError, CancelledAt, CapabilityReason};
+use crate::support::error::{AppError, CancelledAt, CapabilityReason, EnvironmentLayer};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
 
 const VALIDATION_EXIT_CODE: i32 = 2;
@@ -249,6 +249,8 @@ enum RefusalDetail {
     PlatformRelease(PlatformReleaseRefusal),
     /// Кто держит базу у отказов `infobase_sessions` и `infobase_designer_busy`.
     Sessions(InfobaseSessions),
+    /// Слой, который отказал, у отказа `environment_unavailable`, когда он определён.
+    EnvironmentLayer(EnvironmentLayer),
 }
 
 /// Оба поколения отказа «база ушла вперёд».
@@ -275,7 +277,23 @@ impl UseCaseError {
     pub fn sessions(&self) -> Option<&InfobaseSessions> {
         match self.detail.as_deref()? {
             RefusalDetail::Sessions(sessions) => Some(sessions),
-            RefusalDetail::Generations(_) | RefusalDetail::PlatformRelease(_) => None,
+            RefusalDetail::Generations(_)
+            | RefusalDetail::PlatformRelease(_)
+            | RefusalDetail::EnvironmentLayer(_) => None,
+        }
+    }
+
+    /// Слой окружения, который отказал, у отказа `environment_unavailable`. У отказа другого
+    /// рода — в том числе отмены, ставшей поверх него, — слоя нет, что бы ни лежало в подробности.
+    pub fn environment_layer(&self) -> Option<EnvironmentLayer> {
+        if self.kind != UseCaseErrorKind::Environment(EnvironmentReason::Unavailable) {
+            return None;
+        }
+        match self.detail.as_deref()? {
+            RefusalDetail::EnvironmentLayer(layer) => Some(*layer),
+            RefusalDetail::Generations(_)
+            | RefusalDetail::PlatformRelease(_)
+            | RefusalDetail::Sessions(_) => None,
         }
     }
 
@@ -290,7 +308,9 @@ impl UseCaseError {
     pub fn platform_release(&self) -> Option<&PlatformReleaseRefusal> {
         match self.detail.as_deref()? {
             RefusalDetail::PlatformRelease(refusal) => Some(refusal),
-            RefusalDetail::Generations(_) | RefusalDetail::Sessions(_) => None,
+            RefusalDetail::Generations(_)
+            | RefusalDetail::Sessions(_)
+            | RefusalDetail::EnvironmentLayer(_) => None,
         }
     }
 
@@ -298,7 +318,9 @@ impl UseCaseError {
     pub fn generations(&self) -> Option<&Generations> {
         match self.detail.as_deref()? {
             RefusalDetail::Generations(generations) => Some(generations),
-            RefusalDetail::PlatformRelease(_) | RefusalDetail::Sessions(_) => None,
+            RefusalDetail::PlatformRelease(_)
+            | RefusalDetail::Sessions(_)
+            | RefusalDetail::EnvironmentLayer(_) => None,
         }
     }
 
@@ -309,21 +331,22 @@ impl UseCaseError {
         self
     }
 
-    /// Тот же отказ с другим текстом: род, шаг, поколения и опись выпуска остаются.
+    /// Тот же отказ с другим текстом: род, шаг и подробность — поколения, опись выпуска,
+    /// сеансы, слой окружения — остаются.
     #[must_use]
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
         self
     }
 
-    /// Уточняет текст отказа тем, что было до него; род, шаг и поколения остаются.
+    /// Уточняет текст отказа тем, что было до него; род, шаг и подробность остаются.
     #[must_use]
     pub fn with_context(mut self, context: impl AsRef<str>) -> Self {
         self.message = format!("{}; {}", context.as_ref(), self.message);
         self
     }
 
-    /// Дописывает к тексту отказа то, что из него следует; род, шаг и поколения остаются.
+    /// Дописывает к тексту отказа то, что из него следует; род, шаг и подробность остаются.
     #[must_use]
     pub fn followed_by(mut self, tail: impl AsRef<str>) -> Self {
         self.message = format!("{}; {}", self.message, tail.as_ref());
@@ -399,17 +422,26 @@ impl UseCaseError {
         let kind = UseCaseErrorKind::of(&value);
         let platform_release = value
             .platform_release()
-            .map(|missing| Box::new(RefusalDetail::PlatformRelease(missing.refusal())));
+            .map(|missing| RefusalDetail::PlatformRelease(missing.refusal()));
         debug_assert_eq!(
             kind == UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
             platform_release.is_some(),
             "the code platform_release_missing and its inventory come together"
         );
+        let layer = value.environment_layer();
+        debug_assert!(
+            layer.is_none()
+                || kind == UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "only environment_unavailable names a layer"
+        );
+        let detail = platform_release
+            .or_else(|| layer.map(RefusalDetail::EnvironmentLayer))
+            .map(Box::new);
         let message = match value {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
             AppError::Refused(refusal) => refusal.message,
-            AppError::EnvironmentUnavailable(message)
-            | AppError::WorkspaceBusy(message)
+            AppError::EnvironmentUnavailable(refusal) => refusal.message,
+            AppError::WorkspaceBusy(message)
             | AppError::InfobaseBusy(message)
             | AppError::Cancelled { message, .. }
             | AppError::TimedOut(message)
@@ -437,7 +469,7 @@ impl UseCaseError {
             AppError::ConfigContext { context, source } => format!("{context}; {source}"),
         };
         Self {
-            detail: platform_release,
+            detail,
             ..Self::new(kind, message)
         }
     }
@@ -884,6 +916,11 @@ mod tests {
             );
             assert_eq!(error.exit_code(), 2, "{error}");
             assert!(error.message().contains("was not found"), "{error}");
+            assert_eq!(
+                error.environment_layer(),
+                Some(crate::support::error::EnvironmentLayer::Platform),
+                "{error}"
+            );
         }
     }
 

@@ -37,7 +37,7 @@ pub fn ignored_by_worktree_gitignore(dir: &Path, relative: &Path) -> Option<bool
 
     // `-z` гит принимает только вместе с `--stdin`: путь уходит на вход, ответ
     // приходит полями через NUL, и никакое имя не ломает разбор.
-    let mut child = match Command::new("git")
+    let mut child = match git()
         .arg("-C")
         .arg(dir)
         .args(["check-ignore", "-z", "--stdin", "--verbose", "--no-index"])
@@ -182,7 +182,7 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
         return UncommittedWork::Nothing;
     }
 
-    let output = match Command::new("git")
+    let output = match git()
         .arg("-C")
         .arg(dir)
         .args([
@@ -478,6 +478,21 @@ fn run_git_query(
     })
 }
 
+/// Запуск `git`. На Windows он идёт в своей группе процессов консоли, как и прочие потомки
+/// раннера: `CTRL_BREAK`, посланный группе раннера, достаётся только раннеру
+/// (`INV.PLATFORM.A-CONSOLE-CHILD-IS-OUTSIDE-THE-RUNNER-PROCESS-GROUP`). На Unix группа не
+/// меняется.
+fn git() -> Command {
+    let command = Command::new("git");
+    #[cfg(windows)]
+    let command = {
+        let mut command = command;
+        crate::platform::process::outside_the_runner_process_group(&mut command);
+        command
+    };
+    command
+}
+
 /// `git` с каталогом и настройками, которые раннер задаёт каждому вопросу о рабочей копии:
 /// без `GIT_OPTIONAL_LOCKS=0` git обновляет сведения о файлах в индексе, как обычный
 /// `git status`; превью их не обновляет (`INV.CLI.PREVIEW-LEAVES-NO-TRACE`). Fsmonitor и
@@ -485,7 +500,7 @@ fn run_git_query(
 /// Переменные, которые подменили бы репозиторий или индекс, из окружения раннера не
 /// наследуются.
 fn git_in(dir: &Path, optional_locks: bool) -> Command {
-    let mut command = Command::new("git");
+    let mut command = git();
     command.arg("-C").arg(dir);
     for variable in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"] {
         command.env_remove(variable);

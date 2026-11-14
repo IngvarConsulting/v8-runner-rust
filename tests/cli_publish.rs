@@ -131,6 +131,92 @@ fn publish_delete_removes_the_publication_without_a_connection_string() {
     assert!(!argv.contains("-connstr"), "{argv}");
 }
 
+/// Указанный в квитанции журнал сохраняет диагностику webinst из обоих потоков.
+#[test]
+fn publish_and_delete_preserve_webinst_diagnostics_in_the_receipt_log() {
+    for (arguments, action) in [
+        (&["publish"][..], "publish"),
+        (&["publish", "--delete"][..], "delete"),
+    ] {
+        for (script, expected) in [
+            (
+                "printf 'stdout diagnostic\\n'\nexit 1",
+                "stdout diagnostic\n",
+            ),
+            (
+                "printf 'stdout diagnostic'\nprintf 'stderr diagnostic\\n' >&2\nexit 1",
+                "stdout diagnostic\nstderr diagnostic\n",
+            ),
+            (
+                "printf 'stderr diagnostic\\n' >&2\nexit 1",
+                "stderr diagnostic\n",
+            ),
+        ] {
+            let dir = temp_workspace();
+            let www = dir.path().join("www");
+            let project = write_project(dir.path(), &web_yaml(&www, ""));
+            write_shell_script(&dir.path().join("platform/bin/webinst"), script);
+
+            let (code, payload) = run(&project.config, arguments);
+            assert_eq!(code, 4, "{payload}");
+            assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+            let data = &payload["data"];
+            assert_eq!(data["ok"], false, "{payload}");
+            assert_eq!(data["action"], action, "{payload}");
+            assert_eq!(data["provider_dispatched"], true, "{payload}");
+            assert_data_matches_one_of(data, action, &["publish"]);
+            let log_path = data["platform_log_path"].as_str().expect("log path");
+            assert_eq!(
+                fs::read_to_string(log_path).expect("read the reported platform log"),
+                expected,
+                "{action}: {script}"
+            );
+        }
+    }
+}
+
+#[test]
+fn publish_log_masks_an_echoed_connection_and_keeps_following_diagnostics() {
+    let dir = temp_workspace();
+    let www = dir.path().join("www");
+    let project = write_project(dir.path(), &web_yaml(&www, ""));
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(
+        &project.config,
+        config.replace(
+            &format!("connection: 'File={}'", dir.path().join("ib").display()),
+            "connection: 'Srvr=srv:1541;Ref=ut;Usr=Admin;Pwd=webinst-secret'",
+        ),
+    )
+    .expect("config with a password in the connection string");
+    write_shell_script(
+        &dir.path().join("platform/bin/webinst"),
+        "for arg do\n\
+         case \"$arg\" in\n\
+           Srvr=*)\n\
+             printf '%s\\n%s\\n' \"$arg\" 'stdout diagnostic'\n\
+             printf 'Pwd=%s\\n%s\\n' \"${arg##*Pwd=}\" 'next stdout diagnostic'\n\
+             printf 'password PWD=%s\\r\\n%s\\n' \"${arg##*Pwd=}\" 'stderr diagnostic' >&2\n\
+             ;;\n\
+         esac\n\
+         done\n\
+         exit 1",
+    );
+
+    let (code, payload) = run(&project.config, &["publish"]);
+    assert_eq!(code, 4, "{payload}");
+    let log_path = payload["data"]["platform_log_path"]
+        .as_str()
+        .expect("log path");
+    let log = fs::read_to_string(log_path).expect("read the reported platform log");
+    assert_eq!(
+        log,
+        "Srvr=srv:1541;Ref=ut;Usr=***;Pwd=***\nstdout diagnostic\n\
+         Pwd=***\nnext stdout diagnostic\n\
+         password PWD=***\r\nstderr diagnostic\n"
+    );
+}
+
 /// Превью составляет команду и находит утилиту, но веб-сервер не трогает.
 #[test]
 fn publish_dry_run_names_the_command_and_touches_nothing() {
@@ -138,15 +224,24 @@ fn publish_dry_run_names_the_command_and_touches_nothing() {
     let www = dir.path().join("www");
     let project = write_project(dir.path(), &web_yaml(&www, ""));
 
-    let (code, payload) = run(&project.config, &["publish", "--dry-run"]);
-
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(payload["data"]["provider_dispatched"], false);
-    assert_eq!(payload["data"]["plan"]["args"][0], "-publish");
-    assert!(payload["data"]["plan"]["program"]
-        .as_str()
-        .is_some_and(|program| program.ends_with("webinst")));
-    assert!(!project.calls.exists(), "a preview must not run webinst");
+    for (arguments, flag) in [
+        (&["publish", "--dry-run"][..], "-publish"),
+        (&["publish", "--delete", "--dry-run"][..], "-delete"),
+    ] {
+        let (code, payload) = run(&project.config, arguments);
+        assert_eq!(code, 0, "{payload}");
+        assert_eq!(payload["data"]["provider_dispatched"], false);
+        assert_eq!(payload["data"]["plan"]["args"][0], flag);
+        assert!(payload["data"]["plan"]["program"]
+            .as_str()
+            .is_some_and(|program| program.ends_with("webinst")));
+        assert!(payload["data"]["platform_log_path"].is_null(), "{payload}");
+        assert!(!project.calls.exists(), "a preview must not run webinst");
+        assert!(
+            !dir.path().join("work/logs/platform").exists(),
+            "a preview must not create a platform log directory"
+        );
+    }
 }
 
 /// `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`. Превью

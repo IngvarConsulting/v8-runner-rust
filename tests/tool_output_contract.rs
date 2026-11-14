@@ -79,6 +79,16 @@ const LABELS_NOT_VERDICTS: &[(&str, &str)] = &[
     // read at all (0 clean, 101 issues found, anything else tool failed; an expected-but-unread
     // log turns clean into tool failed) — never the prose. These markers decide whether a line is
     // a finding and how severe it reads, and an unrecognised severity is an error.
+    ("src/parsers/designer_validation.rs", "No errors found"),
+    (
+        "src/parsers/designer_validation.rs",
+        "Не обнаружено ссылок на функцию:",
+    ),
+    (
+        "src/parsers/designer_validation.rs",
+        "Отсутствует обработчик:",
+    ),
+    ("src/parsers/designer_validation.rs", "Пустой обработчик:"),
     ("src/parsers/designer_validation.rs", "неразрешим"),
     ("src/parsers/designer_validation.rs", "ошиб"),
     ("src/parsers/designer_validation.rs", "ошибок не обнаружено"),
