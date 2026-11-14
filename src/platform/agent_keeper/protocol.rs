@@ -697,9 +697,10 @@ mod tests {
             AgentError::Keeper { .. } => 27,
             AgentError::KeeperUnreachable { .. } => 28,
             AgentError::UserDirUnknown { .. } => 29,
+            AgentError::SftpStatus { .. } => 30,
         }
     }
-    const AGENT_ERROR_VARIANTS: usize = 30;
+    const AGENT_ERROR_VARIANTS: usize = 31;
 
     /// Каждый вид отказа агента, один раз.
     fn every_agent_error() -> Vec<AgentError> {
@@ -816,6 +817,11 @@ mod tests {
                 user: "u".to_owned(),
                 detail: "d".to_owned(),
             },
+            AgentError::SftpStatus {
+                path: "p".to_owned(),
+                code: 4,
+                detail: "d".to_owned(),
+            },
         ]
     }
 
@@ -842,6 +848,7 @@ mod tests {
                     | AgentError::Abandoned { .. }
                     | AgentError::Exchange { .. }
                     | AgentError::UnsafeEntryName { .. }
+                    | AgentError::SftpStatus { .. }
                     | AgentError::UserDirUnknown { .. }
             )
         };
