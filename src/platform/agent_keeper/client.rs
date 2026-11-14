@@ -1,6 +1,8 @@
-//! Клиент сторожа: находит живого агента ключа по записи или поднимает сторожа, открывает
-//! сессию команды (`begin` … `end`) и говорит с ним по каналу. Замок реестра учётной записи
-//! берётся только на поиск и на запись «запускается», а не на все 6–9 с подъёма агента.
+//! Клиент сторожа: находит живого агента ключа по записи в рабочей копии или поднимает сторожа,
+//! открывает сессию команды (`begin` … `end`) и говорит с ним по каналу. Замок учётной записи
+//! ([`Registry::lock`]) берётся на подсчёт сторожей, запись «запускается» и подъём сторожа до
+//! его канала, а не на все 6–9 с подъёма агента; замок ключа ([`KeeperHome::lock`]) — только
+//! на чтение и запись записи, после замка учётной записи.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,11 +11,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio_util::sync::CancellationToken;
 
-use super::channel::{connect, Stream};
+use super::channel::{connect, connect_own, Stream};
 use super::protocol::{read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request};
-use super::{credentials_digest, KeeperHome};
+use super::{credentials_digest, KeeperHome, LEGACY_SERVICE};
 use crate::platform::agent::{AgentError, AgentMessage, AgentReply, AtOpen, WaitPolicy};
-use crate::platform::live_registry::lock_agent_registry;
+use crate::platform::live_registry::{legacy_agents_path, Registry, RegistryLock};
 use crate::platform::process::ProcessInterruptionReason;
 use crate::platform::service::{process_facts, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
@@ -35,17 +37,31 @@ pub struct KeeperLaunch {
     pub startup_timeout_ms: u64,
     /// Путь базы в каноническом виде: он идёт в запись агента.
     pub infobase: String,
-    /// `workPath` рабочей копии: он идёт в запись агента, и его называет ожидание на пределе.
-    #[serde(default)]
-    pub work_path: Option<PathBuf>,
+    /// `workPath` рабочей копии: в нём дом агента ([`KeeperHome::of`]); он идёт в запись
+    /// агента, и его называет ожидание на пределе.
+    pub work_path: PathBuf,
 }
 
 /// Учётные данные базы: сторож открывает ими сессию агента. В командную строку и журнал они не
-/// попадают.
+/// попадают. `digest` — их отпечаток ([`credentials_digest`]) с солью рабочей копии: его
+/// считает команда, и с ним сторож сверяет каждый запрос.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub user: String,
     pub password: String,
+    pub digest: String,
+}
+
+impl Credentials {
+    /// Учётные данные с отпечатком по соли из `salt_dir` (`localPath/agent`).
+    pub fn new(user: String, password: String, salt_dir: &Path) -> std::io::Result<Self> {
+        let digest = credentials_digest(salt_dir, &user, &password)?;
+        Ok(Self {
+            user,
+            password,
+            digest,
+        })
+    }
 }
 
 impl std::fmt::Debug for Credentials {
@@ -112,6 +128,8 @@ const WAIT_STEP: Duration = Duration::from_millis(100);
 /// Сколько раз клиент поднимает сторожа заново, если поднятый вышел, не ответив: так бывает,
 /// когда канал ещё держит уходящий сторож того же ключа.
 const RESPAWNS: u32 = 3;
+/// Сколько клиент ждёт, пока поднятый им сторож займёт канал, держа замок учётной записи.
+const BIND_PATIENCE: Duration = Duration::from_secs(5);
 /// Сколько клиент ждёт ответа на `end`: отключение от базы ограничено своим сроком у сторожа.
 const END_PATIENCE: Duration = Duration::from_secs(30);
 /// Сколько клиент ждёт подключения к каналу и ответа на `status`, `hold`, `release`: зависший
@@ -158,10 +176,15 @@ enum Found {
     Live(u32),
     /// Его поднимает другой клиент.
     Starting,
-    /// Его нет: запись «запускается» уже стоит за этим клиентом.
-    Absent,
+    /// Его нет: запись «запускается» уже стоит за этим клиентом, а замок учётной записи
+    /// держится, пока поднятый сторож не займёт свой канал.
+    Absent(RegistryLock),
     /// Его нет, а живых агентов других ключей уже столько, сколько допускает предел.
     OverLimit,
+    /// Записи нет, а канал ключа занят: сторож ещё пишет запись или уходит — в том числе сам,
+    /// заметив, что его дом убрали (`git clean`), пока он жил. Его ждут: новый сторож этого
+    /// ключа канала не получит, пока старый не ушёл.
+    Orphan,
 }
 
 /// Живой сторож учётной записи, найденный по записи.
@@ -308,6 +331,16 @@ fn unavailable_by(
     }
 }
 
+/// Реестр живых агентов учётной записи недоступен: замок не дался за срок, его имя заняла другая
+/// учётная запись, или система не называет каталог состояния. Живого агента не будет, а команда
+/// работает с разовым (`reason: keeper_failed`), как при любом отказе сторожа.
+pub(crate) fn registry_unavailable(error: std::io::Error) -> KeeperStartError {
+    unavailable_by(
+        "the live agent registry of this OS account is not available",
+        error,
+    )
+}
+
 /// Отмена команды, пока она ждала сторожа: агенту ничего не отправлено.
 fn cancelled_waiting() -> KeeperStartError {
     KeeperStartError::Agent(AgentError::NotSent {
@@ -344,7 +377,7 @@ impl KeeperClient {
         limit: u8,
         cancel: &CancellationToken,
     ) -> Result<Self, KeeperStartError> {
-        let mut client = Self::prepare(key, credentials)?;
+        let mut client = Self::prepare(key, launch, credentials)?;
         client.obtain(
             launch,
             credentials,
@@ -374,7 +407,7 @@ impl KeeperClient {
         wait: &EarlyWait<'_>,
         session: EarlySession,
     ) -> Result<Self, KeeperStartError> {
-        let mut client = Self::prepare(key, credentials)?;
+        let mut client = Self::prepare(key, launch, credentials)?;
         // Агента поднимают без подключения к базе в обоих случаях: подключает его сессия
         // команды или `attach`, и отказ подключения отвечает одинаково для свежего и взятого.
         let take = match session {
@@ -420,7 +453,7 @@ impl KeeperClient {
         holder: &Holder,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<(Self, Vec<Holder>), KeeperStartError> {
-        let mut client = Self::prepare(key, credentials)?;
+        let mut client = Self::prepare(key, launch, credentials)?;
         let holders = client.obtain(
             launch,
             credentials,
@@ -436,12 +469,18 @@ impl KeeperClient {
         Ok((client, holders))
     }
 
-    fn prepare(key: &str, credentials: &Credentials) -> Result<Self, KeeperStartError> {
-        let state = crate::support::machine::account::account_state_dir()?;
-        let home = KeeperHome::open(&state, key)?;
-        let digest = credentials_digest(&state, &credentials.user, &credentials.password)?;
+    fn prepare(
+        key: &str,
+        launch: &KeeperLaunch,
+        credentials: &Credentials,
+    ) -> Result<Self, KeeperStartError> {
+        let registry = Registry::of_account().map_err(registry_unavailable)?;
+        // Остатки 0.17.0–0.17.3 убираются до замка учётной записи: медленное удаление его не
+        // держит.
+        sweep_former_layout(&registry);
+        let home = KeeperHome::of(&registry, &launch.work_path, key)?;
         let mut client = Self::detached(home, 0)?;
-        client.digest = digest;
+        client.digest = credentials.digest.clone();
         Ok(client)
     }
 
@@ -471,7 +510,13 @@ impl KeeperClient {
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
         let mut evictions = 0;
+        // Копия раннера для сторожа кладётся до замка учётной записи: копирование файла его не
+        // держит. Нужна она, только когда своего сторожа нет.
+        let mut program: Option<std::io::Result<PathBuf>> = None;
         loop {
+            if program.is_none() && !self.home.paths().record().is_file() {
+                program = Some(keeper_exe(self.home.live()));
+            }
             if cancel.is_cancelled() || wait.stop.is_cancelled() {
                 return Err(cancelled_waiting());
             }
@@ -479,7 +524,7 @@ impl KeeperClient {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    match make_room(self.home.state(), &key, wait.stop, &mut silent) {
+                    match make_room(self.home.registry(), &key, wait.stop, &mut silent) {
                         Room::Freed if waits || evictions <= usize::from(limit) => {
                             evictions += 1;
                             continue;
@@ -525,17 +570,30 @@ impl KeeperClient {
                         Err(error) => return Err(error),
                     }
                 }
-                Found::Starting => {}
-                Found::Absent => {
+                Found::Starting | Found::Orphan => {}
+                Found::Absent(account) => {
                     self.reused = false;
-                    let pid = match self.spawn(launch, credentials, at_open) {
+                    let copy = match program.get_or_insert_with(|| keeper_exe(self.home.live())) {
+                        Ok(copy) => Ok(copy.clone()),
+                        Err(error) => Err(unavailable(format!(
+                            "no copy of the runner for the keeper: {error}"
+                        ))),
+                    };
+                    let pid = match copy
+                        .and_then(|copy| self.spawn(&copy, launch, credentials, at_open))
+                    {
                         Ok(pid) => pid,
                         Err(error) => {
+                            drop(account);
                             self.forget_start();
                             return Err(error);
                         }
                     };
                     self.keeper = pid;
+                    // Пока сторож не занял канал, другие команды учётной записи его не видят:
+                    // замок учётной записи держится до тех пор, и предел не превысят.
+                    self.await_channel(pid, deadline.min(Instant::now() + BIND_PATIENCE));
+                    drop(account);
                     match self.await_start(pid, deadline, wait)? {
                         Started::Answered => match self.take(take, wait.stop) {
                             Ok(holders) => return Ok(holders),
@@ -551,7 +609,7 @@ impl KeeperClient {
                         Started::Exited => {
                             return Err(unavailable(format!(
                                 "the keeper of the live agent exited before answering; see {}",
-                                self.home.paths().log().display()
+                                self.home.log().display()
                             )))
                         }
                     }
@@ -560,29 +618,24 @@ impl KeeperClient {
             if Instant::now() >= deadline {
                 return Err(unavailable(format!(
                     "the keeper of the live agent did not answer in time; see {}",
-                    self.home.paths().log().display()
+                    self.home.log().display()
                 )));
             }
             std::thread::sleep(WAIT_STEP);
         }
     }
 
-    /// Живой сторож ключа `key`, если он есть, — без сессии команды и без подъёма нового: для
-    /// `status`, `stop` и снятия. Каталогов не создаёт: сторожа, которого не поднимали, нет.
-    pub fn attach(state: &Path, key: &str) -> std::io::Result<Option<Self>> {
-        let Some(home) = KeeperHome::existing(state, key)? else {
-            return Ok(None);
-        };
+    /// Живой сторож дома `home`, если он есть, — без сессии команды и без подъёма нового: для
+    /// `status`, `stop` и снятия. Ничего не создаёт: запись читается как есть (она заменяется
+    /// атомарно).
+    pub fn attach(home: KeeperHome) -> std::io::Result<Option<Self>> {
         let machine = machine_fingerprint();
-        let observed = {
-            let _registry = lock_agent_registry(state)?;
-            observe_service(
-                home.paths(),
-                machine.as_deref(),
-                &process_facts,
-                &|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()),
-            )
-        };
+        let observed = observe_service(
+            home.paths(),
+            machine.as_deref(),
+            &process_facts,
+            &|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()),
+        );
         let Observed::Own(record) = observed else {
             return Ok(None);
         };
@@ -655,11 +708,15 @@ impl KeeperClient {
         }
     }
 
-    /// Ищет сторожа под замком реестра; не нашёл — ставит запись «запускается» за собой, если
-    /// живых агентов других ключей меньше `limit`. Подсчёт и запись идут под одним замком,
-    /// поэтому одновременные команды предел вместе не превысят.
+    /// Ищет сторожа под замком учётной записи и замком ключа; не нашёл — ставит запись
+    /// «запускается» за собой, если живых агентов других ключей меньше `limit`, и отдаёт замок
+    /// учётной записи: его держат, пока поднятый сторож не займёт канал. Подсчёт, запись и подъём
+    /// идут под одним замком, поэтому одновременные команды учётной записи — и из разных рабочих
+    /// копий — предел вместе не превысят.
     fn find(&self, limit: u8) -> Result<Found, KeeperStartError> {
-        let _registry = lock_agent_registry(self.home.state())?;
+        let registry = self.home.registry();
+        let account = registry.lock().map_err(registry_unavailable)?;
+        let held = self.home.lock().map_err(registry_unavailable)?;
         let paths = self.home.paths();
         let machine = machine_fingerprint();
         let observed = observe_service(paths, machine.as_deref(), &process_facts, &|record| {
@@ -669,13 +726,17 @@ impl KeeperClient {
             Observed::Own(record) => Ok(record.pid.map_or(Found::Starting, Found::Live)),
             Observed::Starting(_) => Ok(Found::Starting),
             Observed::Nothing | Observed::Stale => {
-                let others = live_keys(self.home.state())
+                if registry.has_channel(self.home.key()) {
+                    return Ok(Found::Orphan);
+                }
+                let others = account_keepers(registry)
                     .into_iter()
-                    .filter(|(key, _)| key != self.home.key())
+                    .filter(|key| key != self.home.key())
                     .count();
                 if others >= usize::from(limit) {
                     return Ok(Found::OverLimit);
                 }
+                self.home.prepare()?;
                 let own = std::process::id();
                 let started = process_facts(own).map(|facts| facts.started);
                 let record = ServiceRecord {
@@ -693,14 +754,32 @@ impl KeeperClient {
                     location: None,
                 };
                 write_json(&paths.record(), &record)?;
-                Ok(Found::Absent)
+                drop(held);
+                Ok(Found::Absent(account))
             }
         }
     }
 
+    /// Ждёт, пока поднятый сторож `pid` займёт канал или выйдет, не дольше `deadline`: всё это
+    /// время замок учётной записи держится, и сторожа, которого другие команды ещё не видят, они
+    /// не обгонят. Сторож занимает канал первым делом, поэтому срок короткий
+    /// ([`BIND_PATIENCE`]).
+    fn await_channel(&self, pid: u32, deadline: Instant) {
+        while Instant::now() < deadline {
+            if self.home.registry().has_channel(self.home.key()) || process_facts(pid).is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tracing::warn!(
+            pid,
+            "the keeper did not open its channel before the start deadline"
+        );
+    }
+
     /// Снимает свою запись «запускается», когда сторож так и не поднят.
     fn forget_start(&self) {
-        let Ok(_registry) = lock_agent_registry(self.home.state()) else {
+        let Ok(_held) = self.home.lock() else {
             return;
         };
         let path = self.home.paths().record();
@@ -716,12 +795,12 @@ impl KeeperClient {
     /// Поднимает сторожа отделённым процессом из копии исполняемого файла раннера.
     fn spawn(
         &self,
+        program: &Path,
         launch: &KeeperLaunch,
         credentials: &Credentials,
         at_open: AtOpen,
     ) -> Result<u32, KeeperStartError> {
-        let program = keeper_exe(self.home.state())
-            .map_err(|error| unavailable_by("no copy of the runner for the keeper", error))?;
+        let program = program.to_path_buf();
         let start = KeeperStart {
             launch: launch.clone(),
             credentials: credentials.clone(),
@@ -735,8 +814,10 @@ impl KeeperClient {
                 "--key".to_owned(),
                 self.home.key().to_owned(),
             ],
-            workdir: Some(self.home.paths().root().to_path_buf()),
-            log_path: self.home.paths().log(),
+            // Текущий каталог сторожа — каталог живых агентов рабочей копии, а не дом агента:
+            // дом сторож убирает, уходя.
+            workdir: Some(self.home.live().to_path_buf()),
+            log_path: self.home.log(),
             stdin: Some(serde_json::to_string(&start).map_err(std::io::Error::other)?),
         };
         // Подъём сторожа — подъём сессии, а не работа команды: признак работы он не ставит
@@ -778,7 +859,7 @@ impl KeeperClient {
                 self.forget_start();
                 return Err(unavailable(format!(
                     "the keeper of the live agent did not answer in time; see {}",
-                    self.home.paths().log().display()
+                    self.home.log().display()
                 )));
             }
             std::thread::sleep(WAIT_STEP);
@@ -1377,43 +1458,125 @@ fn timed_out(channel: &str, patience: Duration) -> AgentError {
     )
 }
 
-/// Ключи живых сторожей учётной записи и их записи: свой процесс по записи или запуск, который
-/// ведёт живой раннер. Читается под замком реестра.
-fn live_keys(state: &Path) -> Vec<(String, ServiceRecord)> {
+/// Ответ сторожа на `whereabouts`: его ключ, дом агента и процесс.
+struct Whereabouts {
+    key: String,
+    home: PathBuf,
+    pid: u32,
+}
+
+/// Спрашивает сторожа на канале `channel`, где он живёт. Канал должен обслуживать процесс своей
+/// учётной записи, и это тот самый процесс, что назвал себя в ответе: чужой процесс, занявший
+/// имя канала, команде дом не подсунет.
+async fn whereabouts(channel: &str) -> Result<Whereabouts, AgentError> {
+    let (stream, server) = match tokio::time::timeout(QUERY_PATIENCE, connect_own(channel)).await {
+        Ok(Ok(connected)) => connected,
+        Ok(Err(source)) => return Err(unreachable_at(channel, source)),
+        Err(_) => return Err(timed_out(channel, QUERY_PATIENCE)),
+    };
+    let (read, mut write) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read);
+    write_line(&mut write, &Request::Whereabouts)
+        .await
+        .map_err(|source| unreachable_at(channel, source))?;
+    match tokio::time::timeout(QUERY_PATIENCE, read_line::<_, Frame>(&mut reader)).await {
+        Err(_) => Err(timed_out(channel, QUERY_PATIENCE)),
+        Ok(Ok(Some(Frame::Whereabouts { key, home, pid, .. })))
+            if server.is_none_or(|server| server == pid) =>
+        {
+            Ok(Whereabouts { key, home, pid })
+        }
+        Ok(Ok(Some(other))) => Err(unexpected(&other)),
+        Ok(Ok(None) | Err(_)) => Err(AgentError::LiveAgentGone {
+            detail: "the keeper closed the channel before the answer".to_owned(),
+        }),
+    }
+}
+
+/// Ключи живых сторожей учётной записи для предела: каналы, которые есть сейчас (уходящий сторож
+/// держит свой, пока его агент не ушёл), и сторожа 0.17.0–0.17.3 по их записям. Занятый сторож
+/// тоже занимает место.
+fn account_keepers(registry: &Registry) -> Vec<String> {
+    let mut keys: Vec<String> = registry
+        .channels()
+        .into_iter()
+        .map(|listed| listed.key)
+        .collect();
+    keys.extend(
+        legacy_keys(registry)
+            .into_iter()
+            .map(|(home, _)| home.key().to_owned()),
+    );
+    keys
+}
+
+/// Сторожа 0.17.0–0.17.3 с живой записью в каталоге состояния: свой процесс по записи или
+/// запуск, который ведёт живой раннер. Только читает.
+fn legacy_keys(registry: &Registry) -> Vec<(KeeperHome, ServiceRecord)> {
     let machine = machine_fingerprint();
-    let Ok(dirs) = std::fs::read_dir(crate::platform::live_registry::agents_path(state)) else {
+    let Ok(dirs) = std::fs::read_dir(legacy_agents_path(registry.state())) else {
         return Vec::new();
     };
     dirs.flatten()
         .filter(|dir| dir.path().is_dir())
         .filter_map(|dir| {
             let key = dir.file_name().to_str()?.to_owned();
-            let paths =
-                crate::platform::service_record::ServicePaths::under(&dir.path(), super::SERVICE);
-            match observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
-                adopt_recorded_pid(record, &process_facts, machine.as_deref())
-            }) {
-                Observed::Own(record) | Observed::Starting(record) => Some((key, record)),
+            let home = KeeperHome::legacy(registry, &key)?;
+            match observe_service(
+                home.paths(),
+                machine.as_deref(),
+                &process_facts,
+                &|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()),
+            ) {
+                Observed::Own(record) | Observed::Starting(record) => Some((home, record)),
                 Observed::Nothing | Observed::Stale => None,
             }
         })
         .collect()
 }
 
-/// Живые сторожа учётной записи с каналом, которому можно задать вопрос, и их записи.
-pub fn live_keepers(state: &Path) -> Vec<(LiveKeeper, ServiceRecord)> {
-    let found = match lock_agent_registry(state) {
-        Ok(_registry) => live_keys(state),
-        Err(error) => {
-            tracing::warn!(%error, "the live agent registry cannot be read");
-            return Vec::new();
-        }
+/// Живые сторожа учётной записи и их записи: по каналам — каждый называет свой дом
+/// (`whereabouts`), запись читается там, и её процесс — тот, что ответил; сторожа
+/// 0.17.0–0.17.3 — по записям в каталоге состояния. Сторож без записи (ещё пишет её или его дом
+/// убрали) и не ответивший не идут.
+fn live_keys(registry: &Registry) -> Vec<(KeeperHome, ServiceRecord)> {
+    let machine = machine_fingerprint();
+    let Ok(runtime) = runtime() else {
+        return legacy_keys(registry);
     };
-    found
+    let mut found: Vec<(KeeperHome, ServiceRecord)> = registry
+        .channels()
         .into_iter()
-        .filter_map(|(key, record)| {
+        .filter_map(|listed| {
+            let answer = runtime.block_on(whereabouts(&listed.channel)).ok()?;
+            if !crate::platform::live_registry::is_key(&answer.key)
+                || !answer.key.starts_with(&listed.key)
+            {
+                return None;
+            }
+            let home = KeeperHome::found(registry, &answer.key, &answer.home).ok()?;
+            match observe_service(
+                home.paths(),
+                machine.as_deref(),
+                &process_facts,
+                &|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()),
+            ) {
+                Observed::Own(record) if record.pid == Some(answer.pid) => Some((home, record)),
+                _ => None,
+            }
+        })
+        .collect();
+    found.extend(legacy_keys(registry));
+    found
+}
+
+/// Живые сторожа учётной записи с каналом, которому можно задать вопрос, и их записи.
+pub fn live_keepers(registry: &Registry) -> Vec<(LiveKeeper, ServiceRecord)> {
+    live_keys(registry)
+        .into_iter()
+        .filter_map(|(home, record)| {
             let keeper = record.pid?;
-            let home = KeeperHome::existing(state, &key).ok()??;
+            let key = home.key().to_owned();
             let client = KeeperClient::detached(home, keeper).ok()?;
             Some((LiveKeeper { key, client }, record))
         })
@@ -1421,25 +1584,25 @@ pub fn live_keepers(state: &Path) -> Vec<(LiveKeeper, ServiceRecord)> {
 }
 
 /// Живые агенты базы `infobase` (путь в каноническом виде) с их состоянием. Состояние
-/// спрашивается под замком реестра: пока его держат, новый агент не поднимается. Сторож, который
-/// не ответил за [`QUERY_PATIENCE`], идёт с отказом.
+/// спрашивается под замком учётной записи: пока его держат, новый агент не поднимается. Сторож,
+/// который не ответил за [`QUERY_PATIENCE`], идёт с отказом.
 pub fn keepers_of(
-    state: &Path,
+    registry: &Registry,
     infobase: &str,
 ) -> Vec<(LiveKeeper, Result<KeeperStatus, AgentError>)> {
-    let _registry = match lock_agent_registry(state) {
-        Ok(registry) => registry,
+    let _account = match registry.lock() {
+        Ok(account) => account,
         Err(error) => {
             tracing::warn!(%error, "the live agent registry cannot be read");
             return Vec::new();
         }
     };
-    live_keys(state)
+    live_keys(registry)
         .into_iter()
-        .filter_map(|(key, record)| {
+        .filter_map(|(home, record)| {
             record.agent.filter(|agent| agent.infobase == infobase)?;
             let keeper = record.pid?;
-            let home = KeeperHome::existing(state, &key).ok()??;
+            let key = home.key().to_owned();
             let client = KeeperClient::detached(home, keeper).ok()?;
             let status = client.status();
             Some((LiveKeeper { key, client }, status))
@@ -1447,10 +1610,22 @@ pub fn keepers_of(
         .collect()
 }
 
-/// Снимает живого агента ключа `key`, если он есть; ответ — был ли он. Агента, который
+/// [`keepers_of`] для подсказок и превью: без каналов сторожей и без каталога сторожей прежней
+/// раскладки — сразу пусто, без замка учётной записи и без каталогов.
+pub fn keepers_of_seen(
+    registry: &Registry,
+    infobase: &str,
+) -> Vec<(LiveKeeper, Result<KeeperStatus, AgentError>)> {
+    if registry.channels().is_empty() && !legacy_agents_path(registry.state()).is_dir() {
+        return Vec::new();
+    }
+    keepers_of(registry, infobase)
+}
+
+/// Снимает живого агента дома `home`, если он есть; ответ — был ли он. Агента, который
 /// выполняет критическую команду, сторож снимает после неё.
-pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
-    match KeeperClient::attach(state, key) {
+pub fn stop_keeper(home: KeeperHome) -> Result<bool, AgentError> {
+    match KeeperClient::attach(home) {
         Ok(Some(keeper)) => keeper.stop(&CancellationToken::new()).map(|_| true),
         Ok(None) => Ok(false),
         Err(error) => Err(AgentError::Keeper {
@@ -1467,7 +1642,7 @@ pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
 /// свежий, закрывается, не ответил) или удерживаются все. Сторожа другой версии раннера условным
 /// `stop` не трогают — прежний сторож понял бы его как безусловный, — а ждут его простоя.
 fn make_room(
-    state: &Path,
+    registry: &Registry,
     own: &str,
     cancel: &CancellationToken,
     silent: &mut std::collections::HashMap<String, Instant>,
@@ -1476,14 +1651,31 @@ fn make_room(
     let mut idle: Vec<(u64, LiveKeeper, String)> = Vec::new();
     let mut wait: Option<String> = None;
     let mut held = Vec::new();
-    let found = match lock_agent_registry(state) {
-        Ok(_registry) => live_keys(state),
-        Err(error) => {
-            tracing::warn!(%error, "the live agent registry cannot be read");
-            return Room::Wait("the live agent registry to be readable".to_owned());
+    let found = live_keys(registry);
+    // Канал есть, а записи с ответом нет: сторож поднимается, уходит или не отвечает — место он
+    // занимает, и снять его некому. Молчащего дольше [`SILENCE_LIMIT`] ожидание не продлевает.
+    for key in account_keepers(registry) {
+        let named = found
+            .iter()
+            .any(|(home, _)| home.key().starts_with(&key) || key.starts_with(home.key()));
+        if key == own || own.starts_with(&key) || named {
+            continue;
         }
-    };
-    for (key, record) in found {
+        let since = *silent.entry(key.clone()).or_insert_with(Instant::now);
+        if since.elapsed() < SILENCE_LIMIT {
+            wait.get_or_insert_with(|| "a live agent to start, to close or to answer".to_owned());
+        } else {
+            held.push(HeldAgent {
+                key,
+                infobase: None,
+                work_path: None,
+                holders: Vec::new(),
+                answering: false,
+            });
+        }
+    }
+    for (home, record) in found {
+        let key = home.key().to_owned();
         if key == own {
             continue;
         }
@@ -1494,10 +1686,10 @@ fn make_room(
             .as_ref()
             .and_then(|agent| agent.work_path.clone());
         // Запись «запускается» предел уже занимает, а канала у неё ещё нет.
-        let Some(client) = record.pid.and_then(|pid| {
-            let home = KeeperHome::existing(state, &key).ok()??;
-            KeeperClient::detached(home, pid).ok()
-        }) else {
+        let Some(client) = record
+            .pid
+            .and_then(|pid| KeeperClient::detached(home, pid).ok())
+        else {
             wait.get_or_insert_with(|| "a live agent to start".to_owned());
             continue;
         };
@@ -1627,23 +1819,20 @@ fn unexpected(frame: &Frame) -> AgentError {
 const STALE_COPY: Duration = Duration::from_secs(10 * 60);
 
 /// Копия исполняемого файла раннера, из которой запускается сторож:
-/// `<state>/bin/<версия>/<метка>/<имя>`. Метка — от размера и времени изменения файла, поэтому
-/// пересобранный раннер той же версии получает свою копию, а работающий сторож держит свою.
-/// Прежние копии, из которых не работает ни один сторож, и брошенные недописанные копии
-/// убираются.
-fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
+/// `workPath/agent/live/bin/<версия>/<метка>/<имя>`. Метка — от размера и времени изменения
+/// файла, поэтому пересобранный раннер той же версии получает свою копию, а работающий сторож
+/// держит свою. Прежние копии, из которых не работает ни один сторож этой рабочей копии, и
+/// брошенные недописанные копии убираются.
+fn keeper_exe(live: &Path) -> std::io::Result<PathBuf> {
     let source = std::env::current_exe()?;
     let name = source
         .file_name()
         .ok_or_else(|| std::io::Error::other("the runner executable has no file name"))?
         .to_owned();
     let stamp = stamp_of(&source)?;
-    let dir = state
-        .join("bin")
-        .join(env!("CARGO_PKG_VERSION"))
-        .join(stamp);
+    let dir = live.join("bin").join(env!("CARGO_PKG_VERSION")).join(stamp);
     let target = dir.join(&name);
-    sweep_copies(state, &dir);
+    sweep_copies(live, &dir);
     if target.is_file() {
         return Ok(target);
     }
@@ -1696,11 +1885,12 @@ pub fn build_stamp() -> String {
         .unwrap_or_default()
 }
 
-/// Убирает копии раннера под `<state>/bin`, кроме `current` и тех, из которых работает живой
-/// сторож, и недописанные копии старше [`STALE_COPY`]. Отказы не мешают: копию, которую держит
-/// процесс, Windows удалить не даст, и её уберёт следующий раз.
-fn sweep_copies(state: &Path, current: &Path) {
-    let in_use = live_keeper_bins(state);
+/// Убирает копии раннера под `<live>/bin` (или `<state>/bin` прежней раскладки), кроме
+/// `current` и тех, из которых работает живой сторож, и недописанные копии старше
+/// [`STALE_COPY`]. Отказы не мешают: копию, которую держит процесс, Windows удалить не даст, и её
+/// уберёт следующий раз.
+fn sweep_copies(root: &Path, current: &Path) {
+    let in_use = live_keeper_bins(root);
     let old = |path: &Path| {
         std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
@@ -1708,7 +1898,7 @@ fn sweep_copies(state: &Path, current: &Path) {
             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
             .is_some_and(|age| age >= STALE_COPY)
     };
-    let Ok(versions) = std::fs::read_dir(state.join("bin")) else {
+    let Ok(versions) = std::fs::read_dir(root.join("bin")) else {
         return;
     };
     for version in versions.flatten() {
@@ -1741,17 +1931,37 @@ fn sweep_copies(state: &Path, current: &Path) {
     }
 }
 
-/// Исполняемые файлы, из которых работают живые сторожа учётной записи.
-fn live_keeper_bins(state: &Path) -> Vec<PathBuf> {
+/// Исполняемые файлы, из которых работают живые сторожа под `root`: в каталоге живых агентов
+/// рабочей копии — дома `<key16>/`, в каталоге состояния прежней раскладки — `agents/<key>/agent/`.
+fn live_keeper_bins(root: &Path) -> Vec<PathBuf> {
     let machine = machine_fingerprint();
-    let Ok(keys) = std::fs::read_dir(crate::platform::live_registry::agents_path(state)) else {
-        return Vec::new();
-    };
-    keys.flatten()
-        .filter_map(|key| {
-            let paths =
-                crate::platform::service_record::ServicePaths::under(&key.path(), super::SERVICE);
-            match observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+    let mut homes: Vec<crate::platform::service_record::ServicePaths> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(crate::platform::live_registry::is_key)
+            {
+                homes.push(crate::platform::service_record::ServicePaths::under(
+                    root,
+                    &name.to_string_lossy(),
+                ));
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(legacy_agents_path(root)) {
+        for entry in entries.flatten() {
+            homes.push(crate::platform::service_record::ServicePaths::under(
+                &entry.path(),
+                LEGACY_SERVICE,
+            ));
+        }
+    }
+    homes
+        .iter()
+        .filter_map(|paths| {
+            match observe_service(paths, machine.as_deref(), &process_facts, &|record| {
                 adopt_recorded_pid(record, &process_facts, machine.as_deref())
             }) {
                 Observed::Own(record) => Some(record.bin),
@@ -1761,9 +1971,62 @@ fn live_keeper_bins(state: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Убирает то, что 0.17.0–0.17.3 оставили в каталоге состояния учётной записи (#735): каталоги
+/// ключей без живого сторожа, копии раннера, из которых не работает ни один сторож, а когда живых
+/// сторожей прежней раскладки не осталось — соль и замок реестра; пустой каталог состояния на
+/// своём месте по умолчанию уходит тоже. Сторожа прежней раскладки, которые ещё живы, остаются:
+/// их уберёт следующий подъём после их простоя. Всё — по возможности: отказ команду не
+/// останавливает.
+fn sweep_former_layout(registry: &Registry) {
+    let state = registry.state();
+    let agents = legacy_agents_path(state);
+    if !agents.is_dir() && !state.join("bin").is_dir() && !state.join("account-salt").is_file() {
+        return;
+    }
+    // Живые сторожа прежней раскладки и уборка — под её замком: команда прежней версии пишет
+    // запись «запускается» под ним же. Замок, уходя, убирает свои файлы сам.
+    let alive = match crate::platform::live_registry::lock_legacy_registry(state) {
+        Some(Ok(_former)) => {
+            let alive = legacy_keys(registry);
+            for entry in std::fs::read_dir(&agents).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let key = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() && !alive.iter().any(|(home, _)| home.key() == key) {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+            alive.len()
+        }
+        Some(Err(error)) => {
+            tracing::debug!(%error, "the former live agent registry is not swept");
+            return;
+        }
+        None => 0,
+    };
+    let _ = std::fs::remove_dir(&agents);
+    sweep_copies(state, &PathBuf::new());
+    let _ = std::fs::remove_dir(state.join("bin"));
+    if alive == 0 {
+        let _ = std::fs::remove_file(state.join("account-salt"));
+        // На Windows в каталоге состояния больше ничего нет; на Unix в нём сокеты сторожей.
+        if cfg!(windows) && crate::support::machine::account::state_location_is_default() {
+            let _ = std::fs::remove_dir(state);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Дом агента для теста: рабочая копия — `dir`, реестр учётной записи — `dir/state`.
+    fn test_home(dir: &Path, key: &str) -> KeeperHome {
+        let registry = Registry::at(dir.join("state"));
+        registry.prepare().unwrap();
+        let home = KeeperHome::of(&registry, dir, key).unwrap();
+        home.prepare().unwrap();
+        home
+    }
 
     /// Сторож запускается из своей копии раннера, а не из файла, который обновляют
     /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`); вторая копия той же сборки не
@@ -1827,7 +2090,7 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"ab".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"ab".repeat(16));
         let channel = if cfg!(windows) {
             format!(
                 r"\\.\pipe\v8-runner-agent-test-{}",
@@ -1991,7 +2254,7 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"0c".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"0c".repeat(16));
         let mut keeper = a_live_process();
         let client = KeeperClient::detached(home, keeper.id()).unwrap();
         let cancel = CancellationToken::new();
@@ -2035,7 +2298,7 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"0d".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"0d".repeat(16));
         let mut keeper = a_live_process();
         let client = KeeperClient::detached(home, keeper.id()).unwrap();
         let stop = CancellationToken::new();
@@ -2076,7 +2339,7 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"0e".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"0e".repeat(16));
         let channel = if cfg!(windows) {
             format!(
                 r"\\.\pipe\v8-runner-agent-test-{}",
@@ -2155,8 +2418,9 @@ mod tests {
                 "host_key": null,
                 "startup_timeout_ms": 1,
                 "infobase": "",
+                "work_path": "/work",
             },
-            "credentials": { "user": "", "password": "" },
+            "credentials": { "user": "", "password": "", "digest": "" },
         }))
         .unwrap();
         assert_eq!(start.at_open, AtOpen::Connect);
@@ -2171,7 +2435,16 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"0a".repeat(16)).unwrap();
+        // Сторож прежней раскладки (0.17.0–0.17.3) с записью «запускается» в каталоге состояния.
+        let registry = Registry::at(state.path().join("state"));
+        let legacy = state
+            .path()
+            .join("state")
+            .join("agents")
+            .join("0a".repeat(16))
+            .join("agent");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let home = KeeperHome::legacy(&registry, &"0a".repeat(16)).expect("legacy home");
         let own = std::process::id();
         let record = ServiceRecord {
             state: RecordState::Starting,
@@ -2190,7 +2463,7 @@ mod tests {
         write_json(&home.paths().record(), &record).unwrap();
         let mut silent = std::collections::HashMap::new();
         let room = make_room(
-            state.path(),
+            &registry,
             &"0b".repeat(16),
             &CancellationToken::new(),
             &mut silent,
@@ -2198,6 +2471,51 @@ mod tests {
         assert!(
             matches!(&room, Room::Wait(what) if what == "a live agent to start"),
             "the starting agent is waited for"
+        );
+    }
+
+    /// Канал сторожа без ответа и без записи предел занимает (сторож поднимается, уходит или
+    /// завис): на пределе его ждут, а замолчавшего дольше срока называют неотвечающим (#735).
+    #[test]
+    fn a_keeper_channel_without_an_answer_takes_its_place_at_the_limit() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let registry = Registry::at(state.path().join("state"));
+        registry.prepare().unwrap();
+        let silent_key = uuid::Uuid::new_v4().simple().to_string();
+        let channel = registry.channel(&silent_key);
+        let runtime = runtime().unwrap();
+        let _listener =
+            runtime.block_on(async { super::super::channel::Listener::bind(&channel).unwrap() });
+        assert!(account_keepers(&registry)
+            .iter()
+            .any(|key| silent_key.starts_with(key.as_str())));
+        let mut silent = std::collections::HashMap::new();
+        let room = make_room(
+            &registry,
+            &"0b".repeat(16),
+            &CancellationToken::new(),
+            &mut silent,
+        );
+        assert!(
+            matches!(&room, Room::Wait(what) if what.contains("to answer")),
+            "the silent keeper is waited for"
+        );
+        for since in silent.values_mut() {
+            *since -= SILENCE_LIMIT;
+        }
+        let room = make_room(
+            &registry,
+            &"0b".repeat(16),
+            &CancellationToken::new(),
+            &mut silent,
+        );
+        assert!(
+            matches!(&room, Room::Held(held) if held.len() == 1 && !held[0].answering),
+            "a keeper silent past the limit is named as not answering"
         );
     }
 
@@ -2299,7 +2617,7 @@ mod tests {
     #[test]
     fn a_run_whose_deadline_has_passed_is_not_sent() {
         let state = tempfile::tempdir().unwrap();
-        let home = KeeperHome::open(state.path(), &"cd".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"cd".repeat(16));
         let mut client = KeeperClient::detached(home, std::process::id()).unwrap();
         // Сторожа на канале нет: отправка была бы отказом подключения, а не сроком.
         client.channel = format!("{}-absent", client.channel);
@@ -2344,7 +2662,7 @@ mod tests {
         } else {
             tempfile::tempdir().unwrap()
         };
-        let home = KeeperHome::open(state.path(), &"ef".repeat(16)).unwrap();
+        let home = test_home(state.path(), &"ef".repeat(16));
         let channel = if cfg!(windows) {
             format!(
                 r"\\.\pipe\v8-runner-agent-test-{}",
@@ -2390,11 +2708,12 @@ mod tests {
                 host_key: None,
                 startup_timeout_ms: 1,
                 infobase: String::new(),
-                work_path: None,
+                work_path: PathBuf::from("/work"),
             },
             credentials: Credentials {
                 user: "Администратор".to_owned(),
                 password: "secret".to_owned(),
+                digest: "digest".to_owned(),
             },
             at_open: AtOpen::Connect,
         };

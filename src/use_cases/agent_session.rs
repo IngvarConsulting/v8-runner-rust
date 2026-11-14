@@ -694,7 +694,7 @@ fn open_handle(
                 infobase_args: connection.infobase_args(),
                 port,
                 host_key: declared_launch_host_key(agent.host_key.clone())?,
-                key_work_path: config.work_path.clone(),
+                host_key_dir: config.work_path.join("agent").join("host-keys"),
                 base_dir: config.work_path.join("agent").join("base"),
                 workdir: config.work_path.join("agent").join("workdir"),
                 process_log: transcript_log.with_extension("process"),
@@ -716,20 +716,21 @@ fn open_handle(
 
 /// Ключ живого агента: строка подключения базы, платформа, пользователь базы, `workPath`, версия
 /// раннера и учётная запись ОС (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Пароля
-/// базы в ключе нет: учётные данные сторож сверяет с каждым запросом.
-fn live_key(state: &Path, config: &AppConfig, v8: &Path) -> std::io::Result<String> {
-    crate::support::machine::account::account_key(state, &live_key_parts(config, v8).as_parts())
+/// базы в ключе нет: учётные данные сторож сверяет с каждым запросом. Соль лежит в `salt_dir`
+/// (`localPath/agent`).
+fn live_key(salt_dir: &Path, config: &AppConfig, v8: &Path) -> std::io::Result<String> {
+    crate::support::machine::account::account_key(salt_dir, &live_key_parts(config, v8).as_parts())
 }
 
-/// Ключ живого агента, только если соль учётной записи уже есть: `None` без неё. Ничего не
+/// Ключ живого агента, только если соль рабочей копии уже есть: `None` без неё. Ничего не
 /// создаёт.
 fn existing_live_key(
-    state: &Path,
+    salt_dir: &Path,
     config: &AppConfig,
     v8: &Path,
 ) -> std::io::Result<Option<String>> {
     crate::support::machine::account::existing_account_key(
-        state,
+        salt_dir,
         &live_key_parts(config, v8).as_parts(),
     )
 }
@@ -805,16 +806,24 @@ pub(crate) fn live_target(
 ) -> Result<LiveTarget, AppError> {
     let agent = &config.tools.designer_agent;
     let connection = config.v8_connection();
-    let state = crate::support::machine::account::account_state_dir().map_err(|error| {
-        AppError::environment_at(
-            EnvironmentLayer::AgentStart,
-            format!(
-                "the live Designer agent needs the account state directory: {error}; \
-             set tools.designer_agent.live: false to work without it"
-            ),
-        )
-    })?;
-    let key = live_key(&state, config, v8)
+    // Соль ключа и отпечатка учётных данных живёт в `localPath`: она переживает `workPath`
+    // (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    let salt_dir = crate::platform::agent_keeper::salt_dir(&config.local_path);
+    config
+        .local_dir()
+        .prepare()
+        .and_then(|()| crate::support::machine::account::ensure_private_dir(&salt_dir))
+        .map_err(|error| {
+            AppError::environment_at(
+                EnvironmentLayer::AgentStart,
+                format!(
+                    "the live Designer agent keeps its key salt in '{}': {error}; \
+                 set tools.designer_agent.live: false to work without it",
+                    salt_dir.display()
+                ),
+            )
+        })?;
+    let key = live_key(&salt_dir, config, v8)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
     let host_key = declared_launch_host_key(agent.host_key.clone())?;
     let launch = KeeperLaunch {
@@ -824,12 +833,14 @@ pub(crate) fn live_target(
         host_key,
         startup_timeout_ms: agent.startup_timeout_ms.max(1),
         infobase: canonical_infobase(config),
-        work_path: Some(config.work_path.clone()),
+        work_path: config.work_path.clone(),
     };
-    let credentials = Credentials {
-        user: connection.user.clone().unwrap_or_default(),
-        password: connection.password.clone().unwrap_or_default(),
-    };
+    let credentials = Credentials::new(
+        connection.user.clone().unwrap_or_default(),
+        connection.password.clone().unwrap_or_default(),
+        &salt_dir,
+    )
+    .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
     Ok(LiveTarget {
         key,
         launch,
@@ -979,19 +990,20 @@ pub(crate) fn keeper_start_refusal(error: KeeperStartError) -> AppError {
     }
 }
 
-/// Каталог состояния учётной записи и ключ живого агента этой рабочей копии под утилитой `v8`,
-/// если они уже есть. Ничего не создаёт: без каталога состояния или соли учётной записи живого
-/// агента нет, и ответ — `None`. Единственная связка «каталог состояния → ключ» для тех, кто
-/// ищет уже поднятого агента: снятие при `live: false`, `agent hold|release|stop|status` и
-/// выбор исполнителя списка расширений.
-pub(crate) fn own_live_key(
+/// Дом живого агента этой рабочей копии под утилитой `v8` с его ключом, если соль рабочей копии
+/// уже есть. Ничего не создаёт: без соли живого агента нет, и ответ — `None`. Единственная связка
+/// «рабочая копия → ключ → дом» для тех, кто ищет уже поднятого агента: снятие при
+/// `live: false`, `agent hold|release|stop|status` и выбор исполнителя списка расширений.
+pub(crate) fn own_live_home(
     config: &AppConfig,
     v8: &Path,
-) -> std::io::Result<Option<(PathBuf, String)>> {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+) -> std::io::Result<Option<crate::platform::agent_keeper::KeeperHome>> {
+    let salt_dir = crate::platform::agent_keeper::salt_dir(&config.local_path);
+    let Some(key) = existing_live_key(&salt_dir, config, v8)? else {
         return Ok(None);
     };
-    Ok(existing_live_key(&state, config, v8)?.map(|key| (state, key)))
+    let registry = crate::platform::live_registry::Registry::of_account()?;
+    crate::platform::agent_keeper::KeeperHome::of(&registry, &config.work_path, &key).map(Some)
 }
 
 /// Жив ли уже агент этой рабочей копии под утилитой `v8` (#631): `live` включён, управляемая
@@ -1007,9 +1019,9 @@ pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
     {
         return false;
     }
-    match own_live_key(config, v8) {
-        Ok(Some((state, key))) => matches!(
-            crate::platform::agent_keeper::client::KeeperClient::attach(&state, &key),
+    match own_live_home(config, v8) {
+        Ok(Some(home)) => matches!(
+            crate::platform::agent_keeper::client::KeeperClient::attach(home),
             Ok(Some(_))
         ),
         Ok(None) => false,
@@ -1024,7 +1036,7 @@ pub(crate) fn live_agent_is_up(config: &AppConfig, v8: &Path) -> bool {
 /// Отказ снятия команду не останавливает: она работает с разовым агентом и так.
 /// Каталога состояния и соли учётной записи она не создаёт: без них живого агента нет.
 fn remove_live_agent(config: &AppConfig, v8: &Path) {
-    let (state, key) = match own_live_key(config, v8) {
+    let home = match own_live_home(config, v8) {
         Ok(Some(found)) => found,
         Ok(None) => return,
         Err(error) => {
@@ -1032,7 +1044,7 @@ fn remove_live_agent(config: &AppConfig, v8: &Path) {
             return;
         }
     };
-    match crate::platform::agent_keeper::client::stop_keeper(&state, &key) {
+    match crate::platform::agent_keeper::client::stop_keeper(home) {
         Ok(true) => tracing::info!("the live agent of this working copy is removed: live is off"),
         Ok(false) => {}
         Err(error) => tracing::warn!(%error, "the live agent of this working copy was not removed"),
@@ -2045,6 +2057,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// Замок реестра учётной записи не дался — за срок или потому, что имя его канала заняла
+    /// другая учётная запись: команда не падает, а работает с разовым агентом
+    /// (`reason: keeper_failed`, `INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    #[test]
+    fn a_failed_registry_lock_falls_back_to_a_one_shot_agent() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+        ] {
+            let error = crate::platform::agent_keeper::client::registry_unavailable(
+                std::io::Error::new(kind, "the registry lock"),
+            );
+            assert_eq!(
+                one_shot_reason(&error),
+                Some(LiveAgentReason::KeeperFailed),
+                "{kind:?}"
+            );
+        }
+    }
 
     /// Агент, поднятый заранее и не взятый командой, снимается за ограниченное время: снятие
     /// говорит подъёму «не ждать» и дожидается его, а подъём на это смотрит (#574).

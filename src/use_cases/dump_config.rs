@@ -537,13 +537,14 @@ fn publish_full_dump(
     // и становится копией раннера только после удачной публикации. `ConfigDumpInfo.xml`,
     // оставшийся в каталоге человека от прежних версий раннера, переходит в новое дерево как
     // был: раннер его не трогает.
-    let version_snapshot =
-        super::version_file::RunnerVersionFile::prepare_from(publication.staging_path())
-            .and_then(|prepared| {
-                carry_the_left_version_file_over(resolved, publication.staging_path())
-                    .map(|()| prepared)
-            })
-            .map_err(|error| publication.cleanup_failure(error))?;
+    let version_snapshot = super::version_file::RunnerVersionFile::prepare_from(
+        publication.staging_path(),
+        &config.work_path,
+    )
+    .and_then(|prepared| {
+        carry_the_left_version_file_over(resolved, publication.staging_path()).map(|()| prepared)
+    })
+    .map_err(|error| publication.cleanup_failure(error))?;
     if let Some(external) = context.external_full_pull() {
         let binding = external_binding.expect("external publication captured its binding");
         binding.validate_stage(publication.staging_path())?;

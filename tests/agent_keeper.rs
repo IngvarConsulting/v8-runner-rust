@@ -2,8 +2,10 @@
 //! агента (поддельный `1cv8` и SSH-сервер двойника в процессе теста) и держит его сессию. Тест
 //! говорит со сторожем его протоколом — построчным JSON по каналу сторожа, — как команда.
 //!
-//! У каждого теста свой каталог состояния (`V8_RUNNER_STATE_DIR`) и свой ключ; в конце сторожу
-//! отдаётся `stop`, а если он не ответил, его процесс снимается.
+//! У каждого теста свой каталог состояния (`V8_RUNNER_STATE_DIR`: он называет реестр учётной
+//! записи), своя рабочая копия и свой ключ; в конце сторожу отдаётся `stop`, а если он не ответил,
+//! его процесс снимается. Дом агента сторож держит в рабочей копии,
+//! `<work>/agent/live/<key16>` (#735).
 #![cfg(any(unix, windows))]
 
 mod support;
@@ -81,6 +83,11 @@ impl Bench {
 
     fn state(&self) -> PathBuf {
         self.state.path().to_path_buf()
+    }
+
+    /// Рабочая копия (`workPath`) теста: в ней дом агента.
+    fn work(&self) -> PathBuf {
+        self.root().join("work")
     }
 
     fn hold(&self) -> Hold {
@@ -188,6 +195,7 @@ struct Keeper {
     child: Child,
     channel: String,
     state: PathBuf,
+    work: PathBuf,
     key: String,
     /// Вывод сторожа: улика, когда он ведёт себя не так.
     log: PathBuf,
@@ -225,8 +233,9 @@ impl Keeper {
                 "host_key": null,
                 "startup_timeout_ms": 30000,
                 "infobase": bench.root().join("ib"),
+                "work_path": bench.work(),
             },
-            "credentials": { "user": user, "password": password },
+            "credentials": { "user": user, "password": password, "digest": digest(user, password) },
         });
         if let Some(at_open) = at_open {
             start["at_open"] = json!(at_open);
@@ -245,19 +254,12 @@ impl Keeper {
         let mut stdin = child.stdin.take().unwrap();
         writeln!(stdin, "{start}").unwrap();
         drop(stdin);
-        let channel = if cfg!(windows) {
-            format!(r"\\.\pipe\v8-runner-agent-{key}")
-        } else {
-            state
-                .join("agents")
-                .join(format!("{}.sock", &key[..32]))
-                .display()
-                .to_string()
-        };
+        let channel = keeper_channel(&state, &key);
         Self {
             child,
             channel,
             state,
+            work: bench.work(),
             key,
             log: log_path,
             runtime: tokio::runtime::Builder::new_current_thread()
@@ -268,11 +270,12 @@ impl Keeper {
     }
 
     fn record(&self) -> PathBuf {
-        self.state
-            .join("agents")
-            .join(&self.key)
-            .join("agent")
-            .join("record.json")
+        self.home().join("record.json")
+    }
+
+    /// Дом агента в рабочей копии: `<work>/agent/live/<key16>`.
+    fn home(&self) -> PathBuf {
+        self.work.join("agent").join("live").join(&self.key[..16])
     }
 
     /// Подключение к каналу сторожа: канал появляется не сразу после запуска.
@@ -325,7 +328,7 @@ impl Keeper {
     }
 
     fn credentials(&self) -> String {
-        digest(&self.state, "", AGENT_PASSWORD)
+        digest("", AGENT_PASSWORD)
     }
 
     /// Открывает сессию команды; её подключение держится, пока сессия не закрыта.
@@ -446,56 +449,41 @@ async fn open(channel: &str) -> std::io::Result<Box<dyn Duplex>> {
     Ok(Box::new(tokio::net::UnixStream::connect(channel).await?))
 }
 
-/// Отпечаток учётных данных, как его считает раннер: HMAC-SHA256 с солью учётной записи над
-/// её идентификатором и частями, каждая с длиной.
-fn digest(state: &Path, user: &str, password: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let salt_path = state.join("account-salt");
-    assert!(
-        wait_until(Duration::from_secs(10), || salt_path.is_file()),
-        "the keeper makes the account salt"
-    );
-    let salt = fs::read(salt_path).unwrap();
-    let mut message = Vec::new();
-    for part in [account_id().as_str(), "agent-credentials", user, password] {
-        message.extend_from_slice(&(part.len() as u64).to_be_bytes());
-        message.extend_from_slice(part.as_bytes());
+/// Отпечаток учётных данных, который команда отдаёт сторожу при подъёме: сторож его не
+/// пересчитывает, а сверяет с ним каждый запрос. Тесту годится любой различимый.
+fn digest(user: &str, password: &str) -> String {
+    format!("test-digest:{user}:{password}")
+}
+
+/// Канал сторожа ключа `key` в реестре каталога состояния `state`: на Windows — именованный
+/// канал `v8-runner-keeper-<scope>-<key>` (ключ уникален, канал ищется по нему), на Unix — сокет
+/// `<state>/keepers/<key32>.sock`.
+fn keeper_channel(state: &Path, key: &str) -> String {
+    if cfg!(windows) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let found = fs::read_dir(r"\\.\pipe\")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .find(|name| name.starts_with("v8-runner-keeper-") && name.ends_with(key));
+            if let Some(name) = found {
+                return format!(r"\\.\pipe\{name}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the keeper of {key} never opened its channel"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        state
+            .join("keepers")
+            .join(format!("{}.sock", &key[..32]))
+            .display()
+            .to_string()
     }
-    let mut block = [0u8; 64];
-    block[..salt.len()].copy_from_slice(&salt);
-    let pad = |byte: u8| block.map(|at| at ^ byte);
-    let inner = Sha256::new()
-        .chain_update(pad(0x36))
-        .chain_update(&message)
-        .finalize();
-    Sha256::new()
-        .chain_update(pad(0x5c))
-        .chain_update(inner)
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-#[cfg(unix)]
-fn account_id() -> String {
-    // SAFETY: `getuid` takes nothing and cannot fail.
-    unsafe { libc::getuid() }.to_string()
-}
-
-#[cfg(windows)]
-fn account_id() -> String {
-    let output = Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .expect("whoami");
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.trim()
-        .rsplit(',')
-        .next()
-        .expect("sid column")
-        .trim_matches('"')
-        .to_owned()
 }
 
 fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -801,7 +789,7 @@ fn other_credentials_remove_the_agent() {
         "none",
         "config generation-id",
         false,
-        &digest(&keeper.state, "", "another password"),
+        &digest("", "another password"),
     );
     assert_eq!(
         frames.last().unwrap()["error"]["error"],
@@ -878,13 +866,78 @@ fn stop_releases_and_removes_the_agent_and_its_record() {
     ready(&keeper);
     let designer = bench.designer_pid();
     assert!(keeper.record().exists());
+    // `AgentBaseDir` агента — в его доме в рабочей копии, не в каталоге состояния (#735).
+    let base = PathBuf::from(fs::read_to_string(bench.root().join("base-dir.txt")).unwrap());
+    assert!(
+        base.starts_with(keeper.home()) && !base.starts_with(&keeper.state),
+        "{}",
+        base.display()
+    );
     let stopped = keeper.last(json!({"op": "stop"}));
     assert_eq!(stopped["frame"], "stopped", "{stopped}");
     assert!(!alive(designer) || wait_until(Duration::from_secs(5), || !alive(designer)));
     assert!(keeper.exited_within(GONE_WITHIN));
     assert!(!keeper.record().exists(), "the record is removed");
+    assert!(
+        wait_until(Duration::from_secs(10), || !keeper.home().exists()),
+        "the keeper removes the agent's home when it closes"
+    );
     let log = fs::read_to_string(&bench.commands_log).unwrap();
     assert!(log.contains("common disconnect-ib"), "{log}");
+}
+
+/// Когда сторож ответил `stopped`, его канала уже нет: команда, снявшая простаивающего агента
+/// ради места на пределе, считает сторожей по каналам и место видит свободным сразу (#735).
+#[test]
+fn a_stopped_keeper_has_no_channel_when_it_answers() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let stopped = keeper.last(json!({"op": "stop"}));
+    assert_eq!(stopped["frame"], "stopped", "{stopped}");
+    let reopened = keeper.runtime.block_on(open(&keeper.channel));
+    assert!(
+        reopened.is_err(),
+        "the channel of a stopped keeper still takes connections"
+    );
+    assert!(keeper.exited_within(GONE_WITHIN));
+}
+
+/// Дом агента убрали, пока сторож жив (`git clean` рабочей копии): без записи команды сторожа не
+/// найдут, и он уходит сам вместе с агентом, а не держит сеанс лицензии до простоя (#735).
+#[test]
+fn a_keeper_whose_home_is_gone_closes_itself() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let designer = bench.designer_pid();
+    fs::remove_file(keeper.record()).expect("remove the record");
+    assert!(
+        keeper.exited_within(GONE_WITHIN),
+        "the keeper outlived its home"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || !alive(designer)),
+        "the agent outlived its keeper's home"
+    );
+}
+
+/// Сторож называет, где живёт, сразу, не дожидаясь агента: по этому ответу команды учётной
+/// записи находят сторожей без общего файла (#735).
+#[test]
+fn the_keeper_names_its_home_in_the_working_copy() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start(&bench, 600_000);
+    let found = keeper.last(json!({"op": "whereabouts"}));
+    assert_eq!(found["frame"], "whereabouts", "{found}");
+    assert_eq!(found["key"], keeper.key, "{found}");
+    assert_eq!(found["pid"], keeper.child.id(), "{found}");
+    assert_eq!(
+        PathBuf::from(found["home"].as_str().unwrap()),
+        keeper.home(),
+        "{found}"
+    );
+    ready(&keeper);
 }
 
 /// Сторож снят — агент уходит с ним, даже без следующей команды
@@ -923,8 +976,8 @@ fn a_second_keeper_of_the_same_key_refuses_to_start() {
         second.stdin.take().unwrap(),
         "{}",
         json!({"launch": {"v8": bench.designer, "infobase_args": [], "port": null, "host_key": null,
-                          "startup_timeout_ms": 1000, "infobase": ""},
-               "credentials": {"user": "", "password": ""}})
+                          "startup_timeout_ms": 1000, "infobase": "", "work_path": bench.work()},
+               "credentials": {"user": "", "password": "", "digest": digest("", "")}})
     )
     .unwrap();
     let output = second.wait_with_output().unwrap();
@@ -1169,7 +1222,7 @@ fn an_attach_with_other_credentials_removes_the_agent() {
     ready(&keeper);
     let refused = keeper.last(json!({
         "op": "attach",
-        "credentials": digest(&keeper.state, "", "another password"),
+        "credentials": digest("", "another password"),
     }));
     assert_eq!(
         refused["error"]["error"], "credentials_mismatch",
@@ -1275,7 +1328,7 @@ fn a_hold_with_other_credentials_removes_the_agent() {
     let refused = keeper.last(json!({
         "op": "hold",
         "holder": {"kind": "ttl", "id": "t", "until_ms": now_ms() + 600_000},
-        "credentials": digest(&keeper.state, "", "another password"),
+        "credentials": digest("", "another password"),
     }));
     assert_eq!(
         refused["error"]["error"], "credentials_mismatch",
