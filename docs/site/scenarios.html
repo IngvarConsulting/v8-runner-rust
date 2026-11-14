@@ -203,7 +203,7 @@
     var lines = ['workPath: .build', 'format: ' + state.format];
     lines.push('infobases:');
     lines.push('  origin:                  # умолчание, как у гита');
-    if (state.target === 'file') lines.push('    connection: "File=.build/ib"');
+    if (state.target === 'file') lines.push('    connection: "File=.local/db"');
     if (state.target === 'cluster') { lines.push('    connection: "Srvr=srv:1541;Ref=demo"'); lines.push('    user: Admin'); lines.push('    dbms:                    # нужна, чтобы раннер создал базу'); lines.push('      kind: PostgreSQL'); lines.push('      server: localhost'); lines.push('      name: demo'); }
     if (state.target === 'standalone') {
       lines.push('    connection: "Srvr=127.0.0.1;Ref=demo"   # прямой шлюз: Конфигуратор и тонкий клиент');

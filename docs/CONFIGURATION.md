@@ -384,10 +384,11 @@ Pure provider selection для infobase export не создаёт `workPath` и
     copied-from.json                   откуда скопирована база
     .lock                              замок памяти базы
     managed/
+      owner.json  метка владельца стенда: каталог и проект копии
       postgres/   data/ password record.json ports.json postgres.log
-      standalone/ data/ record.json ports.json
+      standalone/ data/ host-key record.json ports.json standalone.log
       cluster/    registry-<regport>/ record.json ports.json cluster.log
-      ras/        record.json
+      ras/        record.json ras.log
   tools/.tests.v8-runner-tools-download.json  метка: набор `tests` скачан `tools download yaxunit --sources`
   .lock                                замок команд, меняющих стенд
   .gitignore                           строка `*`
@@ -1491,6 +1492,17 @@ Linux под root и Windows (8.3.27, 8.5.1):
 остановка кластера), отключают его сами; чужому Конфигуратору или чужой монопольной операции
 базу отпускает `v8-runner agent release`. Живой агент без держателя закрывается после 15 минут
 простоя; держимый остаётся подключённым, пока его держат.
+
+Каталог состояния учётной записи лежит в профиле пользователя, обычно на системном диске,
+и `workPath` его не содержит. В нём:
+
+- `agents/<ключ>/agent/` — каталог сторожа живого агента: `record.json` — запись сторожа и
+  его агента, `agent.log` — журнал сторожа (его путь называет отказ `agent_start` у
+  `agent hold`, когда сторож вышел, не ответив, или не ответил вовремя), `host-keys/` — одноразовый ключ хоста агента;
+- `bin/<версия>/` — копия исполняемого файла, из которой запущен сторож;
+- `account-salt` — соль ключей живых агентов учётной записи.
+
+Удаление `workPath` записи сторожей не задевает.
 
 С `live: false` команда снимает своего агента после работы, как раньше, и снимает живого
 агента своей рабочей копии, если такой остался. Если раннер запущен в Job, из которого нельзя
