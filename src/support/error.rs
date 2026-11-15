@@ -331,7 +331,8 @@ impl AppError {
                     | IbcmdError::SnapshotBusy { .. }
                     | IbcmdError::SnapshotProbe { .. }
                     | IbcmdError::SnapshotUnsupported
-                    | IbcmdError::PartialImportCommandLineTooLong { .. } => None,
+                    | IbcmdError::PartialImportCommandLineTooLong { .. }
+                    | IbcmdError::UnansweredQuestion { .. } => None,
                 }
             }
             Self::PlatformEdt(source) | Self::PlatformEdtContext { source, .. } => match source {
@@ -467,6 +468,7 @@ fn process_cancellation(error: &ProcessError) -> Option<CancelledAt> {
         | ProcessError::StderrLogIo { .. }
         | ProcessError::TimedOut { .. }
         | ProcessError::ManagedSpawnUnsupported { .. }
+        | ProcessError::RepeatedQuestion { .. }
         | ProcessError::UnexpressiblePath { .. } => None,
     }
 }
@@ -520,6 +522,11 @@ impl From<IbcmdError> for AppError {
             IbcmdError::DirectoryWipingExport => Self::Runtime(error.to_string()),
             IbcmdError::PartialImportCommandLineTooLong { .. } => {
                 Self::SourceLoadNotStarted(error.to_string())
+            }
+            // Слой — пользователь базы, как у агента, отвергшего вход
+            // (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`).
+            IbcmdError::UnansweredQuestion { .. } => {
+                Self::environment_at(EnvironmentLayer::InfobaseUser, error.to_string())
             }
         }
     }

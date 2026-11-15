@@ -164,6 +164,35 @@ fn a_platform_spawn_leaves_the_runner_process_group() {
     }
 }
 
+/// Вывод процесса читает один владелец в пределе, а `ibcmd` запускается одной точкой, которая
+/// снимает повторённый вопрос (`INV.PLATFORM.PROCESS-OUTPUT-IS-HELD-WITHIN-A-BOUND`,
+/// `INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`). Корень #742 —
+/// `read_to_end` без предела и запуск `ibcmd` без признака: второй читатель вывода или второй
+/// запуск `ibcmd` под другим именем валит эту проверку.
+#[test]
+fn process_output_has_one_bounded_reader_and_ibcmd_one_guarded_launch() {
+    let process = production_tokens(&repo_path("src/platform/process.rs"));
+    assert!(
+        !process.contains("read_to_end") && !process.contains("read_to_string"),
+        "process.rs reads a child stream past capture::read_stream"
+    );
+    assert_eq!(
+        process.matches("capture::read_stream(").count(),
+        2,
+        "stdout and stderr are read by capture::read_stream"
+    );
+    let ibcmd = production_tokens(&repo_path("src/platform/ibcmd.rs"));
+    assert_eq!(
+        ibcmd.matches(".run_with_policy(").count(),
+        1,
+        "ibcmd has one launch point"
+    );
+    assert!(
+        ibcmd.contains("stopping_a_repeated_question()"),
+        "the ibcmd launch stops a repeated question"
+    );
+}
+
 /// Служба стенда запускается одним путём: второй способ поднять долгоживущий процесс не появится
 /// незаметно (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`, #536).
 #[test]

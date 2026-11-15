@@ -18,7 +18,7 @@ use crate::platform::designer::DesignerDsl;
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, EnvironmentLayer};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 
@@ -298,7 +298,14 @@ pub(crate) fn read_with_record_tool(
     );
     match read {
         Ok(token) => answer(token),
-        Err(error) if error.cancellation().is_some() => Err(error),
+        // Вопрос `ibcmd` о пользователе базы — не «нет ответа»: иначе сверка поколения назвала
+        // бы его расхождением и спрятала причину.
+        Err(error)
+            if error.cancellation().is_some()
+                || error.environment_layer() == Some(EnvironmentLayer::InfobaseUser) =>
+        {
+            Err(error)
+        }
         Err(error) => Ok(RecordToolAnswer::NoAnswer(format!(
             "{tool} gave no configuration generation: {error}"
         ))),
