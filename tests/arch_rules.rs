@@ -673,8 +673,6 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("mcp/surface-stays-explicit.md", "оба"),
     ("platform/agent-session-lives-with-the-lock.md", "два,два"),
     ("platform/edt-has-two-execution-modes.md", "два"),
-    // Обещание: предел в 1 + 7 МиБ держит `a_flood_of_output_is_kept_within_the_bound`.
-    ("platform/process-output-is-held-within-a-bound.md", "семи"),
     ("platform/prose-debt-only-shrinks.md", "трёх"),
     (
         "use-cases/a-push-into-a-base-that-moved-ahead-is-refused.md",

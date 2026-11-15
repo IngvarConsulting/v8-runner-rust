@@ -10,10 +10,10 @@ use std::io::Read;
 use std::sync::{Arc, OnceLock};
 
 /// Сколько первых байт потока раннер держит в памяти.
-const RETAINED_HEAD: usize = 1 << 20;
+const RETAINED_HEAD: usize = 56 << 20;
 /// Сколько последних байт потока раннер держит в памяти: ответ утилиты — например, токен
 /// поколения — пишется последним.
-const RETAINED_TAIL: usize = 7 << 20;
+const RETAINED_TAIL: usize = 8 << 20;
 /// Насколько далеко от среза ищется конец строки, чтобы резать по строкам.
 const LINE_SEARCH: usize = 64 << 10;
 /// Размер одного чтения из трубы.
@@ -317,9 +317,9 @@ mod tests {
     #[test]
     fn one_huge_chunk_is_kept_within_the_bound() {
         let mut captured = CapturedStream::default();
-        captured.push(&vec![b'x'; 20 << 20]);
+        captured.push(&vec![b'x'; 80 << 20]);
         assert_eq!(captured.retained(), RETAINED_HEAD + RETAINED_TAIL);
-        assert_eq!(captured.total(), 20 << 20);
+        assert_eq!(captured.total(), 80 << 20);
     }
 
     /// Вывод в пределе возвращается как есть, без строки о пропуске.
@@ -337,7 +337,7 @@ mod tests {
     fn a_cut_inside_a_character_keeps_both_parts_readable() {
         let mut captured = CapturedStream::default();
         captured.push(b"a");
-        let letters = "ж".repeat(6 << 20);
+        let letters = "ж".repeat(40 << 20);
         captured.push(letters.as_bytes());
         let text = captured.finish().decode();
         assert!(text.starts_with("aж"), "{}", &text[..8]);
