@@ -128,6 +128,17 @@ mod tests {
     }
 
     /// Замеренные ответы `ibcmd` (stdout без BOM и файл `--out` с BOM и CRLF).
+    /// Список, срезанный пределом вывода, полным не читается: строка о пропуске — не строка
+    /// списка, и прогноз «неизвестен» (`INV.PLATFORM.PROCESS-OUTPUT-IS-HELD-WITHIN-A-BOUND`).
+    #[test]
+    fn a_cut_export_status_is_never_read_as_complete() {
+        let cut =
+            "modified: Catalog.A\n[v8-runner: 4096 bytes of output omitted]\nadded: Catalog.B\n";
+        assert_eq!(read_export_status(cut), DumpForecast::Unknown);
+        let cut_full = "modified: all\n[v8-runner: 4096 bytes of output omitted]\n";
+        assert_eq!(read_export_status(cut_full), DumpForecast::Unknown);
+    }
+
     #[test]
     fn the_export_status_is_read_by_its_measured_keys() {
         assert_eq!(read_export_status(""), DumpForecast::Changes);
