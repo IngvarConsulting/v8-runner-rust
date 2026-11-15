@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::io::Read;
 use std::num::NonZeroI32;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -10,6 +9,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::platform::secrets::render_masked_command;
+
+mod capture;
 
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -318,6 +319,10 @@ pub struct ProcessExecutionPolicy {
     /// `None` — у шага самой платформы, который работой команды не является; объявить так
     /// шаг может только платформа: поле за её пределами не видно.
     pub(in crate::platform) work: Option<WorkGiven>,
+    /// Снимать ли процесс, который с самого начала повторяет один вопрос на закрытом вводе
+    /// (`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`).
+    /// Ставит адаптер утилиты, которая так спрашивает, — [`Self::stopping_a_repeated_question`].
+    pub(in crate::platform) stops_a_repeated_question: bool,
 }
 
 /// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
@@ -348,6 +353,7 @@ impl ProcessExecutionPolicy {
             safety,
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: Some(work),
+            stops_a_repeated_question: false,
         }
     }
 
@@ -364,6 +370,7 @@ impl ProcessExecutionPolicy {
             safety,
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: None,
+            stops_a_repeated_question: false,
         }
     }
 
@@ -390,6 +397,17 @@ impl ProcessExecutionPolicy {
         };
         Self {
             safety,
+            ..self.clone()
+        }
+    }
+
+    /// Та же политика для утилиты, которая на закрытом вводе спрашивает без конца: процесс,
+    /// который с самого начала вывода только повторяет один вопрос, снимается сразу, каков бы
+    /// ни был его класс прерывания, и ответ — [`ProcessError::RepeatedQuestion`]. Такой процесс
+    /// ещё ничего не сделал: он ждёт ответа, которого раннер не даст.
+    pub(in crate::platform) fn stopping_a_repeated_question(&self) -> Self {
+        Self {
+            stops_a_repeated_question: true,
             ..self.clone()
         }
     }
@@ -444,6 +462,11 @@ pub enum ProcessError {
 
     #[error("process timed out '{cmd}' after {timeout_ms}ms")]
     TimedOut { cmd: String, timeout_ms: u64 },
+
+    /// Процесс с самого начала только повторял один вопрос на закрытом вводе и снят: ответа,
+    /// которого он ждёт, раннер не даёт. `question` — повторённый кусок вывода, улика человеку.
+    #[error("process '{cmd}' kept asking \"{question}\" on its closed input and was stopped")]
+    RepeatedQuestion { cmd: String, question: String },
 
     #[error("managed process spawn is not supported for '{cmd}'")]
     ManagedSpawnUnsupported { cmd: String },
@@ -626,20 +649,21 @@ impl ProcessExecutor {
         debug!(
             command = rendered_command.as_str(),
             exit_code = output.status.code().unwrap_or(-1),
-            stdout_bytes = output.stdout.len(),
-            stderr_bytes = output.stderr.len(),
+            stdout_bytes = output.stdout.total(),
+            stderr_bytes = output.stderr.total(),
             "process finished"
         );
+        let (stdout, stderr) = (output.stdout.finish(), output.stderr.finish());
 
         if let Some(path) = &request.stdout_log_path {
-            std::fs::write(path, &output.stdout).map_err(|source| ProcessError::StdoutLogIo {
+            std::fs::write(path, stdout.bytes()).map_err(|source| ProcessError::StdoutLogIo {
                 path: path.clone(),
                 source,
             })?;
         }
 
         if let Some(path) = &request.stderr_log_path {
-            std::fs::write(path, &output.stderr).map_err(|source| ProcessError::StderrLogIo {
+            std::fs::write(path, stderr.bytes()).map_err(|source| ProcessError::StderrLogIo {
                 path: path.clone(),
                 source,
             })?;
@@ -647,8 +671,8 @@ impl ProcessExecutor {
 
         Ok(ProcessResult {
             exit_code: output.status.code().unwrap_or(-1),
-            stdout: decode_output(output.stdout),
-            stderr: decode_output(output.stderr),
+            stdout: stdout.decode(),
+            stderr: stderr.decode(),
             interruption: output.interruption,
         })
     }
@@ -1341,34 +1365,34 @@ fn wait_for_output(
     rendered_command: &str,
     policy: &ProcessExecutionPolicy,
 ) -> Result<ObservedOutput, ProcessError> {
-    let mut stdout =
-        spawned
-            .child
-            .stdout()
-            .take()
-            .ok_or_else(|| ProcessError::StartupCheckFailed {
-                cmd: rendered_command.to_owned(),
-                source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout pipe missing"),
-            })?;
-    let mut stderr =
-        spawned
-            .child
-            .stderr()
-            .take()
-            .ok_or_else(|| ProcessError::StartupCheckFailed {
-                cmd: rendered_command.to_owned(),
-                source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stderr pipe missing"),
-            })?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
+    let stdout = spawned
+        .child
+        .stdout()
+        .take()
+        .ok_or_else(|| ProcessError::StartupCheckFailed {
+            cmd: rendered_command.to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout pipe missing"),
+        })?;
+    let stderr = spawned
+        .child
+        .stderr()
+        .take()
+        .ok_or_else(|| ProcessError::StartupCheckFailed {
+            cmd: rendered_command.to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stderr pipe missing"),
+        })?;
+    // Вывод держится в пределе, а вопрос ищут оба потока: утилита вольна спрашивать в любом.
+    let question = capture::QuestionSlot::default();
+    let watched = |slot: &capture::QuestionSlot| {
+        policy
+            .stops_a_repeated_question
+            .then(|| std::sync::Arc::clone(slot))
+    };
+    let (stdout_question, stderr_question) = (watched(&question), watched(&question));
+    let stdout_reader =
+        std::thread::spawn(move || capture::read_stream(stdout, stdout_question.as_ref()));
+    let stderr_reader =
+        std::thread::spawn(move || capture::read_stream(stderr, stderr_question.as_ref()));
 
     let start = std::time::Instant::now();
     let mut observed_interruption: Option<ProcessInterruptionReason> = None;
@@ -1421,6 +1445,25 @@ fn wait_for_output(
             };
         }
 
+        if let Some(asked) = question.get() {
+            // Вопрос сильнее отложенного прерывания: процесс снимает сам раннер, и ответ
+            // называет вопрос, а не отмену.
+            let question = decode_output(asked.clone());
+            warn!(
+                command = rendered_command,
+                question = question.as_str(),
+                "the process keeps asking a question on its closed input; stopping it"
+            );
+            terminate_child_group(&mut spawned);
+            confirm_interrupted_exit(&mut spawned, rendered_command)?;
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(ProcessError::RepeatedQuestion {
+                cmd: rendered_command.to_owned(),
+                question,
+            });
+        }
+
         if observed_interruption.is_none() {
             if policy.cancellation.is_cancelled() {
                 observed_interruption = Some(ProcessInterruptionReason::Cancelled);
@@ -1457,8 +1500,8 @@ fn wait_for_output(
 
 struct ObservedOutput {
     status: std::process::ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    stdout: capture::CapturedStream,
+    stderr: capture::CapturedStream,
     interruption: Option<ProcessInterruption>,
 }
 
@@ -2319,6 +2362,76 @@ mod tests {
             fs::read_to_string(stderr_log).expect("stderr log").trim(),
             "oops"
         );
+    }
+
+    /// Процесс, который с начала вывода только повторяет вопрос на закрытом вводе, снят за
+    /// секунды, даже под критической политикой, а его группа ушла; без признака у политики
+    /// раннер его не трогает, но держит вывод в пределе
+    /// (`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`).
+    #[cfg(unix)]
+    #[test]
+    fn a_process_repeating_a_question_on_closed_input_is_stopped() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("asks.sh");
+        let child_pid = dir.path().join("child.pid");
+        write_script(
+            &script,
+            &format!(
+                "echo $$ > '{}'\nprintf 'Для выполнения операции требуется аутентификация\\n'\nwhile :; do printf 'Имя пользователя: '; done",
+                child_pid.display()
+            ),
+        );
+        let policy = ProcessExecutionPolicy {
+            safety: ProcessInterruptionSafety::CriticalNonAbortable,
+            ..ProcessExecutionPolicy::default()
+        }
+        .stopping_a_repeated_question();
+
+        let started = std::time::Instant::now();
+        let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        match outcome {
+            Err(ProcessError::RepeatedQuestion { question, .. }) => {
+                assert_eq!(question, "Имя пользователя: ");
+            }
+            other => panic!("the question was not stopped: {other:?}"),
+        }
+        let pid: i32 = fs::read_to_string(&child_pid)
+            .expect("child pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        // SAFETY: signal 0 only probes whether the process exists.
+        assert!(
+            super::wait_until(
+                std::time::Instant::now() + Duration::from_secs(5),
+                || unsafe { libc::kill(pid, 0) != 0 }
+            ),
+            "the asking process is gone with its group"
+        );
+    }
+
+    /// Без признака у политики повторённый вопрос не снимается: признак ставит адаптер
+    /// утилиты, а не исполнитель за всех.
+    #[cfg(unix)]
+    #[test]
+    fn a_repeated_question_is_left_alone_without_the_policy_mark() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("asks-a-while.sh");
+        write_script(
+            &script,
+            "i=0; while [ $i -lt 40000 ]; do printf 'Имя пользователя: '; i=$((i+1)); done; exit 7",
+        );
+        let result = ProcessExecutor
+            .run_with_policy(&plain_request(script), &ProcessExecutionPolicy::default())
+            .expect("an unmarked run waits for the end");
+        assert_eq!(result.exit_code, 7);
+        assert!(result.stdout.starts_with("Имя пользователя: "));
     }
 
     #[test]
