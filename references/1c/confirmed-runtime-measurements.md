@@ -2331,6 +2331,66 @@ macOS arm64 за 2 мин; сам называет себя `0.4.0`). `cf bootst
 `.erf` выгружаются верно. Задачи автору — Untru/ibcmd-rs#432–#442; решение владельца —
 встраивание ждёт выпуска с исправлениями (#413).
 
+## `ibcmd-rs` 0.4.1: приёмка опубликованных архивов для `make` и `convert`
+
+Замер 17.11.2026 для [#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413).
+Архивы [релиза `v0.4.1`](https://github.com/Untru/ibcmd-rs/releases/tag/v0.4.1),
+коммит `4c7c03b`. SHA-256 совпали с опубликованными `.sha256` и с digest в GitHub Releases.
+Linux-архив повторно проверен через `sha256sum -c` на Linux x86-64 с glibc 2.39.
+В [теге](https://github.com/Untru/ibcmd-rs/blob/v0.4.1/LICENSE) и в обоих архивах есть MIT `LICENSE`.
+
+| архив | SHA-256 |
+| --- | --- |
+| `ibcmd-rs-0.4.1-x86_64-pc-windows-msvc.zip` | `c72a7104df54d574043cefafd099a005f2e257df581d769fb1b894a2efa09212` |
+| `ibcmd-rs-0.4.1-x86_64-unknown-linux-gnu.zip` | `5ca39dba907188cf355da3e5e0a80d1c6ad925d55a68e9e523d2a87a4357bb1c` |
+
+**Сборка.** `--version` на обеих ОС возвращает `ibcmd-rs 0.4.1`. Входы получены штатным
+Конфигуратором 8.3.27.2074 из `tests/fixtures/designer/{configuration,extension,external}`
+в новых временных файловых базах. Основная конфигурация включала WebSocket-клиент,
+внешний источник данных и право `ExclusiveModeTerminationAtSessionStart`. На обеих ОС
+`cf bootstrap --base-free --platform 8.3.27 <xml> <pkg>` создал `.cf` и `.cfe` с rc=0 и
+JSON в stdout. Несуществующий каталог дал rc=2 и `bootstrap_package_invalid` в JSON в stderr.
+Неизвестный ключ дал rc=2 и текстовую ошибку разбора CLI в stderr.
+
+Пакеты, собранные обоими бинарниками, загружены `/LoadCfg` и применены `/UpdateDBCfg`
+на Windows с 1С 8.3.27.2074. Для `.cfe` оба вызова с `-Extension Расширение1`.
+Все операции вернули rc=0. Выгрузка применённого состояния `/DumpConfigToFiles … -db`
+совпала с контрольной побайтно: 50 файлов CF и 5 файлов CFE без `ConfigDumpInfo.xml`.
+На Linux 1С 8.3.27.2342 создала пустую базу, а `/LoadCfg` остановился с сообщением
+«Не найдена лицензия». Применение через Linux-версию платформы осталось непроверенным.
+
+**Строгий экспорт.** Один и тот же набор штатных пакетов 8.3.27.2074 проверен обоими
+бинарниками с `--fail-on-opaque`. Указано число выгруженных файлов без `ConfigDumpInfo.xml`.
+В каждом случае дерево побайтно совпало со штатной выгрузкой, включая состав путей.
+
+| пакет | rc Windows / Linux | XML-файлов |
+| --- | --- | --- |
+| `.cf` | 2 / 2 | 50 |
+| `.cfe` (`Расширение1`) | 0 / 0 | 5 |
+| `.epf` | 2 / 2 | 3 |
+| `.epf` с `CatalogRef.Справочник1` | 2 / 2 | 3 |
+| `.erf` | 2 / 2 | 3 |
+
+При отказе JSON в stderr содержит `ok: false` и `opaque_export_refused`. В
+`export.storage.entries` ровно три записи с `disposition: "opaque"`: `root`, `version`,
+`versions`, причина `no legacy family decoder recognized this storage entry`.
+Файлы при этом остаются в выходном каталоге. Строгий экспорт собранных `ibcmd-rs` пакетов
+на обеих ОС дал те же коды: rc=2 для `.cf`, rc=0 для `.cfe`. На Windows экспорт контрольных
+CF, EPF и ERF без `--fail-on-opaque` вернул rc=0 с теми же тремя `opaque`.
+
+```text
+1cv8 CREATEINFOBASE "File=<scratch>"
+1cv8 DESIGNER /F <scratch> /LoadConfigFromFiles tests/fixtures/designer/configuration
+1cv8 DESIGNER /F <scratch> /UpdateDBCfg
+1cv8 DESIGNER /F <scratch> /DumpCfg native.cf
+1cv8 DESIGNER /F <scratch> /DumpConfigToFiles native-xml
+ibcmd-rs cf bootstrap --base-free --platform 8.3.27 native-xml built.cf
+ibcmd-rs cf export --platform 8.3.27 --fail-on-opaque native.cf exported-xml
+```
+
+Последняя команда возвращает rc=2 на штатном CF. Потери XML на проверенных пакетах не
+обнаружены. Строгий прогон матрицы не пройден: корректные CF, EPF и ERF отклонены.
+
 ## Разбор пакета `convert` во временной базе
 
 Замер 08.10.2026. Задача: [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416)
