@@ -205,8 +205,47 @@ docker compose exec -T -u onec srv xvfb-run -a /opt/1cv8/x86_64/8.5.4.1878/1cv8 
 не «совпадает ли содержимое»: равенство — изменений не было, неравенство — была запись, возможно того же самого.
 «Сорок нулей» как признак пустой базы держится только на 8.3.27: на 8.5.4 пустая база — и файловая, и в
 кластере — отдаёт `2af84151e959af78eab1cb38d137eedf33543af5`.
-Вопросы о Конфигураторе в кластере и о смене токена после применения остаются открытыми до стенда с лицензией
-разработчика у клиента и без эмуляции.
+Для нативной 8.3.27 эти два вопроса проверены отдельно в следующем замере.
+
+### Нативный Windows-кластер 8.3.27 (#184)
+
+Замер 17.11.2026, Windows 11 x64, 1С 8.3.27.2074, Postgres Pro 1C 17.11. База создана
+`rac infobase create --create-database` в отдельном кластере с временными каталогами реестра 1С и СУБД.
+В пустую ИБ загружена конфигурация `tests/fixtures/designer/configuration`.
+
+| Состояние ИБ | Токен основной конфигурации, одинаковый у обоих инструментов | Строки `Config` / `ConfigSave` |
+| --- | --- | --- |
+| После создания `vr184designer` | `0000000000000000000000000000000000000000` | 0 / 0 |
+| После `/LoadConfigFromFiles`, без применения | `9cfb5191642f5749b4cb8392df65924300000000` | 0 / 53 |
+| После `/UpdateDBCfg -Dynamic-` | `9cfb5191642f5749b4cb8392df65924300000000` | 53 / 0 |
+| После создания `vr184ibcmd` | `0000000000000000000000000000000000000000` | 0 / 0 |
+| После `ibcmd config import`, без применения | `ead1d8939ba00d48ad5a4a2cecd1dcf500000000` | 0 / 54 |
+| После `ibcmd config apply --force --dynamic=disable` | `ead1d8939ba00d48ad5a4a2cecd1dcf500000000` | 53 / 0 |
+
+Оба чтения в каждом состоянии, загрузка и применение вернули код 0. У Конфигуратора
+файл `/Out` содержал BOM UTF-8, 40 строчных hex-символов и CRLF (45 байт). У `ibcmd`
+stdout содержал 40 строчных hex-символов и `0A 0D 0A` (43 байта), stderr был пуст.
+Запросы к таблицам PostgreSQL подтвердили, что после загрузки записи были только в
+`ConfigSave`, а после применения только в `Config`. В первом цикле совпал и агрегированный
+MD5 содержимого перенесённых записей `BinaryData`; во втором число записей изменилось.
+
+```text
+rac infobase create --cluster=<uuid> --create-database --name=<db> --dbms=PostgreSQL "--db-server=127.0.0.1 port=23040" --db-name=<db> --db-user=postgres --db-pwd=<пароль-СУБД> --locale=ru --scheduled-jobs-deny=on 127.0.0.1:23002
+1cv8 DESIGNER /S "127.0.0.1:23001\<db>" /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /GetConfigGenerationID /Exit
+1cv8 DESIGNER /S "127.0.0.1:23001\vr184designer" /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /LoadConfigFromFiles <фикстура> /Exit
+1cv8 DESIGNER /S "127.0.0.1:23001\vr184designer" /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /UpdateDBCfg -Dynamic- /Exit
+ibcmd infobase --data=<каталог> --dbms=PostgreSQL "--db-server=127.0.0.1 port=23040" --db-name=<db> --db-user=postgres --db-pwd=<пароль-СУБД> config generation-id
+ibcmd infobase --data=<каталог> --dbms=PostgreSQL "--db-server=127.0.0.1 port=23040" --db-name=vr184ibcmd --db-user=postgres --db-pwd=<пароль-СУБД> config import <фикстура>
+ibcmd infobase --data=<каталог> --dbms=PostgreSQL "--db-server=127.0.0.1 port=23040" --db-name=vr184ibcmd --db-user=postgres --db-pwd=<пароль-СУБД> config apply --force --dynamic=disable
+```
+
+Для #215 пригодна та же форма чтения, что у файловой цели. После кода 0 снять
+BOM и принять последнюю непустую строку из `/Out` Конфигуратора или stdout `ibcmd`,
+если она состоит из 40 шестнадцатеричных знаков. В обоих циклах
+токен изменился при загрузке и сохранился после применения. Равенство токенов до и
+после применения не доказывает, что конфигурация БД осталась прежней. Для #167
+сравнивают токены одного исполнителя; совпадение ответов двух инструментов наблюдалось
+здесь только у основной конфигурации. Сорок нулей у пустой базы не идентифицируют ИБ.
 
 ## Кодировка ответа `ibcmd` на Windows
 
@@ -920,6 +959,33 @@ $P/1cv8c ENTERPRISE /IBConnectionString "Srvr=127.0.0.1:18341;Ref=wrongname;" /D
 `--direct-regport` и `--name`. Отдельно: прямой шлюз слушает все интерфейсы, и
 ограничить его адресом ключами `ibsrv` нельзя.
 
+### Интерактивные клиенты с пользователем ИБ (#184)
+
+Замер 17.11.2026, Windows 11, 1С 8.3.27.2074. На отдельной копии DemoAccountingKz
+все три команды открыли сеанс с существующим пользователем `Администратор`. Для проверки
+`/P` на той же копии создали пользователя `Probe184` с непустым паролем и выключенной
+аутентификацией ОС. `ibcmd --pid=<pid-ibsrv> session list` с реквизитами администратора
+через stdin вернул 0 и показал новые сеансы `Probe184`:
+
+| Клиент и маршрут | `app-id` | UUID нового сеанса |
+| --- | --- | --- |
+| Тонкий клиент `/S` | `1CV8C` | `6af539af-37b0-4b59-ad42-89f9ecdb2830` |
+| Тонкий клиент `/WS` | `1CV8C` | `e2a1ba3e-c227-4ddd-9832-66242f53221f` |
+| Интерактивный Конфигуратор `/S` | `Designer` | `aab8e302-b4ab-4dad-a44a-9f1a7b8c6918` |
+
+```text
+ibsrv --data=<каталог-сервера> --db-path=<копия-ИБ> --name=probe184 --http-address=127.0.0.1 --http-port=27414 --http-base=/probe184 --direct-regport=27441 --direct-range=27460:27469 --ssh-port=27443 --ssh-host-key=<ключ-стенда> --schedule-jobs=deny
+1cv8c ENTERPRISE /S "127.0.0.1:27441\probe184" /N Probe184 /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл>
+1cv8c ENTERPRISE /WS http://127.0.0.1:27414/probe184 /N Probe184 /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл>
+1cv8 DESIGNER /S "127.0.0.1:27441\probe184" /N Probe184 /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл>
+ibcmd --pid=<pid-ibsrv> session list
+```
+
+Успешные сеансы проверяли при открытых окнах клиентов, затем процессы останавливали
+извне. С тем же именем и неверным паролем каждый клиент завершился с кодом 1, записал
+`Пользователь ИБ не идентифицирован` в `/Out` и не создал новый сеанс пользователя.
+Замер подтверждает приём `/N` и `/P` тонким клиентом по `/WS` самого `ibsrv`.
+
 ## Пакетный Конфигуратор через прямой шлюз
 
 Замер 06.10.2026. Задача: [#179](https://github.com/IngvarConsulting/v8-runner-rust/issues/179). Платформа 8.3.27.2074, macOS.
@@ -970,6 +1036,39 @@ $P/ibcmd session list --pid=<pid ibsrv>
 У `/RestoreIB` ключа `-SessionTerminate` нет (молча игнорируется); перед ним сеансы
 нужно завершить отдельно, например `ibcmd session terminate --remote=ssh://…` (см. раздел
 о сеансах).
+
+### Поколение, список расширений и опись по прямому шлюзу (#184)
+
+Замер 17.11.2026, Windows 11, 1С 8.3.27.2074. Автономный сервер работал с отдельной
+файловой копией DemoAccountingKz с пользователями. Конфигуратор подключался через
+`/S "127.0.0.1:27441\probe184"` с реквизитами пользователя ИБ.
+
+| Команда | Код | Результат |
+| --- | --- | --- |
+| `/GetConfigGenerationID` | 0 | `/Out`: `76cf68b0126837418abc9e878db8df1300000000`, UTF-8 с BOM, CRLF, 45 байт |
+| `/GetConfigGenerationID`, неверное имя пользователя | 1 | `/Out`: `Пользователь ИБ не идентифицирован` |
+| `/DumpDBCfgList -AllExtensions`, до установки расширения | 0 | `/Out` содержит только BOM, список пуст |
+| `/DumpDBCfgList -AllExtensions`, после применения расширения | 0 | `/Out`: `Расширение1`, UTF-8 с BOM и CRLF, 26 байт |
+| `/DumpConfigToFiles <dir> -configDumpInfoOnly` | 0 | В новом каталоге только `ConfigDumpInfo.xml` (7 972 384 байта); в `/Out` только BOM |
+
+```text
+1cv8 DESIGNER /S "127.0.0.1:27441\probe184" /N Администратор /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /GetConfigGenerationID
+1cv8 DESIGNER /S "127.0.0.1:27441\probe184" /N Администратор /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /DumpDBCfgList -AllExtensions
+1cv8 DESIGNER /S "127.0.0.1:27441\probe184" /N Администратор /P <пароль> /DisableStartupDialogs /DisableStartupMessages /Out <отдельный-файл> /DumpConfigToFiles <dir> -configDumpInfoOnly
+```
+
+Для непустого списка использована копия `tests/fixtures/designer/extension`. В ней
+указаны русский язык заимствованной базы (`ExtendedConfigurationObject`
+`2c7fb663-11bf-4edc-b036-4e861fef613c`), `TaxiEnableVersion8_2` и `Version8_3_21`.
+В той же пакетной форме `/LoadConfigFromFiles <ext> -Extension Расширение1`,
+`/UpdateDBCfg -Extension Расширение1` и `/DumpDBCfg <file.cfe> -Extension Расширение1`
+вернули 0. Последняя команда подтвердила применение, выгрузив CFE на 6 164 байта.
+Непустой список содержит внутреннее имя отдельной строкой в том же формате, что
+и [кластерный ответ](#пакетный-список-расширений-на-кластере). Опись основной конфигурации
+разобрана как XML `ConfigDumpInfo` в формате `Hierarchical`, версия `2.20`.
+После остановки `ibsrv` те же чтения поколения и описи повторены через `/F <копия-ИБ>`
+при неизменной основной конфигурации. Оба вернули 0, файл `/Out` с токеном и
+`ConfigDumpInfo.xml` совпали побайтно с файлами прямого шлюза.
 
 ## Локализованный журнал `/CheckConfig` файловой базы на Windows
 
