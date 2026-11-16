@@ -752,6 +752,16 @@ pub(super) fn sessions(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Option<Vec<crate::platform::rac::Session>> {
+    if let Some(gate) = crate::use_cases::sessions::PinnedGate::from_config(config).ok()? {
+        let answer = gate
+            .execute(
+                context,
+                config,
+                crate::platform::standalone_sessions::SessionCall::List,
+            )
+            .ok()?;
+        return crate::platform::rac::checked_sessions(&answer);
+    }
     let (ibcmd, source) = session_target(context, config, runner, host)?;
     let request = ibsrv::session_list(&ibcmd, source);
     let answer = match runner.run_with_policy(

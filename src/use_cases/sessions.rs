@@ -9,9 +9,11 @@ use crate::domain::sessions::{
     protected_application, SessionTerminationError, SessionsListResult, SessionsResult,
     SessionsTerminateResult,
 };
+use crate::platform::agent::{AgentEndpoint, HostKeyExpectation, WaitPolicy};
 use crate::platform::ibsrv::{self, SessionSource};
 use crate::platform::process::{ProcessExecutor, ProcessRequest, ProcessResult, ProcessRunner};
 use crate::platform::rac;
+use crate::platform::standalone_sessions::{self, SessionCall};
 use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::cluster_admin::{cluster_auth, ClusterAdmin, CLUSTER_CREDENTIALS};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
@@ -96,6 +98,51 @@ enum Endpoint<'a> {
         binary: PathBuf,
         source: SessionSource<'a>,
     },
+    PinnedStandalone(PinnedGate),
+}
+
+pub(super) struct PinnedGate {
+    endpoint: AgentEndpoint,
+    key: HostKeyExpectation,
+}
+
+impl PinnedGate {
+    pub(super) fn from_config(config: &AppConfig) -> Result<Option<Self>, AppError> {
+        let Some(server) = config.infobase.standalone.as_ref() else {
+            return Ok(None);
+        };
+        let Some(fingerprint) = server.host_fingerprint.as_deref() else {
+            return Ok(None);
+        };
+        if server.managed.is_some() {
+            return Ok(None);
+        }
+        let (host, port) = server.gate_endpoint().map_err(AppError::Validation)?;
+        Ok(Some(Self {
+            endpoint: AgentEndpoint { host, port },
+            key: HostKeyExpectation::declared(fingerprint).map_err(AppError::Validation)?,
+        }))
+    }
+
+    pub(super) fn execute(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        call: SessionCall<'_>,
+    ) -> Result<String, AppError> {
+        let policy = WaitPolicy::from_step(
+            context.process_policy(InterruptionSafetyClass::GracefulThenKill, Some(TIMEOUT)),
+        );
+        let connection = config.v8_connection();
+        standalone_sessions::execute(
+            &self.endpoint,
+            &self.key,
+            connection.user.as_deref().unwrap_or_default(),
+            connection.password.as_deref().unwrap_or_default(),
+            call,
+            &policy,
+        )
+    }
 }
 
 struct Backend<'a> {
@@ -122,21 +169,17 @@ impl<'a> Backend<'a> {
                 CapabilityReason::Target,
                 "sessions deny and allow require a cluster infobase; ibcmd exposes no maintenance lock for the standalone server",
             )),
-            TargetKind::Standalone => {
-                let (binary, source) = crate::use_cases::managed_stand::standalone_session_target(
-                    context, config,
-                ).ok_or_else(|| AppError::environment(
-                    "sessions requires a running managed standalone server or infobase.standalone.gate and ibcmd",
-                ))?;
-                if matches!(source, SessionSource::Gate(_))
-                    && config.infobase.standalone.as_ref().is_some_and(|server| server.host_fingerprint.is_some())
-                {
-                    return Err(AppError::environment(
-                        "ibcmd cannot bind its SSH connection to infobase.standalone.host-fingerprint; use the managed server by local PID or the platform administration utilities with the declared key",
-                    ));
+            TargetKind::Standalone => match PinnedGate::from_config(config)? {
+                Some(gate) => Endpoint::PinnedStandalone(gate),
+                None => {
+                    let (binary, source) = crate::use_cases::managed_stand::standalone_session_target(
+                        context, config,
+                    ).ok_or_else(|| AppError::environment(
+                        "sessions requires a running managed standalone server or infobase.standalone.gate and ibcmd",
+                    ))?;
+                    Endpoint::Standalone { binary, source }
                 }
-                Endpoint::Standalone { binary, source }
-            }
+            },
             TargetKind::Cluster => {
                 let admin = ClusterAdmin::connect(context, config, runner)?;
                 let (_, reference) = config
@@ -160,7 +203,7 @@ impl<'a> Backend<'a> {
     fn managed_ras(&self) -> bool {
         match &self.endpoint {
             Endpoint::Cluster { admin, .. } => admin.managed_ras(),
-            Endpoint::Standalone { .. } => false,
+            Endpoint::Standalone { .. } | Endpoint::PinnedStandalone(_) => false,
         }
     }
 
@@ -180,6 +223,9 @@ impl<'a> Backend<'a> {
             }
             Endpoint::Standalone { binary, source } => {
                 self.ibcmd_call(&ibsrv::session_list(binary, *source), *source)?
+            }
+            Endpoint::PinnedStandalone(gate) => {
+                gate.execute(self.context, self.config, SessionCall::List)?
             }
         };
         rac::checked_sessions(&answer).ok_or_else(|| {
@@ -258,6 +304,17 @@ impl<'a> Backend<'a> {
                     &ibsrv::session_terminate(binary, *source, &id, message),
                     *source,
                 ),
+                Endpoint::PinnedStandalone(gate) => Uuid::parse_str(&id)
+                    .map_err(|_| {
+                        AppError::InvalidOutput("invalid standalone session UUID".to_owned())
+                    })
+                    .and_then(|session| {
+                        gate.execute(
+                            self.context,
+                            self.config,
+                            SessionCall::Terminate { session, message },
+                        )
+                    }),
             };
             match answer {
                 Ok(_) if matches!(self.endpoint, Endpoint::Cluster { .. }) => {

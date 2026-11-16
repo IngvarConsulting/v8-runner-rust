@@ -746,12 +746,68 @@ impl HostKeyExpectation {
 ///
 /// Ключ хоста сверяется здесь и больше нигде: это единственное место, где библиотека
 /// спрашивает раннер, тот ли сервер ответил.
-struct ClientEvents {
+pub(super) struct ClientEvents {
     expectation: HostKeyExpectation,
 
     /// Куда лечь увиденному ключу. Обработчик уезжает в `connect` по значению, а
     /// разбираться с отказом приходится снаружи — иначе причина осталась бы внутри.
     presented: Arc<Mutex<Option<String>>>,
+}
+
+/// Открывает SSH-транспорт. Пароль и выбор подсистемы принадлежат вызывающему.
+pub(super) async fn connect_ssh(
+    endpoint: &AgentEndpoint,
+    expectation: &HostKeyExpectation,
+    handshake: Option<Duration>,
+) -> Result<client::Handle<ClientEvents>, AgentError> {
+    let named = endpoint.to_string();
+    let host = endpoint.host.to_string();
+    let presented = Arc::new(Mutex::new(None));
+    let connect = client::connect(
+        Arc::new(ssh_client_config()),
+        (host.as_str(), endpoint.port),
+        ClientEvents {
+            expectation: expectation.clone(),
+            presented: presented.clone(),
+        },
+    );
+    let connected = match handshake {
+        Some(limit) => {
+            tokio::time::timeout(limit, connect)
+                .await
+                .map_err(|_| AgentError::Unreachable {
+                    endpoint: named.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("no SSH answer within {} ms", limit.as_millis()),
+                    ),
+                })?
+        }
+        None => connect.await,
+    };
+    connected.map_err(|error| match error {
+        russh::Error::IO(source) => AgentError::Unreachable {
+            endpoint: named.clone(),
+            source,
+        },
+        // Причина отказа по ключу едет отдельно от `Result<bool, _>` обработчика.
+        russh::Error::UnknownKey => AgentError::HostKeyRejected {
+            endpoint: named.clone(),
+            expected: match expectation {
+                HostKeyExpectation::Pinned(fingerprint) => fingerprint.to_string(),
+                HostKeyExpectation::Unpinned => "any public key".to_owned(),
+            },
+            presented: presented
+                .lock()
+                .expect("host key slot")
+                .clone()
+                .unwrap_or_else(|| "nothing".to_owned()),
+        },
+        source => AgentError::Handshake {
+            endpoint: named.clone(),
+            source,
+        },
+    })
 }
 
 impl client::Handler for ClientEvents {
@@ -876,61 +932,13 @@ impl AgentSession {
             })?;
         let endpoint = request.endpoint.clone();
         let named = endpoint.to_string();
-        let host = endpoint.host.to_string();
         // Имя пользователя базы в журнал не идёт, как и у Конфигуратора (`/N ***`): журнал
         // действий читают те, кому учётных данных базы не давали.
         debug!(endpoint = %named, "opening agent session");
 
-        let expectation = request.host_key.clone();
-        let presented: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let (connection, channel) =
             runtime.block_on(async {
-                let config = Arc::new(ssh_client_config());
-                let connect = client::connect(
-                    config,
-                    (host.as_str(), endpoint.port),
-                    ClientEvents {
-                        expectation: expectation.clone(),
-                        presented: presented.clone(),
-                    },
-                );
-                let connected = match handshake {
-                    Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
-                        AgentError::Unreachable {
-                            endpoint: named.clone(),
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                format!("no SSH answer within {} ms", limit.as_millis()),
-                            ),
-                        }
-                    })?,
-                    None => connect.await,
-                };
-                let mut connection = connected.map_err(|error| match error {
-                    russh::Error::IO(source) => AgentError::Unreachable {
-                        endpoint: named.clone(),
-                        source,
-                    },
-                    // Отказ по ключу — не сбой рукопожатия: сервер ответил исправно,
-                    // просто это не тот сервер. Причина едет отдельно, потому что через
-                    // `Result<bool, _>` обработчика она пройти не может.
-                    russh::Error::UnknownKey => AgentError::HostKeyRejected {
-                        endpoint: named.clone(),
-                        expected: match &expectation {
-                            HostKeyExpectation::Pinned(fingerprint) => fingerprint.to_string(),
-                            HostKeyExpectation::Unpinned => "any public key".to_owned(),
-                        },
-                        presented: presented
-                            .lock()
-                            .expect("host key slot")
-                            .clone()
-                            .unwrap_or_else(|| "nothing".to_owned()),
-                    },
-                    source => AgentError::Handshake {
-                        endpoint: named.clone(),
-                        source,
-                    },
-                })?;
+                let mut connection = connect_ssh(&endpoint, &request.host_key, handshake).await?;
                 let auth = connection
                     .authenticate_password(request.user.clone(), request.password.clone())
                     .await
