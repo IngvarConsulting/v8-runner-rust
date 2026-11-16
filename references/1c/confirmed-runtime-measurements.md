@@ -6170,3 +6170,21 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
 `ras help cluster` у 8.3.27.2074 показывает `--monitor-address` для шлюза HTTP-монитора.
 Ключа адреса сокета администрирования в справке нет. После замера все процессы стенда
 и их слушатели исчезли, временный каталог удалён.
+
+## Свойства окна обслуживания кластера (#212)
+
+Замер 16.11.2026, Windows 11, 1С 8.3.27.2074 и отдельный Postgres Pro 1C
+17.11. База создана штатным `rac infobase create --create-database`.
+Проверку состояния делал `rac infobase info --cluster=<uuid> --infobase=<uuid>`
+с реквизитами кластера и ИБ. В ответе были поля `sessions-deny`,
+`scheduled-jobs-deny`, `denied-from`, `denied-to`, `denied-message`,
+`denied-parameter` и `permission-code`. У открытой базы даты, сообщение,
+маркер и код были пустыми.
+
+При `v8-runner sessions deny --jobs --message maintenance --code <код>`
+RAC показывал `sessions-deny: on`, `scheduled-jobs-deny: on`, сообщение и UUID
+маркера в двойных кавычках и заданный код. Даты оставались пустыми.
+`v8-runner sessions allow` возвращал 0, снимал запрет сеансов, очищал маркер,
+сообщение и код, восстанавливал исходное состояние заданий. Проверены
+исходные значения `scheduled-jobs-deny: off` и `on`. Кластер, база,
+публикация PostgreSQL и временный каталог убраны.
