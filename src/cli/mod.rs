@@ -8,6 +8,7 @@ pub(crate) mod external_pull;
 pub mod global_flags;
 /// CLI-facing output helpers.
 pub mod output;
+mod sessions;
 /// CLI signal routing helpers.
 pub mod signal;
 /// Previous command-line names accepted for one release cycle; checked against the parser.

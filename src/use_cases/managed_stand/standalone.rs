@@ -697,19 +697,15 @@ pub(super) fn run_standalone(
 /// Сколько ждать ответа `ibcmd session list`: на замере он отвечает за 0,1–0,2 с.
 const SESSIONS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Сеансы базы у автономного сервера: источник признака «базу держат сеансы» у применения
-/// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). Свой `ibsrv` раннер спрашивает по pid
-/// из записи (`ibcmd` из того же каталога, что `ibsrv`), чужой — через объявленный SSH-шлюз
-/// (`ibcmd` проекта). `None` — свой сервер не работает, пути нет или `ibcmd` не ответил: на
-/// замере #613 у сервера над файловой базой, в котором сеансов ещё не было, он отвечает rc=−1.
-pub(super) fn sessions(
+/// Свой `ibsrv` спрашивается по pid из подтверждённой записи службы, чужой — через SSH-шлюз.
+pub(super) fn session_target<'a>(
     context: &ExecutionContext,
-    config: &AppConfig,
+    config: &'a AppConfig,
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
-) -> Option<Vec<crate::platform::rac::Session>> {
+) -> Option<(PathBuf, ibsrv::SessionSource<'a>)> {
     let standalone = config.infobase.standalone.as_ref()?;
-    let request = if standalone.managed.is_some() {
+    if standalone.managed.is_some() {
         let declared = declared(config).ok()?;
         let paths = ServicePaths::new(
             &config.local_dir(),
@@ -734,15 +730,30 @@ pub(super) fn sessions(
             .bin
             .parent()?
             .join(format!("ibcmd{}", std::env::consts::EXE_SUFFIX));
-        ibsrv::session_list(&ibcmd, ibsrv::SessionSource::Pid(record.pid?))
+        Some((ibcmd, ibsrv::SessionSource::Pid(record.pid?)))
     } else {
         let gate = standalone.gate.as_deref()?;
         let ibcmd = crate::platform::utilities::PlatformUtilities::from_config(config)
             .locate(crate::platform::locator::UtilityType::Ibcmd)
             .ok()?
             .path;
-        ibsrv::session_list(&ibcmd, ibsrv::SessionSource::Gate(gate))
-    };
+        Some((ibcmd, ibsrv::SessionSource::Gate(gate)))
+    }
+}
+
+/// Сеансы базы у автономного сервера: источник признака «базу держат сеансы» у применения
+/// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). Свой `ibsrv` раннер спрашивает по pid
+/// из записи (`ibcmd` из того же каталога, что `ibsrv`), чужой — через объявленный SSH-шлюз
+/// (`ibcmd` проекта). `None` — свой сервер не работает, пути нет или `ibcmd` не ответил: на
+/// замере #613 у сервера над файловой базой, в котором сеансов ещё не было, он отвечает rc=−1.
+pub(super) fn sessions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Option<Vec<crate::platform::rac::Session>> {
+    let (ibcmd, source) = session_target(context, config, runner, host)?;
+    let request = ibsrv::session_list(&ibcmd, source);
     let answer = match runner.run_with_policy(
         &request,
         &context.process_policy(

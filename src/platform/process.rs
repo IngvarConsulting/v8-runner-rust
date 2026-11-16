@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::num::NonZeroI32;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -481,6 +482,16 @@ pub enum ProcessError {
     },
 }
 
+/// Ввод для процесса с захватом потоков. Значения могут быть паролями.
+pub enum CapturedInput<'a> {
+    Immediate(&'a [u8]),
+    /// Данные отправляются после точного совпадения первой строки stdout с приглашением.
+    AfterStdoutLine {
+        bytes: &'a [u8],
+        prompts: &'static [&'static str],
+    },
+}
+
 /// Boundary for synchronous and detached process execution.
 pub trait ProcessRunner {
     /// Execute a process under the caller's execution policy.
@@ -499,6 +510,24 @@ pub trait ProcessRunner {
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
     ) -> Result<ProcessResult, ProcessError>;
+
+    /// Execute a captured process and send bytes to stdin before closing the pipe.
+    /// Input stays separate from the request so it cannot appear in command diagnostics.
+    fn run_with_input(
+        &self,
+        request: &ProcessRequest,
+        policy: &ProcessExecutionPolicy,
+        input: CapturedInput<'_>,
+    ) -> Result<ProcessResult, ProcessError> {
+        let _ = (policy, input);
+        Err(ProcessError::SpawnFailed {
+            cmd: render_command(request),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "captured process input is not supported by this runner",
+            ),
+        })
+    }
 
     /// Start a process in fire-and-forget mode without waiting for completion. A process
     /// that passed its startup probe is the command's work: the implementation marks `work`.
@@ -550,7 +579,16 @@ impl ProcessRunner for ProcessExecutor {
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
     ) -> Result<ProcessResult, ProcessError> {
-        self.run_internal(request, policy)
+        self.run_internal(request, policy, None)
+    }
+
+    fn run_with_input(
+        &self,
+        request: &ProcessRequest,
+        policy: &ProcessExecutionPolicy,
+        input: CapturedInput<'_>,
+    ) -> Result<ProcessResult, ProcessError> {
+        self.run_internal(request, policy, Some(input))
     }
 
     fn spawn(
@@ -621,6 +659,7 @@ impl ProcessExecutor {
         &self,
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
+        input: Option<CapturedInput<'_>>,
     ) -> Result<ProcessResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(
@@ -641,11 +680,16 @@ impl ProcessExecutor {
                 timeout_ms: 0,
             });
         }
-        let spawned = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
+        let io_mode = if input.is_some() {
+            ProcessIoMode::CapturedWithInput
+        } else {
+            ProcessIoMode::Captured
+        };
+        let spawned = spawn_command(request, io_mode, &rendered_command)?;
         if let Some(work) = &policy.work {
             work.mark_work_given();
         }
-        let output = wait_for_output(spawned, &rendered_command, policy)?;
+        let output = wait_for_output(spawned, &rendered_command, policy, input)?;
         debug!(
             command = rendered_command.as_str(),
             exit_code = output.status.code().unwrap_or(-1),
@@ -738,9 +782,10 @@ enum ProcessIoMode {
     UnicaOwnedDetached,
     ManagedDetached,
     ManagedWait,
-    /// `ManagedWait`, привязанный к жизни этого процесса (`ManagedSpawnMode::Tied`).
+    /// Процесс, привязанный к жизни раннера; stderr без указанного журнала закрыт.
     ManagedTied,
     Captured,
+    CapturedWithInput,
 }
 
 impl ProcessIoMode {
@@ -749,7 +794,9 @@ impl ProcessIoMode {
             Self::Detached | Self::ManagedDetached => true,
             #[cfg(any(unix, windows))]
             Self::UnicaOwnedDetached => true,
-            Self::ManagedWait | Self::ManagedTied | Self::Captured => false,
+            Self::ManagedWait | Self::ManagedTied | Self::Captured | Self::CapturedWithInput => {
+                false
+            }
         }
     }
 
@@ -871,6 +918,14 @@ impl ChildHandle {
             Self::Standard(child) => child.kill(),
             #[cfg(windows)]
             Self::Wrapped(child) => child.start_kill(),
+        }
+    }
+
+    fn stdin(&mut self) -> &mut Option<std::process::ChildStdin> {
+        match self {
+            Self::Standard(child) => &mut child.stdin,
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.stdin(),
         }
     }
 
@@ -1146,7 +1201,11 @@ fn build_command(
     if let Some(workdir) = &line.workdir {
         cmd.current_dir(workdir);
     }
-    cmd.stdin(Stdio::null());
+    cmd.stdin(if matches!(io_mode, ProcessIoMode::CapturedWithInput) {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     match io_mode {
         ProcessIoMode::Detached => {
             cmd.stdout(Stdio::null());
@@ -1168,26 +1227,31 @@ fn build_command(
                 die_with_parent(&mut cmd);
             }
             cmd.stdout(Stdio::null());
-            let path =
-                request
-                    .stderr_log_path
-                    .as_ref()
-                    .ok_or_else(|| ProcessError::StderrLogIo {
+            let stderr = match &request.stderr_log_path {
+                Some(path) => {
+                    let file = std::fs::File::create(path).map_err(|source| {
+                        ProcessError::StderrLogIo {
+                            path: path.clone(),
+                            source,
+                        }
+                    })?;
+                    Stdio::from(file)
+                }
+                None if matches!(io_mode, ProcessIoMode::ManagedTied) => Stdio::null(),
+                None => {
+                    return Err(ProcessError::StderrLogIo {
                         path: PathBuf::new(),
                         source: std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
                             "stderr log path is required",
                         ),
-                    })?;
-            let stderr =
-                std::fs::File::create(path).map_err(|source| ProcessError::StderrLogIo {
-                    path: path.clone(),
-                    source,
-                })?;
-            cmd.stderr(Stdio::from(stderr));
+                    });
+                }
+            };
+            cmd.stderr(stderr);
             set_child_process_group(&mut cmd);
         }
-        ProcessIoMode::Captured => {
+        ProcessIoMode::Captured | ProcessIoMode::CapturedWithInput => {
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             set_child_process_group(&mut cmd);
@@ -1360,10 +1424,78 @@ fn is_executable_busy(error: &std::io::Error) -> bool {
     }
 }
 
+/// Шлюз SSH может сначала спрашивать о доверии ключу хоста. Реквизиты базы
+/// разблокирует только первое приглашение аутентификации, принятое целиком.
+struct InputGate {
+    signal: mpsc::Sender<()>,
+    prompts: &'static [&'static str],
+    first_line: Vec<u8>,
+}
+
+struct BeforeInput<R> {
+    stream: R,
+    gate: Option<InputGate>,
+}
+
+impl<R: std::io::Read> std::io::Read for BeforeInput<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        const MAX_PROMPT_LEN: usize = 4096;
+        let count = self.stream.read(buffer)?;
+        if let Some(mut gate) = self.gate.take() {
+            let chunk = &buffer[..count];
+            let end = chunk.iter().position(|&byte| byte == b'\n');
+            let part = &chunk[..end.unwrap_or(count)];
+            if count > 0 && gate.first_line.len() + part.len() <= MAX_PROMPT_LEN {
+                gate.first_line.extend_from_slice(part);
+                if end.is_none() {
+                    self.gate = Some(gate);
+                } else if gate
+                    .prompts
+                    .contains(&decode_output(gate.first_line).trim_end_matches('\r'))
+                {
+                    let _ = gate.signal.send(());
+                }
+            }
+        }
+        Ok(count)
+    }
+}
+
+fn begin_input(child: &mut ChildHandle, input: CapturedInput<'_>) -> Option<InputGate> {
+    let mut stdin = child
+        .stdin()
+        .take()
+        .expect("captured input mode creates a stdin pipe");
+    let (bytes, receiver, gate) = match input {
+        CapturedInput::Immediate(bytes) => (bytes, None, None),
+        CapturedInput::AfterStdoutLine { bytes, prompts } => {
+            let (signal, receiver) = mpsc::channel();
+            let gate = InputGate {
+                signal,
+                prompts,
+                first_line: Vec::new(),
+            };
+            (bytes, Some(receiver), Some(gate))
+        }
+    };
+    let bytes = bytes.to_vec();
+    // Запись может заблокироваться на полной трубе. Отдельный поток не задерживает
+    // ожидание отмены. Закрытую трубу инструмент мог оставить после своего ответа.
+    std::thread::spawn(move || {
+        use std::io::Write;
+
+        if receiver.is_none_or(|ready| ready.recv().is_ok()) {
+            let _ = stdin.write_all(&bytes);
+        }
+    });
+    gate
+}
+
 fn wait_for_output(
     mut spawned: SpawnedChild,
     rendered_command: &str,
     policy: &ProcessExecutionPolicy,
+    input: Option<CapturedInput<'_>>,
 ) -> Result<ObservedOutput, ProcessError> {
     let stdout = spawned
         .child
@@ -1389,6 +1521,11 @@ fn wait_for_output(
             .then(|| std::sync::Arc::clone(slot))
     };
     let (stdout_question, stderr_question) = (watched(&question), watched(&question));
+    let sensitive_input = input.is_some();
+    let stdout = BeforeInput {
+        stream: stdout,
+        gate: input.and_then(|input| begin_input(&mut spawned.child, input)),
+    };
     let stdout_reader =
         std::thread::spawn(move || capture::read_stream(stdout, stdout_question.as_ref()));
     let stderr_reader =
@@ -1448,7 +1585,11 @@ fn wait_for_output(
         if let Some(asked) = question.get() {
             // Вопрос сильнее отложенного прерывания: процесс снимает сам раннер, и ответ
             // называет вопрос, а не отмену.
-            let question = decode_output(asked.clone());
+            let question = if sensitive_input {
+                "***".to_owned()
+            } else {
+                decode_output(asked.clone())
+            };
             warn!(
                 command = rendered_command,
                 question = question.as_str(),
@@ -1970,8 +2111,8 @@ mod tests {
     }
 
     use super::{
-        is_invalid_standard_handle_error, render_command, ManagedSpawnMode, ProcessError,
-        ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
+        is_invalid_standard_handle_error, render_command, CapturedInput, ManagedSpawnMode,
+        ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessIoMode, ProcessRequest,
         ProcessResult, ProcessRunner, WorkGiven, WINDOWS_ERROR_INVALID_HANDLE,
     };
@@ -2040,6 +2181,123 @@ mod tests {
             stderr_log_path: None,
             startup_probe: None,
             windows_verbatim_args: Vec::new(),
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn child_reads_standard_input() {
+        use std::io::Read;
+
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        println!("input=<{input}>");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn captured_stdin_transfers_utf8_and_closes_the_pipe() {
+        let mut request = plain_request(std::env::current_exe().unwrap());
+        request.args = [
+            "--exact",
+            "platform::process::tests::child_reads_standard_input",
+            "--ignored",
+            "--nocapture",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let policy = ProcessExecutionPolicy {
+            timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        };
+        let input = "Администратор\nпароль\n";
+
+        let result = ProcessExecutor
+            .run_with_input(
+                &request,
+                &policy,
+                CapturedInput::Immediate(input.as_bytes()),
+            )
+            .expect("deliver input");
+        assert_eq!(result.outcome(), Ok(()));
+        assert!(result.stdout.contains(&format!("input=<{input}>")));
+
+        let result = ProcessExecutor.run_with_policy(&request, &policy).unwrap();
+        assert_eq!(result.outcome(), Ok(()));
+        assert!(result.stdout.contains("input=<>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_stdin_does_not_block_cancellation() {
+        let root = tempdir().unwrap();
+        let mut request = plain_request(PathBuf::from("sh"));
+        request.args = ["-c", "touch started; exec sleep 30"]
+            .map(str::to_owned)
+            .to_vec();
+        request.workdir = Some(root.path().to_path_buf());
+        let policy = ProcessExecutionPolicy {
+            timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        };
+        let operator =
+            super::cancel_when_started(&root.path().join("started"), policy.cancellation.clone());
+        let input = vec![0; 1 << 20];
+
+        let result =
+            ProcessExecutor.run_with_input(&request, &policy, CapturedInput::Immediate(&input));
+        assert!(operator.join().unwrap());
+        assert!(matches!(
+            result,
+            Err(ProcessError::Cancelled {
+                delivered: true,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn only_a_parent_tied_process_may_omit_its_stderr_log() {
+        let request = plain_request(PathBuf::from("fixture"));
+        assert!(super::build_command(&request, ProcessIoMode::ManagedTied, "fixture").is_ok());
+        assert!(matches!(
+            super::build_command(&request, ProcessIoMode::ManagedWait, "fixture"),
+            Err(ProcessError::StderrLogIo { .. })
+        ));
+    }
+
+    #[test]
+    fn input_waits_for_a_matching_first_line_and_never_answers_host_confirmation() {
+        use std::io::{Cursor, Read};
+        use std::sync::mpsc;
+
+        for (output, accepted) in [
+            ("Authentication required\nUsername: ", true),
+            ("Trust this host? [y/n]: ", false),
+            ("Error connecting\nAuthentication required\n", false),
+        ] {
+            let (signal, ready) = mpsc::channel();
+            let mut reader = super::BeforeInput {
+                stream: Cursor::new(output),
+                gate: Some(super::InputGate {
+                    signal,
+                    prompts: &["Authentication required"],
+                    first_line: Vec::new(),
+                }),
+            };
+            let mut captured = Vec::new();
+            let mut buffer = [0; 3];
+            loop {
+                let read = reader.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                captured.extend_from_slice(&buffer[..read]);
+            }
+            assert_eq!(captured, output.as_bytes());
+            assert_eq!(ready.try_recv().is_ok(), accepted);
         }
     }
 

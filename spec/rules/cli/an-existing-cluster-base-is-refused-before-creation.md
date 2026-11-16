@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.AN-EXISTING-CLUSTER-BASE-IS-REFUSED-BEFORE-CREATION
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/213
+check:
+  - tests/cli_init.rs::an_existing_cluster_base_refuses_in_preview_and_before_creation
 ---
 
 # Существующая база в кластере — отказ до создания, и превью его называет

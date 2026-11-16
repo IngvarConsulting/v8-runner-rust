@@ -11,12 +11,11 @@ use crate::domain::capability::{Provider, TargetKind};
 
 /// Отвечает ли инструмент поколением у такой цели. Единственное место этого признака.
 ///
-/// Конфигуратор у не-файловой цели (кластер, прямой шлюз автономного сервера) заведомо не
-/// отвечает: формат его ответа там не замерен, и нераспознанный ответ — отсутствие ответа
-/// (`INV.USE-CASES.A-CLUSTER-DESIGNER-GENERATION-IS-READ-LIKE-A-FILE-ONE`, gap #184). Тогда
-/// выгрузка поверх каталога памяти о базе не запишет, и отказ без памяти советует полную
-/// (`INV.USE-CASES.WITHOUT-A-GENERATION-ANSWER-A-NO-MEMORY-REFUSAL-OFFERS-PULL-FORCE`). Признак
-/// снимается вместе с gap #184. Остальные инструменты отвечают.
+/// Для Конфигуратора обмен использует поколение файловой базы, а для серверных целей
+/// действует gap #184 (`INV.USE-CASES.A-CLUSTER-DESIGNER-GENERATION-IS-READ-LIKE-A-FILE-ONE`).
+/// Проба прямого шлюза использует токен как подтверждение входа в ИБ. Без поколения обмен
+/// советует полную выгрузку
+/// (`INV.USE-CASES.WITHOUT-A-GENERATION-ANSWER-A-NO-MEMORY-REFUSAL-OFFERS-PULL-FORCE`).
 pub fn answers_generation(tool: Provider, target: TargetKind) -> bool {
     match tool {
         Provider::Designer => target == TargetKind::File,

@@ -3,6 +3,8 @@
 pub struct V8Connection {
     raw: String,
     connection_args: Vec<String>,
+    /// The server address denotes a standalone server's direct gate.
+    pub(crate) direct_gate: bool,
     /// Optional username added as `/N <value>`.
     pub user: Option<String>,
     /// Optional password added as `/P <value>`.
@@ -19,6 +21,7 @@ impl V8Connection {
         Self {
             raw: format!("/F {path}"),
             connection_args: vec!["/F".to_owned(), path],
+            direct_gate: false,
             user: None,
             password: None,
         }
@@ -43,6 +46,7 @@ impl V8Connection {
         Self {
             raw: trimmed.to_owned(),
             connection_args,
+            direct_gate: false,
             user: None,
             password: None,
         }
@@ -237,7 +241,7 @@ impl V8Connection {
 
     /// Сервер и имя базы в кластере: `Srvr` и `Ref` объявленной строки или части `/S
     /// <сервер>\<база>`.
-    fn cluster_address(&self) -> Option<(String, String)> {
+    pub(crate) fn cluster_address(&self) -> Option<(String, String)> {
         if let Some(address) = declared_server_address(&self.raw) {
             return Some((address.server, address.reference));
         }

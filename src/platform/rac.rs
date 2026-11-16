@@ -3,7 +3,38 @@
 
 use std::path::Path;
 
-use crate::platform::process::ProcessRequest;
+use crate::platform::process::{
+    ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
+};
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Default)]
+pub struct Credentials<'a> {
+    pub user: Option<&'a str>,
+    pub password: Option<&'a str>,
+}
+
+pub fn with_cluster_auth(
+    mut request: ProcessRequest,
+    credentials: Credentials<'_>,
+) -> ProcessRequest {
+    let address = request
+        .args
+        .pop()
+        .expect("rac request ends with its address");
+    append_auth(&mut request.args, "cluster", credentials);
+    request.args.push(address);
+    request
+}
+
+fn append_auth(args: &mut Vec<String>, level: &str, credentials: Credentials<'_>) {
+    if let Some(user) = credentials.user {
+        args.push(format!("--{level}-user={user}"));
+        if let Some(password) = credentials.password {
+            args.push(format!("--{level}-pwd={password}"));
+        }
+    }
+}
 
 /// База кластера для регистрации без создания БД.
 pub struct Registration<'a> {
@@ -37,6 +68,23 @@ pub fn cluster_list(rac: &Path, ras: &str) -> ProcessRequest {
     )
 }
 
+pub fn probe_clusters(
+    runner: &dyn ProcessRunner,
+    rac: &Path,
+    address: &str,
+    policy: &ProcessExecutionPolicy,
+) -> Result<Vec<Cluster>, ProcessError> {
+    runner
+        .run_with_policy(&cluster_list(rac, address), &policy.without_work())
+        .map(|answer| {
+            if answer.outcome().is_ok() {
+                clusters(&answer.stdout)
+            } else {
+                Vec::new()
+            }
+        })
+}
+
 /// `rac infobase summary list`: какие базы зарегистрированы в кластере.
 pub fn infobase_list(rac: &Path, ras: &str, cluster: &str) -> ProcessRequest {
     request(
@@ -49,6 +97,20 @@ pub fn infobase_list(rac: &Path, ras: &str, cluster: &str) -> ProcessRequest {
             ras.to_owned(),
         ],
     )
+}
+
+pub fn probe_infobases(
+    runner: &dyn ProcessRunner,
+    request: &ProcessRequest,
+    policy: &ProcessExecutionPolicy,
+) -> Result<crate::platform::process::ProcessResult, ProcessError> {
+    runner.run_with_policy(request, &policy.without_work())
+}
+
+pub fn created_infobase(answer: &str) -> Option<Uuid> {
+    (values(answer, "infobase").count() == 1)
+        .then(|| uuid_field(answer, "infobase"))
+        .flatten()
 }
 
 /// `rac infobase create` без `--create-database`: регистрирует базу над уже существующей БД.
@@ -74,6 +136,20 @@ pub fn register_infobase(rac: &Path, ras: &str, base: &Registration<'_>) -> Proc
     }
     args.push(ras.to_owned());
     request(rac, args)
+}
+
+pub fn create_infobase(
+    rac: &Path,
+    ras: &str,
+    base: &Registration<'_>,
+    credentials: Credentials<'_>,
+) -> ProcessRequest {
+    let mut request = with_cluster_auth(register_infobase(rac, ras, base), credentials);
+    request.args.insert(2, "--create-database".to_owned());
+    request
+        .args
+        .insert(3, "--scheduled-jobs-deny=on".to_owned());
+    request
 }
 
 /// `rac infobase drop` без `--drop-database`: снимает регистрацию базы, БД остаётся. У базы с
@@ -116,22 +192,186 @@ pub fn session_list(rac: &Path, ras: &str, cluster: &str, infobase: &str) -> Pro
     )
 }
 
+pub fn session_terminate(
+    rac: &Path,
+    ras: &str,
+    cluster: &str,
+    session: &str,
+    message: Option<&str>,
+    credentials: Credentials<'_>,
+) -> ProcessRequest {
+    let mut args = vec![
+        "session".to_owned(),
+        "terminate".to_owned(),
+        format!("--cluster={cluster}"),
+        format!("--session={session}"),
+    ];
+    if let Some(message) = message {
+        args.push(format!("--error-message={message}"));
+    }
+    append_auth(&mut args, "cluster", credentials);
+    args.push(ras.to_owned());
+    request(rac, args)
+}
+
+pub fn infobase_help(rac: &Path) -> ProcessRequest {
+    request(rac, vec!["help".to_owned(), "infobase".to_owned()])
+}
+
+pub struct InfobaseTarget<'a> {
+    pub cluster: &'a str,
+    pub id: &'a str,
+    pub cluster_auth: Credentials<'a>,
+    pub infobase_auth: Credentials<'a>,
+}
+
+fn infobase_args(action: &str, target: &InfobaseTarget<'_>) -> Vec<String> {
+    let mut args = vec![
+        "infobase".to_owned(),
+        action.to_owned(),
+        format!("--cluster={}", target.cluster),
+        format!("--infobase={}", target.id),
+    ];
+    append_auth(&mut args, "cluster", target.cluster_auth);
+    append_auth(&mut args, "infobase", target.infobase_auth);
+    args
+}
+
+pub fn infobase_info(rac: &Path, ras: &str, target: &InfobaseTarget<'_>) -> ProcessRequest {
+    let mut args = infobase_args("info", target);
+    args.push(ras.to_owned());
+    request(rac, args)
+}
+
+pub struct LockUpdate<'a> {
+    pub sessions_denied: bool,
+    pub jobs_denied: Option<bool>,
+    pub marker: &'a str,
+    pub message: &'a str,
+    pub permission_code: &'a str,
+}
+
+pub fn infobase_update(
+    rac: &Path,
+    ras: &str,
+    target: &InfobaseTarget<'_>,
+    lock: LockUpdate<'_>,
+) -> ProcessRequest {
+    let switch = |on| if on { "on" } else { "off" };
+    let mut args = infobase_args("update", target);
+    args.extend([
+        format!("--sessions-deny={}", switch(lock.sessions_denied)),
+        format!("--denied-parameter={}", lock.marker),
+        format!("--denied-message={}", lock.message),
+        format!("--permission-code={}", lock.permission_code),
+    ]);
+    if let Some(jobs) = lock.jobs_denied {
+        args.push(format!("--scheduled-jobs-deny={}", switch(jobs)));
+    }
+    args.push(ras.to_owned());
+    request(rac, args)
+}
+
+pub struct LockInfo {
+    pub sessions_denied: bool,
+    pub jobs_denied: bool,
+    pub marker: String,
+    pub message: String,
+    pub code: String,
+    pub scheduled: bool,
+}
+
+pub fn lock_info(answer: &str, id: &str) -> Option<LockInfo> {
+    let block = blocks(answer).find(|block| field(block, "infobase") == Some(id))?;
+    let switch = |key| match field(&block, key)? {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    };
+    Some(LockInfo {
+        sessions_denied: switch("sessions-deny")?,
+        jobs_denied: switch("scheduled-jobs-deny")?,
+        marker: field(&block, "denied-parameter")?
+            .trim_matches('"')
+            .to_owned(),
+        message: field(&block, "denied-message")?
+            .trim_matches('"')
+            .to_owned(),
+        code: field(&block, "permission-code")?
+            .trim_matches('"')
+            .to_owned(),
+        scheduled: ["denied-from", "denied-to"].into_iter().any(|key| {
+            field(&block, key).is_some_and(|value| {
+                !matches!(
+                    value.trim_matches('"'),
+                    "" | "0001-01-01T00:00:00" | "0001-01-01 00:00:00"
+                )
+            })
+        }),
+    })
+}
+
+pub struct Cluster {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+}
+
+pub fn clusters(answer: &str) -> Vec<Cluster> {
+    blocks(answer)
+        .map(|block| {
+            Some(Cluster {
+                id: uuid_field(&block, "cluster")?.to_string(),
+                host: field(&block, "host")?.to_owned(),
+                port: field(&block, "port")?
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
+}
+
+fn uuid_field(block: &str, key: &str) -> Option<Uuid> {
+    Uuid::parse_str(field(block, key)?)
+        .ok()
+        .filter(|id| !id.is_nil())
+}
+
+/// A successful query that can be used to decide whether it is safe to create a new base.
+pub fn checked_infobase_id(answer: &str, name: &str) -> Option<Option<Uuid>> {
+    let name = name.to_lowercase();
+    let mut found = None;
+    for block in blocks(answer) {
+        let id = uuid_field(&block, "infobase")?;
+        if infobase_name(&block)? == name && found.replace(id).is_some() {
+            return None;
+        }
+    }
+    Some(found)
+}
+
 /// Идентификатор базы с этим именем из ответа `infobase summary list`; имена сравниваются, как
 /// у [`lists_infobase`].
 pub fn infobase_id(answer: &str, name: &str) -> Option<String> {
     let name = name.to_lowercase();
     blocks(answer).find_map(|block| {
-        let listed = field(&block, "name")?.trim_matches('"').to_lowercase();
-        (listed == name)
+        (infobase_name(&block)? == name)
             .then(|| field(&block, "infobase").map(str::to_owned))
             .flatten()
     })
+}
+
+fn infobase_name(block: &str) -> Option<String> {
+    Some(field(block, "name")?.trim_matches('"').to_lowercase())
 }
 
 /// Один сеанс из ответа `session list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
+    pub number: Option<u32>,
     pub application: String,
     pub host: String,
     pub user: String,
@@ -141,24 +381,65 @@ pub struct Session {
     pub asleep: bool,
 }
 
+impl Session {
+    fn parse(block: &str) -> Option<Self> {
+        let value = |key| {
+            field(block, key)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_owned()
+        };
+        Some(Self {
+            id: field(block, "session")?.to_owned(),
+            number: field(block, "session-id").and_then(|value| value.parse().ok()),
+            application: value("app-id"),
+            host: value("host"),
+            user: value("user-name"),
+            started: value("started-at"),
+            asleep: value("hibernate") == "yes",
+        })
+    }
+
+    pub fn into_entry(self) -> crate::domain::sessions::SessionEntry {
+        use crate::domain::sessions::{from_this_machine, protected_application, SessionEntry};
+        SessionEntry {
+            from_this_machine: from_this_machine(&self.host),
+            computer: self.host,
+            application: crate::platform::session_list::application_of_rac(&self.application),
+            excluded: protected_application(&self.application),
+            application_title: self.application,
+            started: self.started,
+            user: (!self.user.is_empty()).then_some(self.user),
+            id: Some(self.id),
+            number: self.number,
+        }
+    }
+}
+
 /// Сеансы из ответа `session list`: блок без `session` пропускается.
 pub fn sessions(answer: &str) -> Vec<Session> {
     blocks(answer)
-        .filter_map(|block| {
-            let value = |key| {
-                field(&block, key)
-                    .unwrap_or_default()
-                    .trim_matches('"')
-                    .to_owned()
-            };
-            Some(Session {
-                id: field(&block, "session")?.to_owned(),
-                application: value("app-id"),
-                host: value("host"),
-                user: value("user-name"),
-                started: value("started-at"),
-                asleep: value("hibernate") == "yes",
-            })
+        .filter_map(|block| Session::parse(&block))
+        .collect()
+}
+
+/// The entire session snapshot is needed before a selected UUID can be terminated.
+pub fn checked_sessions(answer: &str) -> Option<Vec<Session>> {
+    let mut ids = std::collections::HashSet::new();
+    blocks(answer)
+        .map(|block| {
+            let id = uuid_field(&block, "session")?;
+            let mut session = Session::parse(&block)?;
+            if values(&block, "session").count() != 1
+                || session.application.is_empty()
+                || field(&block, "session-id").is_some() && session.number.is_none()
+                || field(&block, "hibernate").is_some_and(|value| !matches!(value, "yes" | "no"))
+                || !ids.insert(id)
+            {
+                return None;
+            }
+            session.id = id.to_string();
+            Some(session)
         })
         .collect()
 }

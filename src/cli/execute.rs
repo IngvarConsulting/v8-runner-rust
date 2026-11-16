@@ -260,6 +260,13 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Sessions(args) => super::sessions::execute(
+            config,
+            &args.command,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Cluster(args) => execute_cluster(
             config,
             args.command,
@@ -806,6 +813,7 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
         },
+        Command::Sessions(args) => super::sessions::command_name(&args.command),
         Command::Cluster(args) => match args.command.service() {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::ClusterStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,

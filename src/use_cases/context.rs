@@ -45,6 +45,10 @@ pub enum CommandName {
     AgentRelease,
     AgentStop,
     AgentStatus,
+    SessionsList,
+    SessionsTerminate,
+    SessionsDeny,
+    SessionsAllow,
     Status,
 }
 
@@ -61,6 +65,7 @@ impl CommandName {
     /// Меняет ли команда стенд. Перечень полный: новая команда решает это явно.
     pub const fn stand_change(self) -> StandChange {
         match self {
+            Self::SessionsDeny | Self::SessionsAllow => StandChange::Always,
             Self::DbmsStart
             | Self::DbmsStop
             | Self::DbmsRestart
@@ -97,6 +102,8 @@ impl CommandName {
             | Self::AgentRelease
             | Self::AgentStop
             | Self::AgentStatus
+            | Self::SessionsList
+            | Self::SessionsTerminate
             | Self::Status => StandChange::Never,
         }
     }
@@ -156,6 +163,10 @@ impl CommandName {
             Self::AgentRelease => "agent release",
             Self::AgentStop => "agent stop",
             Self::AgentStatus => "agent status",
+            Self::SessionsList => "sessions list",
+            Self::SessionsTerminate => "sessions terminate",
+            Self::SessionsDeny => "sessions deny",
+            Self::SessionsAllow => "sessions allow",
             Self::Status => "status",
         }
     }
