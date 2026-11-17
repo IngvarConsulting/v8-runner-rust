@@ -2897,11 +2897,9 @@ fn a_standalone_client_carries_the_infobase_credentials_by_the_direct_gate() {
     }
 }
 
-/// По клиентскому адресу автономной цели реквизиты не идут: их приём по `/WS` не замерен
-/// (#184). Ни `/N`, ни `/P`, ни пароля в командной строке нет — и при `--via web`, и когда
-/// строки прямого шлюза нет.
+/// Тонкий клиент получает реквизиты ИБ при явном и при неявном выборе /WS.
 #[test]
-fn a_standalone_web_address_carries_no_credentials() {
+fn a_standalone_web_address_carries_the_infobase_credentials() {
     for (infobase, arguments) in [
         (
             STANDALONE_WITH_THE_DIRECT_GATE,
@@ -2919,16 +2917,42 @@ fn a_standalone_web_address_carries_no_credentials() {
         assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
         assert_eq!(payload["data"]["via"], "web", "{arguments:?}: {payload}");
         let args = planned_args(&payload);
-        let at = args
-            .iter()
-            .position(|arg| arg == "/WS")
-            .unwrap_or_else(|| panic!("no /WS in {args:?}"));
-        assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "/N" || arg == "/P" || arg.contains("s3cret")),
+        assert_eq!(
+            address_window(&args, "/WS"),
+            [
+                "/WS",
+                "http://localhost/standalone",
+                "/N",
+                "Admin",
+                "/P",
+                "***"
+            ],
             "{arguments:?}: {args:?}"
+        );
+        assert!(!payload.to_string().contains("s3cret"), "{payload}");
+
+        let (_dir, config_path, args_log) = setup_standalone_project(infobase, "");
+        let dispatched = launch_json(&config_path, &arguments[..arguments.len() - 1]);
+        assert_eq!(
+            dispatched["data"]["provider_dispatched"], true,
+            "{dispatched}"
+        );
+        assert!(!dispatched.to_string().contains("s3cret"), "{dispatched}");
+        let actual: Vec<String> = read_args_log(&args_log)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            address_window(&actual, "/WS"),
+            [
+                "/WS",
+                "http://localhost/standalone",
+                "/N",
+                "Admin",
+                "/P",
+                "s3cret"
+            ],
+            "{actual:?}"
         );
     }
 }

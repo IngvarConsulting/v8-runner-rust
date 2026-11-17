@@ -1,13 +1,14 @@
 ---
 id: INV.USE-CASES.A-CLUSTER-DESIGNER-GENERATION-IS-READ-LIKE-A-FILE-ONE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/184
+check:
+  - tests/cli_status.rs::status_deep_reads_designer_generation_on_server_targets
+  - src/platform/generation.rs::the_token_is_the_last_non_empty_line_of_forty_hex_digits
+  - src/platform/generation.rs::an_unrecognized_answer_is_no_answer
 ---
 
 # Ответ Конфигуратора о поколении у базы в кластере разбирается как у файловой
 
-Конфигуратор с базой в кластере и с автономным сервером по прямому шлюзу разбирает ответ
-`/GetConfigGenerationID` так же, как с файловой базой. Нераспознанный ответ — отсутствие
-ответа: сверки нет, отказа нет. Формат ответа у серверной базы не замерен ни в кластере, ни
-за прямым шлюзом
-([замер](../../../references/1c/confirmed-runtime-measurements.md)).
+При работе с Конфигуратором раннер читает `/GetConfigGenerationID` у базы в кластере
+и по прямому шлюзу автономного сервера так же, как у файловой базы. Нераспознанный
+ответ считается отсутствием токена. Сравнение серверных токенов ограничено инструментом
+записи. [Замер #184](https://github.com/IngvarConsulting/v8-runner-rust/pull/751)

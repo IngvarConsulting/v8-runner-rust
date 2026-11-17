@@ -117,18 +117,13 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
-/// Каким адресом клиент открывает базу. Реквизиты базы берутся из строки подключения, а
-/// идут ли они, говорит сам вариант адреса: решение принимает выбор адреса клиента в
-/// `use_cases::client_address`, в командную строку его переводит только [`Self::args`].
+/// Адрес, по которому клиент открывает базу с её реквизитами.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientAddress {
     /// `infobase.connection` вместе с `/N` и `/P`.
     Connection,
     /// `infobase.web.url` как ws-соединение с `/N` и `/P`.
     Web(String),
-    /// `infobase.web.url` как ws-соединение без `/N` и `/P`: приём реквизитов по `/WS`
-    /// автономного сервера не замерен (#184).
-    WebWithoutCredentials(String),
 }
 
 impl ClientAddress {
@@ -136,7 +131,7 @@ impl ClientAddress {
     pub const fn via(&self) -> LaunchVia {
         match self {
             Self::Connection => LaunchVia::Connection,
-            Self::Web(_) | Self::WebWithoutCredentials(_) => LaunchVia::Web,
+            Self::Web(_) => LaunchVia::Web,
         }
     }
 
@@ -144,7 +139,7 @@ impl ClientAddress {
     pub fn web_url(&self) -> Option<&str> {
         match self {
             Self::Connection => None,
-            Self::Web(url) | Self::WebWithoutCredentials(url) => Some(url),
+            Self::Web(url) => Some(url),
         }
     }
 
@@ -157,7 +152,6 @@ impl ClientAddress {
                 args.extend(connection.credential_args());
                 args
             }
-            Self::WebWithoutCredentials(url) => vec!["/WS".to_owned(), url.clone()],
         }
     }
 }
@@ -362,30 +356,21 @@ mod tests {
         );
     }
 
-    /// Реквизиты при клиентском адресе идут, только если так решено: тогда `/N` и `/P`
-    /// следуют за `/WS`, иначе в командной строке их нет вовсе.
     #[test]
-    fn a_web_address_carries_the_credentials_only_when_decided() {
+    fn a_web_address_carries_configured_credentials() {
         let mut connection = V8Connection::from_connection_string("Srvr=h:1541;Ref=demo");
         connection.user = Some("Admin".to_owned());
         connection.password = Some("s3cret".to_owned());
-        let args = |address: ClientAddress| {
-            build_launch_args(
-                LaunchClientMode::Thin,
-                &address,
-                &connection,
-                &[],
-                &LaunchOptions::default(),
-            )
-        };
-
-        let with = args(ClientAddress::Web("http://localhost/base".to_owned()));
-        let without = args(ClientAddress::WebWithoutCredentials(
-            "http://localhost/base".to_owned(),
-        ));
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            &ClientAddress::Web("http://localhost/base".to_owned()),
+            &connection,
+            &[],
+            &LaunchOptions::default(),
+        );
 
         assert_eq!(
-            &with[2..],
+            &args[2..],
             [
                 "/WS",
                 "http://localhost/base",
@@ -395,8 +380,6 @@ mod tests {
                 "s3cret"
             ]
         );
-        assert_eq!(&without[2..], ["/WS", "http://localhost/base"]);
-        assert!(!with.iter().chain(&without).any(|arg| arg == "/S"));
     }
 
     /// The 1C command-line parser as measured: values are separated by any
