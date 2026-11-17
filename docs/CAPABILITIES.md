@@ -22,7 +22,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | Сценарий | Поддерживаемые комбинации | Примечания |
 | --- | --- | --- |
 | `version` | Работает без существующего конфига | Печатает имя приложения и версию; с `--json-message` возвращает JSON envelope |
-| `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
+| `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/cf` |
 | `init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка выпусков (по умолчанию latest; у vanessa есть `--prerelease`) | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `infobase create` | файловая база — цепочка `ibcmd` → `designer`; база в кластере — только `designer` (`providers.infobase.create` у кластера — ошибка настроек); автономный сервер — отказ `capability`/`target` с рецептом | Файловую ИБ `ibcmd` создаёт сразу с основной конфигурацией (`--import --apply --force`; исходники EDT сперва переводятся в XML), Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/UpdateDBCfg`; в кластере Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой регистрирует базу и создаёт базу данных (нужны `infobase.dbms` с `locale`); существующая файловая база — отказ с советом `--recreate`; `--recreate` заменяет базу этой копии (файловую или стенда раннера над своим PostgreSQL); при `format=EDT` дополнительно импортирует EDT workspace |
@@ -648,7 +648,7 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
   `.dump-*.lock*`; файл — `<project-dir>/.gitignore`, существующий
   только дописывается), и
   `source-set main` типа `CONFIGURATION`.
-- Выгружает основную конфигурацию из указанной ИБ в `src/configuration` полной выгрузкой.
+- Выгружает основную конфигурацию из указанной ИБ полной выгрузкой в `src/cf` по умолчанию.
   Выгрузка — та же операция `pull`, и исполнителя выбирает её строка матрицы. Своего ключа
   `providers` у `clone` нет: проекта с ключом ещё не существует.
 - `--from` не должен содержать embedded credentials; используйте `--user` и `--password`.
