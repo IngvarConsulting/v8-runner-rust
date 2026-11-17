@@ -4729,6 +4729,30 @@ PID postmaster менялся, PID `ragent` оставался прежним. �
 по машинному ответу в этой серии не найден
 ([`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`](../../spec/rules/platform/prose-debt-only-shrinks.md)).
 
+### Связь PID агента с UUID серверного сеанса
+
+На том же стенде включили технологический журнал отдельной копии платформы для
+Designer и `rphost`. В интервале одного `common connect-ib` клиентский
+`SCALL` с `MName=startServerSeance` сопоставили с серверным `CALL` по `CallID`,
+`Interface`, `Method` и паре `DstClientID` / `t:clientID`. PID рабочего процесса
+из каталога журнала сопоставили с UUID процесса через `rac process list`. По этому UUID
+и `SessionID` из серверного вызова нашли UUID текущего сеанса в `rac session list`.
+
+Для агента PID 53388 получились `CallID=11166`, `t:clientID=25` и `SessionID=1`.
+После `rac session terminate` его UUID исчез. Агент PID 45104, запущенный при живом
+первом процессе, получил `CallID=2024`, `t:clientID=28`, тот же `SessionID=1` и
+другой UUID. На прежних SSH-каналах первый агент вернул `UnknownError`, второй
+вернул `success` на `config generation-id`. Одновременное подключение двух агентов к ИБ
+не подтвердили. Клиентский журнал отдельно не дал `SessionID` ни до отказа, ни сразу
+после. Без ограничения интервалом `common connect-ib` совпадения указывали на
+`SessionID=2`, а для искомого UUID `rac` возвращал `session-id=1`.
+
+`rac session info --cluster=<cluster-uuid> --session=<session-uuid>` вернул код 0
+и запись для живого UUID. Для завершённого UUID, случайного UUID сеанса и
+несуществующего UUID кластера Windows вернул одинаковый код `0xFFFFFFFF` и пустой
+stdout. Различался текст stderr. Один этот вызов не устанавливает причину отказа
+структурно.
+
 ## Управляемый агент: ключ, порт и Windows ACL на Linux и Windows (#429)
 
 Замер 07.11.2026, продолжение [#429](https://github.com/IngvarConsulting/v8-runner-rust/issues/429)
