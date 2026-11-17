@@ -159,6 +159,7 @@ v8-runner infobase create
   refuses with its holder PID. On Windows, both previews and actual DT requests refuse IBCMD
   during provider selection until its session probe is measured.
   `restore --create` skips the agent.
+- Apply the [direct ibcmd guardrail](#direct-ibcmd-access) before running a command that can select it.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`. Without a `providers` key a file-base `push`/`pull` where every set goes
   whole (`--force`, `--full`, a set without hash memory, a pull without a usable version file)
@@ -169,7 +170,9 @@ v8-runner infobase create
   for names-only inventory. Other extension operations with that override fail `capability_unavailable`.
   The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
   with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared. A collision on an automatically selected port allows one relaunch on a different port before the startup timeout expires. A collision on a declared port fails immediately. If the managed agent does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster or standalone server uses the `extensions list` provider, which needs no `dbms`; if the selected agent cannot start, the upload fails `environment` before loading. `providers.<op>: designer` restores the Designer-first choice;
-  a cluster base refuses `providers.<op>: ibcmd` for these operations.
+  a cluster base refuses `providers.<op>: ibcmd` for these operations. On a file target,
+  `upload .cfe` checks the installed extensions through direct `ibcmd` before the Designer load,
+  regardless of `providers.extensions`. Apply the guardrail to that step too.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
@@ -322,8 +325,9 @@ v8-runner infobase create
   reports `name_prefix` from the applied DB configuration; for the agent it is `null` (not
   attested, unlike `""`). With a live agent of the working copy up, `extensions list` on a file
   base reads through it (`provider.selected: agent`, `ibcmd` in `skipped`), so `name_prefix` is
-  `null`; need the prefix — `agent stop` first or set `providers.extensions: ibcmd`. Never fill it from source files
-  or the working configuration after `upload` without `apply`. A read that fails after the
+  `null`; if you need the prefix, apply the [direct ibcmd guardrail](#direct-ibcmd-access)
+  before switching away from the live agent or setting `providers.extensions: ibcmd`. Never fill
+  it from source files or the working configuration after `upload` without `apply`. A read that fails after the
   platform got the request answers `ok: false` with an empty `extensions`: the composition is
   unknown, not empty — check `ok` first.
   Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
@@ -357,6 +361,40 @@ v8-runner infobase create
 - Report missing local 1C utilities as environment/setup issues, not as project source failures:
   a missing or wrong-version utility answers `environment_unavailable` (exit 2).
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
+
+### Direct ibcmd access
+
+Apply this check before any direct `ibcmd` access to a physical infobase. The agent owns the
+check both for raw invocations and for v8-runner commands. Check every step that can reach the base, including
+implicit operations and default or fallback executors. A preview naming one executor only shows
+that selection. If the check cannot be met, use a supported server route that excludes direct access
+throughout the operation (pin an executor where the operation allows it), or stop and report the
+missing evidence.
+
+- Identify the physical target (resolved file location or DBMS instance and database) and the access
+  mode separately. Identify every cluster process and `ibsrv` instance that serves that target,
+  including remote nodes, HA standbys and aliases for the same storage.
+- Before opening the base directly, obtain current, verifiable evidence from the relevant hosts
+  or their service managers that all those processes are stopped, or that the target has no server
+  assigned. Require a controlled maintenance window covering the operation, with manual starts,
+  automatic restarts and HA failover prevented for the target until the operation ends. Use evidence
+  that identifies the target, services and time. A timestamped status alone leaves a restart race.
+  Leave unrelated servers running. Stop infrastructure only when separately instructed.
+- Treat unknown mode, incomplete coverage, unavailable checks and stale evidence as a refusal of
+  direct access. An empty session list, blocked logins, an unreachable port or RAS, an empty local
+  process list, `File=`, a `dbms` section, the utility name and a previous successful run are
+  insufficient. Check operation support, platform version, permissions and any exclusive-access
+  requirement separately, including for file bases.
+- For a supported `ibcmd --pid` or `--remote` operation, verify the running `ibsrv` instance,
+  the physical base it serves, operation support and its access requirements. Keep the server
+  running for this route and verify that no step opens the same base directly. If the channel
+  is unavailable, report that or use another supported server channel. Use the runner's published
+  providers as documented and avoid substituting direct access for a server call.
+- Operations that open no infobase, such as source-file-only conversions, skip this check. If
+  `make` or package `convert` uses a runner build or temporary infobase, assess that actual
+  target. Those workflows do not open the project infobase.
+
+See [executor decision examples](references/config-and-backends.md#direct-ibcmd-decision-examples).
 
 ## Output Discipline
 

@@ -4,7 +4,8 @@ Use these commands when the task is about files, artifacts, publication, or sour
 
 ## Pull
 
-`pull` reverse-syncs the current infobase state back to project files.
+`pull` reverse-syncs the current infobase state back to project files. Apply the
+[direct ibcmd guardrail](../SKILL.md#direct-ibcmd-access) if its executor chain can select `ibcmd`.
 
 ```bash
 git status --short
@@ -74,9 +75,9 @@ Use a DT only as a portable full-infobase image, not as a backup:
 v8-runner infobase dump --output dist/base.dt
 ```
 
-DT export uses the implemented Designer adapter. IBCMD DT remains experimental until a
-no-active-connections or exclusive-access preflight is implemented and proved; if Designer is
-ready, runner selects it even when `providers.infobase.dump: ibcmd` names the other one.
+Choose the DT executor using the project matrix. On POSIX a file target also accepts explicit
+`providers.infobase.dump: ibcmd` without fallback. Apply the [direct ibcmd guardrail](../SKILL.md#direct-ibcmd-access)
+and close file-base sessions before proceeding. Windows refuses IBCMD DT at provider selection.
 
 Load a DT image back with the paired command, stating which irreversible change is allowed:
 
@@ -91,11 +92,10 @@ one are both `invalid_argument`. Neither provider asks on its own — Designer c
 infobase and overwrites a present one — and unlike an export there is no staging step, so the
 mode is the only protection the caller gets. A restore that fails after the provider started
 reports `target_state: uncertain`, because how much data it had already replaced is not
-observable; a refusal before the start leaves `unchanged`. Restore shares the export provider
-posture: Designer `/RestoreIB` is implemented and live-verified, IBCMD `infobase restore` stays
-experimental. Terminating active sessions is not exposed yet, so a busy infobase fails with the
-platform's own error. The load is a critical phase: Ctrl+C or SIGTERM does not stop it — the
-runner waits for the platform and reports the deferred interruption in
+observable; a refusal before the start leaves `unchanged`. The same file-target restrictions
+apply to explicit `providers.infobase.restore: ibcmd`. On POSIX a busy file base refuses before
+the IBCMD DT transfer and reports the process holding it. The load is a critical phase: Ctrl+C
+or SIGTERM does not stop it. The runner waits for the platform and reports the deferred interruption in
 `execution.interruptions` with `phase: provider_command`.
 
 ## Convert
@@ -137,9 +137,10 @@ Rules:
   is named by its set name, as in `push`; its `Configuration.xml` is not read.
   `--extension` remains a hidden alias.
 - `--mode combine` requires `--settings`;
-- use `--mode load` for the first installation of an extension; JSON reports
-  `compatibility_state: "absent"` when the infobase does not list it yet, read from
-  `ibcmd config extension list` rather than from any platform message;
+- use `--mode load` for the first installation of an extension. JSON reports
+  `compatibility_state: "absent"` when the installed extension inventory omits it. For a file target,
+  the inventory step uses direct `ibcmd config extension list` regardless of `providers.extensions`.
+  Apply the [direct ibcmd guardrail](../SKILL.md#direct-ibcmd-access) before starting `upload .cfe`;
 - `--mode combine` of a configuration needs `--vendor-name <NAME>`: the platform will not
   compare a configuration with its vendor counterpart unnamed, so the state stays
   `not_probed` and the combine is refused. `--mode load` needs no name;
