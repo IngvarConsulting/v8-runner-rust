@@ -166,6 +166,24 @@ fn run_launch(
         client_wait.as_ref(),
     );
 
+    // Launch the bundled executable through the same owned process path so macOS
+    // associates it with the application and the caller can still cancel startup.
+    #[cfg(target_os = "macos")]
+    let process_request = {
+        let mut request = process_request;
+        let bundle = location.installation_root.join("1cv8c.app");
+        let executable = bundle.join("Contents/MacOS/1cv8c");
+        if matches!(
+            args.target,
+            LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ThinClient)
+        ) && client_wait.is_none()
+            && executable.is_file()
+        {
+            request.program = executable;
+        }
+        request
+    };
+
     if args.dry_run {
         let connection = config.v8_connection();
         let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
@@ -181,7 +199,7 @@ fn run_launch(
             mode,
             pid: None,
             via,
-            binary: location.path.clone(),
+            binary: process_request.program.clone(),
             platform_resolution,
             url: reported_url.clone(),
             provider_dispatched: false,
@@ -189,7 +207,7 @@ fn run_launch(
                 program: process_request.program.clone(),
                 args: masked,
             }),
-            message: Some(preview_message(config, args, &location.path)),
+            message: Some(preview_message(config, args, &process_request.program)),
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
