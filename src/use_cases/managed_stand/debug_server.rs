@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::TargetKind;
-use crate::domain::dbms::ServiceAction;
-use crate::domain::debug_server::{DebugServerOwner, DebugServerResult, DebugSession};
+use crate::domain::debug_server::{
+    DebugServerAction, DebugServerOwner, DebugServerResult, DebugSession,
+};
 use crate::domain::launch::PlatformResolution;
 use crate::platform::dbgs::{self, DebugPort};
 use crate::platform::process::ProcessRunner;
@@ -31,22 +32,23 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 use super::{
-    await_gone, await_rdbg, occupant_name, occupant_of, write_record, RdbgWait, ServiceHost,
-    DEBUG_READY_TIMEOUT,
+    await_rdbg, occupant_name, occupant_of, spawn_debugger, stop_confirmed, write_record,
+    DebuggerLaunch, DebuggerSpawn, RdbgWait, ServiceHost, SpawnedDebugger, DEBUG_READY_TIMEOUT,
 };
 
 /// Каталог сеансов под `workPath`.
 const SESSIONS: &str = "debug-server";
 /// Файл, куда `dbgs` пишет свой адрес.
 const NOTIFY: &str = "notify";
-/// Метка сеанса, который называет сервер отладки кластера: процесса раннера у него нет.
-const CLUSTER_SESSION: &str = "cluster.json";
+/// Метка сеанса, который называет сервер отладки стенда: процесса раннера у него нет.
+const STAND_SESSION: &str = "session.json";
+/// Имя файловой базы для отладчика (замер «Сервер отладки `dbgs`»).
+const FILE_ALIAS: &str = "DefAlias";
 /// Журнал неудачной попытки: каталог сеанса снят, а причина отказа остаётся читаемой.
 const FAILED_LOG_PREFIX: &str = "failed-";
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Каталог без записи моложе этого — его, возможно, прямо сейчас заводит другой `start`.
 const FRESH: Duration = Duration::from_secs(60);
-/// Сколько хранить журналы неудачных попыток и метки сеансов кластера, которые никто не
+/// Сколько хранить журналы неудачных попыток и метки сеансов стенда, которые никто не
 /// остановил.
 const KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Полоса портов сервера отладки: ниже полосы закреплённых портов стенда (20000 и выше), выше
@@ -66,17 +68,25 @@ pub struct DebugServerStart {
     pub owner_pid: Option<u32>,
 }
 
-/// Чей сервер отладки у базы проекта.
-enum Server {
-    /// Файловая база: свой `dbgs` раннера.
-    Runner,
-    /// База на кластере раннера: сервер отладки поднимает кластер.
-    Cluster,
+/// Сервер отладки стенда: порт и имя базы для отладчика, если оно замерено.
+pub(super) struct StandDebugServer {
+    pub port: u16,
+    pub infobase_alias: Option<String>,
 }
 
-fn server_of(config: &AppConfig) -> Result<Server, UseCaseError> {
+/// Сервер отладки стенда, о котором спрашивает `start`: чей он, как его назвать в
+/// предупреждении и откуда узнать его порт.
+struct Stand<'a> {
+    owner: DebugServerOwner,
+    whose: &'static str,
+    server: &'a dyn Fn() -> Result<StandDebugServer, UseCaseError>,
+}
+
+/// Чей сервер отладки у базы проекта: свой `dbgs` раннера у файловой базы, сервер стенда у базы
+/// на кластере или автономном сервере раннера; сервер, запущенный не раннером, — отказ.
+fn server_of(config: &AppConfig) -> Result<DebugServerOwner, UseCaseError> {
     match config.target_kind() {
-        TargetKind::File => Ok(Server::Runner),
+        TargetKind::File => Ok(DebugServerOwner::Runner),
         TargetKind::Cluster
             if config
                 .infobase
@@ -84,13 +94,22 @@ fn server_of(config: &AppConfig) -> Result<Server, UseCaseError> {
                 .as_ref()
                 .is_some_and(|cluster| cluster.managed.is_some()) =>
         {
-            Ok(Server::Cluster)
+            Ok(DebugServerOwner::Cluster)
         }
         TargetKind::Cluster => Err(refuse(
             "the infobase is on a cluster the runner did not start: the address of its debug server is known only to its administrator; a file infobase or cluster.managed is needed",
         )),
+        TargetKind::Standalone
+            if config
+                .infobase
+                .standalone
+                .as_ref()
+                .is_some_and(|standalone| standalone.managed.is_some()) =>
+        {
+            Ok(DebugServerOwner::Standalone)
+        }
         TargetKind::Standalone => Err(refuse(
-            "debugging an infobase on a standalone server is not supported yet: the runner starts ibsrv without a debug server",
+            "the infobase is on a standalone server the runner did not start: the address of its debug server is known only to its administrator; a file infobase, cluster.managed or standalone.managed is needed",
         )),
     }
 }
@@ -136,8 +155,10 @@ pub(super) struct DebugServer<'a> {
     pub host: &'a dyn ServiceHost,
     /// Тонкий клиент, из установки которого берётся `dbgs`.
     pub locate_client: &'a dyn Fn() -> Result<PlatformResolution, UseCaseError>,
-    /// Порт сервера отладки кластера этой базы, когда он отвечает.
-    pub cluster_port: &'a dyn Fn() -> Result<u16, UseCaseError>,
+    /// Сервер отладки кластера этой базы, когда он отвечает.
+    pub cluster_server: &'a dyn Fn() -> Result<StandDebugServer, UseCaseError>,
+    /// Сервер отладки автономного сервера этой базы, когда он отвечает.
+    pub standalone_server: &'a dyn Fn() -> Result<StandDebugServer, UseCaseError>,
 }
 
 impl DebugServer<'_> {
@@ -148,8 +169,25 @@ impl DebugServer<'_> {
     ) -> Result<DebugServerResult, UseCaseError> {
         let started = Instant::now();
         let mut result = match server_of(self.config)? {
-            Server::Cluster => self.cluster(request, dry_run)?,
-            Server::Runner => self.runner_server(request, dry_run)?,
+            DebugServerOwner::Runner => self.runner_server(request, dry_run)?,
+            DebugServerOwner::Cluster => self.stand(
+                Stand {
+                    owner: DebugServerOwner::Cluster,
+                    whose: "the cluster",
+                    server: self.cluster_server,
+                },
+                request,
+                dry_run,
+            )?,
+            DebugServerOwner::Standalone => self.stand(
+                Stand {
+                    owner: DebugServerOwner::Standalone,
+                    whose: "the standalone server",
+                    server: self.standalone_server,
+                },
+                request,
+                dry_run,
+            )?,
         };
         result.duration_ms = crate::support::time::elapsed_ms(started);
         Ok(result)
@@ -174,37 +212,48 @@ impl DebugServer<'_> {
         ))
     }
 
-    /// Сервер отладки кластера: процесса раннера нет, сеанс — метка с портом.
-    fn cluster(
+    /// Сервер отладки стенда — кластера или автономного сервера: процесса раннера нет, сеанс —
+    /// метка с владельцем.
+    fn stand(
         &self,
+        stand: Stand<'_>,
         request: DebugServerStart,
         dry_run: bool,
     ) -> Result<DebugServerResult, UseCaseError> {
-        let mut result = empty(ServiceAction::Planned);
-        result.owner = Some(DebugServerOwner::Cluster);
+        let Stand {
+            owner,
+            whose,
+            server,
+        } = stand;
+        let mut result = empty(DebugServerAction::Planned);
+        result.owner = Some(owner);
         if request.owner_pid.is_some() {
-            result.warnings.push(
-                "--owner-pid is ignored: the debug server of the cluster lives as long as the cluster".to_owned(),
-            );
+            result.warnings.push(format!(
+                "--owner-pid is ignored: the debug server of {whose} lives as long as {whose}"
+            ));
         }
         if request.port.is_some() {
-            result.warnings.push(
-                "--port is ignored: the debug server of the cluster listens on the port of the cluster".to_owned(),
-            );
+            result.warnings.push(format!(
+                "--port is ignored: the debug server of {whose} listens on the port of {whose}"
+            ));
         }
         if dry_run {
             return Ok(result);
         }
-        let port = (self.cluster_port)()?;
+        let StandDebugServer {
+            port,
+            infobase_alias: alias,
+        } = server()?;
         self.sweep();
         let session = DebugSession::new();
         let paths = session_paths(self.config, session);
-        write_json(&paths.root().join(CLUSTER_SESSION), &ClusterSession {})
+        write_json(&paths.root().join(STAND_SESSION), &SessionMarker { owner })
             .map_err(|error| super::io_failure("cannot write", paths.root(), &error))?;
-        result.action = ServiceAction::Started;
+        result.action = DebugServerAction::Started;
         result.session = Some(session);
         result.port = Some(port);
         result.url = Some(dbgs::url(port));
+        result.infobase_alias = alias;
         Ok(result)
     }
 
@@ -232,7 +281,7 @@ impl DebugServer<'_> {
             ..client
         };
         let port = self.choose_port(request.port)?;
-        let mut result = empty(ServiceAction::Planned);
+        let mut result = empty(DebugServerAction::Planned);
         result.owner = Some(DebugServerOwner::Runner);
         result.owner_pid = request.owner_pid;
         if let DebugPort::Exact(port) = port {
@@ -252,56 +301,27 @@ impl DebugServer<'_> {
         let session = DebugSession::new();
         let paths = session_paths(self.config, session);
         let notify = paths.root().join(NOTIFY);
-        let starter = {
-            let pid = std::process::id();
-            self.host.facts(pid).map(|facts| (pid, facts.started))
-        };
-        let (first, explicit) = match port {
-            DebugPort::Exact(port) => (port, true),
-            DebugPort::Window { first, .. } => (first, false),
-        };
-        let mut record = ServiceRecord {
-            state: RecordState::Starting,
-            pid: None,
-            started: None,
-            image: None,
-            machine: Some(machine),
-            starter,
-            port: first,
-            explicit,
-            bin: program.clone(),
+        let launch = DebuggerLaunch {
+            paths: &paths,
+            program: &program,
+            port,
+            notify: &notify,
+            owner: request.owner_pid,
+            machine,
             version,
-            agent: None,
-            location: None,
         };
-        write_record(&paths, &record)?;
-        let spawn = dbgs::start_request(&program, port, &notify, request.owner_pid, &paths.log());
-        let pid = match self.host.spawn(&spawn, self.context.work()) {
-            Ok(pid) => pid,
-            Err(error) => {
-                forget(&paths);
-                // Job, из которого нельзя выйти, — дело окружения: сервер умер бы с командой.
-                return Err(match error {
-                    crate::platform::service::ServiceSpawnError::Io(_) => UseCaseError::new(
-                        UseCaseErrorKind::Platform,
-                        format!("dbgs did not start: {error}"),
-                    ),
-                    _ => UseCaseError::from(AppError::environment(format!(
-                        "dbgs did not start: {error}"
-                    ))),
-                });
-            }
-        };
-        let Some(facts) = self.host.facts(pid) else {
-            let log = self.abandon(&paths);
-            return Err(self.exited(&log, port, "dbgs exited as soon as it started"));
-        };
-        record.pid = Some(pid);
-        record.started = Some(facts.started);
-        record.image = Some(facts.image);
-        if let Err(error) = write_record(&paths, &record) {
-            return Err(self.give_up(&paths, &record, session, error));
-        }
+        let SpawnedDebugger { mut record, pid } =
+            match spawn_debugger(self.host, self.runner, self.context, launch) {
+                DebuggerSpawn::Spawned(spawned) => *spawned,
+                DebuggerSpawn::ExitedAtOnce => {
+                    let log = self.abandon(&paths);
+                    return Err(self.exited(&log, port, "dbgs exited as soon as it started"));
+                }
+                DebuggerSpawn::Failed(error) => {
+                    forget(&paths);
+                    return Err(error);
+                }
+            };
         let actual = self.await_ready(&paths, &record, pid, session, &notify, port)?;
         record.port = actual;
         record.state = RecordState::Running;
@@ -309,12 +329,13 @@ impl DebugServer<'_> {
         if let Err(error) = write_record(&paths, &record) {
             return Err(self.give_up(&paths, &record, session, error));
         }
-        result.action = ServiceAction::Started;
+        result.action = DebugServerAction::Started;
         result.session = Some(session);
         result.port = Some(actual);
         result.url = Some(dbgs::url(actual));
         result.pid = Some(pid);
         result.log_path = Some(paths.log());
+        result.infobase_alias = Some(FILE_ALIAS.to_owned());
         Ok(result)
     }
 
@@ -464,20 +485,20 @@ impl DebugServer<'_> {
         dry_run: bool,
     ) -> Result<DebugServerResult, UseCaseError> {
         if !paths.root().is_dir() {
-            let mut result = empty(ServiceAction::NothingToStop);
+            let mut result = empty(DebugServerAction::NothingToStop);
             result.known_session = Some(false);
             return Ok(result);
         }
         let mut result = empty(if dry_run {
-            ServiceAction::Planned
+            DebugServerAction::Planned
         } else {
-            ServiceAction::NothingToStop
+            DebugServerAction::NothingToStop
         });
         result.known_session = Some(true);
-        // Адрес сервера кластера сеанс не хранит: порты кластера могли смениться, а живой адрес
-        // называет `cluster status`.
-        if read_json::<ClusterSession>(&paths.root().join(CLUSTER_SESSION)).is_some() {
-            result.owner = Some(DebugServerOwner::Cluster);
+        // Адрес сервера стенда сеанс не хранит: порты стенда могли смениться, а живой адрес
+        // называет `cluster status` или `standalone status`.
+        if let Some(owner) = stand_session(paths) {
+            result.owner = Some(owner);
             if !dry_run {
                 forget(paths);
             }
@@ -525,7 +546,7 @@ impl DebugServer<'_> {
                 format!("dbgs pid {pid} did not stop; repeat debug-server stop"),
             ));
         }
-        result.action = ServiceAction::Stopped;
+        result.action = DebugServerAction::Stopped;
         result.stopped_pid = Some(pid);
         result.pid = None;
         Ok(result)
@@ -545,7 +566,7 @@ impl DebugServer<'_> {
     ///   никто не получил и не остановит, поэтому он гасится здесь;
     /// - каталог без записи моложе [`FRESH`] не трогается: его, возможно, заводит другой
     ///   `start`;
-    /// - метки сеансов кластера и журналы неудачных попыток старше [`KEPT`] снимаются.
+    /// - метки сеансов стенда и журналы неудачных попыток старше [`KEPT`] снимаются.
     fn sweep(&self) {
         let root = sessions_root(self.config);
         let Ok(entries) = std::fs::read_dir(&root) else {
@@ -564,7 +585,7 @@ impl DebugServer<'_> {
                 continue;
             };
             let paths = session_paths(self.config, session);
-            if paths.root().join(CLUSTER_SESSION).is_file() {
+            if stand_session(&paths).is_some() {
                 if age(paths.root()).is_some_and(|age| age > KEPT) {
                     forget(&paths);
                 }
@@ -592,15 +613,14 @@ impl DebugServer<'_> {
             forget(paths);
             return true;
         };
-        let patience = self.host.patience(STOP_TIMEOUT);
-        self.host
-            .soft_stop(self.runner, pid, record.started, self.context);
-        let mut gone = await_gone(self.host, pid, record.started, patience);
-        if !gone {
-            self.host
-                .hard_stop(self.runner, pid, record.started, self.context);
-            gone = await_gone(self.host, pid, record.started, patience);
-        }
+        let gone = stop_confirmed(
+            self.host,
+            self.runner,
+            self.context,
+            pid,
+            record.started,
+            Duration::ZERO,
+        );
         if gone {
             forget(paths);
         }
@@ -608,22 +628,30 @@ impl DebugServer<'_> {
     }
 }
 
-/// Метка сеанса сервера отладки кластера. Порта в ней нет: он принадлежит закреплённому
-/// кластера и меняется вместе с ним.
+/// Метка сеанса сервера отладки стенда: только чей он. Порта в ней нет: он принадлежит
+/// закреплённому стенда и меняется вместе с ним.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct ClusterSession {}
+struct SessionMarker {
+    owner: DebugServerOwner,
+}
+
+/// Чей сеанс стенда лежит в каталоге; `None` — сеанс своего `dbgs` раннера.
+fn stand_session(paths: &ServicePaths) -> Option<DebugServerOwner> {
+    read_json::<SessionMarker>(&paths.root().join(STAND_SESSION)).map(|marker| marker.owner)
+}
 
 /// Снимает сеанс целиком: запись, файл адреса и журнал.
 fn forget(paths: &ServicePaths) {
     let _ = std::fs::remove_dir_all(paths.root());
 }
 
-fn empty(action: ServiceAction) -> DebugServerResult {
+fn empty(action: DebugServerAction) -> DebugServerResult {
     DebugServerResult {
         ok: true,
         action,
         session: None,
         owner: None,
+        infobase_alias: None,
         url: None,
         port: None,
         pid: None,
@@ -887,12 +915,26 @@ mod tests {
             self
         }
 
+        fn on_managed_standalone(mut self) -> Self {
+            let db_path = self.config.base_path.join("ib");
+            self.config.infobase = InfobaseConfig::file(String::new());
+            self.config.infobase.standalone = Some(crate::config::model::StandaloneConfig {
+                managed: Some(ManagedServerConfig {
+                    name: Some("demo".to_owned()),
+                    db_path: Some(db_path),
+                }),
+                gate: None,
+                host_fingerprint: None,
+                exchange: None,
+            });
+            self
+        }
+
         fn server<'a>(
             &'a self,
             context: &'a ExecutionContext,
             host: &'a Host,
             locate: &'a dyn Fn() -> Result<PlatformResolution, UseCaseError>,
-            cluster_port: &'a dyn Fn() -> Result<u16, UseCaseError>,
         ) -> DebugServer<'a> {
             DebugServer {
                 context,
@@ -900,7 +942,8 @@ mod tests {
                 runner: &Runner,
                 host,
                 locate_client: locate,
-                cluster_port,
+                cluster_server: &fake_cluster,
+                standalone_server: &fake_standalone,
             }
         }
 
@@ -926,9 +969,7 @@ mod tests {
             host: &Host,
         ) -> Result<DebugServerResult, UseCaseError> {
             let locate = || Ok(self.resolution());
-            let cluster_port = || Ok(24018);
-            self.server(context, host, &locate, &cluster_port)
-                .start(request, false)
+            self.server(context, host, &locate).start(request, false)
         }
 
         fn start(
@@ -945,9 +986,7 @@ mod tests {
             host: &Host,
         ) -> Result<DebugServerResult, UseCaseError> {
             let locate = || Ok(self.resolution());
-            let cluster_port = || unreachable!("stop does not ask the cluster");
-            self.server(&context(), host, &locate, &cluster_port)
-                .stop(session, false)
+            self.server(&context(), host, &locate).stop(session, false)
         }
 
         /// Каталоги сеансов, без журналов неудачных попыток.
@@ -962,6 +1001,22 @@ mod tests {
                 })
                 .unwrap_or_default()
         }
+    }
+
+    /// Сервер отладки кластера подделки: порт блока, имени базы нет.
+    fn fake_cluster() -> Result<StandDebugServer, UseCaseError> {
+        Ok(StandDebugServer {
+            port: 24018,
+            infobase_alias: None,
+        })
+    }
+
+    /// Сервер отладки автономного сервера подделки: порт блока и имя базы в сервере.
+    fn fake_standalone() -> Result<StandDebugServer, UseCaseError> {
+        Ok(StandDebugServer {
+            port: 24019,
+            infobase_alias: Some("demo".to_owned()),
+        })
     }
 
     fn context() -> ExecutionContext {
@@ -982,12 +1037,13 @@ mod tests {
                 &host,
             )
             .unwrap();
-        assert_eq!(started.action, ServiceAction::Started);
+        assert_eq!(started.action, DebugServerAction::Started);
         assert_eq!(started.owner, Some(DebugServerOwner::Runner));
         let port = started.port.unwrap();
         assert_eq!(started.url.as_deref(), Some(dbgs::url(port).as_str()));
         assert!((10_000..20_000).contains(&port), "{port}");
         assert_eq!(started.pid, Some(PID));
+        assert_eq!(started.infobase_alias.as_deref(), Some("DefAlias"));
         let resolution = started.platform_resolution.unwrap();
         assert_eq!(
             resolution.path,
@@ -1239,13 +1295,13 @@ mod tests {
             .unwrap();
         assert!(host.alive(PID));
         let stopped = setup.stop(session, &host).unwrap();
-        assert_eq!(stopped.action, ServiceAction::Stopped);
+        assert_eq!(stopped.action, DebugServerAction::Stopped);
         assert_eq!(stopped.stopped_pid, Some(PID));
         assert_eq!(stopped.known_session, Some(true));
         assert!(!host.alive(PID));
         assert!(setup.sessions().is_empty());
         let again = setup.stop(session, &host).unwrap();
-        assert_eq!(again.action, ServiceAction::NothingToStop);
+        assert_eq!(again.action, DebugServerAction::NothingToStop);
         assert_eq!(again.known_session, Some(false));
     }
 
@@ -1258,7 +1314,7 @@ mod tests {
         let other = setup
             .stop("0123456789abcdef0123456789abcdef".parse().unwrap(), &host)
             .unwrap();
-        assert_eq!(other.action, ServiceAction::NothingToStop);
+        assert_eq!(other.action, DebugServerAction::NothingToStop);
         assert_eq!(other.known_session, Some(false));
         assert!(host.alive(PID));
     }
@@ -1296,7 +1352,7 @@ mod tests {
             },
         );
         let stopped = setup.stop(session, &host).unwrap();
-        assert_eq!(stopped.action, ServiceAction::NothingToStop);
+        assert_eq!(stopped.action, DebugServerAction::NothingToStop);
         assert!(stopped.stale_record);
         assert!(host.soft_stops.borrow().is_empty());
         assert!(host.hard_stops.borrow().is_empty());
@@ -1331,13 +1387,13 @@ mod tests {
         let setup = setup();
         let host = Host::default();
         let locate = || Ok(setup.resolution());
-        let cluster_port = || Ok(24018);
+
         let context = context();
         let planned = setup
-            .server(&context, &host, &locate, &cluster_port)
+            .server(&context, &host, &locate)
             .start(DebugServerStart::default(), true)
             .unwrap();
-        assert_eq!(planned.action, ServiceAction::Planned);
+        assert_eq!(planned.action, DebugServerAction::Planned);
         assert!(planned.session.is_none());
         assert_eq!(host.spawned.get(), 0);
         assert!(!sessions_root(&setup.config).exists());
@@ -1355,9 +1411,27 @@ mod tests {
         assert_eq!(started.pid, None);
         assert_eq!(host.spawned.get(), 0);
         let stopped = setup.stop(started.session.unwrap(), &host).unwrap();
-        assert_eq!(stopped.action, ServiceAction::NothingToStop);
+        assert_eq!(stopped.action, DebugServerAction::NothingToStop);
         assert_eq!(stopped.owner, Some(DebugServerOwner::Cluster));
         assert_eq!(stopped.url, None, "the session keeps no stale address");
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(setup.sessions().is_empty());
+    }
+
+    /// База на автономном сервере раннера: адрес его `dbgs` и имя базы в сервере, процесса
+    /// раннера нет, `stop` его не трогает.
+    #[test]
+    fn a_standalone_infobase_gets_the_debug_server_of_the_server() {
+        let setup = setup().on_managed_standalone();
+        let host = Host::default();
+        let started = setup.start(DebugServerStart::default(), &host).unwrap();
+        assert_eq!(started.owner, Some(DebugServerOwner::Standalone));
+        assert_eq!(started.url.as_deref(), Some("http://127.0.0.1:24019"));
+        assert_eq!(started.infobase_alias.as_deref(), Some("demo"));
+        assert_eq!(host.spawned.get(), 0);
+        let stopped = setup.stop(started.session.unwrap(), &host).unwrap();
+        assert_eq!(stopped.owner, Some(DebugServerOwner::Standalone));
+        assert_eq!(stopped.action, DebugServerAction::NothingToStop);
         assert!(host.soft_stops.borrow().is_empty());
         assert!(setup.sessions().is_empty());
     }

@@ -8,20 +8,25 @@ check:
   - tests/cli_debug_server.rs::start_runs_the_debug_server_beside_the_client_and_stop_ends_it
   - src/use_cases/managed_stand/debug_server.rs::start_answers_with_the_address_that_answered_as_a_debug_server
   - src/use_cases/managed_stand/debug_server.rs::a_cluster_infobase_gets_the_debug_server_of_the_cluster
+  - src/use_cases/managed_stand/debug_server.rs::a_standalone_infobase_gets_the_debug_server_of_the_server
+  - src/use_cases/managed_stand/standalone.rs::the_debug_server_of_the_standalone_server_needs_a_debug_start
   - src/use_cases/managed_stand/debug_server.rs::a_preview_starts_and_writes_nothing
 ---
 
 # `data` команды `debug-server start`
 
 `action`: `started` или `planned` в превью. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
-файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, Windows и Linux).
+файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, Windows и Linux),
+`standalone` — `dbgs` управляемого автономного сервера базы (`standalone start --debug`, Windows).
 `url` — адрес для `/DEBUGGERURL` клиента и для отладчика, `http://127.0.0.1:<порт>`; `port` — тот же порт.
-`session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет.
+`session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет. `infobase_alias` — имя
+базы для `infoBaseAlias` запросов `rdbg`: `DefAlias` у файловой базы, имя базы в сервере у автономного сервера; у
+кластера поля нет.
 
 У `owner: runner` ещё `pid` процесса `dbgs`, `owner_pid` — процесс, с концом которого сервер выходит сам
 (`--owner-pid`), `platform_resolution` — путь `dbgs` и установка тонкого клиента, из которой он взят, и `log_path`
-— журнал сервера. У `owner: cluster` процесса раннера нет, и этих полей тоже; ключи `--port` и `--owner-pid` к
-серверу кластера не применяются, о чём говорит `warnings` конверта.
+— журнал сервера. У `owner: cluster` и `owner: standalone` процесса раннера нет, и этих полей тоже; ключи `--port`
+и `--owner-pid` к серверу стенда не применяются, о чём говорит `warnings` конверта.
 
 ## Пример
 

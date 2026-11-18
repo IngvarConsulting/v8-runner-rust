@@ -10,9 +10,10 @@ pub use web::{execute_web, web_status, WebCommand};
 pub(crate) use web::{publication, ManagedPublication, Reload};
 
 pub(crate) use cluster::ClusterBase;
-pub use cluster::{ClusterCommand, DebugChoice};
+pub use cluster::ClusterCommand;
 pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
+pub use standalone::StandaloneCommand;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -411,6 +412,131 @@ fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: D
 /// которого агент поднимает лениво, вместе с первым рабочим процессом (замер «Сервер отладки
 /// `dbgs`»).
 const DEBUG_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Свой `dbgs`, запущенный с записью `starting`: запись уже называет его pid.
+struct SpawnedDebugger {
+    record: ServiceRecord,
+    pid: u32,
+}
+
+/// Чем кончился запуск своего `dbgs`.
+enum DebuggerSpawn {
+    Spawned(Box<SpawnedDebugger>),
+    /// Вышел, едва запустившись: запись снята, причину знает журнал.
+    ExitedAtOnce,
+    Failed(UseCaseError),
+}
+
+/// Что запускать как свой `dbgs` и где его запись.
+struct DebuggerLaunch<'a> {
+    paths: &'a ServicePaths,
+    program: &'a Path,
+    port: crate::platform::dbgs::DebugPort,
+    notify: &'a Path,
+    owner: Option<u32>,
+    machine: String,
+    version: Option<String>,
+}
+
+/// Единственный запуск своего `dbgs` с записью — для сеанса `debug-server` и для автономного
+/// сервера: запись `starting` до запуска, pid и время старта сразу после. Не запустился или
+/// запись не легла — процесс гасится, запись снимается. Готовность проверяет вызывающий.
+fn spawn_debugger(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    launch: DebuggerLaunch<'_>,
+) -> DebuggerSpawn {
+    use crate::platform::dbgs::DebugPort;
+
+    let (first, explicit) = match launch.port {
+        DebugPort::Exact(port) => (port, true),
+        DebugPort::Window { first, .. } => (first, false),
+    };
+    let mut record = ServiceRecord {
+        state: RecordState::Starting,
+        pid: None,
+        started: None,
+        image: None,
+        machine: Some(launch.machine),
+        starter: {
+            let pid = std::process::id();
+            host.facts(pid).map(|facts| (pid, facts.started))
+        },
+        port: first,
+        explicit,
+        bin: launch.program.to_path_buf(),
+        version: launch.version,
+        agent: None,
+        location: launch.paths.location(),
+    };
+    if let Err(error) = write_record(launch.paths, &record) {
+        return DebuggerSpawn::Failed(error);
+    }
+    let request = crate::platform::dbgs::start_request(
+        launch.program,
+        launch.port,
+        launch.notify,
+        launch.owner,
+        &launch.paths.log(),
+    );
+    let pid = match host.spawn(&request, context.work()) {
+        Ok(pid) => pid,
+        Err(error) => {
+            forget_record(launch.paths);
+            // Job, из которого нельзя выйти, — дело окружения: сервер умер бы с командой.
+            return DebuggerSpawn::Failed(match error {
+                ServiceSpawnError::Io(_) => UseCaseError::new(
+                    UseCaseErrorKind::Platform,
+                    format!("dbgs did not start: {error}"),
+                ),
+                _ => environment(format!("dbgs did not start: {error}")),
+            });
+        }
+    };
+    let Some(facts) = host.facts(pid) else {
+        forget_record(launch.paths);
+        return DebuggerSpawn::ExitedAtOnce;
+    };
+    record.pid = Some(pid);
+    record.started = Some(facts.started);
+    record.image = Some(facts.image);
+    if let Err(error) = write_record(launch.paths, &record) {
+        if stop_confirmed(host, runner, context, pid, record.started, Duration::ZERO) {
+            forget_record(launch.paths);
+            return DebuggerSpawn::Failed(error);
+        }
+        return DebuggerSpawn::Failed(error.followed_by(format!("dbgs pid {pid} did not stop")));
+    }
+    DebuggerSpawn::Spawned(Box::new(SpawnedDebugger { record, pid }))
+}
+
+/// Сколько ждать конца процесса после каждого шага остановки.
+const DEBUGGER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Единственная остановка своего процесса с подтверждением конца
+/// (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`) для серверов отладки: сначала `grace` — процесс
+/// может выйти сам (`dbgs` выходит вместе со своим владельцем), затем мягко, затем
+/// принудительно. `true` — конец подтверждён.
+fn stop_confirmed(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    pid: u32,
+    started: Option<u64>,
+    grace: Duration,
+) -> bool {
+    let patience = host.patience(DEBUGGER_STOP_TIMEOUT);
+    if !grace.is_zero() && await_gone(host, pid, started, host.patience(grace)) {
+        return true;
+    }
+    host.soft_stop(runner, pid, started, context);
+    if await_gone(host, pid, started, patience) {
+        return true;
+    }
+    host.hard_stop(runner, pid, started, context);
+    await_gone(host, pid, started, patience)
+}
 
 /// Чем кончилось ожидание сервера отладки.
 enum RdbgWait {
@@ -1327,7 +1453,7 @@ pub(crate) fn create_standalone_base(
 pub fn execute_standalone(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: StandaloneCommand,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
     standalone::run_standalone(
@@ -1369,14 +1495,24 @@ fn with_debug_server<T>(
     run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
-    let cluster_port = || cluster::debug_port(context, config, &RealHost::CURRENT);
+    let cluster_server = || {
+        cluster::debug_port(context, config, &RealHost::CURRENT).map(|port| {
+            debug_server::StandDebugServer {
+                port,
+                infobase_alias: None,
+            }
+        })
+    };
+    let standalone_server =
+        || standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
     run(&debug_server::DebugServer {
         context,
         config,
         runner: &ProcessExecutor,
         host: &RealHost::CURRENT,
         locate_client: &locate,
-        cluster_port: &cluster_port,
+        cluster_server: &cluster_server,
+        standalone_server: &standalone_server,
     })
     .map_err(UseCaseFailure::without_payload)
 }
@@ -1399,7 +1535,7 @@ pub fn standalone_status(
     standalone::run_standalone(
         context,
         config,
-        ServiceCommand::Status,
+        StandaloneCommand::Status,
         false,
         &ProcessExecutor,
         &RealHost::CURRENT,
@@ -1543,6 +1679,29 @@ fn locate(
         // Род и код отказа решает сама ошибка поиска: отказ выпуска формата исходников
         // остаётся собой, а не пересказом.
         .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
+}
+
+/// Сервер отладки стенда, о котором просит запуск кластера или автономного сервера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugChoice {
+    /// `--debug`: поднять с сервером отладки и закрепить это.
+    On,
+    /// `--no-debug`: поднять без него и закрепить это.
+    Off,
+    /// Ключа нет: как закреплено.
+    #[default]
+    AsPinned,
+}
+
+impl DebugChoice {
+    /// Что просят явно; `None` — как закреплено.
+    pub(crate) fn requested(self) -> Option<bool> {
+        match self {
+            Self::On => Some(true),
+            Self::Off => Some(false),
+            Self::AsPinned => None,
+        }
+    }
 }
 
 /// Какая из команд службы: `dbms`, `standalone` или `cluster`.

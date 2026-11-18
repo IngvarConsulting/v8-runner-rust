@@ -41,6 +41,18 @@ impl ServerPorts {
             .chain(self.range_start..self.range_start + DIRECT_RANGE_WIDTH)
     }
 
+    /// Порт сервера отладки стенда (`standalone start --debug`): следом за диапазоном прямых
+    /// соединений, внутри шага блока. В [`Self::all`] его нет — его занятость проверяет только
+    /// запуск с отладкой, и тогда блок переезжает целиком.
+    pub fn debug(self) -> u16 {
+        self.range_start.saturating_add(DIRECT_RANGE_WIDTH)
+    }
+
+    /// Порты блока, которые займёт запуск: с портом отладки, если она включена.
+    pub fn used(self, debug: bool) -> impl Iterator<Item = u16> {
+        self.all().chain(debug.then(|| self.debug()))
+    }
+
     /// Блоки делят хотя бы один порт.
     pub fn overlaps(self, other: Self) -> bool {
         crate::platform::service::ports_overlap(self.all(), other.all())
@@ -95,6 +107,7 @@ pub fn start_server(
     storage: &ServerStorage<'_>,
     name: &str,
     ports: ServerPorts,
+    debugger: Option<&str>,
     host_key: &Path,
     log: &Path,
 ) -> ServiceRequest {
@@ -127,6 +140,14 @@ pub fn start_server(
         format!("--ssh-port={}", ports.ssh),
         format!("--ssh-host-key={}", host_key.display()),
     ]);
+    // Свой сервер отладки `ibsrv` (`--debug-port`) внешнему отладчику протокола `rdbg` отвечает
+    // 406; цели он регистрирует на внешнем `dbgs` по адресу `--debug-server-url` (замер #759).
+    if let Some(url) = debugger {
+        args.extend([
+            "--debug=http".to_owned(),
+            format!("--debug-server-url={url}"),
+        ]);
+    }
     ServiceRequest {
         program: ibsrv.to_path_buf(),
         args,
@@ -328,6 +349,7 @@ mod tests {
             &ServerStorage::File(Path::new("ib")),
             "demo",
             ServerPorts::from_first(24000),
+            None,
             Path::new("key"),
             Path::new("log"),
         );
@@ -341,6 +363,40 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("extended-designer")));
         assert_eq!(request.workdir.as_deref(), Some(Path::new("root")));
+        assert!(!request.args.iter().any(|arg| arg.starts_with("--debug")));
+    }
+
+    /// С отладкой `ibsrv` регистрирует цели на внешнем `dbgs`, а свой сервер отладки не
+    /// открывает (замер #759); порт отладки — за диапазоном прямых соединений, внутри шага.
+    #[test]
+    fn a_debug_server_registers_its_targets_on_the_given_debugger() {
+        let ports = ServerPorts::from_first(24000);
+        assert_eq!(ports.debug(), 24019);
+        assert!(!ports.all().any(|port| port == ports.debug()));
+        assert!(ports.used(true).any(|port| port == ports.debug()));
+        let request = start_server(
+            Path::new("ibsrv"),
+            Path::new("root/data"),
+            &ServerStorage::File(Path::new("ib")),
+            "demo",
+            ports,
+            Some("http://127.0.0.1:24019"),
+            Path::new("key"),
+            Path::new("log"),
+        );
+        let at = request
+            .args
+            .iter()
+            .position(|arg| arg == "--debug=http")
+            .expect("--debug=http");
+        assert_eq!(
+            request.args[at + 1],
+            "--debug-server-url=http://127.0.0.1:24019"
+        );
+        assert!(!request
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("--debug-port")));
     }
 
     #[test]
@@ -357,6 +413,7 @@ mod tests {
             }),
             "demo",
             ServerPorts::from_first(24000),
+            None,
             Path::new("key"),
             Path::new("log"),
         );

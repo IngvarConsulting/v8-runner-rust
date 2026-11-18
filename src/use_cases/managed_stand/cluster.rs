@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::{
     await_gone, being_started, block_conflict, environment, first_taken, forget_record, io_failure,
     occupant_of, other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record,
-    Database, MoveCause, ServiceHost, Stand,
+    Database, DebugChoice, MoveCause, ServiceHost, Stand,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -46,29 +46,6 @@ const REMNANT_IMAGES: [&str; 3] = ["rmngr.exe", "rphost.exe", "dbgs.exe"];
 const REMNANT_IMAGES: [&str; 3] = ["rmngr", "rphost", "dbgs"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
-
-/// Сервер отладки агента, о котором просит запуск.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DebugChoice {
-    /// `--debug`: поднять с сервером отладки и закрепить это.
-    On,
-    /// `--no-debug`: поднять без него и закрепить это.
-    Off,
-    /// Ключа нет: как закреплено.
-    #[default]
-    AsPinned,
-}
-
-impl DebugChoice {
-    /// Что просят явно; `None` — как закреплено.
-    fn requested(self) -> Option<bool> {
-        match self {
-            Self::On => Some(true),
-            Self::Off => Some(false),
-            Self::AsPinned => None,
-        }
-    }
-}
 
 /// Команда кластера. Ключ `--new-regport` есть только у запуска.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -962,19 +939,15 @@ impl Cluster<'_> {
                 .map_err(|error| io_failure("cannot prepare", paths.root(), &error))?;
         }
         let debug = self.wanted_debug(pins.as_ref());
-        let pins = match pins {
+        let pinned = match pins {
             // Реестры подметаются только при известных портах: если закреплённое потеряно, прежний
             // реестр может быть тем, где зарегистрирована база.
             Some(pins) => {
                 self.sweep_registries(&pins.registry);
-                if pins.debug == debug {
-                    pins
-                } else {
-                    let pins = ClusterPins { debug, ..pins };
-                    self.write_pins(&pins)?;
-                    pins
-                }
+                pins
             }
+            // Новые порты закрепляются до запуска: прерванный запуск оставит реестр, где база.
+            // Признак отладки — нет, он закрепляется ниже, после успешного подъёма.
             None => {
                 let ports = self.choose_ports(stand, None)?;
                 let pins = ClusterPins {
@@ -982,13 +955,22 @@ impl Cluster<'_> {
                     registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
                     registered: false,
                     previous: None,
-                    debug,
+                    debug: false,
                 };
                 self.write_pins(&pins)?;
                 pins
             }
         };
+        let pinned_debug = pinned.debug;
+        let pins = ClusterPins { debug, ..pinned };
         let agent = self.raise(&pins, machine)?;
+        // Признак отладки закрепляется только после успешного подъёма: отказ — например, занятый
+        // порт отладки — оставляет прежний, и следующий запуск без ключа идёт как раньше.
+        if pins.debug != pinned_debug {
+            if let Err(error) = self.write_pins(&pins) {
+                return Err(self.give_up(&agent, error));
+            }
+        }
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
         Ok(self.describe(result, Some(&agent)))
@@ -2879,6 +2861,33 @@ pub(super) mod tests {
         assert_eq!(setup.pins().registry, pins.registry);
     }
 
+    /// Отказ `start --debug` (занятый порт отладки) признак не закрепляет: следующий `start` без
+    /// ключа поднимает кластер без отладки, как было закреплено.
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_refused_debug_start_pins_no_debug() {
+        let setup = setup();
+        let host = Host::default();
+        setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        setup.command(ClusterCommand::Stop, &host).unwrap();
+        let pins = setup.pins();
+        assert!(!pins.debug);
+        host.listeners.borrow_mut().insert(pins.ports.debug(), 9999);
+        setup
+            .command(debug_start(DebugChoice::On), &host)
+            .unwrap_err();
+        assert_eq!(setup.pins(), pins, "a refused start pins nothing");
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert_eq!(started.action, ServiceAction::Started);
+        assert_eq!(started.debug_url, None);
+        assert!(!host.agent_args.borrow().contains(&"-debug".to_owned()));
+        assert!(!setup.pins().debug);
+    }
+
     /// Сервер отладки кластера есть на Windows и Linux: на других системах `--debug` — отказ до
     /// запуска процессов (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
     #[test]
@@ -4250,7 +4259,9 @@ pub(super) mod tests {
         let refused = super::super::standalone::run_standalone(
             &ExecutionContext::cli(CommandName::StandaloneStart),
             &config,
-            ServiceCommand::Start,
+            super::super::StandaloneCommand::Start {
+                debug: DebugChoice::AsPinned,
+            },
             false,
             &Runner { host: &host },
             &host,

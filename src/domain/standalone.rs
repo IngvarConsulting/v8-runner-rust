@@ -42,6 +42,12 @@ pub struct StandaloneResult {
     /// HTTP шли в том блоке следом за ним.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_port: Option<u16>,
+    /// Адрес своего сервера отладки сервера, поднятого с `--debug`: `http://127.0.0.1:<порт>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_url: Option<String>,
+    /// `dbgs` сервера, погашенный вместе с ним.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_debug_pid: Option<u32>,
     pub duration_ms: u64,
     /// Предупреждения идут только в `warnings` конверта: форма `data` их не несёт.
     #[serde(skip)]

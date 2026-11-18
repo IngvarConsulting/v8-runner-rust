@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::dbms::ServiceAction;
 use crate::domain::launch::PlatformResolution;
 
 /// Сеанс сервера отладки: 32 шестнадцатеричных знака в нижнем регистре. Он становится именем
@@ -81,18 +80,41 @@ pub enum DebugServerOwner {
     Runner,
     /// Сервер отладки управляемого кластера (`cluster start --debug`); `stop` его не трогает.
     Cluster,
+    /// Сервер отладки управляемого автономного сервера (`standalone start --debug`); `stop` его
+    /// не трогает.
+    Standalone,
+}
+
+/// Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не
+/// описывается отчётом: у `debug-server` нет ни `status`, ни повторного `start` того же сеанса.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerAction {
+    /// `start`: сервер отвечает, сеанс записан.
+    Started,
+    /// `stop`: свой `dbgs` сеанса остановлен.
+    Stopped,
+    /// `stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.
+    NothingToStop,
+    /// Предварительный просмотр: ничего не запущено и не остановлено.
+    Planned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DebugServerResult {
     pub ok: bool,
     /// `started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`.
-    pub action: ServiceAction,
+    pub action: DebugServerAction,
     /// Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<DebugSession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<DebugServerOwner>,
+    /// Имя базы, под которым отладчик видит её цели (`infoBaseAlias` запросов `rdbg`):
+    /// `DefAlias` у файловой базы, имя базы в сервере у автономного сервера. У сервера кластера
+    /// поля нет: не замерено.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infobase_alias: Option<String>,
     /// Адрес для `/DEBUGGERURL` клиента и для отладчика: `http://127.0.0.1:<порт>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,

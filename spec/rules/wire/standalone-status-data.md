@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STANDALONE-STATUS-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/standalone-status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -14,6 +14,8 @@ check:
 `stale_record` говорит, что запись была, а процесса из неё уже нет. Адрес сервера живёт только в состоянии стенда:
 занятый блок `standalone start` сменяет (`INV.PLATFORM.STANDALONE-PORTS-AND-KEY-ARE-PINNED`), а `v8project*.yaml`
 раннер не правит. Берите адрес из этого ответа и не кешируйте.
+
+**Что изменила версия 3.** Появилось `debug_url` — адрес своего `dbgs` сервера, поднятого с `--debug`.
 
 ## Пример
 

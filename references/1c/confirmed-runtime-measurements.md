@@ -6925,8 +6925,41 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
   /DEBUGGERURL http://127.0.0.1:<порт>` к `dbgs`, который поднял `debug-server start`,
   регистрирует на нём две цели файловой базы: `getDbgTargets` отвечает JSON со списком `id`,
   где `targetType` — `ManagedClient` и `ServerEmulation`, `infoBaseAlias` — `DefAlias`.
-- Не мерено: `dbgs` на Linux и macOS (наличие в установке, `--notify`, `--ownerPID`),
-  `ibsrv --debug=http`.
+- Не мерено: `dbgs` на Linux и macOS (наличие в установке, `--notify`, `--ownerPID`).
+
+### Автономный сервер `ibsrv` и отладка (#759)
+
+Windows, 8.3.27.2342, файловая база через `ibsrv --db-path`, тонкий клиент `/S 127.0.0.1:<порт>\demo`.
+
+- `ibsrv ... --debug=http --debug-address=127.0.0.1 --debug-port=27719`: сервер отладки
+  обслуживает сам `ibsrv` (порт слушает его pid), отдельного `dbgs` нет; готов через 1 с.
+  Он отвечает иначе, чем `dbgs`: `POST /e1crdbg/rdbg?cmd=getDbgTargets` — 400 с пустым
+  телом, чужой путь — 404, `GET` — 501. `attachDebugUI` отвечает 406 при любых `Accept`,
+  `Content-Type`, виде XML и имени базы (`demo`, `DefAlias`, адрес); `getDbgTargets` с
+  непустым именем — тоже 406. Внешний отладчик протокола `rdbg` к такому серверу не
+  подключается, хотя клиент с `/DEBUG -http -attach /DEBUGGERURL` на этот адрес работает
+  (сеанс `1CV8C` виден в `ibcmd session list --pid`).
+- `ibsrv ... --debug=http --debug-server-url=http://127.0.0.1:27800` при запущенном
+  `dbgs --addr=127.0.0.1 --port=27800`: своего порта отладки `ibsrv` не открывает.
+  Клиент с `/DEBUGGERURL http://127.0.0.1:27800` и сам `ibsrv` регистрируют цели на этом
+  `dbgs`: `getDbgTargets` с `infoBaseAlias` = `demo` (значение `--name` у `ibsrv`) вернул
+  цели `Server` и клиента; с `DefAlias` или адресом базы — пустой список.
+- `taskkill /PID` без `/F` остановил `ibsrv` со встроенным сервером отладки за 3 с;
+  процесса `dbgs` после него не было.
+- Порядок можно обратить. `ibsrv --debug=http --debug-server-url=http://127.0.0.1:27800`
+  поднимается и работает, пока `dbgs` на этом адресе нет. Потом запущен
+  `dbgs --addr=127.0.0.1 --port=27800 --ownerPID=<pid ibsrv>`, затем клиент: через 2 с
+  `getDbgTargets` (`infoBaseAlias` = `demo`) вернул цели `Server` и `ManagedClient`.
+- `attachDetachDbgTargets` с `<attach>true</attach>` и id цели `Server` ответил 200:
+  отладчик подключается к серверной цели этого `dbgs`.
+- `taskkill /PID <ibsrv>` без `/F`: через 5 с нет ни `ibsrv`, ни `dbgs`, запущенного с
+  `--ownerPID` его pid.
+- Замена `dbgs` под работающим `ibsrv` не подтвердилась. Первый `dbgs` с `--ownerPID`
+  убит, через 2 с на том же порту поднят второй. За 30 с `getDbgTargets` (`demo`) целей
+  не вернул, и после запуска клиента с `/DEBUGGERURL` на этот адрес — тоже за 20 с.
+  Без клиента целей не было и у первого `dbgs`: цель `Server` появляется вместе с сеансом.
+- Ключ `--debug-server-url` есть в `ibsrv --help` установок 8.3.24.1819, 8.3.25.1633,
+  8.3.26.1656, 8.3.27.2342, 8.5.1.1529 и 8.5.4.2028; живой запуск — только на 8.3.27.
 
 ## Частный Apache 2.4 и кластерная публикация на Linux (#610)
 
