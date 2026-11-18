@@ -154,6 +154,11 @@ v8-runner infobase create
   (`error.next` names `<command> <main set> --output <file>.cf`) — except `download` in an infobase-only project
   (`source-set: []`), which still writes the main configuration to the file. Choose a `<dir>` outside the source-set directories and `workPath`: a package landing on, inside or around them is refused before the platform starts. This is not `make`, which builds
   artifacts from project sources.
+- Need the BSL text the infobase actually runs (e.g. for a debugger): the `push` receipt carries no BSL hashes and
+  proves nothing about it. Use `v8-runner download <SET> --state db --output <file.cf|file.cfe>`, then
+  `v8-runner convert <file> --to xml --output <dir>` (`<dir>` outside the project; Designer XML layout) and hash the
+  `.bsl` files yourself. It reflects the base at that moment; `push --no-apply` leaves it unchanged; a never-applied
+  extension and a standalone server without a direct gate are refused. A module without source may have no `.bsl`.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`): the
   agent, then Designer; POSIX file DT transfers also accept explicit IBCMD via
