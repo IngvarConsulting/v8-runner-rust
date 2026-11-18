@@ -3895,7 +3895,7 @@ infobases:
 Пакеты расширения Конфигуратора и `ibcmd` равны между собой по выгрузке. Повторный
 `/DumpCfg -Extension` одной базы побайтно **не** стабилен, в отличие от основной.
 
-**5. Смена версии платформы — не замерена:** лицензии 8.5.4 на этом Mac нет. На копиях
+**5. Смена версии платформы на macOS.** Лицензии 8.5.4 на этом Mac нет. На копиях
 постоянных баз 8.3.27 (Конфигуратора и `ibcmd`):
 
 - `1cv8` 8.5.4.1878 `/DumpCfg` и `/LoadConfigFromFiles … -partial` — rc=1 за 22–24 с, `/Out`:
@@ -3906,9 +3906,8 @@ infobases:
 - после этого 8.3.27 открывает обе базы как прежде (`generation-id`, `config save`,
   `/DumpCfg` — rc=0, пакет равен эталону); заголовок `1Cv8.1CD` — та же версия формата.
 
-**EDT не замерен.** `1cedtcli` на этом Mac нет: под `/Applications/1C/1CE` установлен только
-запускатель `1c-edt-start` 2025.2.1, без самого EDT. Сборка проекта EDT и доля
-`1cedtcli export` в ней не измерены.
+**EDT на macOS.** Под `/Applications/1C/1CE` установлен только запускатель
+`1c-edt-start` 2025.2.1. Замеры EDT выполнены на Windows, см. ниже.
 
 **Попутно: `ibcmd config export --file` с потоками по умолчанию нестабилен.** Разбор формой
 `convert` (без `--threads`) падал на исправном пакете: на фикстуре 4 из 38 вызовов rc=255
@@ -3959,8 +3958,7 @@ ibcmd config --data <W>/unpack/data --db-path <W>/unpack/ib export --threads=1 -
 - Без изменений пакет основной конфигурации из той же базы побайтно повторяется у обоих
   исполнителей, так что «не изменилось» по байтам пакета возможно, пока базу не перезагружали
   целиком; у пакета расширения Конфигуратора — нет.
-- Не замерены: удаление и переименование объектов при частичной загрузке, проект EDT и доля
-  `1cedtcli`, переход базы на 8.5.4.
+- Результаты Windows для EDT, смены платформы и структурных изменений приведены ниже.
 - Разбор `ibcmd config export --file` с потоками по умолчанию на этом Mac ломается, на больших
   пакетах — всегда; `--threads=1` проходит.
 
@@ -4025,6 +4023,55 @@ v8-runner --json-message --config <проект> convert <выход>/full.cf --
 идентификаторе файла и размере. Это наблюдалось после полной сборки при выгрузке
 из базы конфигурации без `/UpdateDBCfg`.
 
+### Доля экспорта EDT в сборке на Windows (#471)
+
+Замер 16.11.2026. Windows 11 (26100), Конфигуратор 8.3.27.2342, офлайн EDT 2026.2.2.21,
+Axiom JDK 25.0.4.1, раннер 0.17.4 из `cde7f1b9` (сборка `cargo build --locked
+--bin v8-runner`). К `tests/fixtures/designer/configuration` добавили 256 общих
+модулей `BenchModule0001`–`BenchModule0256`, по 80 коротких функций на модуль.
+У каждого объекта отдельный UUID. Описания сделаны по образцу
+`CommonModules/ОбщийМодуль1.xml`, имена добавлены в `Configuration.xml`.
+Установку EDT распаковали в каталог замера. JVM запускали с `-Xmx1600m` и
+`-XX:ActiveProcessorCount=4`. Набор `main` имеет формат EDT и путь
+`configuration` внутри нового проекта, без подключённой базы. В проекте 564
+файла, около 2,1 МБ. В `tools.edt_cli.path` указан распакованный `1cedtcli.exe`,
+`tools.edt_cli.interactive-mode` задан как `false`. Импорт завершился кодом 0
+за 46,66 с.
+
+```text
+1cedtcli -v -data <ws-import> -timeout 240 -command import --configuration-files <xml> --project <project>/configuration --version 8.3.27.2342
+# V8TR_ACTION_LOG_FILE указывает на отдельный журнал каждой команды.
+v8-runner --log-level debug --json-message --config <project>/v8project.yaml make main --output <out>/initial.cf --full
+v8-runner --log-level debug --json-message --config <project>/v8project.yaml make main --output <out>/warm.cf
+# Дописать комментарий в configuration/src/CommonModules/BenchModule0128/Module.bsl.
+v8-runner --log-level debug --json-message --config <project>/v8project.yaml make main --output <out>/partial.cf
+v8-runner --log-level debug --json-message --config <project>/v8project.yaml make main --output <out>/full-edit.cf --full
+v8-runner --log-level debug --json-message --config <project>/v8project.yaml convert <cf> --to xml --output <xml-cf>
+```
+
+Полное время — от запуска до выхода раннера. Время EDT — от `running process`
+до `process finished` в журнале того же `make` для отдельного процесса
+`1cedtcli -data <ws-make> -command export --project <project>/configuration --configuration-files <xml-stage>`
+с учётом запуска JVM. Доля — время экспорта, делённое на полное время команды.
+
+| Сценарий | Режим | Код `make` | Полное время, с | Код EDT | Экспорт, с | Доля |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Первая сборка в свежей базе | `full` | 0 | 53,102 | 0 | 44,988 | 84,7% |
+| Повтор без изменений | `unchanged` | 0 | 1,829 | — | — | 0% |
+| Правка одного модуля | `partial` | 0 | 37,788 | 0 | 33,705 | 89,2% |
+| Свежая база после той же правки, `--full` | `full` | 0 | 57,482 | 0 | 49,391 | 85,9% |
+
+Без изменений из платформенных процессов запускался только `/DumpCfg`. После
+правки BSL экспорт EDT всё равно выполнялся. В этом одиночном сравнении частичная
+сборка была быстрее полной на 19,69 с. Из них 15,69 с пришлись на разницу времени
+самого экспорта, поэтому этот результат включает разброс EDT.
+
+Четыре разбора `convert` вернули код 0 за 6,94, 6,42, 5,22 и 5,31 с в порядке
+таблицы. За вычетом `ConfigDumpInfo.xml` сравнили пути и SHA-256 всех 562
+файлов. Первая и неизменная сборки совпали. После правки от первого CF отличался
+только `CommonModules/BenchModule0128/Ext/Module.bsl` с контрольным комментарием.
+Частичный и полный CF после правки совпали по той же проверке. EDT при экспорте
+сообщал об отсутствии содержимого общей картинки из фикстуры.
 
 ### База сборки на границах версий
 
@@ -4043,7 +4090,126 @@ v8-runner --config <проект>/v8project.yaml --json-message make main --outp
 | Правка модуля | `partial` | `source files changed` |
 | Удалён один модуль объекта, затем последний | `full` | `no safe partial load for the existing configuration` |
 
-Пакеты частичной и полной сборки после разбора в XML совпали по путям и SHA-256 без `ConfigDumpInfo.xml` на каждом сочетании. Удалённые модули в пакет не попали, в том числе на 8.5.4.2028, где полная загрузка поверх базы единственный модуль не удаляет: при таком удалении база сборки создаётся заново. Набор маленький, 5 файлов, поэтому время и большие конфигурации этот замер не оценивает. Формат EDT и внешние обработки на этих версиях не проверялись.
+Пакеты частичной и полной сборки после разбора в XML совпали по путям и SHA-256 без `ConfigDumpInfo.xml` на каждом сочетании. Удалённые модули в пакет не попали, в том числе на 8.5.4.2028, где полная загрузка поверх базы единственный модуль не удаляет: при таком удалении база сборки создаётся заново. Набор маленький, 5 файлов, поэтому время и большие конфигурации этот замер не оценивает. В этой матрице проверяли только основную конфигурацию формата Конфигуратора.
+
+### Прямой переход той же базы сборки с 8.3.27 на 8.5.4 (#471)
+
+Замер 16.11.2026. Windows 11 (26100). Источник — `tests/fixtures/designer/configuration` из
+`cde7f1b9`. Конфигуратор 8.3.27.2342 создал файловую базу `seed` и загрузил XML
+без `/UpdateDBCfg`. После завершения процессов из базы скопировали только
+`1Cv8.1CD` в отдельный каталог для каждого исполнителя. SHA-256 каждой копии
+перед прогоном совпал с оригиналом базы сборки. Список файлов записан в UTF-8 с BOM.
+
+```text
+1cv8 CREATEINFOBASE "File='<W>/seed'" /DisableStartupDialogs /DisableStartupMessages /Out <log>
+1cv8 DESIGNER /F <W>/seed /DisableStartupDialogs /DisableStartupMessages /LoadConfigFromFiles <xml> /Out <log>
+1cv8 DESIGNER /F <W>/seed /DisableStartupDialogs /DisableStartupMessages /DumpCfg <cf> /Out <log>
+# У следующих команд платформа 8.5.4.2028. В list.txt одна строка CommonModules/ОбщийМодуль1/Ext/Module.bsl.
+1cv8 DESIGNER /F <W>/designer-migration /DisableStartupDialogs /DisableStartupMessages /DumpCfg <cf> /Out <log>
+1cv8 DESIGNER /F <W>/designer-migration /DisableStartupDialogs /DisableStartupMessages /LoadConfigFromFiles <xml-edit> -partial -listFile <list.txt> /Out <log>
+1cv8 DESIGNER /F <W>/designer-migration /DisableStartupDialogs /DisableStartupMessages /DumpCfg <cf-edit> /Out <log>
+ibcmd config --data <data> --db-path <W>/ibcmd-migration generation-id
+ibcmd config --data <data> --db-path <W>/ibcmd-migration save <cf>
+ibcmd config --data <data> --db-path <W>/ibcmd-migration import files --partial --base-dir=<xml-edit> CommonModules/ОбщийМодуль1/Ext/Module.bsl
+ibcmd config --data <data> --db-path <W>/ibcmd-migration save <cf-edit>
+```
+
+Все команды завершились кодом 0. На 8.3.27.2342 создание, полная загрузка и
+выгрузка заняли 6,59, 8,53 и 5,67 с. В таблице указано время каждого вызова
+8.5.4.2028 по стене.
+
+| Операция в копии базы 8.3.27 | Конфигуратор, с | `ibcmd`, с |
+| --- | ---: | ---: |
+| Чтение `generation-id` | — | 12,12 |
+| Первый CF из копии | 67,54 | 5,01 |
+| Частичная загрузка правки одного модуля | 5,84 | 7,20 |
+| CF после частичной загрузки | 2,92 | 7,79 |
+
+Конфигуратор для первого CF сообщил «Сохранение конфигурации успешно завершено»,
+`ibcmd generation-id` вернул непустой идентификатор. Контрольная свежая база
+8.5.4.2028 дала коды 0 за 3,27 с (создание), 3,81 с (полная загрузка XML с
+правкой) и 3,85 с (выгрузка CF).
+
+CF до правки из трёх баз были побайтно одинаковыми (114 991 байт). Контрольный
+разбор `ibcmd config --data <data> --db-path <db> export --threads=1 --file=<cf> <xml>`
+на 8.5.4.2028 завершился кодом 0 для исходного CF и первого CF Конфигуратора
+(5,09 и 6,08 с). Повтор разбора побайтно одинакового первого CF `ibcmd` с тем же
+`--data` прервали на 120 с. Для пакетов с правкой использовали отдельный `--data`
+на каждый вызов. Разбор свежего CF, частичного CF Конфигуратора и частичного CF
+`ibcmd` завершился кодом 0 за 30,96, 42,81 и 28,50 с.
+
+В трёх выгрузках с правкой совпали пути всех 51 файла. В `ConfigDumpInfo.xml`
+различались только `configVersion`. В обеих частичных сборках BSL с правкой
+совпал со свежей сборкой. Из остальных файлов по SHA-256 отличался только
+`CommonForms/Форма/Ext/Form.xml`. В обоих CF из базы 8.3.27 форма
+сохранила строки `<WindowOpeningMode>DontBlock</WindowOpeningMode>` и
+`<Group>Vertical</Group>`, а свежая загрузка тех же исходников в 8.5.4 их
+опустила. Равенство пакетов после частичной и полной загрузок из замера на
+одной версии нельзя переносить на этот переход.
+
+Оба исполнителя 8.5.4.2028 открыли копию 8.3.27.2342 и собрали CF из неё до и
+после частичного обновления. Обратный переход не измеряли.
+
+Для проверки политики раннера той же сборкой `cde7f1b9` дважды выполнили
+`v8-runner --log-level debug --json-message --config <проект>/v8project.yaml make main --output <cf>`
+на неизменном наборе XML и в одном `workPath`. Между вызовами изменили
+`tools.platform.version` и путь установки с 8.3.27.2342 на 8.5.4.2028. Обе
+команды вернули код 0 за 4,75 и 8,23 с. Первый ответ содержал режим `full` и
+причину `new build infobase`. На 8.5.4 раннер создал свежую базу, полностью
+загрузил XML и вернул `full` с причиной `platform version changed`. Это
+решение раннера закреплено в правиле
+`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-THE-BUILD-INFOBASE`.
+
+### Переименование и удаление целого объекта в базе сборки (#471)
+
+Замер 16.11.2026. Windows 11 (26100), 8.5.4.2028. В фикстуру добавили
+общий модуль `ProbeTarget471` с BSL, отдельным UUID и без ссылок из других
+объектов. Конфигуратор создал базу, полностью загрузил XML и выгрузил CF за
+2,12, 2,59 и 2,03 с. Исходный CF разобрали за 3,85 с. Коды 0, конфигурацию
+к базе данных не применяли. Для каждого частичного прогона скопировали
+`1Cv8.1CD` этой базы в отдельный каталог.
+
+При переименовании сохранили UUID и BSL, заменили имя на
+`ПробаПереименования471` в `Configuration.xml` и XML объекта и перенесли
+XML и BSL на новые пути. В список для частичной загрузки включили
+`Configuration.xml`, `CommonModules/ПробаПереименования471.xml` и
+`CommonModules/ПробаПереименования471/Ext/Module.bsl`. При удалении исключили
+объявление из `Configuration.xml` и файлы объекта из исходников. В список
+загрузки включили только `Configuration.xml`. Оба списка для Конфигуратора
+записали в UTF-8 с BOM.
+
+```text
+1cv8 DESIGNER /F <copy> /DisableStartupDialogs /DisableStartupMessages /LoadConfigFromFiles <xml> -partial -listFile <list> /Out <log>
+1cv8 DESIGNER /F <copy> /DisableStartupDialogs /DisableStartupMessages /DumpCfg <cf> /Out <log>
+ibcmd config --data <data> --db-path <copy> import files --partial --base-dir=<xml> <files…>
+ibcmd config --data <data> --db-path <copy> save <cf>
+ibcmd config --data <data> --db-path <db> export --threads=1 --file=<cf> <xml-cf>
+```
+
+Для каждого эталона создали свежую базу через `CREATEINFOBASE`, выполнили
+`/LoadConfigFromFiles` без списка, затем `/DumpCfg`. Время по стене, все
+вызовы в таблице вернули код 0.
+
+| Изменение | Путь | Создание, с | Загрузка, с | CF, с | Разбор, с |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Переименование | Свежая база | 1,52 | 2,83 | 2,24 | 4,49 |
+| Переименование | Частично, Конфигуратор | — | 2,73 | 2,91 | 4,47 |
+| Переименование | Частично, `ibcmd` | — | 2,28 | 2,32 | 3,95 |
+| Удаление | Свежая база | 1,55 | 2,63 | 2,09 | 4,38 |
+| Удаление | Частично, Конфигуратор | — | 2,64 | 2,44 | 3,98 |
+| Удаление | Частично, `ibcmd` | — | 2,31 | 2,80 | 3,86 |
+
+После переименования старого имени не было в выгрузке. У объекта с новым
+именем сохранились UUID и SHA-256 файла BSL. После удаления исчезли описание
+и BSL объекта. После разбора каждый частичный CF совпал с соответствующим
+эталоном по путям и SHA-256. Сравнили 52 файла для переименования и 50 для
+удаления, исключив `ConfigDumpInfo.xml`.
+
+[Предыдущий замер структурных изменений](#частичная-загрузка-структурных-изменений)
+показал удаление целого справочника загрузкой одного `Configuration.xml`.
+Удаление файла модуля у оставшегося объекта имеет другую границу. На 8.5.4
+полная загрузка поверх прежней базы оставляла модуль, а в #526 свежая база
+сборки дала CF без него.
 
 ## Кавычки в параметре запуска `/C`
 
