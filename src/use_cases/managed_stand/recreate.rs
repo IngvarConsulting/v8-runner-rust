@@ -5,7 +5,6 @@
 //! Только своя БД (`dbms.managed`): чужую СУБД раннер не трогает
 //! (`INV.USE-CASES.A-MANAGED-RECREATE-DROPS-ONLY-ITS-OWN-DATABASE`).
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use super::cluster::{register_again, registration_for_recreate, Registered};
@@ -43,7 +42,7 @@ pub(crate) fn old_database(
     context: &ExecutionContext,
     config: &AppConfig,
 ) -> Result<OldDatabase, UseCaseError> {
-    old_database_with(context, config, &ProcessExecutor, &RealHost)
+    old_database_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
 }
 
 pub(super) fn old_database_with(
@@ -103,7 +102,7 @@ pub(crate) fn refuse_a_leftover_database(
     else {
         return Ok(());
     };
-    let stand = Stand::new(config, context, &ProcessExecutor, &RealHost)?;
+    let stand = Stand::new(config, context, &ProcessExecutor, &RealHost::CURRENT)?;
     let Ok((port, bin)) = stand.running_record() else {
         return Ok(());
     };
@@ -158,7 +157,7 @@ impl OldDatabase {
         context: &ExecutionContext,
         config: &AppConfig,
     ) -> Result<(), UseCaseError> {
-        self.set_aside_with(context, config, &ProcessExecutor, &RealHost)
+        self.set_aside_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
     }
 
     pub(super) fn set_aside_with(
@@ -215,7 +214,7 @@ impl OldDatabase {
     /// Удача: отложенная БД удаляется. Неудача — строка для ответа: БД осталась под временным
     /// именем.
     pub(crate) fn discard(&self, context: &ExecutionContext, config: &AppConfig) -> Option<String> {
-        self.discard_with(context, config, &ProcessExecutor, &RealHost)
+        self.discard_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
     }
 
     pub(super) fn discard_with(
@@ -251,7 +250,7 @@ impl OldDatabase {
     /// Неудача создания: то, что оставило создание, снимается, прежняя БД получает своё имя и
     /// регистрацию. Ответ — что вернуть не вышло.
     pub(crate) fn restore(&self, context: &ExecutionContext, config: &AppConfig) -> Vec<String> {
-        self.restore_with(context, config, &ProcessExecutor, &RealHost)
+        self.restore_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
     }
 
     pub(super) fn restore_with(
@@ -347,10 +346,8 @@ impl OldDatabase {
         let stand = Stand::new(config, context, runner, host).map_err(Refused::Other)?;
         let passfile = stand.paths.passfile();
         let password = stand.password().map_err(Refused::Other)?;
-        crate::support::fs::write_file_atomically(&passfile, |file| {
-            file.write_all(postgres::passfile_line(self.port, &password).as_bytes())
-        })
-        .map_err(|error| Refused::Other(io_failure("cannot write", &passfile, &error)))?;
+        postgres::write_passfile(&passfile, self.port, &password)
+            .map_err(|error| Refused::Other(io_failure("cannot write", &passfile, &error)))?;
         let answer = runner.run_with_policy(
             &PostgresBuild::at(self.bin.clone()).statement(self.port, &passfile, sql),
             &policy(context),

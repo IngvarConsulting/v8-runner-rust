@@ -270,7 +270,7 @@ impl Server<'_> {
         if dry_run {
             return Ok(self.plan());
         }
-        if !self.host.supported() {
+        if !self.host.standalone_supported() {
             return Err(environment(
                 "managed services run on Windows only: on this system the runner starts no ibsrv",
             ));
@@ -544,10 +544,12 @@ impl Server<'_> {
         let Some(pid) = record.pid else {
             return false;
         };
-        self.host.soft_stop(self.runner, pid, self.context);
+        self.host
+            .soft_stop(self.runner, pid, record.started, self.context);
         let mut gone = self.await_gone(pid, record.started, self.host.patience(SOFT_STOP_TIMEOUT));
         if !gone {
-            self.host.hard_stop(self.runner, pid, self.context);
+            self.host
+                .hard_stop(self.runner, pid, record.started, self.context);
             gone = self.await_gone(pid, record.started, self.host.patience(SOFT_STOP_TIMEOUT));
         }
         if gone {
@@ -1089,14 +1091,26 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
-        fn soft_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn soft_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.soft_stops.borrow_mut().insert(pid);
             if !self.ignores_soft_stop.get() {
                 self.processes.borrow_mut().remove(&pid);
                 self.listeners.borrow_mut().retain(|_, held| *held != pid);
             }
         }
-        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn hard_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.hard_stops.borrow_mut().insert(pid);
             if pid == PID && self.immortal.get() {
                 return;
@@ -1639,6 +1653,42 @@ mod tests {
         }
         assert_eq!(host.spawned.get(), 0);
         assert!(!setup.config.work_path.exists());
+    }
+
+    /// Linux: `ibsrv` не замерен, и `standalone start|restart` отказывают до любого процесса,
+    /// даже от обычного пользователя (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+    #[test]
+    fn linux_refuses_the_standalone_server_before_any_process() {
+        let setup = setup();
+        let witness = Host::default();
+        let linux = super::super::RealHost {
+            system: super::super::System {
+                privileged: || false,
+                ..super::super::System::LINUX
+            },
+        };
+        let locate = || Ok(PathBuf::from("ibsrv.exe"));
+        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+            let refused = run_standalone(
+                &ExecutionContext::cli(CommandName::StandaloneStart),
+                &setup.config,
+                command,
+                false,
+                &Runner { host: &witness },
+                &linux,
+                &locate,
+            )
+            .map_err(|failure| failure.error)
+            .unwrap_err();
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+                "{refused}"
+            );
+        }
+        assert_eq!(witness.spawned.get(), 0);
+        assert!(witness.calls.borrow().is_empty());
+        assert!(!setup.paths().root().exists());
     }
 
     #[test]

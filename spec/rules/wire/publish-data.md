@@ -1,11 +1,13 @@
 ---
 id: CTR.WIRE.PUBLISH-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/publish.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_publish.rs::publish_composes_webinst_from_the_declared_web_section
   - tests/cli_publish.rs::publish_preview_never_echoes_the_password_of_the_connection_string
+  - src/use_cases/managed_stand/web.rs::publish_runs_the_located_webinst_on_the_private_config_and_reloads_apache
+  - src/use_cases/managed_stand/web.rs::only_webinst_is_elevated_and_a_refusing_sudo_names_the_sudoers_rule
 ---
 
 # `data` команды `publish`
@@ -17,6 +19,14 @@ check:
 целиком, потому что публикация замещает `default.vrd` без остатка. Целиком — значит без
 пропущенных параметров, а не без маскирования: `-connstr` несёт строку соединения, и
 пароль в ней закрыт как везде.
+
+У базы с `infobase.web.managed` сервер, физический каталог и адрес не объявлены — их
+вычисляет раннер: `apache24`, каталог публикации частного Apache под `localPath` и
+loopback-адрес его порта. Ответ называет вычисленное.
+
+**Что изменила версия 7.** Ответ управляемой публикации называет вычисленные сервер,
+каталог и адрес. На Linux её план называет `sudo` с ключами `-n --` перед путём `webinst`:
+права поднимаются только у него ([правило](../platform/a-managed-apache-is-private.md)).
 
 **Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 

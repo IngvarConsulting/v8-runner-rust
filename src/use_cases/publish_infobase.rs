@@ -21,6 +21,7 @@ use crate::platform::webinst::{webinst_args, write_diagnostics};
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::managed_stand::{ManagedPublication, Reload};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
@@ -44,20 +45,57 @@ fn run_publish(
     config: &AppConfig,
     request: &PublishRequest,
 ) -> UseCaseResult<PublishResult> {
+    let managed = crate::use_cases::managed_stand::publication(
+        context,
+        config,
+        request.action,
+        request.dry_run,
+    )
+    .map_err(UseCaseFailure::without_payload)?;
+    publish_with(context, config, request, managed)
+}
+
+/// Выход сценария с уже выбранным стендом; его берут сценарии частного Apache с подделанной
+/// машиной.
+#[cfg(test)]
+pub(crate) fn execute_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PublishRequest,
+    managed: Option<ManagedPublication<'_>>,
+) -> UseCaseResult<PublishResult> {
+    stamp_dispatch(
+        publish_with(context, config, request, managed),
+        context.work(),
+    )
+}
+
+/// Публикация с уже выбранным стендом: у базы управляемого кластера `managed` несёт частный
+/// Apache, его исполнителя и `webinst` выпуска кластера.
+fn publish_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PublishRequest,
+    managed: Option<ManagedPublication<'_>>,
+) -> UseCaseResult<PublishResult> {
     let started = Instant::now();
     debug!(
         command = context.command().as_str(),
         action = request.action.as_str(),
         dry_run = request.dry_run,
+        managed = managed.is_some(),
         "executing publish use case"
     );
-
-    let web = config.infobase.web.as_ref().ok_or_else(|| {
-        UseCaseFailure::without_payload(AppError::Validation(
-            "infobase.web is not declared: name the web server, wsdir and dir to publish"
-                .to_owned(),
-        ))
-    })?;
+    let web = managed
+        .as_ref()
+        .map(|publication| &publication.target)
+        .or(config.infobase.web.as_ref())
+        .ok_or_else(|| {
+            UseCaseFailure::without_payload(AppError::Validation(
+                "infobase.web is not declared: name the web server, wsdir and dir to publish"
+                    .to_owned(),
+            ))
+        })?;
     let server = web.server.ok_or_else(|| {
         UseCaseFailure::without_payload(AppError::Validation(
             "infobase.web.server is not declared: iis, apache2, apache22 or apache24".to_owned(),
@@ -68,32 +106,47 @@ fn run_publish(
     let dir = web.dir.clone().unwrap_or_default();
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected =
-        crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Publish)
-            .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
-    if selected.provider != Provider::Webinst {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
-        ));
-    }
-    let receipt = selected.receipt;
-    let Some(location) = selected.location else {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(
-                crate::domain::capability::Operation::Publish,
-                selected.provider,
-            ),
-        ));
+    let (receipt, program) = if let Some(publication) = &managed {
+        let receipt = config
+            .provider_plan(Operation::Publish)
+            .receipt_for(Provider::Webinst, Vec::new());
+        (receipt, publication.webinst.clone())
+    } else {
+        let selected = crate::use_cases::provider_selection::select(
+            config,
+            &mut utilities,
+            Operation::Publish,
+        )
+        .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+        if selected.provider != Provider::Webinst {
+            return Err(UseCaseFailure::without_payload(
+                crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
+            ));
+        }
+        let Some(location) = selected.location else {
+            return Err(UseCaseFailure::without_payload(
+                crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
+            ));
+        };
+        (selected.receipt, location.path)
     };
-
     let args = webinst_args(
         request.action,
         server,
         web,
         &wsdir,
         &dir,
-        &config.infobase.connection,
+        managed
+            .as_ref()
+            .map_or(config.infobase.connection.as_str(), |target| {
+                target.connection.as_str()
+            }),
     );
+    // На Linux управляемая публикация поднимает права только у `webinst`.
+    let (program, args) = match &managed {
+        Some(publication) => publication.command(args),
+        None => (program, args),
+    };
     let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
     let result = |plan: Option<PublishPlan>| PublishResult {
         provider: Some(receipt.clone()),
@@ -118,7 +171,7 @@ fn run_publish(
             "[webinst] preview only, web server not touched",
         );
         let mut preview = result(Some(PublishPlan {
-            program: location.path.clone(),
+            program: program.clone(),
             // `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`.
             args: mask_preview_args(&args, &secrets),
         }));
@@ -127,12 +180,16 @@ fn run_publish(
             request.action.as_str(),
             wsdir,
             server.as_str(),
-            location.path.display()
+            program.display()
         ));
         return Ok(preview);
     }
 
-    let logs_dir = platform_logs_dir(&config.work_path).map_err(|error| {
+    let logs_dir = match &managed {
+        Some(publication) => Ok(publication.log_root.clone()),
+        None => platform_logs_dir(&config.work_path),
+    }
+    .map_err(|error| {
         UseCaseFailure::without_payload(AppError::Runtime(format!(
             "failed to create platform log directory under '{}': {error}",
             config.work_path.display()
@@ -154,8 +211,13 @@ fn run_publish(
             server.as_str()
         ),
     );
+    let snapshot = managed
+        .as_ref()
+        .map(|publication| publication.snapshot())
+        .transpose()
+        .map_err(UseCaseFailure::without_payload)?;
     let process = ProcessRequest {
-        program: location.path.clone(),
+        program,
         args,
         workdir: None,
         stdout_log_path: None,
@@ -163,7 +225,10 @@ fn run_publish(
         startup_probe: None,
         windows_verbatim_args: Vec::new(),
     };
-    let runner = utilities.runner_for(UtilityType::Webinst);
+    let runner = match &managed {
+        Some(publication) => publication.runner(),
+        None => utilities.runner_for(UtilityType::Webinst),
+    };
     let finished = runner
         .run_with_policy(
             &process,
@@ -185,12 +250,54 @@ fn run_publish(
                 failed.message = Some(message);
                 failed
             })
-        })?;
+        });
+    let finished = match finished {
+        Ok(finished) => finished,
+        Err(mut failure) => {
+            if let (Some(publication), Some(snapshot)) = (&managed, snapshot) {
+                for rollback in [snapshot.restore().err(), publication.reclaim_files().err()]
+                    .into_iter()
+                    .flatten()
+                {
+                    failure.error = failure.error.followed_by(rollback.to_string());
+                }
+            }
+            return Err(failure);
+        }
+    };
 
     let mut done = result(None);
     done.platform_log_path = Some(log_path);
     match finished.outcome() {
         Ok(()) => {
+            if let Some(publication) = &managed {
+                // Сначала файлы `webinst` возвращаются пользователю раннера, затем Apache
+                // перечитывает конфиг.
+                let reclaimed = publication.reclaim_files();
+                let reclaim_failed = reclaimed.is_err();
+                if let Err(mut error) =
+                    reclaimed.and_then(|()| publication.reload(Reload::Activate))
+                {
+                    if let Some(snapshot) = snapshot {
+                        // Файлы `webinst` забираются и тогда, когда откат конфига не удался;
+                        // отказ забрать их, уже названный выше, не повторяется.
+                        let restored = snapshot
+                            .restore()
+                            .and_then(|()| publication.reload(Reload::Recover));
+                        let reclaimed = if reclaim_failed {
+                            None
+                        } else {
+                            publication.reclaim_files().err()
+                        };
+                        for rollback in [restored.err(), reclaimed].into_iter().flatten() {
+                            error = error.followed_by(rollback.to_string());
+                        }
+                    }
+                    done.ok = false;
+                    done.message = Some(error.to_string());
+                    return Err(UseCaseFailure::with_payload(error, done));
+                }
+            }
             done.message = Some(format!(
                 "{} '{}' on {} completed",
                 request.action.as_str(),
@@ -207,11 +314,22 @@ fn run_publish(
                 wsdir,
                 server.as_str()
             );
-            done.message = Some(message.clone());
-            Err(UseCaseFailure::with_payload(
-                AppError::Platform(message),
-                done,
-            ))
+            let mut error = managed
+                .as_ref()
+                .and_then(|publication| publication.elevation_refusal(&finished))
+                .unwrap_or_else(|| {
+                    crate::use_cases::result::UseCaseError::from(AppError::Platform(message))
+                });
+            done.message = Some(error.to_string());
+            if let (Some(publication), Some(snapshot)) = (&managed, snapshot) {
+                for rollback in [snapshot.restore().err(), publication.reclaim_files().err()]
+                    .into_iter()
+                    .flatten()
+                {
+                    error = error.followed_by(rollback.to_string());
+                }
+            }
+            Err(UseCaseFailure::with_payload(error, done))
         }
     }
 }
