@@ -540,6 +540,14 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
+        "crate::use_cases::managed_stand::debug_server_start",
+        "сервер отладки не трогает базу и стенд; гонку команд сеанса решает его запись (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
+    ),
+    (
+        "crate::use_cases::managed_stand::debug_server_stop",
+        "отладчик гасит сервер при отсоединении, даже пока идёт другая команда (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
+    ),
+    (
         "crate::use_cases::live_agent::status",
         "область — учётная запись ОС: спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
     ),

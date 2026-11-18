@@ -309,6 +309,7 @@ pub fn run() -> i32 {
         | Command::Dbms(_)
         | Command::Standalone(_)
         | Command::Cluster(_)
+        | Command::DebugServer(_)
         | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)

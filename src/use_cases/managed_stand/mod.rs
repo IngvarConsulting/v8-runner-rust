@@ -2,11 +2,13 @@
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
 mod cluster;
+mod debug_server;
 mod recreate;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
+pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 
 use std::io::Write as _;
@@ -70,6 +72,10 @@ pub(crate) trait ServiceHost {
     fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
         Some(Vec::new())
     }
+    /// Отвечает ли на порту сервер отладки по протоколу `rdbg`.
+    fn rdbg_answers(&self, _port: u16) -> bool {
+        false
+    }
 }
 
 struct RealHost;
@@ -94,21 +100,47 @@ impl ServiceHost for RealHost {
         service::port_answers(port)
     }
     fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        let request = taskkill(&["/PID", &pid.to_string()]);
-        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        stop_service(runner, pid, false, context);
     }
     fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
-        let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        stop_service(runner, pid, true, context);
     }
     fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
         service::processes(images)
+    }
+    fn rdbg_answers(&self, port: u16) -> bool {
+        crate::platform::dbgs::rdbg_answers(port)
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
 }
 
+/// Остановка службы: `taskkill` на Windows, сигнал её группе на Unix. Жёсткая на Windows берёт
+/// и дерево (`/T`): потомки службы не переживают её.
+#[cfg(windows)]
+fn stop_service(runner: &dyn ProcessRunner, pid: u32, hard: bool, context: &ExecutionContext) {
+    let pid = pid.to_string();
+    let args: &[&str] = if hard {
+        &["/PID", &pid, "/T", "/F"]
+    } else {
+        &["/PID", &pid]
+    };
+    let _ = runner.run_with_policy(&taskkill(args), &context.cleanup_policy());
+}
+
+#[cfg(unix)]
+fn stop_service(_runner: &dyn ProcessRunner, pid: u32, hard: bool, _context: &ExecutionContext) {
+    service::signal_service_group(pid, hard);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stop_service(_runner: &dyn ProcessRunner, _pid: u32, _hard: bool, _context: &ExecutionContext) {}
+
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "taskkill есть только на Windows")
+)]
 fn taskkill(args: &[&str]) -> ProcessRequest {
     ProcessRequest {
         program: PathBuf::from("taskkill"),
@@ -1047,6 +1079,59 @@ pub fn execute_standalone(
         &RealHost,
         &|| locate_ibsrv(config),
     )
+}
+
+/// `debug-server start`: сервер отладки для отладчика. Без замка `workPath`
+/// (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
+pub fn debug_server_start(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: DebugServerStart,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
+    let locate = || locate_client(config);
+    let cluster_port = || cluster::debug_port(context, config, &RealHost);
+    debug_server::DebugServer {
+        context,
+        config,
+        runner: &ProcessExecutor,
+        host: &RealHost,
+        locate_client: &locate,
+        cluster_port: &cluster_port,
+    }
+    .start(request, dry_run)
+    .map_err(UseCaseFailure::without_payload)
+}
+
+/// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.
+pub fn debug_server_stop(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    session: &str,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
+    let locate = || locate_client(config);
+    let cluster_port = || cluster::debug_port(context, config, &RealHost);
+    debug_server::DebugServer {
+        context,
+        config,
+        runner: &ProcessExecutor,
+        host: &RealHost,
+        locate_client: &locate,
+        cluster_port: &cluster_port,
+    }
+    .stop(session, dry_run)
+    .map_err(UseCaseFailure::without_payload)
+}
+
+/// Тонкий клиент так, как его выберет `launch thin`: из его установки берётся `dbgs`.
+fn locate_client(
+    config: &AppConfig,
+) -> Result<crate::domain::launch::PlatformResolution, UseCaseError> {
+    crate::platform::utilities::PlatformUtilities::from_config(config)
+        .locate(crate::platform::locator::UtilityType::V8C)
+        .map(|location| crate::use_cases::platforms::platform_resolution(&location))
+        .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
 }
 
 /// `standalone status`: читает запись без замка, чтобы отвечать и пока идёт другая команда.

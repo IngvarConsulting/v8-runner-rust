@@ -327,6 +327,11 @@ pub struct ClusterPins {
     /// откатывает следующий `cluster start`, а рабочие команды такой кластер не видят.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<PreviousRegistry>,
+    /// Агент поднимается с сервером отладки (`cluster start --debug`). Признак переживает
+    /// `stop` и `restart`, пока его не снимет `--no-debug`. Закреплённое без него — кластер без
+    /// отладки.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
 }
 
 /// Реестр, из которого идёт перенос.

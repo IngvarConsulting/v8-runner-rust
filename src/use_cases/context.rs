@@ -41,6 +41,8 @@ pub enum CommandName {
     ClusterStatus,
     ClusterStop,
     ClusterRestart,
+    DebugServerStart,
+    DebugServerStop,
     AgentHold,
     AgentRelease,
     AgentStop,
@@ -93,6 +95,8 @@ impl CommandName {
             | Self::DbmsStatus
             | Self::StandaloneStatus
             | Self::ClusterStatus
+            | Self::DebugServerStart
+            | Self::DebugServerStop
             | Self::AgentHold
             | Self::AgentRelease
             | Self::AgentStop
@@ -150,6 +154,8 @@ impl CommandName {
             Self::StandaloneRestart => "standalone restart",
             Self::ClusterStart => "cluster start",
             Self::ClusterStatus => "cluster status",
+            Self::DebugServerStart => "debug-server start",
+            Self::DebugServerStop => "debug-server stop",
             Self::ClusterStop => "cluster stop",
             Self::ClusterRestart => "cluster restart",
             Self::AgentHold => "agent hold",

@@ -6,6 +6,8 @@ pub mod backup_removal;
 /// Opening a URL in the user's browser.
 pub mod browser;
 pub mod connection;
+/// The 1C debug server `dbgs` the runner starts for a debugger.
+pub mod dbgs;
 pub mod designer;
 pub mod download;
 /// Прогноз режима выгрузки по изменившемуся: что платформа сделает с `-update`.

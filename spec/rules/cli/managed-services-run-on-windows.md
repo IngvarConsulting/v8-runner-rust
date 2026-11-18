@@ -10,3 +10,5 @@ check:
 
 На Linux и macOS `dbms start`, `cluster start`, `standalone start` и их `restart` отвечают
 `environment_unavailable`, не запуская процессов: поведение служб замерено только на Windows.
+Сервер отладки `debug-server` службой стенда не является и работает на Windows, Linux и macOS; на них нет
+только сервера отладки кластера, потому что нет и самого управляемого кластера.

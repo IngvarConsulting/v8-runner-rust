@@ -36,11 +36,20 @@ impl ClusterPorts {
         self.range_start.saturating_add(WORKER_RANGE_WIDTH - 1)
     }
 
-    /// Все порты блока.
+    /// Порт сервера отладки кластера (`-debugServerPort`): следом за диапазоном рабочих
+    /// процессов, внутри шага блока. Диапазон не меняется: реестр помнит прежний `/range`
+    /// (замер #538), и порт из него мог бы занять `rphost`.
+    pub fn debug(self) -> u16 {
+        self.range_end().saturating_add(1)
+    }
+
+    /// Все порты блока, с портом сервера отладки: его не должен держать чужой процесс, даже
+    /// если кластер сейчас без отладки.
     pub fn all(self) -> impl Iterator<Item = u16> {
         [self.agent, self.regport]
             .into_iter()
             .chain(self.range_start..=self.range_end())
+            .chain(std::iter::once(self.debug()))
     }
 
     /// Блоки делят хотя бы один порт.
@@ -68,26 +77,40 @@ pub fn ras_address(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Запуск агента кластера с реестром в `registry` (каталог `/d`).
+/// Запуск агента кластера с реестром в `registry` (каталог `/d`). С `debug` агент поднимает и
+/// свой сервер отладки HTTP на петле: дочерний `dbgs` на [`ClusterPorts::debug`] (замер «Сервер
+/// отладки `dbgs`»).
 pub fn start_agent(
     ragent: &Path,
     registry: &Path,
     ports: ClusterPorts,
+    debug: bool,
     log: &Path,
 ) -> ServiceRequest {
+    let mut args = vec![
+        "/agent".to_owned(),
+        "/port".to_owned(),
+        ports.agent.to_string(),
+        "/regport".to_owned(),
+        ports.regport.to_string(),
+        "/range".to_owned(),
+        ports.worker_range(),
+        "/d".to_owned(),
+        registry.display().to_string(),
+    ];
+    if debug {
+        args.extend([
+            "-debug".to_owned(),
+            "-http".to_owned(),
+            "-debugServerPort".to_owned(),
+            ports.debug().to_string(),
+            "-debugServerAddr".to_owned(),
+            std::net::Ipv4Addr::LOCALHOST.to_string(),
+        ]);
+    }
     ServiceRequest {
         program: ragent.to_path_buf(),
-        args: vec![
-            "/agent".to_owned(),
-            "/port".to_owned(),
-            ports.agent.to_string(),
-            "/regport".to_owned(),
-            ports.regport.to_string(),
-            "/range".to_owned(),
-            ports.worker_range(),
-            "/d".to_owned(),
-            registry.display().to_string(),
-        ],
+        args,
         workdir: registry.parent().map(Path::to_path_buf),
         log_path: log.to_path_buf(),
         stdin: None,
@@ -140,6 +163,7 @@ mod tests {
             Path::new("ragent.exe"),
             Path::new("w/data"),
             ports,
+            false,
             Path::new("w/cluster.log"),
         );
         assert_eq!(
@@ -156,5 +180,33 @@ mod tests {
                 "w/data"
             ]
         );
+    }
+
+    /// Порт сервера отладки — внутри шага блока, но вне `/range`: реестр помнит прежний
+    /// диапазон, и порт из него мог бы занять `rphost`.
+    #[test]
+    fn the_debug_port_follows_the_worker_range_inside_the_block() {
+        let ports = ClusterPorts::from_first(24000);
+        assert_eq!(ports.debug(), 24018);
+        assert!(ports.all().any(|port| port == 24018));
+        let agent = start_agent(
+            Path::new("ragent.exe"),
+            Path::new("w/data"),
+            ports,
+            true,
+            Path::new("w/cluster.log"),
+        );
+        assert_eq!(
+            agent.args[9..],
+            [
+                "-debug",
+                "-http",
+                "-debugServerPort",
+                "24018",
+                "-debugServerAddr",
+                "127.0.0.1"
+            ]
+        );
+        assert_eq!(agent.args[6], "24002:24017");
     }
 }

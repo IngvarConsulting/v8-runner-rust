@@ -35,17 +35,25 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(200);
 const AGENT_IMAGE: &str = "ragent.exe";
 /// Процессы агента, которые переживают его конец (замер #534).
-const REMNANT_IMAGES: [&str; 2] = ["rmngr.exe", "rphost.exe"];
+/// `dbgs.exe` — сервер отладки, которого агент с `-debug -http` поднимает сам (замер «Сервер
+/// отладки `dbgs`»).
+const REMNANT_IMAGES: [&str; 3] = ["rmngr.exe", "rphost.exe", "dbgs.exe"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
 
-/// Команда кластера. Ключ `--new-regport` есть только у запуска.
+/// Команда кластера. Ключ `--new-regport` есть только у запуска. `debug` — `--debug` или
+/// `--no-debug`; `None` — как было закреплено.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClusterCommand {
-    Start { new_regport: bool },
+    Start {
+        new_regport: bool,
+        debug: Option<bool>,
+    },
     Status,
     Stop,
-    Restart,
+    Restart {
+        debug: Option<bool>,
+    },
 }
 
 /// Что сняла остановка агента.
@@ -126,6 +134,8 @@ struct Cluster<'a> {
     agent: ServicePaths,
     ras: ServicePaths,
     started_at: Instant,
+    /// Запрошенный сервер отладки: `--debug`, `--no-debug` или как закреплено.
+    debug: Option<bool>,
 }
 
 impl Cluster<'_> {
@@ -147,6 +157,12 @@ impl Cluster<'_> {
     fn write_pins(&self, pins: &ClusterPins) -> Result<(), UseCaseError> {
         write_json(&self.agent.pins(), pins)
             .map_err(|error| io_failure("cannot write", &self.agent.pins(), &error))
+    }
+
+    /// Поднимать ли агента с сервером отладки: как попросили, иначе как закреплено.
+    fn wanted_debug(&self, pins: Option<&ClusterPins>) -> bool {
+        self.debug
+            .unwrap_or_else(|| pins.is_some_and(|pins| pins.debug))
     }
 
     fn registry(&self, pins: &ClusterPins) -> PathBuf {
@@ -197,6 +213,7 @@ impl Cluster<'_> {
             stopped_remnant_pids: Vec::new(),
             stopped_dbms_pid: None,
             previous_regport: None,
+            debug_url: None,
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             warnings: Vec::new(),
         }
@@ -209,6 +226,9 @@ impl Cluster<'_> {
             result.worker_range = Some(pins.ports.worker_range());
             result.registry_dir = Some(self.registry(&pins));
             result.registered = pins.registered;
+            if agent.is_some() && pins.debug {
+                result.debug_url = Some(crate::platform::dbgs::url(pins.ports.debug()));
+            }
         }
         if let Some(agent) = agent {
             result.pid = agent.pid;
@@ -612,6 +632,10 @@ impl Cluster<'_> {
                         self.declared.infobase
                     )));
                 }
+                let running = self.pins().is_some_and(|pins| pins.debug);
+                if let Some(wanted) = self.debug.filter(|wanted| *wanted != running) {
+                    return Err(debug_mismatch(&self.declared.infobase, running, wanted));
+                }
                 // Запись упавшего раннера становится рабочей: её читают остальные команды.
                 write_record(&self.agent, &record)?;
                 let ras = match self.own_ras() {
@@ -728,6 +752,7 @@ impl Cluster<'_> {
             registry: previous.registry,
             registered: previous.registered,
             previous: None,
+            debug: pins.debug,
         })?;
         if self.registry_is_free(&new_registry) {
             let _ = std::fs::remove_dir_all(&new_registry);
@@ -854,12 +879,19 @@ impl Cluster<'_> {
                 .prepare()
                 .map_err(|error| io_failure("cannot prepare", paths.root(), &error))?;
         }
+        let debug = self.wanted_debug(pins.as_ref());
         let pins = match pins {
             // Реестры подметаются только при известных портах: если закреплённое потеряно, прежний
             // реестр может быть тем, где зарегистрирована база.
             Some(pins) => {
                 self.sweep_registries(&pins.registry);
-                pins
+                if pins.debug == debug {
+                    pins
+                } else {
+                    let pins = ClusterPins { debug, ..pins };
+                    self.write_pins(&pins)?;
+                    pins
+                }
             }
             None => {
                 let ports = self.choose_ports(stand, None)?;
@@ -868,6 +900,7 @@ impl Cluster<'_> {
                     registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
                     registered: false,
                     previous: None,
+                    debug,
                 };
                 self.write_pins(&pins)?;
                 pins
@@ -918,6 +951,7 @@ impl Cluster<'_> {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
+            debug: self.wanted_debug(Some(&old)),
         };
         for paths in [&self.agent, &self.ras] {
             paths
@@ -1064,7 +1098,13 @@ impl Cluster<'_> {
             location: self.agent.location(),
         };
         write_record(&self.agent, &agent)?;
-        let request = ragent::start_agent(&ragent_bin, &registry, pins.ports, &self.agent.log());
+        let request = ragent::start_agent(
+            &ragent_bin,
+            &registry,
+            pins.ports,
+            pins.debug,
+            &self.agent.log(),
+        );
         let pid = self.spawn(&request, "ragent").inspect_err(|_| {
             forget_record(&self.agent);
         })?;
@@ -1247,6 +1287,7 @@ fn cluster<'a>(
         agent,
         ras,
         started_at: Instant::now(),
+        debug: None,
     })
 }
 
@@ -1260,15 +1301,87 @@ pub(super) fn run_cluster(
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<ClusterResult> {
     super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
-    let cluster =
+    let mut cluster =
         cluster(config, context, runner, host, locate).map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
-        ClusterCommand::Start { new_regport } => cluster.start(dry_run, new_regport),
+        ClusterCommand::Start { new_regport, debug } => {
+            cluster.debug = debug;
+            cluster.start(dry_run, new_regport)
+        }
         ClusterCommand::Status => Ok(cluster.status()),
         ClusterCommand::Stop => cluster.stop(dry_run),
-        ClusterCommand::Restart => cluster.restart(dry_run),
+        ClusterCommand::Restart { debug } => {
+            cluster.debug = debug;
+            cluster.restart(dry_run)
+        }
     };
     outcome.map_err(|error| UseCaseFailure::with_payload(error, cluster.failed()))
+}
+
+/// Работающий кластер, поднятый с другим сервером отладки, чем просят: перезапуск с ключом.
+fn debug_mismatch(infobase: &str, running: bool, wanted: bool) -> UseCaseError {
+    let flag = if wanted { "--debug" } else { "--no-debug" };
+    validation(format!(
+        "the cluster of '{infobase}' is running {} a debug server: run `cluster restart {flag}`",
+        if running { "with" } else { "without" },
+    ))
+}
+
+/// Сколько ждать сервер отладки кластера: агент поднимает `dbgs` лениво, вместе с первым
+/// рабочим процессом (замер «Сервер отладки `dbgs`»).
+const DEBUG_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Порт сервера отладки кластера этой базы, когда он отвечает по `rdbg`: для
+/// `debug-server start`. Кластер не работает или поднят без отладки — отказ с командой,
+/// которая это исправит.
+pub(super) fn debug_port(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    host: &dyn ServiceHost,
+) -> Result<u16, UseCaseError> {
+    let no_locate = || Err(validation("a running cluster names its own utilities"));
+    let cluster = cluster(
+        config,
+        context,
+        &crate::platform::process::ProcessExecutor,
+        host,
+        &no_locate,
+    )?;
+    let infobase = &cluster.declared.infobase;
+    let pins = cluster.pins();
+    let Observed::Own(_) = cluster.observe(&cluster.agent) else {
+        return Err(environment(format!(
+            "the cluster of '{infobase}' is not running: run `cluster start --debug`"
+        )));
+    };
+    let Some(pins) = pins.filter(|pins| pins.debug) else {
+        return Err(environment(format!(
+            "the cluster of '{infobase}' runs without a debug server: run `cluster restart --debug`"
+        )));
+    };
+    let port = pins.ports.debug();
+    let deadline = Instant::now() + host.patience(DEBUG_READY_TIMEOUT);
+    loop {
+        if let Some(error) =
+            interruption_before_safe_point(context, "waiting for the debug server of the cluster")
+        {
+            return Err(error.into());
+        }
+        if host.rdbg_answers(port) {
+            return Ok(port);
+        }
+        if Instant::now() >= deadline {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::TimedOut,
+                format!(
+                    "the debug server of the cluster of '{infobase}' did not answer on port {port} in {} s; log: {}",
+                    DEBUG_READY_TIMEOUT.as_secs(),
+                    cluster.agent.log().display()
+                ),
+            ));
+        }
+        host.sleep(POLL);
+    }
 }
 
 /// Что `infobase create` делает с базой кластера раннера.
@@ -1799,6 +1912,8 @@ mod tests {
         spawned: RefCell<Vec<String>>,
         agent_args: RefCell<Vec<String>>,
         agent_exits_at_once: Cell<bool>,
+        /// Сервер отладки агента отвечает по `rdbg`.
+        rdbg: Cell<bool>,
         cluster_silent: Cell<bool>,
         hard_stops: RefCell<HashSet<u32>>,
         /// Процессы, которых не снять.
@@ -1857,6 +1972,9 @@ mod tests {
     impl ServiceHost for Host {
         fn supported(&self) -> bool {
             !self.unsupported.get()
+        }
+        fn rdbg_answers(&self, _port: u16) -> bool {
+            self.rdbg.get()
         }
         fn spawn(
             &self,
@@ -2068,13 +2186,35 @@ mod tests {
             new_regport: bool,
             host: &Host,
         ) -> Result<ClusterResult, UseCaseError> {
-            let locate = || Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"));
             let command = match command {
-                ServiceCommand::Start => ClusterCommand::Start { new_regport },
+                ServiceCommand::Start => ClusterCommand::Start {
+                    new_regport,
+                    debug: None,
+                },
                 ServiceCommand::Status => ClusterCommand::Status,
                 ServiceCommand::Stop => ClusterCommand::Stop,
-                ServiceCommand::Restart => ClusterCommand::Restart,
+                ServiceCommand::Restart => ClusterCommand::Restart { debug: None },
             };
+            self.command_in(context, command, host)
+        }
+        fn command(
+            &self,
+            command: ClusterCommand,
+            host: &Host,
+        ) -> Result<ClusterResult, UseCaseError> {
+            self.command_in(
+                &ExecutionContext::cli(CommandName::ClusterStart),
+                command,
+                host,
+            )
+        }
+        fn command_in(
+            &self,
+            context: &ExecutionContext,
+            command: ClusterCommand,
+            host: &Host,
+        ) -> Result<ClusterResult, UseCaseError> {
+            let locate = || Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"));
             run_cluster(
                 context,
                 &self.config,
@@ -2237,6 +2377,109 @@ mod tests {
         assert!(setup.dbms_record().explicit);
         setup.run(ServiceCommand::Stop, &host).unwrap();
         assert!(host.alive(PG_PID));
+    }
+
+    fn debug_start(debug: Option<bool>) -> ClusterCommand {
+        ClusterCommand::Start {
+            new_regport: false,
+            debug,
+        }
+    }
+
+    /// `cluster start --debug`: агент поднимается с сервером отладки на порту блока, признак
+    /// закрепляется, ответ называет адрес.
+    #[test]
+    fn a_debug_start_raises_the_agent_with_its_debug_server() {
+        let setup = setup();
+        let host = Host::default();
+        let started = setup.command(debug_start(Some(true)), &host).unwrap();
+        let pins = setup.pins();
+        assert!(pins.debug);
+        let port = pins.ports.debug().to_string();
+        let args = host.agent_args.borrow().clone();
+        let at = args
+            .iter()
+            .position(|arg| arg == "-debugServerPort")
+            .unwrap();
+        assert_eq!(args[at + 1], port);
+        assert!(args.contains(&"-debug".to_owned()) && args.contains(&"-http".to_owned()));
+        assert_eq!(started.debug_url, Some(format!("http://127.0.0.1:{port}")));
+    }
+
+    /// Признак переживает `restart` без ключа; `--no-debug` его снимает.
+    #[test]
+    fn the_debug_server_stays_on_until_no_debug() {
+        let setup = setup();
+        let host = Host::default();
+        setup.command(debug_start(Some(true)), &host).unwrap();
+        setup
+            .command(ClusterCommand::Restart { debug: None }, &host)
+            .unwrap();
+        assert!(host.agent_args.borrow().contains(&"-debug".to_owned()));
+        setup
+            .command(ClusterCommand::Restart { debug: Some(false) }, &host)
+            .unwrap();
+        assert!(!host.agent_args.borrow().contains(&"-debug".to_owned()));
+        assert!(!setup.pins().debug);
+    }
+
+    /// Работающий кластер без отладки на `start --debug` — отказ с перезапуском, а не «уже
+    /// работает» без отладки.
+    #[test]
+    fn a_debug_start_on_a_cluster_running_without_it_is_refused() {
+        let setup = setup();
+        let host = Host::default();
+        setup.command(debug_start(None), &host).unwrap();
+        let error = setup.command(debug_start(Some(true)), &host).unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
+        assert!(
+            error.to_string().contains("cluster restart --debug"),
+            "{error}"
+        );
+        // Без ключа — «уже работает», как прежде.
+        let again = setup.command(debug_start(None), &host).unwrap();
+        assert_eq!(again.action, ServiceAction::AlreadyRunning);
+        assert_eq!(again.debug_url, None);
+    }
+
+    /// Закреплённое прежних версий, без признака, читается: кластер без отладки, реестр тот же.
+    #[test]
+    fn pins_written_before_the_debug_server_keep_their_registry() {
+        let old = r#"{"ports":{"agent":24000,"regport":24001,"range_start":24002},"registry":"registry-24001","registered":true}"#;
+        let pins: ClusterPins = serde_json::from_str(old).unwrap();
+        assert!(!pins.debug);
+        assert!(pins.registered);
+        assert_eq!(pins.registry, "registry-24001");
+    }
+
+    /// `debug-server start` у базы кластера: порт отвечающего сервера отладки или отказ с
+    /// командой, которая его поднимет.
+    #[test]
+    fn the_debug_port_of_the_cluster_needs_a_debug_start() {
+        let setup = setup();
+        let host = Host::default();
+        let context = ExecutionContext::cli(CommandName::DebugServerStart);
+        let error = debug_port(&context, &setup.config, &host).unwrap_err();
+        assert!(
+            error.to_string().contains("cluster start --debug"),
+            "{error}"
+        );
+        setup.command(debug_start(None), &host).unwrap();
+        let error = debug_port(&context, &setup.config, &host).unwrap_err();
+        assert!(
+            error.to_string().contains("cluster restart --debug"),
+            "{error}"
+        );
+        setup
+            .command(ClusterCommand::Restart { debug: Some(true) }, &host)
+            .unwrap();
+        let error = debug_port(&context, &setup.config, &host).unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::TimedOut, "{error}");
+        host.rdbg.set(true);
+        assert_eq!(
+            debug_port(&context, &setup.config, &host).unwrap(),
+            setup.pins().ports.debug()
+        );
     }
 
     #[test]
@@ -2529,6 +2772,7 @@ mod tests {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
+            debug: false,
         };
         std::fs::create_dir_all(setup.agent().root().join(&moving.registry)).unwrap();
         write_json(&setup.agent().pins(), &moving).unwrap();

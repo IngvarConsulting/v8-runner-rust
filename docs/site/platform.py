@@ -376,6 +376,12 @@ t("Операции, которых нет в EDT, выполняются в К�
   "EDT не заменяет Конфигуратор.",
   edt("Загрузить и выгрузить содержимое базы", 10328))
 
+group("debug", "Отладка",
+      "Кто поднимает сервер отладки, к которому подключаются отладчик и клиент.")
+t("Клиентское приложение запускается под отладкой ключом /Debug с режимом http и ключом /DebuggerURL с адресом отладчика; с -attach отладчик сам подключает предметы отладки, зарегистрированные на сервере отладки. Сервер отладки по HTTP — dbgs из поставки платформы. Конфигуратор при отладке поднимает его сам, агент кластера — при запуске с -debug -http, автономный сервер — с --debug=http.",
+  "Сервер отладки поднимает тот, кто держит базу. У файловой базы такого нет: свой dbgs из установки клиента поднимает раннер командой debug-server start. Кластер раннера поднимает свой сервер отладки при cluster start --debug.",
+  key="debug-server")
+
 
 NAV = '''<div class="topbar"><div class="in">
   <a class="brand" href="index.html">v8-runner</a>
@@ -419,6 +425,10 @@ NAV = '''<div class="topbar"><div class="in">
     <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-debug-server.html#op-debug-server-start">debug-server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>

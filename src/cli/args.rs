@@ -89,6 +89,10 @@ pub enum Command {
     Standalone(StandaloneArgs),
     /// Start and stop the cluster (ragent and ras) of an infobase declared with cluster.managed
     Cluster(ClusterArgs),
+    /// Start and stop the 1C debug server a debugger attaches to: the runner's own dbgs for a
+    /// file infobase, the debug server of the managed cluster for its infobase
+    #[command(name = "debug-server")]
+    DebugServer(DebugServerArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -340,13 +344,94 @@ pub enum ClusterCommandArgs {
         /// infobase in it over its database
         #[arg(long)]
         new_regport: bool,
+        #[command(flatten)]
+        debug: ClusterDebugArgs,
     },
     /// Say whether it runs, who started it and where it listens
     Status,
     /// Stop the cluster this working copy started, with its remnants; the data stays
     Stop,
     /// Stop and start it again
-    Restart,
+    Restart {
+        #[command(flatten)]
+        debug: ClusterDebugArgs,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct DebugServerArgs {
+    #[command(subcommand)]
+    pub command: DebugServerCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum DebugServerCommandArgs {
+    /// Start a debug server, wait until it answers and print its address and session; it outlives
+    /// the command
+    Start {
+        /// Listen on this port; without it the first free port of the working copy's window
+        #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
+        /// The debugger process: the debug server ends by itself when this process ends
+        #[arg(long, value_name = "PID")]
+        owner_pid: Option<u32>,
+    },
+    /// Stop the debug server of this session; a repeated or unknown session stops nothing
+    Stop {
+        /// The session `debug-server start` answered
+        #[arg(value_name = "SESSION")]
+        session: Copy32,
+    },
+}
+
+/// Сеанс `debug-server` в разборе ключей: 32 шестнадцатеричных знака. Тип `Copy`, чтобы команда
+/// оставалась `Copy`, как у остальных служб.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Copy32(pub [u8; 32]);
+
+impl Copy32 {
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or_default()
+    }
+}
+
+impl std::str::FromStr for Copy32 {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes: [u8; 32] = value
+            .as_bytes()
+            .try_into()
+            .ok()
+            .filter(|bytes: &[u8; 32]| bytes.iter().all(u8::is_ascii_hexdigit))
+            .ok_or_else(|| {
+                "a session is the 32 hex digits `debug-server start` answered".to_owned()
+            })?;
+        Ok(Self(bytes))
+    }
+}
+
+/// Сервер отладки кластера: включить, снять или оставить как закреплено.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct ClusterDebugArgs {
+    /// Start the agent with its HTTP debug server on the loopback (Windows); it stays on for later
+    /// starts until --no-debug
+    #[arg(long, conflicts_with = "no_debug")]
+    pub debug: bool,
+    /// Start the agent without a debug server
+    #[arg(long)]
+    pub no_debug: bool,
+}
+
+impl ClusterDebugArgs {
+    /// `None` — ключа нет: как закреплено.
+    pub fn choice(self) -> Option<bool> {
+        match (self.debug, self.no_debug) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        }
+    }
 }
 
 impl ClusterCommandArgs {
@@ -355,7 +440,7 @@ impl ClusterCommandArgs {
             Self::Start { .. } => ServiceCommandArgs::Start,
             Self::Status => ServiceCommandArgs::Status,
             Self::Stop => ServiceCommandArgs::Stop,
-            Self::Restart => ServiceCommandArgs::Restart,
+            Self::Restart { .. } => ServiceCommandArgs::Restart,
         }
     }
 }

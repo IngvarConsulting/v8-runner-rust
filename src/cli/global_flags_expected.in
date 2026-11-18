@@ -55,6 +55,8 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "cluster start",
     "cluster stop",
     "cluster restart",
+    "debug-server start",
+    "debug-server stop",
     "extensions",
     "extensions list",
     "extensions info",

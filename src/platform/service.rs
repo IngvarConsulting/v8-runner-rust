@@ -71,6 +71,15 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
+/// Unix: сигнал группе службы. `spawn_hidden` уводит службу в свой сеанс (`setsid`), поэтому её
+/// pid — номер её группы, и сигнал доходит до всех её потомков. Мягкий — `SIGTERM`, жёсткий —
+/// `SIGKILL`. Успех вызова ничего не доказывает: конец процесса подтверждает ожидание
+/// (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`).
+#[cfg(unix)]
+pub fn signal_service_group(pid: u32, hard: bool) {
+    imp::signal_group(pid, hard);
+}
+
 /// Мгновение старта процесса по [`ProcessFacts::started`]: тики FILETIME на Windows, тики часов
 /// после загрузки на Linux, микросекунды эпохи на macOS. `None` — система мгновения не называет.
 #[cfg(windows)]
@@ -969,6 +978,21 @@ mod imp {
         // держит выход раннера.
         std::thread::spawn(move || child.wait());
         Ok(pid)
+    }
+
+    pub fn signal_group(pid: u32, hard: bool) {
+        // Номер 0 и 1 — не служба: сигнал своей группе или `init` раннер не шлёт.
+        let Ok(group) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        if group <= 1 {
+            return;
+        }
+        let signal = if hard { libc::SIGKILL } else { libc::SIGTERM };
+        // SAFETY: `kill` с числовыми аргументами; отсутствующая группа отвечает `ESRCH`.
+        unsafe {
+            libc::kill(-group, signal);
+        }
     }
 
     /// Помечает «закрыть при `exec`» все дескрипторы, кроме stdin, stdout и stderr, даже
