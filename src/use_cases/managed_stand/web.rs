@@ -503,9 +503,11 @@ impl<'a> Web<'a> {
             .find(|&port| {
                 Some(port) != pg_port
                     && !super::dynamic_ports().contains(&port)
-                    && cluster_ports
-                        .as_ref()
-                        .is_none_or(|pins| !pins.ports.all().any(|value| value == port))
+                    && cluster_ports.as_ref().is_none_or(|pins| {
+                        // Порт сервера отладки кластера (`cluster start --debug`) в блок не
+                        // входит, но Apache его занимать не должен.
+                        !pins.ports.all().any(|value| value == port) && pins.ports.debug() != port
+                    })
                     && occupant_of(self.host, port).is_none()
             })
             .ok_or_else(|| environment("no free stand port for Apache"))
@@ -1418,6 +1420,22 @@ mod stand_tests {
         );
         let planned = web(&stand, WebCommand::Restart, true, &host).unwrap();
         assert_eq!(assert_form("web-restart", &planned)["action"], "planned");
+    }
+
+    /// Порт сервера отладки кластера в его блок не входит, но Apache его не занимает: иначе
+    /// `cluster start --debug` отказал бы из-за своего же Apache.
+    #[test]
+    fn apache_never_takes_the_debug_port_of_the_cluster() {
+        let (stand, host) = running();
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        let debug = stand.pins().ports.debug();
+        write_json(
+            &stand.agent().sibling(StandService::Web).pins(),
+            &PinnedPorts { port: debug },
+        )
+        .unwrap();
+        let started = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert_ne!(port_of(&started), debug);
     }
 
     #[test]
