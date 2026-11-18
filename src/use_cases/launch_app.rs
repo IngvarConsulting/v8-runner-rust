@@ -3,11 +3,13 @@ use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::launch::{
-    ClientWaitResult, ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia,
+    ClientWaitResult, ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchStartup,
+    LaunchVia,
 };
 use crate::domain::next_step::NextStep;
 use crate::domain::progress::ProgressPhase;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
+use crate::domain::sessions::ApplicationCode;
 use crate::platform::enterprise::{
     build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
 };
@@ -20,6 +22,7 @@ use crate::use_cases::client_address;
 use crate::use_cases::client_mcp_readiness;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
+use crate::use_cases::launch_startup;
 use crate::use_cases::platforms::platform_resolution;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
@@ -129,6 +132,8 @@ fn run_launch(
         client_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
     let readiness_url =
         client_mcp_readiness_url(config, args).map_err(UseCaseFailure::without_payload)?;
+    let startup_window =
+        startup_window(args, client_wait.is_some()).map_err(UseCaseFailure::without_payload)?;
     if args.dry_run {
         // Both options report an outcome observed from a running client, which a preview
         // never starts; answering them with a plan would be a fabricated observation.
@@ -213,6 +218,7 @@ fn run_launch(
             external_epf_wait: None,
             client_wait: None,
             debug: launch_debug(&launch),
+            startup: None,
         });
     }
 
@@ -296,6 +302,7 @@ fn run_launch(
             external_epf_wait,
             client_wait,
             debug: launch_debug(&launch),
+            startup: None,
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -336,6 +343,7 @@ fn run_launch(
             external_epf_wait: None,
             client_wait: None,
             debug: launch_debug(&launch),
+            startup: None,
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -383,10 +391,85 @@ fn run_launch(
         }
     }
 
-    let spawned = runner
-        .spawn(&process_request, context.work())
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let spawn = |request: &ProcessRequest| {
+        runner
+            .spawn(request, context.work())
+            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))
+    };
+    let base_dir = crate::use_cases::infobase_owner::file_infobase_dir(config);
+    let raw_keys = [launch.raw_args.as_slice(), additional_launch_keys.as_slice()].concat();
+    let observation = startup_window.map(|(window, application)| {
+        let facts = launch_startup::LaunchFacts {
+            via_web: via == LaunchVia::Web,
+            file_base: base_dir.as_deref(),
+            application,
+            infobase_user: connection.user.as_deref(),
+            raw_keys: &raw_keys,
+        };
+        (window, launch_startup::plan(&facts))
+    });
+    let (spawned, startup) = match observation {
+        None => (spawn(&process_request)?, None),
+        Some((_, launch_startup::Plan::Unobservable(reason))) => (
+            spawn(&process_request)?,
+            Some((LaunchStartup::unconfirmed(), Some(reason.to_string()))),
+        ),
+        Some((window, launch_startup::Plan::Observe { mut log, attempt })) => {
+            let mut client = runner
+                .spawn_observed(&process_request, context.work())
+                .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+            match launch_startup::observe(
+                &mut client,
+                &mut log,
+                &attempt,
+                window,
+                &context.cancellation(),
+            ) {
+                launch_startup::Observation::Decided { startup, reason } => {
+                    (client.release(), Some((startup, reason)))
+                }
+                // Отмена во время окна снимает клиента: отменённая команда его не оставляет
+                // (`INV.CLI.A-LAUNCH-OBSERVES-ITS-OWN-STARTUP`).
+                launch_startup::Observation::Cancelled => {
+                    let pid = client.pid();
+                    let binary = process_request.program.clone();
+                    let error = AppError::from(client.kill());
+                    let result = LaunchResult {
+                        ok: false,
+                        mode,
+                        pid: Some(pid),
+                        via,
+                        binary: binary.clone(),
+                        platform_resolution,
+                        url: reported_url.clone(),
+                        provider_dispatched: false,
+                        plan: None,
+                        message: Some(format!(
+                            "Launched {} via {} (pid {pid}) but the startup observation was interrupted; process terminated",
+                            mode_label(args.target),
+                            binary.display()
+                        )),
+                        mcp_readiness: None,
+                        external_epf_wait: None,
+                        client_wait: None,
+                        debug: launch_debug(&launch),
+                        startup: None,
+                    };
+                    return Err(UseCaseFailure::after_possible_work(
+                        error,
+                        context.work(),
+                        || result,
+                    ));
+                }
+            }
+        }
+    };
 
+    let mut message = launch_message(config, args, &spawned.binary, spawned.pid);
+    if let Some((startup, reason)) = &startup {
+        message.push_str("; ");
+        message.push_str(&launch_startup::summary(startup, reason.as_deref()));
+    }
     Ok(LaunchResult {
         ok: true,
         mode,
@@ -397,12 +480,53 @@ fn run_launch(
         url: reported_url.clone(),
         provider_dispatched: false,
         plan: None,
-        message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
+        message: Some(message),
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
         debug: launch_debug(&launch),
+        startup: startup.map(|(startup, _)| startup),
     })
+}
+
+/// `--observe-startup-ms`: окно и приложение, чей вход наблюдать. Только клиент предприятия,
+/// которого раннер отпускает работать: ожидание выхода и превью наблюдают другое или ничего.
+fn startup_window(
+    args: &LaunchArgs,
+    waits_for_exit: bool,
+) -> Result<Option<(Duration, ApplicationCode)>, AppError> {
+    let Some(window) = args.observe_startup else {
+        return Ok(None);
+    };
+    let application = match args.target {
+        LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ThinClient) => {
+            ApplicationCode::ThinClient
+        }
+        LaunchTargetRequest::Enterprise(
+            EnterpriseLaunchTarget::ThickClient | EnterpriseLaunchTarget::OrdinaryApplication,
+        ) => ApplicationCode::ThickClient,
+        LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ClientMcp { .. })
+        | LaunchTargetRequest::Designer
+        | LaunchTargetRequest::Web => {
+            return Err(AppError::Validation(
+                "--observe-startup-ms is supported only for launch thin, thick and ordinary"
+                    .to_owned(),
+            ))
+        }
+    };
+    if waits_for_exit {
+        return Err(AppError::Validation(
+            "--observe-startup-ms cannot be combined with --wait-for-exit: the wait already reports how the client ended"
+                .to_owned(),
+        ));
+    }
+    if args.dry_run {
+        return Err(AppError::Validation(
+            "--observe-startup-ms cannot be combined with launch --dry-run because a preview never starts the client"
+                .to_owned(),
+        ));
+    }
+    Ok(Some((window, application)))
 }
 
 /// The client request: an awaited client mirrors its stderr and skips the startup
@@ -596,6 +720,7 @@ fn execute_web(
     config: &AppConfig,
     args: &LaunchArgs,
 ) -> UseCaseResult<LaunchResult> {
+    startup_window(args, false).map_err(UseCaseFailure::without_payload)?;
     let url = client_address::web_address(config).map_err(UseCaseFailure::without_payload)?;
     if args.client_mcp.is_some() || args.launch.external_epf_wait.is_some() {
         return Err(UseCaseFailure::without_payload(AppError::Validation(
@@ -651,6 +776,7 @@ fn execute_web(
             external_epf_wait: None,
             client_wait: None,
             debug: None,
+            startup: None,
         });
     }
 
@@ -677,6 +803,7 @@ fn execute_web(
         external_epf_wait: None,
         client_wait: None,
         debug: None,
+        startup: None,
     })
 }
 
@@ -836,6 +963,7 @@ mod tests {
                 },
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect_err("NUL must fail before locating or dispatching the platform");
@@ -962,6 +1090,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect("launch succeeds");
@@ -992,6 +1121,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: true,
+                observe_startup: None,
             },
         )
         .expect("preview succeeds");
@@ -1033,6 +1163,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: true,
+                observe_startup: None,
             },
         )
         .expect("preview succeeds");
@@ -1069,6 +1200,7 @@ mod tests {
                     ..ClientMcpOptionsRequest::default()
                 }),
                 dry_run: true,
+                observe_startup: None,
             },
         )
         .expect_err("preview cannot wait for a client it never starts");
@@ -1099,6 +1231,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect("launch succeeds");
@@ -1129,6 +1262,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect("launch succeeds");
@@ -1166,6 +1300,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect("launch succeeds");
@@ -1202,6 +1337,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect_err("client_mcp options are required");
@@ -1222,6 +1358,7 @@ mod tests {
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect_err("client_mcp options are rejected for non-mcp launch");
@@ -1253,6 +1390,7 @@ mod tests {
                     ..ClientMcpOptionsRequest::default()
                 }),
                 dry_run: false,
+                observe_startup: None,
             },
         )
         .expect_err("wait-ready without port should fail before platform lookup");

@@ -259,6 +259,31 @@ pub mod account {
         windows_token::sid_of(windows_token::Which::User)
     }
 
+    /// Name of the OS account this process runs as, without its domain: what the platform
+    /// writes after `<домен>\` as the OS user of a sign-in attempt. `None` when the system
+    /// does not give it.
+    #[cfg(windows)]
+    pub fn account_name() -> Option<String> {
+        use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
+        // UNLEN + 1: the longest account name with its terminating null.
+        let mut buffer = [0u16; 257];
+        let mut length = u32::try_from(buffer.len()).ok()?;
+        // SAFETY: the pointer and `length` describe `buffer`, which outlives the call; on
+        // success `length` holds the number of characters written with the final null.
+        if unsafe { GetUserNameW(buffer.as_mut_ptr(), &mut length) } == 0 {
+            return None;
+        }
+        let written = usize::try_from(length).ok()?.saturating_sub(1);
+        let name = String::from_utf16_lossy(buffer.get(..written)?);
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// Name of the OS account this process runs as, as the login environment names it.
+    #[cfg(not(windows))]
+    pub fn account_name() -> Option<String> {
+        std::env::var("USER").ok().filter(|name| !name.is_empty())
+    }
+
     /// Whether process `pid` runs as this OS account. A process whose token the account may
     /// not query cannot be checked: that is an error, not another account. `NotFound` — there
     /// is no such process.

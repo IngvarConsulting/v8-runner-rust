@@ -1226,6 +1226,11 @@ pub struct LaunchArgs {
     /// Wait until the client MCP HTTP endpoint is initialized and tools/list succeeds
     #[arg(long = "wait-ready")]
     pub wait_ready: bool,
+
+    /// Watch the client sign in for up to MS milliseconds (1..=600000) in the file
+    /// infobase event log and answer the outcome in `startup`. thin, thick and ordinary only
+    #[arg(long = "observe-startup-ms", value_name = "MS")]
+    pub observe_startup_ms: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
@@ -1762,6 +1767,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                observe_startup_ms: _,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
@@ -1815,6 +1821,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                observe_startup_ms: _,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1871,6 +1878,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                observe_startup_ms: _,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());

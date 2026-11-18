@@ -619,6 +619,7 @@ fn map_launch_app_request(
             // Preview is a CLI capability; the MCP surface exposes no preview input,
             // exactly as it does not for `infobase --dry-run`.
             dry_run: false,
+            observe_startup: None,
         });
     }
 
@@ -643,6 +644,7 @@ fn map_launch_app_request(
         via: map_launch_via_input(request.via.as_deref())
             .map_err(|error| launch_adapter_business_error(error, "via"))?,
         dry_run: false,
+        observe_startup: None,
     })
 }
 
@@ -2188,6 +2190,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             }));
             let config = sample_config();
             let service = McpService::with_port(&config, port);
@@ -2226,6 +2229,7 @@ mod tests {
             external_epf_wait: None,
             client_wait: None,
             debug: None,
+            startup: None,
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -2282,6 +2286,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 
@@ -2330,6 +2335,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 
@@ -2372,6 +2378,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 
@@ -2419,6 +2426,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 
@@ -2466,6 +2474,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 
@@ -2514,6 +2523,7 @@ mod tests {
                 external_epf_wait: None,
                 client_wait: None,
                 debug: None,
+                startup: None,
             })),
         );
 

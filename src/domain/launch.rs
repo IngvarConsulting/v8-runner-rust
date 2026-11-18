@@ -12,8 +12,10 @@ pub struct LaunchResult {
     /// `true` when the process was spawned and, when the command waits on it, the wait
     /// succeeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`
     /// its MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness
-    /// check answers `false` although the client was started. A preview answers `true`
-    /// without starting anything: `provider_dispatched` tells the two apart.
+    /// check answers `false` although the client was started. Under `--observe-startup-ms`
+    /// every observed outcome answers `true`, `auth_failed` and `start_failed` included: the
+    /// outcome is in `startup`. A preview answers `true` without starting anything:
+    /// `provider_dispatched` tells the two apart.
     pub ok: bool,
     /// Requested launch mode.
     pub mode: LaunchMode,
@@ -54,6 +56,61 @@ pub struct LaunchResult {
     /// Сервер отладки, к которому подключён клиент (`launch --debug`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<Box<LaunchDebug>>,
+    /// Чем кончился вход клиента (`launch --observe-startup-ms`); без ключа поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<LaunchStartup>,
+}
+
+/// Исход входа клиента, увиденный в журнале регистрации файловой базы
+/// (`INV.CLI.A-LAUNCH-OBSERVES-ITS-OWN-STARTUP`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LaunchStartup {
+    pub outcome: StartupOutcome,
+    /// Время решающей записи журнала — `AuthenticationError` или `Session.Start` — со смещением
+    /// зоны этой машины, до секунды; `null`, когда решила не запись.
+    #[schemars(with = "Option<String>", extend("format" = "date-time"))]
+    pub event_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    /// Код выхода клиента, если он вышел за время наблюдения.
+    pub exit_code: Option<i32>,
+}
+
+impl LaunchStartup {
+    /// Свидетельства нет: ни записи, ни выхода.
+    pub const fn unconfirmed() -> Self {
+        Self {
+            outcome: StartupOutcome::Unconfirmed,
+            event_at: None,
+            exit_code: None,
+        }
+    }
+}
+
+/// Чем кончился вход клиента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupOutcome {
+    /// Сеанс начат, и клиент живёт после этого ещё две секунды.
+    Started,
+    /// Вход отклонён: `AuthenticationError` этой попытки, и клиент вышел.
+    AuthFailed,
+    /// Клиент вышел с ненулевым кодом без отказа во входе.
+    StartFailed,
+    /// Сеанс был начат, и клиент вышел с кодом 0.
+    Closed,
+    /// Свидетельства, которое называло бы исход именно этой попытки, нет.
+    Unconfirmed,
+}
+
+impl StartupOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::AuthFailed => "auth_failed",
+            Self::StartFailed => "start_failed",
+            Self::Closed => "closed",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
 }
 
 /// Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`. Объект, а не

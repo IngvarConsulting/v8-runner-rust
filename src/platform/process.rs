@@ -239,6 +239,62 @@ impl Drop for ManagedSpawnResult {
     }
 }
 
+/// Клиент, за которым раннер наблюдает после запуска (`launch --observe-startup-ms`).
+///
+/// Запущен тем же режимом, что и обычный `launch` (`spawn`): своя группа процессов, а при
+/// `V8_RUNNER_CLIENT_OWNER=unica` — группа или Job вызывающего (`INV.PLATFORM.HOST-OWNED-CLIENT`);
+/// ни своей группы с Job, ни снятия при закрытии ручки. Ручка нужна только чтобы узнать код
+/// выхода: брошенная, она клиента не снимает, а [`ObservedSpawn::release`] отдаёт его как у
+/// `spawn`.
+pub struct ObservedSpawn {
+    result: SpawnResult,
+    child: SpawnedChild,
+    rendered_command: String,
+}
+
+impl ObservedSpawn {
+    /// Operating system process identifier.
+    pub fn pid(&self) -> u32 {
+        self.result.pid
+    }
+
+    /// Код выхода, если клиент уже вышел; `None` — ещё работает. Выход по сигналу — `-1`.
+    pub fn exit_code(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .child
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    /// Наблюдение кончилось, клиент остаётся работать.
+    pub fn release(self) -> SpawnResult {
+        self.result
+    }
+
+    /// Снимает клиента по отмене команды и называет это отменой: клиент был работой команды.
+    /// Клиента во владении вызывающего снимает только он сам — сигнал группе достался бы и
+    /// раннеру, и всему, что держит вызывающий.
+    #[must_use]
+    pub fn kill(mut self) -> ProcessError {
+        let error = ProcessError::Cancelled {
+            cmd: self.rendered_command.clone(),
+            delivered: true,
+        };
+        // Только живой и не подобранный клиент: номер подобранного уже не наш.
+        if !matches!(self.child.child.try_wait(), Ok(None)) {
+            return error;
+        }
+        if self.child.io_mode.is_host_owned() {
+            let _ = self.child.child.kill_process_only();
+        } else {
+            terminate_child_group(&mut self.child);
+        }
+        let _ = self.child.child.wait();
+        error
+    }
+}
+
 /// Safety class applied by the process runner when interruption arrives mid-flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessInterruptionSafety {
@@ -594,6 +650,21 @@ pub trait ProcessRunner {
             cmd: render_command(request),
         })
     }
+
+    /// Start a client the way `spawn` does, without its startup probe, and keep a handle that
+    /// only tells whether it exited (see [`ObservedSpawn`]). A client that exits at once is an
+    /// observation, not a failed start: the implementation marks `work` as soon as the process
+    /// has started.
+    fn spawn_observed(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<ObservedSpawn, ProcessError> {
+        let _ = work;
+        Err(ProcessError::ManagedSpawnUnsupported {
+            cmd: render_command(request),
+        })
+    }
 }
 
 impl ProcessExecutor {
@@ -692,6 +763,34 @@ impl ProcessRunner for ProcessExecutor {
             child: Some(spawned),
             rendered_command,
             delivered: work.is_some(),
+        })
+    }
+
+    fn spawn_observed(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<ObservedSpawn, ProcessError> {
+        let rendered_command = render_command(request);
+        debug!(
+            command = rendered_command.as_str(),
+            "spawning observed process"
+        );
+        // Без пробы старта: ранний выход клиента — то, что наблюдают, а не отказ запуска.
+        let child = spawn_command(request, ProcessIoMode::Detached, &rendered_command)?;
+        work.mark_work_given();
+        let pid = child.child.id();
+        debug!(
+            command = rendered_command.as_str(),
+            pid, "observed process started"
+        );
+        Ok(ObservedSpawn {
+            result: SpawnResult {
+                pid,
+                binary: request.program.clone(),
+            },
+            child,
+            rendered_command,
         })
     }
 }
@@ -842,6 +941,20 @@ impl ProcessIoMode {
         }
     }
 
+    /// Клиент в группе или Job вызывающего (`INV.PLATFORM.HOST-OWNED-CLIENT`).
+    const fn is_host_owned(self) -> bool {
+        match self {
+            #[cfg(any(unix, windows))]
+            Self::UnicaOwnedDetached => true,
+            Self::Detached
+            | Self::ManagedDetached
+            | Self::ManagedWait
+            | Self::ManagedTied
+            | Self::Captured
+            | Self::CapturedWithInput => false,
+        }
+    }
+
     fn with_client_owner(self) -> std::io::Result<Self> {
         if !matches!(self, Self::Detached) {
             return Ok(self);
@@ -951,6 +1064,15 @@ impl ChildHandle {
         match refused_interrupted_wait() {
             Some(error) => Err(error),
             None => self.try_wait(),
+        }
+    }
+
+    /// Снимает только сам процесс, без группы и потомков.
+    fn kill_process_only(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Standard(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.start_kill(),
         }
     }
 
@@ -3157,14 +3279,21 @@ mod tests {
                     "--ignored".into(),
                 ];
                 request.startup_probe = Some(Duration::from_millis(250));
-                ProcessExecutor.spawn(&request, &work).unwrap();
+                if case == "observed" {
+                    // `launch --observe-startup-ms`: the same host-owned group, released.
+                    let mut observed = ProcessExecutor.spawn_observed(&request, &work).unwrap();
+                    assert_eq!(observed.exit_code().unwrap(), None);
+                    observed.release();
+                } else {
+                    ProcessExecutor.spawn(&request, &work).unwrap();
+                }
                 assert!(work.given());
             }
             fs::write(root.join("receipt"), case.to_string_lossy().as_bytes()).unwrap();
             return;
         }
 
-        for case in ["success", "failure"] {
+        for case in ["success", "failure", "observed"] {
             let dir = tempfile::Builder::new()
                 .prefix("v8o")
                 .tempdir_in("/tmp")
@@ -3727,6 +3856,12 @@ mod tests {
             exercise("handoff", "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit");
         }
 
+        /// Наблюдаемый клиент — в Job вызывающего, как у `spawn`, и переживает раннер.
+        #[test]
+        fn an_observed_client_stays_in_the_host_job_and_survives_release() {
+            exercise("observed", "platform::process::tests::windows_client_owner::an_observed_client_stays_in_the_host_job_and_survives_release");
+        }
+
         fn exercise(case: &str, test_name: &str) {
             if std::env::var(CASE).as_deref() == Ok(case) {
                 // Host must assign this runner to its Job before real owner-mode admission.
@@ -3736,29 +3871,36 @@ mod tests {
                     .expect("host admission barrier");
                 assert_eq!(&start, b"go");
                 let work = WorkGiven::for_command();
-                let spawned = ProcessExecutor
-                    .spawn(
-                        &ProcessRequest {
-                            program: std::env::current_exe().expect("test executable"),
-                            args: vec![
-                                "--exact".into(),
-                                CLIENT_TEST.into(),
-                                "--ignored".into(),
-                                "--nocapture".into(),
-                            ],
-                            workdir: None,
-                            stdout_log_path: None,
-                            stderr_log_path: None,
-                            startup_probe: Some(Duration::from_secs(if case == "startup" {
-                                30
-                            } else {
-                                1
-                            })),
-                            windows_verbatim_args: Vec::new(),
-                        },
-                        &work,
-                    )
-                    .expect("real owner-mode spawn");
+                let request = ProcessRequest {
+                    program: std::env::current_exe().expect("test executable"),
+                    args: vec![
+                        "--exact".into(),
+                        CLIENT_TEST.into(),
+                        "--ignored".into(),
+                        "--nocapture".into(),
+                    ],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: Some(Duration::from_secs(if case == "startup" {
+                        30
+                    } else {
+                        1
+                    })),
+                    windows_verbatim_args: Vec::new(),
+                };
+                let spawned = if case == "observed" {
+                    // `launch --observe-startup-ms`: no probe, the same host Job, released.
+                    let mut observed = ProcessExecutor
+                        .spawn_observed(&request, &work)
+                        .expect("real owner-mode observed spawn");
+                    assert_eq!(observed.exit_code().expect("client state"), None);
+                    observed.release()
+                } else {
+                    ProcessExecutor
+                        .spawn(&request, &work)
+                        .expect("real owner-mode spawn")
+                };
                 assert!(work.given());
                 fs::write(
                     std::env::var_os(RECEIPT).expect("receipt path"),

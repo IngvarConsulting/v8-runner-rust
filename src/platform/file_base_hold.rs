@@ -72,24 +72,9 @@ pub fn session_lock(base: &Path) -> SessionLock {
     }
 }
 
-/// Первая строка в кавычках записи `1Cv8.cdn`; `""` внутри — кавычка.
+/// Первая строка в кавычках записи `1Cv8.cdn`; разбирает её владелец скобочного формата.
 fn lock_message(record: &str) -> Option<String> {
-    let start = record.find('"')? + 1;
-    let mut message = String::new();
-    let mut chars = record[start..].chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            if chars.peek() == Some(&'"') {
-                chars.next();
-                message.push('"');
-            } else {
-                return Some(message);
-            }
-        } else {
-            message.push(c);
-        }
-    }
-    None
+    crate::platform::brackets::first_quoted(record)
 }
 
 #[derive(Clone, Copy)]

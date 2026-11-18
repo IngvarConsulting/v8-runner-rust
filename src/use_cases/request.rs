@@ -873,6 +873,9 @@ pub struct LaunchRequest {
     pub via: Option<LaunchVia>,
     /// Validate and select a provider without launching the client process.
     pub dry_run: bool,
+    /// `--observe-startup-ms`: окно, в котором раннер наблюдает вход клиента
+    /// (`INV.CLI.A-LAUNCH-OBSERVES-ITS-OWN-STARTUP`). Только CLI; `None` — не наблюдать.
+    pub observe_startup: Option<std::time::Duration>,
 }
 
 /// Transport-neutral request for the `init` use case.

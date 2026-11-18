@@ -5121,7 +5121,28 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         client_mcp,
         via: map_launch_via(args.via.as_deref())?,
         dry_run,
+        observe_startup: map_observe_startup(args.observe_startup_ms)?,
     })
+}
+
+/// `launch --observe-startup-ms <MS>`: окно наблюдения входа, 1..=600000 мс. С чем ключ
+/// сочетается, решает сценарий запуска: только он видит цель и прочие ключи разом.
+fn map_observe_startup(
+    milliseconds: Option<u64>,
+) -> Result<Option<std::time::Duration>, UseCaseError> {
+    match milliseconds {
+        None => Ok(None),
+        Some(ms @ 1..=crate::use_cases::launch_startup::MAX_WINDOW_MS) => {
+            Ok(Some(std::time::Duration::from_millis(ms)))
+        }
+        Some(_) => Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!(
+                "--observe-startup-ms must be from 1 to {}",
+                crate::use_cases::launch_startup::MAX_WINDOW_MS
+            ),
+        )),
+    }
 }
 
 /// `launch --debug <url>`: только клиент предприятия — у Конфигуратора свой отладчик, а
@@ -6964,6 +6985,7 @@ mod tests {
                     mcp_config: None,
                     mcp_port: None,
                     wait_ready: false,
+                    observe_startup_ms: None,
                 },
                 false,
             )
@@ -6983,6 +7005,7 @@ mod tests {
                 },
                 client_mcp: None,
                 dry_run: false,
+                observe_startup: None,
             }
         );
         assert_eq!(
@@ -6997,6 +7020,7 @@ mod tests {
                     mcp_config: None,
                     mcp_port: None,
                     wait_ready: false,
+                    observe_startup_ms: None,
                 },
                 false,
             )
@@ -7016,6 +7040,7 @@ mod tests {
                     mcp_config: None,
                     mcp_port: None,
                     wait_ready: false,
+                    observe_startup_ms: None,
                 },
                 false,
             )
@@ -7035,6 +7060,7 @@ mod tests {
                     mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                     mcp_port: Some(123),
                     wait_ready: true,
+                    observe_startup_ms: None,
                 },
                 false,
             )
@@ -7059,6 +7085,7 @@ mod tests {
                     wait_ready: true,
                 }),
                 dry_run: false,
+                observe_startup: None,
             }
         );
         let load = map_load_request(
@@ -7133,6 +7160,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                observe_startup_ms: None,
             },
             false,
         )
@@ -7565,6 +7593,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                observe_startup_ms: None,
             }),
             &CommandLineTarget::default(),
             &presenter,

@@ -4,6 +4,8 @@ pub mod agent_keeper;
 pub mod apache;
 /// Removal of the replaced tree of a full pull in a detached runner process (#616).
 pub mod backup_removal;
+/// Скобочный формат 1С `{…}`: журнал регистрации и блокировка начала сеансов.
+pub mod brackets;
 /// Opening a URL in the user's browser.
 pub mod browser;
 pub mod connection;
@@ -18,6 +20,8 @@ pub mod dump_format;
 pub mod edt;
 pub mod edt_session;
 pub mod enterprise;
+/// Журнал регистрации файловой базы: что в нём появилось после метки.
+pub mod event_log;
 pub mod extension_inventory;
 /// Кто держит файловую базу: сеансы, Конфигуратор, блокировка начала сеансов.
 pub mod file_base_hold;

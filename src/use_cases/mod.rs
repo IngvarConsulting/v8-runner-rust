@@ -66,6 +66,8 @@ pub(crate) mod installed_extensions;
 pub(crate) mod interruption;
 /// Launch orchestration use case.
 pub mod launch_app;
+/// Наблюдение входа клиента после `launch --observe-startup-ms`.
+pub(crate) mod launch_startup;
 /// Shared launch key policy for Enterprise-backed use cases.
 mod launch_keys;
 /// `agent hold`, `release`, `stop` и `status`: живой агент Конфигуратора по запросу.
