@@ -382,6 +382,28 @@ PostgreSQL раннера — `MoveCause::Postgres`; порт занят — `Mo
 порта PostgreSQL раннера. Новые порты попадают только в закреплённое под `localPath`, откуда их читают
 загрузчик настроек и ответы `start`/`status`; `v8project*.yaml` не меняется.
 
+### Публикация на Apache стенда
+
+Частный Apache (`managed_stand::web`) — служба стенда рядом с PostgreSQL: запись, закреплённый порт и
+идентичность процесса под `localPath/infobases/<база>/managed/web/`. `cluster start` поднимает его шагом
+(`Ownership::ClusterStep`), `web start` — явно; `cluster stop` гасит только шаг. Упавший между запуском
+Apache и записью PID раннер не оставляет сироту: `observe` узнаёт процесс по `httpd.pid`, образу, порту
+записи и ключу `-f` своего конфига.
+
+`publish` управляемой базы строит `ManagedPublication`: адрес кластера из его закреплённых портов,
+`dir`/`conf`/`url` частного Apache и `webinst` из поиска утилит. Путь `webinst` не берётся из записи
+кластера — этот файл под `localPath` правит пользователь, а программа может получить root; выпуск
+найденного сверяется с выпуском работающего `ragent`. Перед `webinst` снимаются `httpd.conf` и
+`default.vrd`; после удачи `activate` проверяет конфиг (`httpd -t`) и перезагружает Apache, неудача
+возвращает снятое и перезагружает Apache на прежнем конфиге без учёта отмены команды.
+
+Права. Службы стенда и сам `publish` работают от обычного пользователя; от root они отказывают
+(`ServiceHost::can_start_as_current_user`, единственный `geteuid` — в `managed_stand::System`). На Linux
+`webinst` пишет публикацию только от root (замер #610), поэтому раннер поднимает права только ему:
+`sudo -n -- <webinst> …`. Без правила sudoers `sudo -n` отказывает, и отказ называет нужную строку. Файлы,
+которые `webinst` записал под каталогом Apache, раннер переписывает от своего имени (`reclaim`): под
+`localPath` и `workPath` не остаётся файлов root, а следующий `publish` и `web stop` работают без sudo.
+
 ## Shared EDT
 
 `tools.edt_cli.interactive_mode` включает shared interactive EDT execution model.
@@ -457,12 +479,3 @@ MCP deliberately narrower than CLI.
 - HTTP session capacity и execution admission являются разными guardrails.
 - Shared EDT under MCP reuses the same execution model instead of inventing a separate MCP-only
   runtime path.
-
-### Публикация на Apache стенда
-
-Для управляемого кластера с `infobase.web.managed` выполните `cluster start`,
-`infobase create`, если базы ещё нет, затем `publish`. На Linux только публикацию
-выполняйте с явным `sudo`, используя доверенный бинарник и доверенный проект.
-Отдельные HTTP-конфиг, PID и журналы находятся под `localPath`. Раннер берёт
-`webinst` и модуль Apache из выпуска кластера. После переноса порта кластера
-повторите `publish`, если `web status` сообщает `publication_stale`.

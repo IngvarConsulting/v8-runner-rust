@@ -748,12 +748,25 @@ infobases:
 принимается только рядом с `cluster.managed` или `standalone.managed`. `tools.postgres.path` — каталог
 сборки PostgreSQL для 1С или его `bin`. Раннер её не скачивает: без ключа или без `pg_ctl` в каталоге
 `dbms start` и `dbms restart` отказывают и называют, где взять бесплатную сборку и на каких условиях; работающий PostgreSQL `restart` не трогает.
+На Linux для `initdb` нужна локаль `ru_RU.utf8`.
 
 `standalone.managed: { name, db-path }` поручает `ibsrv` раннеру (команды `standalone`, только Windows): `db-path` — файловая
 база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. Вместо `db-path` можно объявить секцию `dbms`: управляемую
 или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` поручает кластер раннеру (команды `cluster`, Windows и Linux; `name` — имя базы в кластере, `Ref=`, по умолчанию — имя базы в `infobases`, так же у `standalone.managed`): `connection` рядом — отказ,
 адрес раннер выводит из своей записи. База кластера живёт в СУБД — `dbms.managed` или ваша секция `dbms`; без `dbms`
 кластер поднимается, но `infobase create` отказывает.
+
+`web: { managed: true, wsdir: demo }` в местном слое у базы с `cluster.managed` поручает раннеру
+частный Apache 2.4 кластера (команды `web`, Windows и Linux) и публикацию в него. `wsdir` — один
+сегмент из ASCII-букв, цифр, дефиса и подчёркивания. `server`, `dir`, `conf`, `url` и `os-auth`
+рядом — отказ: их вычисляет раннер. `tools.apache.path` — исполняемый файл `httpd` или `apache2`,
+каталог установки или её `bin`, от файла проекта; без ключа раннер ищет среди установленных, а
+системные сценарии `apachectl` и `apache2ctl` — отказ. Раннер Apache не скачивает и не
+устанавливает. `webinst` раннер находит поиском утилит платформы (`tools.platform`) и сверяет его
+выпуск с выпуском работающего кластера. На Linux `webinst` публикует только от root: раннер
+запускает его через `sudo -n`, поэтому разрешите эту программу в sudoers, например
+`<user> ALL=(root) NOPASSWD: /opt/1cv8/x86_64/<версия>/webinst`; сам `publish` выполняйте от
+обычного пользователя.
 
 Исполнители автономного сервера:
 
@@ -1530,12 +1543,3 @@ Linux под root и Windows (8.3.27, 8.5.1):
 - подсвечивается JSON Schema как unsupported key;
 - runtime loader отклоняет unsupported keys на YAML boundary;
 - рабочий каталог EDT session сейчас фиксирован: `workPath/edt-workspace`.
-
-### Apache управляемого кластера
-
-В местном слое у базы с `cluster.managed` задайте `web: { managed: true, wsdir: demo }`.
-`wsdir` — один сегмент из ASCII-букв, цифр, дефиса и подчёркивания. В этом режиме
-`server`, `dir`, `conf`, `url` и `os-auth` не задаются. Раннер берёт Apache 2.4 из
-`tools.apache.path` (исполняемый файл, каталог установки или `bin`) или ищет среди
-установленных. Путь отсчитывается от файла проекта. Apache и PostgreSQL заранее установите
-на машину. На Linux для `initdb` нужна локаль `ru_RU.utf8`.

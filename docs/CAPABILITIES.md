@@ -873,6 +873,40 @@ v8-runner cluster restart [--dry-run]
   службы помнит свой каталог и проект: копия `.local` в другой каталог чужой сервер своим не считает и не гасит, а при
   `localPath`, общем у двух проектов, команды стенда второго отказывают `workspace_busy`, называя первый проект.
 
+### `web`
+
+```text
+v8-runner web start [--dry-run]
+v8-runner web status
+v8-runner web stop [--dry-run]
+v8-runner web restart [--dry-run]
+```
+
+- Обслуживают частный Apache 2.4 базы с `infobase.web.managed` и `cluster.managed` на Windows и Linux, без
+  системной службы: конфиг `httpd.conf`, журналы, PID-файл и каталог публикации лежат под
+  `localPath/infobases/<база>/managed/web/`. Apache слушает только `127.0.0.1`, модуль 1С берёт из выпуска
+  кластера. Системные службы, конфиги и сценарии `apachectl` раннер не трогает: свой экземпляр он гасит по
+  записи службы и идентичности процесса.
+- Цикл: `cluster start` (Apache поднимается шагом после готовности кластера) → `infobase create` → `publish` →
+  HTTP по адресу из ответа `publish` → `cluster stop` (гасит Apache, поднятый шагом). `web start` делает
+  экземпляр явным: он переживает `cluster stop` и гаснет по `web stop`. Если Apache не поднялся, `cluster start`
+  гасит кластер и PostgreSQL, поднятые этим запуском.
+- Порт закрепляется при первом запуске вне динамического диапазона. Порт, занятый чужим процессом, `start` и
+  `restart` меняют сами и называют прежний в `previous_port`; чужой процесс остаётся работать.
+- `publish` публикует базу в этот Apache через `webinst` из поиска утилит, того же выпуска, что работающий
+  кластер, и перезагружает Apache: на Linux мягко (`SIGUSR1`), на Windows остановкой и запуском. Неудача
+  `webinst` или перезагрузки возвращает конфиг и `default.vrd`. На Linux права root получает только `webinst`
+  — через `sudo -n` по правилу sudoers; `publish` от root отказывает. После переноса `regport` кластера
+  `status` ставит `publication_stale: true` — повторите `publish`.
+- Ответ: `infobase`, `state`, `action`, `ready`, `config_path`, `log_path`; у своего процесса — `pid`,
+  `address`, `explicit`, `program`; `occupant_pid` у чужого процесса на порте; `previous_port`,
+  `publication_stale` ([форма](../spec/rules/wire/web-start-data.md)).
+- Отказы: `validation` — нет `infobase.web.managed`, `tools.apache.path` указывает на `apachectl`;
+  `workspace_busy` — частный конфиг занят другим Apache (с его PID), порт держит чужой процесс при `stop`, нет
+  перечня процессов; `environment_unavailable` — нет сборки Apache или модуля 1С, нет свободного порта, запуск от
+  root на Linux, другая ОС, `sudo -n` не разрешён для `webinst`.
+- `status` работает без замка `workPath`.
+
 
 ### `agent`
 
@@ -2301,12 +2335,3 @@ v8-runner mcp serve http
 - Переименование расширения на месте по совпавшему внутреннему идентификатору и
   `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.
-
-### Управляемый Apache
-
-`web start|status|stop|restart` обслуживает частный Apache 2.4, объявленный через
-`infobase.web.managed`. `cluster start` поднимает его после готовности кластера.
-`cluster stop` останавливает Apache, который поднял кластер. `web start` делает
-экземпляр явным, после чего его останавливает `web stop`. `publish` возвращает
-loopback-адрес публикации. На Linux службы запускаются обычным пользователем,
-для `publish` утилита 1С требует root. Системные службы и конфиги не используются.
