@@ -42,7 +42,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
-| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
+| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует базу кластера раннера в его частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` берёт из выпуска кластера ([`web`](#web)) |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `localPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Квитанция `data.provider` относится к чтению поколения. Для имён из пакетного Конфигуратора активность имеет значение `null` |
 | `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
@@ -291,8 +291,8 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | `agent_start` | агент не поднялся: запуск, порт, срок подъёма, хранитель живого агента |
 | `platform` | утилиты платформы нет, она не той версии или не выбрана |
 
-Поля нет — слой не определён: так отвечают прочие отказы окружения (службы не на Windows,
-файла базы нет, не объявлен путь) и `platform_release_missing`, у которого свой код. Текст
+Поля нет — слой не определён: так отвечают прочие отказы окружения (службы стенда на
+неподдерживаемой системе, файла базы нет, не объявлен путь) и `platform_release_missing`, у которого свой код. Текст
 отказа остаётся прежним. У MCP поле то же, а код — `runtime_failure`
 ([правило](../spec/rules/wire/an-environment-refusal-names-its-layer.md)).
 
@@ -789,8 +789,9 @@ v8-runner dbms restart [--dry-run]
 ```
 
 - Запускают и останавливают PostgreSQL базы, объявленной `dbms.managed`, без службы и прав
-  администратора. Только Windows: на Linux и macOS `start` и `restart` отвечают
-  `environment_unavailable`.
+  администратора, на Windows и Linux. На Linux службу запускает обычный пользователь: под root
+  `start` и `restart` отвечают `environment_unavailable`, как и на macOS
+  ([правило](../spec/rules/cli/managed-services-run-on-windows-and-linux.md)).
 - `tools.postgres.path` называет каталог сборки PostgreSQL для 1С. Данные, журнал, пароль и запись
   лежат под `localPath/infobases/<база>/managed/postgres/` (`localPath` по умолчанию — `.local`
   рядом с `v8project.yaml`, [подробности](CONFIGURATION.md#localpath)), там же память о базе;

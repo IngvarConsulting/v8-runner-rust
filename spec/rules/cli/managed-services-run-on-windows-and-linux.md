@@ -1,5 +1,5 @@
 ---
-id: INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS
+id: INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX
 check:
   - src/use_cases/managed_stand/mod.rs::other_systems_refuse_start_and_restart_without_starting_anything
   - tests/cli_dbms.rs::other_systems_refuse_start_as_the_environment
