@@ -668,7 +668,7 @@ impl Cluster<'_> {
         };
         if !DEBUG_CLUSTER_SUPPORTED && self.wanted_debug(self.pins().as_ref()) {
             return Err(environment(
-                "the debug server of the cluster is measured on Windows only: start the cluster with --no-debug",
+                "the debug server of the cluster runs on Windows and Linux only: start the cluster with --no-debug",
             ));
         }
         if self.standalone_running() {
@@ -1409,9 +1409,10 @@ pub(super) fn run_cluster(
     outcome.map_err(|error| UseCaseFailure::with_payload(error, cluster.failed()))
 }
 
-/// Сервер отладки кластера (`ragent -debug -http`) замерен только на Windows
-/// (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
-const DEBUG_CLUSTER_SUPPORTED: bool = cfg!(windows);
+/// Сервер отладки кластера (`ragent -debug -http`) — там же, где управляемый кластер: на
+/// Windows и Linux (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`). На Linux он ещё не
+/// замерен вживую.
+const DEBUG_CLUSTER_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
 
 /// Работающий кластер, поднятый с другим сервером отладки, чем просят: перезапуск с ключом.
 fn debug_mismatch(infobase: &str, running: bool, wanted: bool) -> UseCaseError {
@@ -1441,7 +1442,7 @@ pub(super) fn debug_port(
     let infobase = &cluster.declared.infobase;
     if !host.supported() || !DEBUG_CLUSTER_SUPPORTED {
         return Err(environment(format!(
-            "the infobase '{infobase}' is on the managed cluster, and its debug server is measured on Windows only: on this system there is none"
+            "the infobase '{infobase}' is on the managed cluster, and its debug server runs on Windows and Linux only: on this system there is none"
         )));
     }
     let pins = cluster.pins();
@@ -2777,7 +2778,7 @@ pub(super) mod tests {
     /// `cluster start --debug`: агент поднимается с сервером отладки на порту блока, признак
     /// закрепляется, ответ называет адрес.
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn a_debug_start_raises_the_agent_with_its_debug_server() {
         let setup = setup();
         let host = Host::default();
@@ -2797,7 +2798,7 @@ pub(super) mod tests {
 
     /// Признак переживает `restart` без ключа; `--no-debug` его снимает.
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn the_debug_server_stays_on_until_no_debug() {
         let setup = setup();
         let host = Host::default();
@@ -2826,7 +2827,7 @@ pub(super) mod tests {
     /// Работающий кластер без отладки на `start --debug` — отказ с перезапуском, а не «уже
     /// работает» без отладки.
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn a_debug_start_on_a_cluster_running_without_it_is_refused() {
         let setup = setup();
         let host = Host::default();
@@ -2852,7 +2853,7 @@ pub(super) mod tests {
     /// Чужой процесс на порту отладки не переносит реестр кластера без отладки; запуск с
     /// отладкой — отказ, называющий порт.
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn a_taken_debug_port_moves_no_registry() {
         let setup = setup();
         let host = Host::default();
@@ -2878,10 +2879,10 @@ pub(super) mod tests {
         assert_eq!(setup.pins().registry, pins.registry);
     }
 
-    /// Сервер отладки кластера замерен только на Windows: на других системах `--debug` —
-    /// отказ до запуска процессов (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+    /// Сервер отладки кластера есть на Windows и Linux: на других системах `--debug` — отказ до
+    /// запуска процессов (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn a_debug_start_is_refused_where_the_debug_server_of_the_cluster_is_not_measured() {
         let setup = setup();
         let host = Host::default();
@@ -2889,7 +2890,7 @@ pub(super) mod tests {
             .command(debug_start(DebugChoice::On), &host)
             .unwrap_err();
         assert!(
-            error.to_string().contains("measured on Windows only"),
+            error.to_string().contains("runs on Windows and Linux only"),
             "{error}"
         );
         assert!(host.spawned.borrow().is_empty());
@@ -2908,7 +2909,7 @@ pub(super) mod tests {
     /// `debug-server start` у базы кластера: порт отвечающего сервера отладки или отказ с
     /// командой, которая его поднимет.
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn the_debug_port_of_the_cluster_needs_a_debug_start() {
         let setup = setup();
         let host = Host::default();
