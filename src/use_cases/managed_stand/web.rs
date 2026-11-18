@@ -867,7 +867,7 @@ impl ManagedPublication<'_> {
                 .any(|line| line.trim_start().starts_with("sudo:")))
         .then(|| {
             environment(format!(
-                "sudo -n did not run webinst: on Linux webinst publishes only as root; allow in sudoers exactly the command line that `publish --dry-run` shows after `sudo -n --` (`{}` with these arguments), not the program with any arguments: its -dir and -confpath would let any file be written as root; sudo said: {}",
+                "sudo -n did not run webinst: on Linux webinst publishes only as root, so a sudoers rule for it is effectively root for this user (its -dir and -confpath lie under localPath, which the user controls); grant it only to a user who may have root anyway, e.g. on a personal dev machine, for exactly the command line that `publish --dry-run` shows after `sudo -n --` (`{}` with these arguments); sudo said: {}",
                 self.webinst.display(),
                 finished.stderr.trim()
             ))
@@ -908,13 +908,6 @@ impl ManagedPublication<'_> {
             vrd,
             descriptor,
         })
-    }
-
-    /// После удачного `webinst`: файлы под `localPath` снова принадлежат пользователю раннера, а
-    /// Apache перечитывает конфиг.
-    pub(crate) fn activate(&self) -> Result<(), UseCaseError> {
-        self.reclaim_files()?;
-        self.reload(Reload::Activate)
     }
 
     /// Файлы, которые `webinst` с поднятыми правами записал под каталогом Apache, снова
@@ -1067,10 +1060,12 @@ fn reclaim(root: &Path, owner: &dyn Fn(&Path) -> Option<u32>) -> std::io::Result
             let theirs = owner(&path);
             if meta.is_dir() {
                 if theirs != Some(ours) {
-                    let uid = theirs.map_or_else(String::new, |uid| format!(" uid {uid}"));
+                    let owner = theirs
+                        .map_or_else(|| "another user".to_owned(), |uid| format!("uid {uid}"));
                     return Err(std::io::Error::other(format!(
-                        "webinst left the directory '{0}' owned by{uid}, which the runner cannot take back: remove it with `sudo rm -r '{0}'` and publish again",
-                        path.display()
+                        "webinst left the directory '{}' owned by {owner}, which the runner cannot take back: remove it with `sudo rm -r {}` and publish again",
+                        path.display(),
+                        shell_quoted(&path)
                     )));
                 }
                 pending.push(path);
@@ -1081,6 +1076,12 @@ fn reclaim(root: &Path, owner: &dyn Fn(&Path) -> Option<u32>) -> std::io::Result
         }
     }
     Ok(())
+}
+
+/// Путь в одинарных кавычках POSIX-оболочки: кавычка внутри закрывается, экранируется и
+/// открывается снова.
+fn shell_quoted(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }
 
 impl PublicationSnapshot {
@@ -1161,6 +1162,12 @@ mod tests {
             "{refused}"
         );
         assert!(foreign_dir.is_dir(), "nothing is removed");
+    }
+
+    #[test]
+    fn a_path_for_the_shell_keeps_its_quotes_inside_single_quotes() {
+        assert_eq!(shell_quoted(Path::new("/a b/c")), "'/a b/c'");
+        assert_eq!(shell_quoted(Path::new("/it's")), r"'/it'\''s'");
     }
 
     #[test]
@@ -1696,7 +1703,7 @@ mod stand_tests {
             refused
                 .error
                 .message()
-                .contains("not the program with any arguments"),
+                .contains("effectively root for this user"),
             "{}",
             refused.error
         );
@@ -1725,24 +1732,29 @@ mod stand_tests {
         std::fs::write(&alias, "changed").unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "backup");
 
-        for breaks in [Breaks::Webinst, Breaks::Config] {
-            match breaks {
-                Breaks::Webinst => host.webinst_fails.set(true),
-                Breaks::Config => {
-                    host.webinst_fails.set(false);
-                    host.webinst_breaks_the_config.set(true);
-                }
-            }
+        // Каждый сбой оставляет файл root, который забрать может только откат: `webinst` не
+        // дошёл до перезагрузки, а при отказе `httpd -t` файл появляется после того, как
+        // активация свои файлы уже забрала.
+        for breaks in [Breaks::Spawn, Breaks::Webinst, Breaks::Config] {
+            host.webinst_leaves_a_root_file
+                .set(breaks != Breaks::Config);
+            host.webinst_cannot_start.set(breaks == Breaks::Spawn);
+            host.webinst_fails.set(breaks == Breaks::Webinst);
+            host.webinst_breaks_the_config.set(breaks == Breaks::Config);
+            host.check_leaves_a_root_file.set(breaks == Breaks::Config);
             publish(&stand, &host, false).unwrap_err();
             std::fs::write(&alias, "changed").unwrap();
             assert_eq!(
                 std::fs::read_to_string(&backup).unwrap(),
                 "backup",
-                "{breaks:?}: the rollback takes the root file back too"
+                "{breaks:?}: the rollback takes the root file back"
             );
         }
 
+        host.webinst_leaves_a_root_file.set(true);
+        host.webinst_cannot_start.set(false);
         host.webinst_breaks_the_config.set(false);
+        host.check_leaves_a_root_file.set(false);
         host.webinst_fails.set(true);
         host.webinst_leaves_a_root_dir.set(true);
         let refused = publish(&stand, &host, false).unwrap_err();
@@ -1751,11 +1763,25 @@ mod stand_tests {
             "{}",
             refused.error
         );
+
+        // Активация, которой не удалось забрать каталог root, не повторяет тот же отказ в откате.
+        host.webinst_fails.set(false);
+        let refused = publish(&stand, &host, false).unwrap_err();
+        assert_eq!(
+            refused.error.message().matches("sudo rm -r").count(),
+            1,
+            "{}",
+            refused.error
+        );
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Breaks {
+        /// Запуск `webinst` не удался.
+        Spawn,
+        /// `webinst` вышел с ошибкой.
         Webinst,
+        /// Apache отверг конфиг после `webinst`.
         Config,
     }
 

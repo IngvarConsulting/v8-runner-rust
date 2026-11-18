@@ -271,16 +271,25 @@ fn publish_with(
     match finished.outcome() {
         Ok(()) => {
             if let Some(publication) = &managed {
-                if let Err(mut error) = publication.activate() {
+                // Сначала файлы `webinst` возвращаются пользователю раннера, затем Apache
+                // перечитывает конфиг.
+                let reclaimed = publication.reclaim_files();
+                let reclaim_failed = reclaimed.is_err();
+                if let Err(mut error) =
+                    reclaimed.and_then(|()| publication.reload(Reload::Activate))
+                {
                     if let Some(snapshot) = snapshot {
-                        // Файлы `webinst` забираются и тогда, когда откат конфига не удался.
+                        // Файлы `webinst` забираются и тогда, когда откат конфига не удался;
+                        // отказ забрать их, уже названный выше, не повторяется.
                         let restored = snapshot
                             .restore()
                             .and_then(|()| publication.reload(Reload::Recover));
-                        for rollback in [restored.err(), publication.reclaim_files().err()]
-                            .into_iter()
-                            .flatten()
-                        {
+                        let reclaimed = if reclaim_failed {
+                            None
+                        } else {
+                            publication.reclaim_files().err()
+                        };
+                        for rollback in [restored.err(), reclaimed].into_iter().flatten() {
                             error = error.followed_by(rollback.to_string());
                         }
                     }

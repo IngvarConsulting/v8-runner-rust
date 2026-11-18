@@ -1813,8 +1813,11 @@ pub(super) mod tests {
                     }
                 }
                 "httpd" => {
-                    let conf =
-                        std::fs::read_to_string(request.args.last().unwrap()).unwrap_or_default();
+                    let path = PathBuf::from(request.args.last().unwrap());
+                    if host.check_leaves_a_root_file.get() {
+                        leave_a_root_file(host, path.parent().unwrap());
+                    }
+                    let conf = std::fs::read_to_string(&path).unwrap_or_default();
                     if host.webinst_breaks_the_config.get() && conf.contains(WEBINST_LINE) {
                         exit_code = 1;
                         stderr = "Syntax error".to_owned();
@@ -1844,12 +1847,13 @@ pub(super) mod tests {
                     .unwrap();
                     let web = conf.parent().unwrap();
                     if host.webinst_leaves_a_root_file.get() {
-                        let backup = web.join("httpd.conf.bak");
-                        std::fs::write(&backup, "backup").unwrap();
-                        let alias = web.parent().unwrap().join("httpd.conf.bak.alias");
-                        let _ = std::fs::remove_file(&alias);
-                        std::fs::hard_link(&backup, alias).unwrap();
-                        host.foreign_owned.borrow_mut().insert(backup);
+                        leave_a_root_file(host, web);
+                    }
+                    if host.webinst_cannot_start.get() {
+                        return Err(ProcessError::SpawnFailed {
+                            cmd: request.program.display().to_string(),
+                            source: std::io::Error::other("cannot start"),
+                        });
                     }
                     if host.webinst_leaves_a_root_dir.get() {
                         let directory = web.join("root-dir");
@@ -1923,6 +1927,17 @@ pub(super) mod tests {
     /// Строка, которую подделка `webinst` дописывает в конфиг Apache.
     pub(crate) const WEBINST_LINE: &str = "# 1c publication demo";
 
+    /// Файл root `httpd.conf.bak` под каталогом Apache и его жёсткая ссылка вне каталога: по ней
+    /// видно, заменил ли раннер файл своим.
+    fn leave_a_root_file(host: &Host, web: &std::path::Path) {
+        let backup = web.join("httpd.conf.bak");
+        std::fs::write(&backup, "backup").unwrap();
+        let alias = web.parent().unwrap().join("httpd.conf.bak.alias");
+        let _ = std::fs::remove_file(&alias);
+        std::fs::hard_link(&backup, alias).unwrap();
+        host.foreign_owned.borrow_mut().insert(backup);
+    }
+
     #[derive(Default)]
     pub(crate) struct Host {
         unsupported: Cell<bool>,
@@ -1948,6 +1963,11 @@ pub(super) mod tests {
         pub(crate) webinst_leaves_a_root_file: Cell<bool>,
         /// `webinst` оставляет каталог root `root-dir`.
         pub(crate) webinst_leaves_a_root_dir: Cell<bool>,
+        /// Запуск `webinst` отказывает, успев оставить файл root.
+        pub(crate) webinst_cannot_start: Cell<bool>,
+        /// Проверка конфига Apache оставляет файл root — уже после того, как активация забрала
+        /// файлы `webinst`.
+        pub(crate) check_leaves_a_root_file: Cell<bool>,
         /// Отмена команды, наступающая, как только поднят `ragent`.
         cancel_on_agent: RefCell<Option<tokio_util::sync::CancellationToken>>,
         processes: RefCell<HashMap<u32, ProcessFacts>>,

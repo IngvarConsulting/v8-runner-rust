@@ -896,7 +896,7 @@ v8-runner web restart [--dry-run]
 - `publish` публикует базу в этот Apache через `webinst` из поиска утилит, того же выпуска, что работающий
   кластер, и перезагружает Apache: на Linux мягко (`SIGUSR1`), на Windows остановкой и запуском. Неудача
   `webinst` или перезагрузки возвращает конфиг и `default.vrd`. На Linux права root получает только `webinst`
-  — через `sudo -n` по правилу sudoers ровно на командную строку из `publish --dry-run`
+  — через `sudo -n` по правилу sudoers, которое фактически даёт пользователю запись от root
   ([настройка](CONFIGURATION.md#управляемый-стенд)); `publish` от root отказывает. После переноса `regport` кластера
   `status` ставит `publication_stale: true` — повторите `publish`.
 - Ответ: `infobase`, `state`, `action`, `ready`, `config_path`, `log_path`; у своего процесса — `pid`,
