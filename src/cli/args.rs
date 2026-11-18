@@ -131,6 +131,8 @@ pub enum Command {
     Launch(LaunchArgs),
     /// Publish the infobase on a web server with webinst, or delete the publication
     Publish(PublishArgs),
+    /// List or end sessions and manage a cluster maintenance window
+    Sessions(SessionCommands),
     /// List the installed 1C platforms and the utilities the runner would choose for this
     /// project; starts nothing
     Platforms,
@@ -145,6 +147,38 @@ pub enum Command {
     /// answering
     #[command(name = "remove-backup", hide = true)]
     RemoveBackup(RemoveBackupArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SessionCommands {
+    #[command(subcommand)]
+    pub command: SessionCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SessionCommand {
+    /// List sessions of the selected infobase
+    List,
+    /// End an identified session, or all eligible sessions of the selected infobase
+    Terminate {
+        #[arg(long, required_unless_present = "id", conflicts_with = "id")]
+        all: bool,
+        #[arg(value_name = "UUID", required_unless_present = "all")]
+        id: Option<uuid::Uuid>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Block new sessions of the selected cluster infobase
+    Deny {
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        code: Option<String>,
+        #[arg(long)]
+        jobs: bool,
+    },
+    /// Remove the runner's maintenance lock from the selected cluster infobase
+    Allow,
 }
 
 #[derive(Args, Debug)]

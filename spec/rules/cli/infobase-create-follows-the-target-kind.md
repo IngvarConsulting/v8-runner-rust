@@ -9,7 +9,7 @@ check:
   - tests/cli_init.rs::a_standalone_target_is_refused_with_the_recipe
   - tests/cli_init.rs::an_existing_file_base_is_refused_and_the_preview_names_it
   - tests/cli_init.rs::a_failed_ibcmd_create_that_left_a_base_names_the_directory_and_the_ways_out
-  - tests/cli_init.rs::a_cluster_preview_names_the_target_and_starts_nothing
+  - tests/cli_init.rs::a_cluster_preview_names_the_target_without_dispatching_the_designer
   - tests/cli_init.rs::init_edt_imports_projects_in_configuration_then_extension_order
   - tests/cli_init.rs::a_file_base_of_an_edt_project_is_assembled_by_ibcmd_from_its_sources
   - tests/cli_push_generation.rs::a_base_created_by_the_runner_takes_the_first_push

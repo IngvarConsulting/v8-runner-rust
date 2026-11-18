@@ -810,6 +810,9 @@ impl AppConfig {
     /// Builds a platform-ready 1C connection with infobase credentials applied.
     pub fn v8_connection(&self) -> V8Connection {
         let mut conn = V8Connection::from_connection_string(&self.infobase.connection);
+        conn.direct_gate = self.infobase.standalone.is_some()
+            && self.connection_declared()
+            && conn.file_path().is_none();
         conn.user = self.infobase.user.clone();
         conn.password = self.infobase.password.clone();
         conn

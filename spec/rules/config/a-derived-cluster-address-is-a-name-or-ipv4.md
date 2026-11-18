@@ -1,7 +1,7 @@
 ---
 id: INV.CONFIG.A-DERIVED-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/213
+check:
+  - src/config/model.rs::the_cluster_administration_address_is_derived_in_the_declared_order
 ---
 
 # Адрес кластера, выведенный из строки соединения, — имя или IPv4

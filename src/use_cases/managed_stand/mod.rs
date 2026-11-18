@@ -1334,6 +1334,14 @@ pub(crate) fn cluster_base(
     )
 }
 
+/// Путь к `ibcmd` и PID или шлюз, которыми управляются сеансы автономного сервера.
+pub(crate) fn standalone_session_target<'a>(
+    context: &ExecutionContext,
+    config: &'a AppConfig,
+) -> Option<(PathBuf, crate::platform::ibsrv::SessionSource<'a>)> {
+    standalone::session_target(context, config, &ProcessExecutor, &RealHost)
+}
+
 /// Чужие живые сеансы серверной базы — признак «базу держат сеансы» у применения, когда
 /// исполнитель его не дал (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`, замер #613):
 /// у кластера раннера — `rac session list`, у автономного сервера — `ibcmd session list` (свой
@@ -1390,14 +1398,7 @@ fn session_entries(
 ) -> Vec<crate::domain::sessions::SessionEntry> {
     sessions
         .into_iter()
-        .map(|session| crate::domain::sessions::SessionEntry {
-            computer: session.host,
-            application: crate::platform::session_list::application_of_rac(&session.application),
-            application_title: session.application,
-            started: session.started,
-            user: (!session.user.is_empty()).then_some(session.user),
-            id: Some(session.id),
-        })
+        .map(crate::platform::rac::Session::into_entry)
         .collect()
 }
 
@@ -1567,6 +1568,7 @@ mod tests {
     fn only_foreign_awake_sessions_of_a_server_hold_it() {
         let session = |id: &str, app: &str, asleep: bool| crate::platform::rac::Session {
             id: id.to_owned(),
+            number: None,
             application: app.to_owned(),
             host: "w11p-igor".to_owned(),
             user: String::new(),

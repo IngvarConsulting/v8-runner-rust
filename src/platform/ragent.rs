@@ -5,6 +5,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::process::{
+    ManagedSpawnMode, ManagedSpawnResult, ProcessError, ProcessRequest, ProcessRunner,
+};
 use crate::platform::service::ServiceRequest;
 
 /// Сколько портов в диапазоне рабочих процессов.
@@ -104,15 +107,34 @@ pub fn start_agent(
 pub fn start_ras(ras: &Path, port: u16, ports: ClusterPorts, log: &Path) -> ServiceRequest {
     ServiceRequest {
         program: ras.to_path_buf(),
-        args: vec![
-            "cluster".to_owned(),
-            format!("--port={port}"),
-            ports.agent_address(),
-        ],
+        args: ras_args(port, ports.agent_address()),
         workdir: log.parent().map(Path::to_path_buf),
         log_path: log.to_path_buf(),
         stdin: None,
     }
+}
+
+/// Временный RAS поднимается без журнала и без отметки работы: это подготовка подключения.
+pub(crate) fn spawn_command_ras(
+    runner: &dyn ProcessRunner,
+    ras: &Path,
+    port: u16,
+    agent: &str,
+) -> Result<ManagedSpawnResult, ProcessError> {
+    let request = ProcessRequest {
+        program: ras.to_path_buf(),
+        args: ras_args(port, agent.to_owned()),
+        workdir: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        startup_probe: None,
+        windows_verbatim_args: Vec::new(),
+    };
+    runner.spawn_managed(&request, ManagedSpawnMode::Tied, None)
+}
+
+fn ras_args(port: u16, agent: String) -> Vec<String> {
+    vec!["cluster".to_owned(), format!("--port={port}"), agent]
 }
 
 /// Ключ запуска, по которому узнают чужой `ragent` над тем же реестром.

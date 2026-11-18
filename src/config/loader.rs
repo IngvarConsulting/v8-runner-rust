@@ -255,6 +255,19 @@ pub fn load_config_for_launch(
     )
 }
 
+pub fn load_config_for_sessions(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::Sessions,
+    )
+}
+
 /// Два документа проекта одним значением: подряд идущие `&str` переставляются молча, а
 /// перестановка меняет и проверки границы, и итоговые настройки.
 pub struct ProjectText<'a> {
@@ -303,6 +316,7 @@ enum ConfigValidationMode {
     ToolsDownload,
     VanessaDownload,
     Launch,
+    Sessions,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
         operation: crate::domain::capability::Operation,
@@ -466,6 +480,9 @@ fn build_config(
             validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
         }
         ConfigValidationMode::Launch => validate_launch(&config)?,
+        ConfigValidationMode::Sessions => {
+            crate::config::validate::validate_infobase_runtime(&config)?
+        }
         ConfigValidationMode::ManagedDbms => {
             crate::config::validate::validate_managed_dbms(&config)?
         }

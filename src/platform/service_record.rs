@@ -358,6 +358,19 @@ pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> 
     read_json::<ClusterPins>(&paths.pins()).filter(|pins| pins.previous.is_none())
 }
 
+/// RAS живого кластера этой копии. Записи без собственного слушателя не дают адреса.
+pub fn running_ras(local: &LocalDir, infobase: &str) -> Option<ServiceRecord> {
+    running_cluster(local, infobase)?;
+    let paths = ServicePaths::new(local, infobase, StandService::Ras);
+    let machine = machine_fingerprint();
+    paths.own_record().filter(|record| {
+        adopt_recorded_pid(record, &process_facts, machine.as_deref())
+            && record
+                .pid
+                .is_some_and(|pid| crate::platform::service::listens_on(pid, record.port))
+    })
+}
+
 /// Работает ли своя служба PostgreSQL этой базы.
 pub fn running_postgres(local: &LocalDir, infobase: &str) -> bool {
     let paths = ServicePaths::new(local, infobase, StandService::Postgres);

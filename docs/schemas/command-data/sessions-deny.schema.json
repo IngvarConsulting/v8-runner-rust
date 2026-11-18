@@ -1,0 +1,31 @@
+{
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/sessions-deny.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "type": "boolean"
+    },
+    "infobase": {
+      "type": "string"
+    },
+    "jobs_denied": {
+      "type": "boolean"
+    },
+    "managed_ras": {
+      "type": "boolean"
+    },
+    "sessions_denied": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "infobase",
+    "managed_ras",
+    "sessions_denied",
+    "jobs_denied",
+    "changed"
+  ],
+  "title": "SessionsLockResult",
+  "type": "object"
+}

@@ -213,7 +213,7 @@ fn a_file_base_held_by_a_session_is_refused_with_the_session_list() {
     assert_eq!(list[0]["application_title"], "Тонкий клиент");
     assert_eq!(list[0]["started"], "2026-11-11T02:49:42");
     assert_eq!(list[0]["user"], Value::Null);
-    assert_eq!(list[0]["id"], "2");
+    assert_eq!(list[0]["number"], 2);
     assert_eq!(list[1]["application"], "1CV8");
     assert_eq!(error["next"]["command"], "apply", "{payload}");
     assert_eq!(error["next"]["source_set"], "main", "{payload}");

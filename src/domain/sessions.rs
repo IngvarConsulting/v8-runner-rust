@@ -51,8 +51,67 @@ pub struct SessionEntry {
     pub started: String,
     /// Пользователь; текст платформы у файловой базы его не называет.
     pub user: Option<String>,
-    /// Номер сеанса у платформы.
+    /// UUID сеанса, когда его сообщил сервер.
     pub id: Option<String>,
+    /// Номер сеанса у платформы.
+    pub number: Option<u32>,
+    pub from_this_machine: bool,
+    /// Сеанс не завершается через `sessions terminate --all`.
+    pub excluded: bool,
+}
+
+pub fn from_this_machine(computer: &str) -> bool {
+    crate::support::machine::host_name().is_some_and(|host| {
+        let short = |name: &str| name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+        !computer.is_empty() && short(computer) == short(&host)
+    })
+}
+
+pub fn protected_application(application: &str) -> bool {
+    // The platform does not identify which Designer sessions belong to this runner.
+    matches!(application, "RAS" | "SystemBackgroundJob" | "Designer")
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionsListResult {
+    pub infobase: String,
+    pub managed_ras: bool,
+    pub sessions: Vec<SessionEntry>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionsTerminateResult {
+    pub infobase: String,
+    pub managed_ras: bool,
+    pub requested: String,
+    pub terminated_session_ids: Vec<String>,
+    pub errors: Vec<SessionTerminationError>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionTerminationError {
+    pub session_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionsLockResult {
+    pub infobase: String,
+    pub managed_ras: bool,
+    pub sessions_denied: bool,
+    pub jobs_denied: bool,
+    pub changed: bool,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum SessionsResult {
+    List(SessionsListResult),
+    Terminate(SessionsTerminateResult),
+    Lock(SessionsLockResult),
 }
 
 /// Устойчивый код приложения платформы.
@@ -125,4 +184,6 @@ pub struct SessionsOutcome {
     pub lock: SessionLock,
     /// Передал ли раннер платформе сообщение завершаемым сеансам.
     pub message_delivered: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed_ras: bool,
 }

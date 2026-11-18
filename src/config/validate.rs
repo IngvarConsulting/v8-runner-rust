@@ -810,12 +810,16 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
 /// Launch consumes an existing infobase and client settings, never project sources.
 /// Validate the workspace path without creating it; execution owns its lifecycle.
 pub fn validate_launch(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_infobase_runtime(config)?;
+    validate_mcp_admission_timeout(config)?;
+    validate_client_mcp_launch_config(config)
+}
+
+pub(crate) fn validate_infobase_runtime(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_connection_contract(config)?;
-    validate_platform_version(config)?;
-    validate_mcp_admission_timeout(config)?;
-    validate_client_mcp_launch_config(config)
+    validate_platform_version(config)
 }
 
 /// Validate configuration for operations that read only the configured infobase.

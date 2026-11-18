@@ -100,6 +100,18 @@ fn without_preview() -> Vec<(&'static str, Vec<&'static str>, &'static str)> {
         ("test va", vec!["test", "va"], "test"),
         ("status", vec!["status"], "status"),
         ("diff", vec!["diff"], "diff"),
+        ("sessions list", vec!["sessions", "list"], "sessions list"),
+        (
+            "sessions terminate",
+            vec!["sessions", "terminate", "--all"],
+            "sessions terminate",
+        ),
+        ("sessions deny", vec!["sessions", "deny"], "sessions deny"),
+        (
+            "sessions allow",
+            vec!["sessions", "allow"],
+            "sessions allow",
+        ),
         (
             "agent hold",
             vec!["agent", "hold", "--ttl", "60"],

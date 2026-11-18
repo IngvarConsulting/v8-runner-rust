@@ -60,6 +60,65 @@ pub fn port_answers(port: u16) -> bool {
     .is_ok()
 }
 
+/// Whether this process owns the IPv4 listener reached through the local endpoint.
+#[cfg(windows)]
+pub(crate) fn listens_on(pid: u32, port: u16) -> bool {
+    imp::loopback_listener_pid(port) == Some(pid)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn listens_on(pid: u32, port: u16) -> bool {
+    let Ok(tcp) = std::fs::read_to_string(format!("/proc/{pid}/net/tcp")) else {
+        return false;
+    };
+    let sockets: Vec<_> = tcp
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let local = fields.nth(1)?;
+            let state = fields.nth(1)?;
+            let inode = fields.nth(5)?;
+            listens_on_ipv4(local, state, port).then(|| format!("socket:[{inode}]"))
+        })
+        .collect();
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.flatten().any(|fd| {
+        std::fs::read_link(fd.path()).is_ok_and(|link| {
+            sockets
+                .iter()
+                .any(|socket| link.as_os_str() == std::ffi::OsStr::new(socket))
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn listens_on_ipv4(local: &str, state: &str, port: u16) -> bool {
+    // /proc/net/tcp encodes IPv4 as eight native-order hex digits, then ':' and four port digits.
+    let Some((address, port_field)) = local.split_at_checked(8) else {
+        return false;
+    };
+    let Some(local_port) = port_field
+        .strip_prefix(':')
+        .filter(|field| field.len() == 4)
+    else {
+        return false;
+    };
+    let Ok(address) = u32::from_str_radix(address, 16) else {
+        return false;
+    };
+    let address = Ipv4Addr::from(address.to_ne_bytes());
+    state == "0A"
+        && matches!(address, Ipv4Addr::UNSPECIFIED | Ipv4Addr::LOCALHOST)
+        && u16::from_str_radix(local_port, 16) == Ok(port)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) fn listens_on(_pid: u32, _port: u16) -> bool {
+    false
+}
+
 /// Что система знает о процессе: опознание своего — `INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessFacts {
@@ -808,6 +867,15 @@ mod imp {
 
     /// Какой процесс слушает порт на IPv4.
     pub fn listening_pid(port: u16) -> Option<u32> {
+        listener_pid(port, false)
+    }
+
+    /// Сервер, до которого дойдёт подключение на 127.0.0.1.
+    pub(super) fn loopback_listener_pid(port: u16) -> Option<u32> {
+        listener_pid(port, true)
+    }
+
+    fn listener_pid(port: u16, loopback: bool) -> Option<u32> {
         let mut size = 0u32;
         // SAFETY: первый вызов спрашивает размер: пустой буфер допустим.
         unsafe {
@@ -848,11 +916,22 @@ mod imp {
             let rows = std::ptr::addr_of!((*table).table)
                 .cast::<windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID>(
             );
-            (0..count).find_map(|index| {
+            let mut wildcard = None;
+            for index in 0..count {
                 let row = rows.add(index).read_unaligned();
                 // Порт в таблице — младшие 16 бит в сетевом порядке.
-                (u16::from_be(row.dwLocalPort as u16) == port).then_some(row.dwOwningPid)
-            })
+                if u16::from_be(row.dwLocalPort as u16) != port {
+                    continue;
+                }
+                let address = std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+                if !loopback || address == std::net::Ipv4Addr::LOCALHOST {
+                    return Some(row.dwOwningPid);
+                }
+                if address.is_unspecified() {
+                    wildcard = Some(row.dwOwningPid);
+                }
+            }
+            wildcard
         }
     }
 

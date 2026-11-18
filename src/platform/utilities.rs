@@ -138,6 +138,12 @@ impl PlatformUtilities {
         self.locator.installations()
     }
 
+    pub(crate) fn rac_candidates(
+        &mut self,
+    ) -> Result<Vec<std::path::PathBuf>, crate::platform::locator::LocatorError> {
+        self.locator.rac_candidates()
+    }
+
     /// Return the standard runner path for the requested utility.
     ///
     /// This stage always returns the standard non-interactive executor. Future EDT work may add a
