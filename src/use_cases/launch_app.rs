@@ -193,6 +193,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         });
     }
 
@@ -275,6 +276,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait,
             client_wait,
+            debug: launch_debug(&launch),
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -314,6 +316,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -379,6 +382,7 @@ fn run_launch(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: launch_debug(&launch),
     })
 }
 
@@ -627,6 +631,7 @@ fn execute_web(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: None,
         });
     }
 
@@ -652,7 +657,16 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: None,
     })
+}
+
+/// Отладка в ответе — тот адрес, что получил клиент.
+fn launch_debug(launch: &LaunchOptions) -> Option<crate::domain::launch::LaunchDebug> {
+    launch
+        .debugger_url
+        .clone()
+        .map(|url| crate::domain::launch::LaunchDebug { url })
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {

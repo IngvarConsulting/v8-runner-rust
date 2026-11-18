@@ -1132,6 +1132,11 @@ pub struct LaunchArgs {
     #[command(flatten)]
     pub launch: DirectLaunchOptionsArgs,
 
+    /// Attach the client to this 1C debug server as it starts: `/DEBUG -http -attach
+    /// /DEBUGGERURL <URL>`; the address `debug-server start` answered. Not for designer or web
+    #[arg(long = "debug", value_name = "URL")]
+    pub debug: Option<String>,
+
     /// Which address opens the base: `web` for infobase.web.url, `connection` for
     /// infobase.connection. Thin client only; the default is infobase.connection, or
     /// infobase.web.url when no connection string is declared
@@ -1684,6 +1689,7 @@ mod tests {
                 mcp_port,
                 wait_ready,
                 via: _,
+                debug: _,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
@@ -1736,6 +1742,7 @@ mod tests {
                 mcp_port,
                 wait_ready,
                 via: _,
+                debug: _,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1791,6 +1798,7 @@ mod tests {
                 mcp_port,
                 wait_ready,
                 via: _,
+                debug: _,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());

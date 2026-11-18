@@ -51,6 +51,16 @@ pub struct LaunchResult {
     /// Bounded thin-client wait without an external EPF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_wait: Option<Box<ClientWaitResult>>,
+    /// Сервер отладки, к которому подключён клиент (`launch --debug`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<LaunchDebug>,
+}
+
+/// Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LaunchDebug {
+    /// Адрес сервера отладки, как его получил клиент.
+    pub url: String,
 }
 
 /// Which of the target's two addresses opens the base.

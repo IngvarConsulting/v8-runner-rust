@@ -82,6 +82,20 @@
       ],
       "type": "object"
     },
+    "LaunchDebug": {
+      "additionalProperties": false,
+      "description": "Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`.",
+      "properties": {
+        "url": {
+          "description": "Адрес сервера отладки, как его получил клиент.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "LaunchMode": {
       "description": "Supported application launch modes.",
       "enum": [
@@ -250,6 +264,17 @@
         }
       ],
       "description": "Bounded thin-client wait without an external EPF."
+    },
+    "debug": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchDebug"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Сервер отладки, к которому подключён клиент (`launch --debug`)."
     },
     "external_epf_wait": {
       "anyOf": [

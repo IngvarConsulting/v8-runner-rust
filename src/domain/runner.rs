@@ -20,6 +20,10 @@ pub struct LaunchOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     // Legacy internal name: applies to thin EPF or explicit typed /C launches.
     pub external_epf_wait: Option<ExternalEpfWaitOptions>,
+    /// Сервер отладки, к которому клиент подключается сразу после запуска (`launch --debug`):
+    /// `/DEBUG -http -attach /DEBUGGERURL <адрес>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debugger_url: Option<String>,
 }
 
 /// Opt-in bounded observation settings for a direct thin-client launch.
