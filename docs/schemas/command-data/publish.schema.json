@@ -353,7 +353,7 @@
       "$ref": "#/$defs/PublishAction"
     },
     "dir": {
-      "description": "Physical directory the publication is written to.",
+      "description": "Physical directory the publication is written to; under `localPath` for a managed base.",
       "type": "string"
     },
     "duration_ms": {
@@ -402,11 +402,11 @@
       "type": "boolean"
     },
     "server": {
-      "description": "Web server named in `infobase.web.server`.",
+      "description": "Web server named in `infobase.web.server`; `apache24` for `infobase.web.managed`.",
       "type": "string"
     },
     "url": {
-      "description": "Address the published infobase opens at, when `infobase.web.url` is declared.",
+      "description": "Address the published infobase opens at: `infobase.web.url` when declared, the loopback\naddress of the private Apache for `infobase.web.managed`.",
       "type": [
         "string",
         "null"

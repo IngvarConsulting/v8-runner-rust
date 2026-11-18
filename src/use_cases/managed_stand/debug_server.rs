@@ -593,10 +593,12 @@ impl DebugServer<'_> {
             return true;
         };
         let patience = self.host.patience(STOP_TIMEOUT);
-        self.host.soft_stop(self.runner, pid, self.context);
+        self.host
+            .soft_stop(self.runner, pid, record.started, self.context);
         let mut gone = await_gone(self.host, pid, record.started, patience);
         if !gone {
-            self.host.hard_stop(self.runner, pid, self.context);
+            self.host
+                .hard_stop(self.runner, pid, record.started, self.context);
             gone = await_gone(self.host, pid, record.started, patience);
         }
         if gone {
@@ -803,12 +805,24 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
-        fn soft_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn soft_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.soft_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
-        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn hard_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.hard_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);

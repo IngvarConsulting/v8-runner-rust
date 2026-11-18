@@ -89,6 +89,8 @@ pub enum Command {
     Standalone(StandaloneArgs),
     /// Start and stop the cluster (ragent and ras) of an infobase declared with cluster.managed
     Cluster(ClusterArgs),
+    /// Manage the private Apache of a declared cluster
+    Web(WebArgs),
     /// Start and stop the 1C debug server a debugger attaches to: the runner's own dbgs for a
     /// file infobase, the debug server of the managed cluster for its infobase
     #[command(name = "debug-server")]
@@ -341,6 +343,12 @@ pub struct BootstrapArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct WebArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommandArgs,
+}
+
+#[derive(Debug, Args)]
 pub struct DbmsArgs {
     #[command(subcommand)]
     pub command: ServiceCommandArgs,

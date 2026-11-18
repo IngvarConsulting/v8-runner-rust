@@ -89,17 +89,22 @@ pub fn start_agent(
     debug: bool,
     log: &Path,
 ) -> ServiceRequest {
-    let mut args = vec![
-        "/agent".to_owned(),
-        "/port".to_owned(),
+    let mut args = if cfg!(target_os = "linux") {
+        Vec::new()
+    } else {
+        vec!["/agent".to_owned()]
+    };
+    let prefix = if cfg!(target_os = "linux") { "-" } else { "/" };
+    args.extend([
+        format!("{prefix}port"),
         ports.agent.to_string(),
-        "/regport".to_owned(),
+        format!("{prefix}regport"),
         ports.regport.to_string(),
-        "/range".to_owned(),
+        format!("{prefix}range"),
         ports.worker_range(),
-        "/d".to_owned(),
+        format!("{prefix}d"),
         registry.display().to_string(),
-    ];
+    ]);
     if debug {
         args.extend([
             "-debug".to_owned(),
@@ -187,6 +192,22 @@ mod tests {
             false,
             Path::new("w/cluster.log"),
         );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                agent.args,
+                [
+                    "-port",
+                    "24000",
+                    "-regport",
+                    "24001",
+                    "-range",
+                    "24002:24017",
+                    "-d",
+                    "w/data"
+                ]
+            );
+            return;
+        }
         assert_eq!(
             agent.args,
             [
@@ -218,8 +239,13 @@ mod tests {
             true,
             Path::new("w/cluster.log"),
         );
+        let at = agent
+            .args
+            .iter()
+            .position(|arg| arg == "-debug")
+            .expect("-debug");
         assert_eq!(
-            agent.args[9..],
+            agent.args[at..],
             [
                 "-debug",
                 "-http",
@@ -229,6 +255,6 @@ mod tests {
                 "127.0.0.1"
             ]
         );
-        assert_eq!(agent.args[6], "24002:24017");
+        assert!(agent.args.contains(&"24002:24017".to_owned()));
     }
 }
