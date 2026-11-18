@@ -85,7 +85,7 @@
 <g class="n n-svc"><rect x="299.0" y="221.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="241.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="259.0">127.0.0.1:1543</tspan></text></g>
 <g class="n n-sw"><rect x="313.0" y="328.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="350.0">1cv8c · клиент</tspan></text></g>
 <g class="n n-doc"><path d="M635.0,162.0 h170.0 v68.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="720.0" y="191.0">каталог базы</tspan><tspan x="720.0" y="209.0">1Cv8.1CD</tspan></text></g>
-<g class="n n-doc"><path d="M615.0,22.0 h210.0 v68.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="720.0" y="51.0">workPath</tspan><tspan x="720.0" y="69.0">журналы, хеши, .cf, .dt</tspan></text></g>
+<g class="n n-doc"><path d="M615.0,22.0 h210.0 v68.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="720.0" y="51.0">workPath</tspan><tspan x="720.0" y="69.0">журналы, .cf, .dt</tspan></text></g>
 <g class="lbl"><rect x="160.5" y="110.3" width="141" height="24" rx="4"/><text><tspan x="231.0" y="122.3">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="168.0" y="160.8" width="141" height="24" rx="4"/><text><tspan x="238.5" y="172.8">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="148.0" y="216.3" width="148" height="24" rx="4"/><text><tspan x="222.0" y="228.3">поднимает, потом SSH</tspan></text></g>
@@ -99,7 +99,7 @@
 <!-- /diagram:d-file -->
 <h3>Конфигурация</h3>
 <p>Основной файл <code>v8project.yaml</code> описывает исходники на машине раннера.</p>
-<pre data-config-example="main"><code>workPath: .build         # журналы, временные файлы и состояние
+<pre data-config-example="main"><code>workPath: .build         # журналы и временные файлы; можно удалить
 format: DESIGNER         # исходники в формате платформы
 source-set:
   - name: main           # локальное имя набора
@@ -108,17 +108,21 @@ source-set:
 <p><code>v8project.local.yaml</code> рядом с основным файлом:</p>
 <pre data-config-example="local"><code>infobases:
   origin:
-    connection: &quot;File=.build/ib&quot;  # база на машине раннера</code></pre>
-<p>Каталог .build/ib расположен рядом с проектом. Платформа установлена на той же машине.</p>
+    connection: &quot;File=.local/db&quot;  # база на машине раннера</code></pre>
+<p>Каталог <code>.local/db</code> расположен рядом с проектом, в <code>localPath</code>: это умолчание <a href="cli-init.html#op-init"><code>init</code></a>. Удаление <code>workPath</code> базу не задевает. Платформа установлена на той же машине.</p>
 <h2 id="folders">Структура папок проекта</h2>
 <pre><code>project/
 ├── v8project.yaml        # общие настройки проекта
 ├── v8project.local.yaml  # настройки этой машины и адрес базы
 ├── src/
 │   └── cf/               # исходники конфигурации
-└── .build/               # рабочий каталог раннера
-    └── ib/               # файловая база
-        └── 1Cv8.1CD      # файл базы данных</code></pre>
+├── .build/               # workPath: журналы и временные файлы, можно удалить
+└── .local/               # localPath: личное состояние копии, не удалять
+    ├── .db.v8-runner.owners.json  # метка владельца файловой базы
+    ├── db/               # файловая база
+    │   └── 1Cv8.1CD      # файл базы данных
+    └── infobases/
+        └── origin/       # память о базе: хеши, поколение, файл версий</code></pre>
 </main>
 <script src="site.js?v=27" defer></script>
 </body>

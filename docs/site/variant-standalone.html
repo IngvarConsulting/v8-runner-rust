@@ -105,7 +105,7 @@
 <!-- /diagram:d-standalone-local -->
 <h3>Конфигурация</h3>
 <p>Основной файл <code>v8project.yaml</code> описывает исходники на машине раннера.</p>
-<pre data-config-example="main"><code>workPath: .build         # журналы, временные файлы и состояние
+<pre data-config-example="main"><code>workPath: .build         # журналы и временные файлы; можно удалить
 format: DESIGNER         # исходники в формате платформы
 source-set:
   - name: main           # локальное имя набора
@@ -198,7 +198,7 @@ source-set:
 <path marker-end="url(#arr-d-standalone-managed)" class="e" d="M1060.0,161.0 C1060.0,121.0 1060.0,149.0 1060.0,109.0"/>
 <g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
 <g class="n n-sw"><rect x="367.0" y="138.0" width="126.0" height="44.0" rx="8"/><text><tspan x="430.0" y="160.0">1cv8 DESIGNER</tspan></text></g>
-<g class="n n-doc"><path d="M-15.0,262.0 h230.0 v68.0 q-57.5,12.0 -115.0,0 q-57.5,-12.0 -115.0,0 z"/><text><tspan x="100.0" y="291.0">workPath</tspan><tspan x="100.0" y="309.0">запись о сервере, ключ хоста</tspan></text></g>
+<g class="n n-doc"><path d="M-15.0,262.0 h230.0 v68.0 q-57.5,12.0 -115.0,0 q-57.5,-12.0 -115.0,0 z"/><text><tspan x="100.0" y="291.0">localPath</tspan><tspan x="100.0" y="309.0">запись о сервере, ключ хоста</tspan></text></g>
 <g class="n n-svc"><rect x="635.0" y="51.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="71.0">SSH-шлюз</tspan><tspan x="760.0" y="89.0">свободный порт, ключ раннера</tspan></text></g>
 <g class="n n-svc"><rect x="625.0" y="161.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">свободный порт, проба готовности</tspan></text></g>
 <g class="n n-sw"><rect x="989.0" y="161.0" width="142.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">поднят раннером</tspan></text></g>

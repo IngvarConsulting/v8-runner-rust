@@ -1506,6 +1506,7 @@ struct ExecutionTimeoutsSchema {
 mod tests {
     use crate::config::loader::{load_config, ConfigLoadError};
     use crate::config::model::InfobaseSelector;
+    use crate::support::path::normalize_windows_verbatim_path;
 
     use super::{
         local_config_schema_json, main_config_schema_json, schema_json_pretty,
@@ -1827,7 +1828,9 @@ mod tests {
             .expect("load config");
         assert_eq!(
             config.base_path,
-            std::fs::canonicalize(dir.path()).expect("canonical config dir")
+            normalize_windows_verbatim_path(
+                &dir.path().canonicalize().expect("canonical config dir")
+            )
         );
     }
 
@@ -1967,10 +1970,11 @@ source-set:
         assert_eq!(
             config.tools.platform.path.as_deref(),
             Some(
-                std::fs::canonicalize(dir.path())
-                    .expect("canonical config dir")
-                    .join("platform/bin")
-                    .as_path()
+                normalize_windows_verbatim_path(
+                    &dir.path().canonicalize().expect("canonical config dir")
+                )
+                .join("platform/bin")
+                .as_path()
             )
         );
     }
@@ -1998,10 +2002,11 @@ source-set:
         assert_eq!(
             config.tools.platform.path.as_deref(),
             Some(
-                std::fs::canonicalize(dir.path())
-                    .expect("canonical config dir")
-                    .join("platform/bin")
-                    .as_path()
+                normalize_windows_verbatim_path(
+                    &dir.path().canonicalize().expect("canonical config dir")
+                )
+                .join("platform/bin")
+                .as_path()
             )
         );
     }

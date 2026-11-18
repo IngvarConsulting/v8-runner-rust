@@ -11,6 +11,7 @@ check:
   - src/use_cases/apply.rs::an_apply_that_fails_after_a_deferred_cancellation_names_it
   - src/use_cases/reset.rs::a_rollback_stopped_at_its_safe_point_writes_nothing
   - src/use_cases/reset.rs::a_cancellation_deferred_by_the_rollback_is_named_once
+  - src/platform/process.rs::a_process_repeating_a_question_on_closed_input_is_stopped
 ---
 
 # Запись в базу — критическая фаза
@@ -23,3 +24,7 @@ check:
 Команда, которая базу только читает, критической фазой не бывает, даже когда её задаёт шаг
 записи: отмена её снимает. Так снимается вопрос `config generation-id`, которым
 `ibcmd infobase create` после неудачи узнаёт, есть ли база уже.
+
+Процесс, который с начала вывода только повторяет один вопрос на закрытом вводе, в запись
+не вошёл: он ждёт ответа. Его раннер снимает при любом классе
+(`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`).

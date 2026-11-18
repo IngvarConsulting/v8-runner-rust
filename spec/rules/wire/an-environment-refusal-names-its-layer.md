@@ -19,6 +19,8 @@ check:
   - tests/cli_convert.rs::convert_without_the_edt_cli_answers_an_environment_failure
   - tests/cli_infobase.rs::missing_file_infobase_is_unavailable_before_designer_dispatch
   - tests/cli_dbms.rs::other_systems_refuse_start_as_the_environment
+  - src/platform/ibcmd.rs::every_ibcmd_run_stops_a_repeated_question_as_an_infobase_user_refusal
+  - tests/cli_ibcmd_user_question.rs::pull_force_refuses_an_infobase_that_asks_for_its_user
 ---
 
 # Отказ окружения называет слой, который отказал
@@ -31,9 +33,9 @@ check:
 
 | `layer` | Что отказало | Отказы |
 | --- | --- | --- |
-| `infobase_user` | агент отверг вход с учётными данными пользователя базы | `AgentError::AuthenticationRejected` |
+| `infobase_user` | агент отверг вход с учётными данными пользователя базы; `ibcmd` без конца спрашивал на закрытом вводе | `AgentError::AuthenticationRejected`, `IbcmdError::UnansweredQuestion` |
 | `agent_endpoint` | точка входа агента: не ответила, рукопожатие SSH не прошло, ключ хоста не тот | `Unreachable`, `Handshake`, `HostKeyRejected`, `ForeignAgentOnPort`, `Channel` |
-| `agent_start` | агент не поднялся | `Launch`, `PortTaken`, `NoFreePort`, `StartupTimedOut`, `ExitedBeforeSession`, `LiveAgentGone`, `Keeper`, `KeeperUnreachable`, `HostKeyPathNotReadable`; нет каталога состояния учётной записи, хранитель не назвал порт, хранитель не поднялся, `host-key` не в ASCII |
+| `agent_start` | агент не поднялся | `Launch`, `PortTaken`, `NoFreePort`, `StartupTimedOut`, `ExitedBeforeSession`, `LiveAgentGone`, `Keeper`, `KeeperUnreachable`, `HostKeyPathNotReadable`; соль ключа в `localPath` не заводится, хранитель не назвал порт, хранитель не поднялся, `host-key` не в ASCII |
 | `platform` | утилиты платформы нет, она не той версии или не выбрана | `AppError::PlatformLocator*`; управляемому агенту не выбран `1cv8`; не готов ни один исполнитель, и хоть одному не нашлось утилиты |
 
 `agent_endpoint` — любая точка входа агента: чужая, шлюз автономного сервера и порт агента,

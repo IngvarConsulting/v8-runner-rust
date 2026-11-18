@@ -43,6 +43,15 @@ pub enum IbcmdError {
     #[error("failed to execute ibcmd process: {0}")]
     Spawn(ProcessError),
 
+    /// `ibcmd` без конца спрашивал на закрытом вводе и снят. Так он спрашивает имя
+    /// пользователя базы, у которой есть пользователи, когда раннеру оно не дано (замеры
+    /// `dump`, `restore`, `config reset`, `config generation-id`); пароль он спрашивает один
+    /// раз и отказывает. `target` называет базу и учётную запись, `question` — улика.
+    #[error(
+        "ibcmd kept asking \"{question}\" for {target} and was stopped: the infobase has users, and the runner gives ibcmd no answer on its input; declare the infobase user under infobases.<name>.user and infobases.<name>.password in v8project.local.yaml"
+    )]
+    UnansweredQuestion { target: String, question: String },
+
     #[error(
         "cannot start partial ibcmd import of {file_count} files: operating-system command-line or executable path limit exceeded; use push <SET> --full, or choose designer or agent via providers.push when available"
     )]
@@ -777,9 +786,16 @@ impl<'a> IbcmdDsl<'a> {
                     startup_probe: None,
                     windows_verbatim_args: Vec::new(),
                 },
-                policy,
+                // Ввод у ibcmd закрыт: вопрос о пользователе он повторяет без конца.
+                &policy.stopping_a_repeated_question(),
             )
-            .map_err(IbcmdError::Spawn)?;
+            .map_err(|error| match error {
+                ProcessError::RepeatedQuestion { question, .. } => IbcmdError::UnansweredQuestion {
+                    target: self.connection.describe_target(),
+                    question: question.trim().to_owned(),
+                },
+                error => IbcmdError::Spawn(error),
+            })?;
 
         Ok(PlatformCommandResult {
             process,
@@ -1366,6 +1382,122 @@ mod tests {
         {
             panic!("ibcmd must run synchronously")
         }
+    }
+
+    /// Исполнитель, у которого процесс повторяет вопрос на закрытом вводе: запоминает
+    /// аргументы и признак политики у каждого запуска.
+    #[derive(Default)]
+    struct AskingRunner {
+        runs: std::cell::RefCell<Vec<(Vec<String>, bool)>>,
+    }
+
+    impl ProcessRunner for AskingRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.runs
+                .borrow_mut()
+                .push((request.args.clone(), policy.stops_a_repeated_question));
+            Err(crate::platform::process::ProcessError::RepeatedQuestion {
+                cmd: "ibcmd".to_owned(),
+                question: "Имя пользователя: ".to_owned(),
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("ibcmd must run synchronously")
+        }
+    }
+
+    /// Каждый запуск `ibcmd` снимает повторённый вопрос, и ответ — отказ окружения со слоем
+    /// `infobase_user`, который называет базу и ключи, которые нужно объявить
+    /// (`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`).
+    #[test]
+    fn every_ibcmd_run_stops_a_repeated_question_as_an_infobase_user_refusal() {
+        use crate::support::error::{AppError, EnvironmentLayer};
+
+        let runner = AskingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(PathBuf::from("data"));
+        let target = Path::new("target");
+        let errors = [
+            dsl.config_generation_id(None).map(|_| ()),
+            dsl.config_generation_id(Some("ext")).map(|_| ()),
+            dsl.config_export_full(target, None).map(|_| ()),
+            dsl.config_export_status(target, None).map(|_| ()),
+            dsl.config_export_info(target).map(|_| ()),
+            dsl.config_export_for_changes(target, target, None)
+                .map(|_| ()),
+            dsl.config_import_full(target, None).map(|_| ()),
+            dsl.config_import_partial(target, &[PathBuf::from("a.xml")], None)
+                .map(|_| ()),
+            dsl.config_apply(None, SessionTerminate::Keep).map(|_| ()),
+            dsl.config_reset(None).map(|_| ()),
+            dsl.config_save(target, true, None).map(|_| ()),
+            dsl.config_export_file(target, target).map(|_| ()),
+            dsl.infobase_extension_list().map(|_| ()),
+            dsl.infobase_extension_info("ext").map(|_| ()),
+            dsl.infobase_extension_set_active("ext", true).map(|_| ()),
+            dsl.infobase_create(None).map(|_| ()),
+            dsl.ensure_infobase_create().map(|_| ()),
+        ];
+
+        let runs = runner.runs.borrow();
+        assert_eq!(runs.len(), errors.len());
+        assert!(runs.iter().all(|(_, stops)| *stops), "{runs:?}");
+        for error in errors {
+            let error = error.expect_err("the question is a refusal");
+            assert!(
+                matches!(&error, IbcmdError::UnansweredQuestion { target, question }
+                    if target.contains("with no configured infobase user")
+                        && question == "Имя пользователя:"),
+                "{error:?}"
+            );
+            let app = AppError::from(error);
+            assert_eq!(
+                app.environment_layer(),
+                Some(EnvironmentLayer::InfobaseUser)
+            );
+            let text = app.to_string();
+            assert!(text.starts_with("environment unavailable: "), "{text}");
+            assert!(text.contains("infobases.<name>.user"), "{text}");
+            assert!(text.contains("v8project.local.yaml"), "{text}");
+        }
+    }
+
+    /// Объявленные пользователь и пароль доходят до `config generation-id`: вопроса тогда нет.
+    #[test]
+    fn the_generation_question_carries_the_declared_credentials() {
+        let runner = CapturingRunner::default();
+        let mut infobase = InfobaseConfig::file("File=./ib");
+        infobase.user = Some("Админ".to_owned());
+        infobase.password = Some("secret".to_owned());
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            IbcmdConnection::from_infobase(&infobase).expect("connection"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let _ = dsl.config_generation_id(None).expect("generation");
+
+        let args = runner.requests.borrow()[0].args.join("\n");
+        assert!(args.contains("generation-id"), "{args}");
+        assert!(args.contains("--user\nАдмин"), "{args}");
+        assert!(args.contains("--password\nsecret"), "{args}");
     }
 
     #[test]

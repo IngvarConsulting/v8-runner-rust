@@ -520,6 +520,105 @@ fn designer_configuration_and_dt_exports_publish_through_native_cli() {
 }
 
 #[test]
+fn designer_dt_restore_authenticates_only_existing_targets() {
+    const USER: &str = "fixture-restore-user";
+    const PASSWORD: &str = "fixture-restore-password";
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    let input = root.path().join("backup.dt");
+    fs::write(&input, b"fixture").expect("DT input");
+    let calls = root.path().join("calls");
+    let marker = root.path().join("ib/1Cv8.1CD");
+    fs::remove_file(&marker).expect("absent target");
+    let file_connection = format!("File={}", root.path().join("ib").display());
+    let local_config = root.path().join("v8project.local.yaml");
+
+    for (connection, mode, state) in [
+        (file_connection.as_str(), "--create", "created"),
+        (file_connection.as_str(), "--replace", "replaced"),
+        (r"Srvr=fixture;Ref=restore", "--replace", "replaced"),
+    ] {
+        fs::write(
+            &local_config,
+            format!(
+                "infobases:\n  origin:\n    connection: '{connection}'\n    user: {USER}\n    password: {PASSWORD}\n"
+            ),
+        )
+        .expect("local config");
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_v8-runner"));
+            command
+                .arg("--config")
+                .arg(&config)
+                .args(["--json-message", "infobase", "restore", mode, "--input"])
+                .arg(&input)
+                .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls);
+            command
+        };
+
+        let preview = command().arg("--dry-run").output().expect("preview");
+        assert!(preview.status.success(), "{preview:?}");
+        let preview_data: Value = serde_json::from_slice(&preview.stdout).expect("JSON envelope");
+        assert_eq!(preview_data["data"]["plan"]["provider"], "designer");
+        assert_eq!(preview_data["data"]["plan"]["target_mode"], &mode[2..]);
+        assert_eq!(preview_data["data"]["target_state"], "unchanged");
+        assert_eq!(preview_data["data"]["provider_dispatched"], false);
+        assert!(!calls.exists(), "preview must not dispatch Designer");
+
+        let execution = command().output().expect("restore");
+        assert!(execution.status.success(), "{execution:?}");
+        let data: Value = serde_json::from_slice(&execution.stdout).expect("JSON envelope");
+        assert_eq!(data["data"]["provider"]["selected"], "designer");
+        assert_eq!(data["data"]["restored"], true);
+        assert_eq!(data["data"]["target_state"], state);
+        for output in [&preview, &execution] {
+            for stream in [&output.stdout, &output.stderr] {
+                let text = String::from_utf8_lossy(stream);
+                assert!(!text.contains(USER) && !text.contains(PASSWORD), "{text}");
+            }
+        }
+        let argv = fs::read_to_string(&calls).expect("Designer argv");
+        assert!(argv.contains("\"/RestoreIB\""), "{argv}");
+        for argument in ["\"/N\"", USER, "\"/P\"", PASSWORD] {
+            assert_eq!(argv.contains(argument), mode == "--replace", "{argv}");
+        }
+        fs::remove_file(&calls).expect("clear argv");
+        if mode == "--create" {
+            fs::write(&marker, b"existing database").expect("existing target");
+        }
+
+        if mode == "--replace" {
+            let failure = command()
+                .env("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD", "1")
+                .output()
+                .expect("failed restore");
+            assert_eq!(failure.status.code(), Some(4), "{failure:?}");
+            let stdout = String::from_utf8_lossy(&failure.stdout);
+            let stderr = String::from_utf8_lossy(&failure.stderr);
+            for stream in [&stdout, &stderr] {
+                assert!(
+                    !stream.contains(USER) && !stream.contains(PASSWORD),
+                    "{stream}"
+                );
+            }
+            let data: Value = serde_json::from_str(&stdout).expect("JSON envelope");
+            assert_eq!(data["error"]["code"], "platform_failure");
+            assert!(
+                data["error"]["message"]
+                    .as_str()
+                    .expect("error message")
+                    .contains("platform restore failed"),
+                "{stdout}"
+            );
+            assert_eq!(data["data"]["restored"], false);
+            assert_eq!(data["data"]["target_state"], "uncertain");
+            fs::remove_file(&calls).expect("clear argv");
+        }
+    }
+}
+
+#[test]
 fn infobase_dry_run_is_non_executing_on_the_host_platform() {
     let root = tempdir().expect("tempdir");
     let platform = compile_fake_designer(&root.path().join("platform"));

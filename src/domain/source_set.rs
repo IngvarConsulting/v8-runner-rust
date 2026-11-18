@@ -307,13 +307,15 @@ mod tests {
 
     #[test]
     fn accepts_absolute_path() {
-        let context =
-            SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "designer-main");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("src-main");
+        let work = dir.path().join("work");
+        let context = SourceSetContext::new("main", source.clone(), "designer-main");
         assert_eq!(context.name(), "main");
-        assert_eq!(context.path(), PathBuf::from("/tmp/src-main").as_path());
+        assert_eq!(context.path(), source);
         assert_eq!(
-            context.storage_path(PathBuf::from("/tmp/work").as_path()),
-            Some(PathBuf::from("/tmp/work/hash-storages/designer-main.redb"))
+            context.storage_path(&work),
+            Some(work.join("hash-storages").join("designer-main.redb"))
         );
     }
 
@@ -325,29 +327,33 @@ mod tests {
 
     #[test]
     fn accepts_safe_storage_key() {
-        let context =
-            SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "main-config_01");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let work = dir.path().join("work");
+        let context = SourceSetContext::new("main", dir.path().join("src-main"), "main-config_01");
         assert_eq!(
-            context.storage_path(PathBuf::from("/tmp/work").as_path()),
-            Some(PathBuf::from("/tmp/work/hash-storages/main-config_01.redb"))
+            context.storage_path(&work),
+            Some(work.join("hash-storages").join("main-config_01.redb"))
         );
     }
 
     #[test]
     #[should_panic(expected = "safe single path segment")]
     fn rejects_storage_key_with_parent_traversal() {
-        let _ = SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "../outside");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = SourceSetContext::new("main", dir.path().join("src-main"), "../outside");
     }
 
     #[test]
     #[should_panic(expected = "safe single path segment")]
     fn rejects_storage_key_with_separator() {
-        let _ = SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "bad/name");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = SourceSetContext::new("main", dir.path().join("src-main"), "bad/name");
     }
 
     #[test]
     #[should_panic(expected = "safe single path segment")]
     fn rejects_storage_key_with_backslash_separator() {
-        let _ = SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "bad\\name");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = SourceSetContext::new("main", dir.path().join("src-main"), "bad\\name");
     }
 }

@@ -31,29 +31,24 @@ mod imp {
         next: NamedPipeServer,
     }
 
-    /// DACL канала: защищённый, полный доступ только пользователю из маркера процесса и
-    /// LocalSystem. Владелец объекта (`OW`) не годится: у повышенного администратора им
-    /// становится группа «Администраторы».
-    fn pipe_sddl() -> std::io::Result<String> {
-        let user = crate::support::machine::account::account_id()?;
-        Ok(format!("D:P(A;;GA;;;{user})(A;;GA;;;SY)"))
-    }
-
     fn instance(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {
         let mut options = ServerOptions::new();
         options
             .first_pipe_instance(first)
             .reject_remote_clients(true);
-        crate::support::temp::with_security(&pipe_sddl()?, |attributes| {
-            // SAFETY: `attributes` points to a live SECURITY_ATTRIBUTES whose descriptor stays
-            // valid for this call; the call does not keep the pointer.
-            unsafe {
-                options.create_with_security_attributes_raw(
-                    name,
-                    std::ptr::from_ref(attributes).cast_mut().cast(),
-                )
-            }
-        })?
+        crate::support::temp::with_security(
+            &crate::platform::live_registry::own_pipe_sddl()?,
+            |attributes| {
+                // SAFETY: `attributes` points to a live SECURITY_ATTRIBUTES whose descriptor stays
+                // valid for this call; the call does not keep the pointer.
+                unsafe {
+                    options.create_with_security_attributes_raw(
+                        name,
+                        std::ptr::from_ref(attributes).cast_mut().cast(),
+                    )
+                }
+            },
+        )?
     }
 
     impl Listener {
@@ -92,24 +87,18 @@ mod imp {
         }
     }
 
-    /// Подключение к каналу, который обслуживает процесс `keeper`. Все экземпляры канала заняты
+    /// Подключение к каналу и процесс, который его обслуживает. Все экземпляры канала заняты
     /// дольше [`BUSY_PATIENCE`] — отказ `TimedOut`: сторож жив, но не принимает подключений.
-    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
+    async fn open(
+        name: &str,
+    ) -> std::io::Result<(tokio::net::windows::named_pipe::NamedPipeClient, u32)> {
         const ERROR_PIPE_BUSY: i32 = 231;
         let started = std::time::Instant::now();
         loop {
             match ClientOptions::new().open(name) {
                 Ok(client) => {
                     let server = server_pid(&client)?;
-                    if server != keeper {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!(
-                                "{name} is served by process {server}, not by the keeper {keeper}"
-                            ),
-                        ));
-                    }
-                    return Ok(Box::new(client));
+                    return Ok((client, server));
                 }
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                     if started.elapsed() >= BUSY_PATIENCE {
@@ -126,6 +115,32 @@ mod imp {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Подключение к каналу, который обслуживает процесс `keeper`.
+    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
+        let (client, server) = open(name).await?;
+        if server != keeper {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{name} is served by process {server}, not by the keeper {keeper}"),
+            ));
+        }
+        Ok(Box::new(client))
+    }
+
+    /// Подключение к каналу, который обслуживает процесс своей учётной записи, — какой, клиент
+    /// заранее не знает (обход сторожей учётной записи, #735). Ответ — подключение и процесс на
+    /// том конце: ответ сторожа должен назвать тот же процесс.
+    pub async fn connect_own(name: &str) -> std::io::Result<(Stream, Option<u32>)> {
+        let (client, server) = open(name).await?;
+        if !crate::support::machine::account::runs_as_this_account(server)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{name} is served by process {server} of another account"),
+            ));
+        }
+        Ok((Box::new(client), Some(server)))
     }
 
     /// Процесс, который обслуживает канал на том конце.
@@ -204,23 +219,12 @@ mod imp {
         }
     }
 
-    /// Подключение к сокету, который слушает процесс своей учётной записи. На Linux сверяется
-    /// и номер процесса сторожа (`SO_PEERCRED`); macOS его не называет, а сокет и так лежит в
-    /// каталоге 0700.
-    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
+    /// Подключение к сокету, который слушает процесс своей учётной записи, и процесс на том
+    /// конце, если ОС его называет: Linux (`SO_PEERCRED`); на macOS сокет и так лежит в каталоге
+    /// 0700, а учётная запись сверена здесь.
+    async fn open(name: &str) -> std::io::Result<(UnixStream, Option<u32>)> {
         let stream = UnixStream::connect(name).await?;
         let credentials = stream.peer_cred()?;
-        #[cfg(target_os = "linux")]
-        if let Some(server) = credentials.pid() {
-            if u32::try_from(server).ok() != Some(keeper) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("{name} is served by process {server}, not by the keeper {keeper}"),
-                ));
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = keeper;
         let peer = credentials.uid();
         // SAFETY: `getuid` takes nothing and cannot fail.
         let own = unsafe { libc::getuid() };
@@ -230,11 +234,35 @@ mod imp {
                 format!("{name} is served by uid {peer}, not by this account ({own})"),
             ));
         }
+        #[cfg(target_os = "linux")]
+        let server = credentials.pid().and_then(|pid| u32::try_from(pid).ok());
+        #[cfg(not(target_os = "linux"))]
+        let server = None;
+        Ok((stream, server))
+    }
+
+    /// Подключение к сокету сторожа `keeper`: процесс сверяется там, где ОС его называет.
+    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
+        let (stream, server) = open(name).await?;
+        if let Some(server) = server.filter(|server| *server != keeper) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{name} is served by process {server}, not by the keeper {keeper}"),
+            ));
+        }
         Ok(Box::new(stream))
+    }
+
+    /// Подключение к сокету, который слушает процесс своей учётной записи, — какой, клиент заранее
+    /// не знает (обход сторожей учётной записи, #735). Ответ — подключение и процесс на том конце,
+    /// если ОС его называет.
+    pub async fn connect_own(name: &str) -> std::io::Result<(Stream, Option<u32>)> {
+        let (stream, server) = open(name).await?;
+        Ok((Box::new(stream), server))
     }
 }
 
-pub use imp::{connect, Listener};
+pub use imp::{connect, connect_own, Listener};
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {

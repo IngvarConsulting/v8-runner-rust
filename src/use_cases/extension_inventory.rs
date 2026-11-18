@@ -428,6 +428,11 @@ fn snapshot_dispatch_error(error: IbcmdError, step: &str, subject: &str) -> AppE
             "extension inventory {step} cancelled for {subject}"
         ));
     }
+    // Отказ окружения со слоем — вопрос `ibcmd` о пользователе базы — доходит со своим слоем,
+    // а не общим сбоем платформы.
+    if error.environment_layer().is_some() {
+        return error.with_context(format!("extension inventory {step} failed for {subject}"));
+    }
     AppError::Platform(format!("extension inventory {step} failed for {subject}"))
 }
 

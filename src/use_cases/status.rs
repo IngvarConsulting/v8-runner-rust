@@ -474,8 +474,7 @@ enum How {
 
 impl Asker {
     /// Исполнитель `push`, готовый спросить поколение. Отказ — исполнитель и почему ответа не
-    /// будет: исполнителя нет, `push` этим исполнителем такой проект не грузит или он
-    /// поколением у этой базы не отвечает.
+    /// будет: исполнителя нет или `push` этим исполнителем такой проект не грузит.
     fn open(
         context: &ExecutionContext,
         config: &AppConfig,
@@ -488,14 +487,6 @@ impl Asker {
             crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Build)
                 .map_err(|(error, _)| (None, error))?;
         let tool = selected.provider;
-        if !crate::platform::generation::answers_generation(tool, config.target_kind()) {
-            return Err((
-                Some(tool),
-                AppError::capability(format!(
-                    "{tool} gives no configuration generation for this infobase"
-                )),
-            ));
-        }
         let how = match (tool, selected.location) {
             (Provider::Designer, Some(location)) => How::Designer {
                 binary: location.path,

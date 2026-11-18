@@ -16,9 +16,11 @@ use crate::support::edt_project;
 use crate::support::error::AppError;
 use crate::support::fs::{
     is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata, remove_path_if_exists,
-    remove_tree_in_parallel, TempDirKind,
+    remove_tree_in_parallel, try_acquire_advisory_lock, TempDirKind, TempDirMetadata,
 };
-use crate::support::path::{is_filesystem_root, nearest_existing_canonical_path};
+use crate::support::path::{
+    hashed_lock_path, is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
+};
 use crate::support::temp::{dump_object_list_file, platform_logs_dir};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
@@ -171,30 +173,70 @@ fn return_backup_to_a_missing_target(
     }
     let mut newest = None;
     for entry in std::fs::read_dir(target_parent).map_err(read_failure)? {
-        let path = entry.map_err(read_failure)?.path();
-        let is_backup = path
+        let entry = entry.map_err(read_failure)?;
+        let path = entry.path();
+        let Some(run_id) = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".dump-backup-"));
-        if !is_backup || !path.is_dir() {
+            .and_then(|name| name.strip_prefix(".dump-backup-"))
+        else {
+            continue;
+        };
+        let file_type = entry.file_type().map_err(read_failure)?;
+        if !file_type.is_dir() && !file_type.is_symlink() {
             continue;
         }
         let Ok(metadata) = read_temp_dir_metadata(&path) else {
             continue;
         };
-        if matches!(metadata.kind, TempDirKind::Backup)
-            && !metadata.superseded
-            && is_known_tool_name(&metadata.tool)
-            && metadata.target_identity == target_identity
+        if !recovery_marker_names_run(&metadata, run_id) {
+            continue;
+        }
+        let is_link = file_type.is_symlink();
+        let matches_target = if is_link {
+            link_entry_paths(&metadata.target_path, target_path).is_some_and(
+                |(named, requested)| {
+                    named == requested
+                        || stable_path_identity(&named) == stable_path_identity(&requested)
+                },
+            )
+        } else {
+            metadata.target_identity == target_identity
+        };
+        if matches_target
             && newest
                 .as_ref()
-                .is_none_or(|(created_at, _)| metadata.created_at > *created_at)
+                .is_none_or(|(created_at, _, _)| metadata.created_at > *created_at)
         {
-            newest = Some((metadata.created_at, path));
+            newest = Some((metadata.created_at, path, is_link));
         }
     }
-    let Some((_, backup)) = newest else {
+    let Some((_, backup, is_link)) = newest else {
         return Ok(());
+    };
+    let _original_lock = if is_link {
+        // The caller locked the missing path. A publisher that still owns the old link
+        // locked its referent, so that lock must also be free before recovery.
+        let referent = interrupted_link_target(&backup, target_path)?;
+        let lock_path = hashed_lock_path(&referent, "dump").map_err(|error| {
+            AppError::Runtime(format!("failed to resolve original dump lock: {error}"))
+        })?;
+        let lock = try_acquire_advisory_lock(&lock_path).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to acquire original dump lock for '{}': {error}",
+                referent.display()
+            ))
+        })?;
+        if interrupted_link_target(&backup, target_path)? != referent
+            || !matches!(std::fs::symlink_metadata(target_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(AppError::Runtime(
+                "interrupted dump backup or its target changed during recovery".into(),
+            ));
+        }
+        Some(lock)
+    } else {
+        None
     };
     std::fs::rename(&backup, target_path).map_err(|error| {
         AppError::Runtime(format!(
@@ -208,10 +250,73 @@ fn return_backup_to_a_missing_target(
         backup = %backup.display(),
         "returned the backup of an interrupted replacement to its missing target"
     );
-    if let Err(error) = remove_path_if_exists(&metadata_sidecar_path(&backup)) {
+    if let Err(error) = std::fs::remove_file(metadata_sidecar_path(&backup)) {
         tracing::warn!(%error, "could not remove the metadata of a returned backup");
     }
+    if is_link {
+        return Err(AppError::Runtime(format!(
+            "restored interrupted dump target link '{}'; retry the command to resolve its target",
+            target_path.display()
+        )));
+    }
     Ok(())
+}
+
+fn recovery_marker_names_run(metadata: &TempDirMetadata, run_id: &str) -> bool {
+    matches!(metadata.kind, TempDirKind::Backup)
+        && !metadata.superseded
+        && is_known_tool_name(&metadata.tool)
+        && metadata.run_id == run_id
+}
+
+fn link_entry_paths(named: &Path, requested: &Path) -> Option<(PathBuf, PathBuf)> {
+    // Canonicalize the parent, but compare the final name without following the link.
+    let entry_path = |path: &Path| -> Option<PathBuf> {
+        Some(
+            std::fs::canonicalize(path.parent()?)
+                .ok()?
+                .join(path.file_name()?),
+        )
+    };
+    Some((entry_path(named)?, entry_path(requested)?))
+}
+
+fn interrupted_link_target(backup: &Path, target: &Path) -> Result<PathBuf, AppError> {
+    let invalid = || {
+        AppError::Runtime(format!(
+            "interrupted dump backup '{}' no longer identifies the original target of '{}'",
+            backup.display(),
+            target.display()
+        ))
+    };
+    if !std::fs::symlink_metadata(metadata_sidecar_path(backup))
+        .is_ok_and(|meta| meta.file_type().is_file())
+        || !std::fs::symlink_metadata(backup).is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(invalid());
+    }
+    let marker = read_temp_dir_metadata(backup).map_err(|_| invalid())?;
+    let run_matches = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".dump-backup-"))
+        .is_some_and(|run_id| recovery_marker_names_run(&marker, run_id));
+    if !run_matches {
+        return Err(invalid());
+    }
+    let (named, requested) = link_entry_paths(&marker.target_path, target).ok_or_else(invalid)?;
+    if named != requested {
+        // A caseless lock key is not proof that two names denote the same entry.
+        return Err(AppError::Runtime(format!(
+            "retry interrupted dump recovery with the recorded target spelling '{}'",
+            named.display()
+        )));
+    }
+    let referent = std::fs::canonicalize(backup).map_err(|_| invalid())?;
+    if !referent.is_dir() || stable_path_identity(&referent) != marker.target_identity {
+        return Err(invalid());
+    }
+    Ok(referent)
 }
 
 /// Убирает устаревшие промежуточные каталоги и копии выгрузки цели: копии лежат рядом с
@@ -269,7 +374,7 @@ fn remove_stale_temp_dirs(
             continue;
         };
         if !is_dir {
-            remove_metadata_of_a_removed_backup(&path, file_name, target_identity)?;
+            remove_metadata_of_a_removed_backup(&path, file_name, target_identity);
             continue;
         }
         if place == TempDirPlace::StageRoot
@@ -362,36 +467,34 @@ fn already_gone(error: std::io::Error) -> std::io::Result<()> {
 
 /// Метаданные прежнего дерева, которое удалили, а метаданные — нет: процесс фонового удаления
 /// оборвался между ними (#616).
-fn remove_metadata_of_a_removed_backup(
-    path: &Path,
-    file_name: &str,
-    target_identity: &str,
-) -> Result<(), AppError> {
+fn remove_metadata_of_a_removed_backup(path: &Path, file_name: &str, target_identity: &str) {
     let Some(backup_name) = file_name
         .strip_suffix(".meta.json")
         .filter(|name| name.starts_with(".dump-backup-"))
     else {
-        return Ok(());
+        return;
     };
     let backup = path.with_file_name(backup_name);
-    if std::fs::symlink_metadata(&backup).is_ok() {
-        return Ok(());
+    if !matches!(std::fs::symlink_metadata(&backup), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return;
     }
     let Ok(metadata) = read_temp_dir_metadata(&backup) else {
-        return Ok(());
+        return;
     };
     if !is_known_tool_name(&metadata.tool)
         || metadata.target_identity != target_identity
-        || !metadata.is_superseded_backup()
+        || !matches!(metadata.kind, TempDirKind::Backup)
+        || backup_name.strip_prefix(".dump-backup-") != Some(metadata.run_id.as_str())
+        || metadata.target_path.parent() != backup.parent()
     {
-        return Ok(());
+        return;
     }
-    remove_path_if_exists(path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to remove the metadata of a removed backup '{}': {error}",
-            path.display()
-        ))
-    })
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, path = %path.display(), "failed to remove the backup metadata");
+        }
+    }
 }
 
 pub(super) fn resolve_dump_edt_base_project_name(

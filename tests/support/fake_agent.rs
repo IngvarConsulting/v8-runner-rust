@@ -102,6 +102,7 @@ pub struct FakeAgent {
     /// SFTP только на чтение — как у живого шлюза `ibsrv` 8.3.27 (замер 15.09.2026:
     /// mkdir/rmdir/get работают, open на запись — Failure).
     pub sftp_read_only: bool,
+    pub refuse_sftp: bool,
     /// Команда shell, которую двойник держит до знака теста.
     pub hold: Option<Hold>,
     /// Запись по SFTP, которую двойник держит до знака теста.
@@ -134,6 +135,7 @@ pub struct FakeAgent {
     pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
     /// Коды языков конфигурации: синониму с другим кодом двойник отвечает `LanguageNotFound`.
     pub languages: Vec<&'static str>,
+    pub gate_language_dump: bool,
     /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
     external_sources: Arc<Mutex<HashMap<PathBuf, String>>>,
     buffers: Arc<Mutex<HashMap<ChannelId, Vec<u8>>>>,
@@ -183,6 +185,7 @@ impl FakeAgent {
             designer_pid_file,
             gate: None,
             sftp_read_only: false,
+            refuse_sftp: false,
             hold: None,
             sftp_hold: None,
             any_credentials: false,
@@ -198,6 +201,7 @@ impl FakeAgent {
             generation: Arc::new(AtomicU64::new(1)),
             extension_generations: Arc::new(Mutex::new(HashMap::new())),
             languages: vec!["ru", "en"],
+            gate_language_dump: false,
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
                 active: true,
@@ -401,7 +405,14 @@ impl FakeAgent {
             let dir = option("dir").unwrap_or_default();
             let target = self.user_dir().join(&dir);
             fs::create_dir_all(&target).expect("agent output dir");
-            fs::write(target.join("Configuration.xml"), "<Configuration/>\n").expect("dump file");
+            let objects = option("list-file")
+                .map(|list| fs::read_to_string(self.user_dir().join(list)).unwrap_or_default());
+            if self.gate_language_dump {
+                self.dump_language_descriptors(&target, objects.as_deref());
+            } else {
+                fs::write(target.join("Configuration.xml"), "<Configuration/>\n")
+                    .expect("dump file");
+            }
             // Как платформа: выгрузка целиком и по изменившемуся пишет файл версий.
             if option("list-file").is_none() {
                 let dump_info = self.dump_info.lock().expect("dump info").clone();
@@ -416,8 +427,7 @@ impl FakeAgent {
             if has("update") {
                 fs::write(target.join("updated.txt"), "updated").expect("update marker");
             }
-            if let Some(list) = option("list-file") {
-                let objects = fs::read_to_string(self.user_dir().join(list)).unwrap_or_default();
+            if let Some(objects) = objects {
                 self.log(&format!(
                     "list: {}",
                     objects.split_whitespace().collect::<Vec<_>>().join(";")
@@ -644,6 +654,24 @@ impl FakeAgent {
                 .filter_map(|part| part.split_once('=').map(|(code, _)| code.trim()))
                 .find(|code| !self.languages.contains(code));
             if let Some(code) = unknown {
+                if self.gate.is_some() {
+                    self.extensions
+                        .lock()
+                        .expect("extensions")
+                        .push(FakeExtension {
+                            name: "Расширение".to_owned(),
+                            active: true,
+                            safe_mode: false,
+                            unsafe_action_protection: false,
+                            purpose: "customization".to_owned(),
+                        });
+                    return (
+                        format!(
+                            "[{{\"message\":\"Язык с кодом '{code}' не найден\\n\",\"type\":\"error\"}}]\n"
+                        ),
+                        false,
+                    );
+                }
                 return (
                     format!(
                         "[{{\"type\":\"error\",\"error-type\":\"LanguageNotFound\",\"message\":\"Язык с кодом '{code}' не найден\",\"body\":[]}}]"
@@ -690,6 +718,36 @@ impl FakeAgent {
             "[{\"type\":\"error\",\"error-type\":\"CommandFormatError\",\"message\":\"Неизвестная команда\"}]\n".to_owned(),
             false,
         )
+    }
+
+    fn dump_language_descriptors(&self, target: &Path, selectors: Option<&str>) {
+        let selected =
+            |name: &str| selectors.is_none_or(|list| list.lines().any(|item| item == name));
+        let mut children = String::new();
+        for (index, code) in self.languages.iter().enumerate() {
+            let name = format!("Язык{index}");
+            children.push_str(&format!("<Language>{name}</Language>"));
+            if selected(&format!("Language.{name}")) {
+                let dir = target.join("Languages");
+                fs::create_dir_all(&dir).expect("language dir");
+                fs::write(
+                    dir.join(format!("{name}.xml")),
+                    format!(
+                        r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Language><Properties><Name>{name}</Name><LanguageCode>{code}</LanguageCode></Properties></Language></MetaDataObject>"#
+                    ),
+                )
+                .expect("language descriptor");
+            }
+        }
+        if selected("Configuration") {
+            fs::write(
+                target.join("Configuration.xml"),
+                format!(
+                    r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Configuration><ChildObjects>{children}</ChildObjects></Configuration></MetaDataObject>"#
+                ),
+            )
+            .expect("configuration descriptor");
+        }
     }
 }
 
@@ -796,6 +854,11 @@ impl server::Handler for FakeAgent {
     ) -> Result<(), Self::Error> {
         if name != "sftp" {
             session.channel_failure(channel_id)?;
+            return Ok(());
+        }
+        if self.refuse_sftp {
+            session.channel_failure(channel_id)?;
+            session.close(channel_id)?;
             return Ok(());
         }
         let channel = self.channels.lock().expect("channels").remove(&channel_id);
