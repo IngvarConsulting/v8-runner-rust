@@ -122,6 +122,18 @@ pub fn write_shell_script(path: &Path, body: &str) {
 }
 
 #[cfg(unix)]
+pub fn write_empty_cluster_rac(path: &Path) {
+    write_shell_script(
+        path,
+        r#"case "$1 $2" in
+  'cluster list') printf 'cluster : aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nhost : cluster\nport : 1541\n';;
+  'infobase summary') exit 0;;
+  *) exit 98;;
+esac"#,
+    );
+}
+
+#[cfg(unix)]
 pub fn write_shell_script_atomically(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("parent");

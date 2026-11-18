@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.APPLY-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/apply.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -30,6 +30,8 @@ check:
 **Без смены версии.** Определение значений `generation` в схеме называется
 `GenerationRecordFate` вместо `ApplyGeneration`: тот же набор значений делит форма `reset`
 (`CTR.WIRE.RESET-DATA`). Значения и поля не изменились.
+
+**Что изменила версия 4.** Строки `sessions.terminated` используют UUID `id` и отдельный номер `number`. Признаки `from_this_machine` и `excluded` общие с `sessions list`. Поле `managed_ras: true` отмечает временный RAS при запасном завершении.
 
 **Что изменила версия 3.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). В той же версии — необязательное поле `sessions`: исход `--sessions force` — завершённые сеансы `terminated` из списка до завершения, блокировка начала сеансов `lock` и `message_delivered`; без `force` поля нет ([правило](../cli/apply-sessions-governs-foreign-sessions.md)).
 

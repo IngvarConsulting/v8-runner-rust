@@ -82,6 +82,10 @@ command_data_forms! {
     "extensions", "extensions" => crate::domain::extensions::ExtensionsResult;
     "extensions", "extensions-inventory" => crate::domain::extensions::ExtensionInventoryResult;
     "push", "push" => crate::domain::build::BuildResult;
+    "sessions list", "sessions-list" => crate::domain::sessions::SessionsListResult;
+    "sessions terminate", "sessions-terminate" => crate::domain::sessions::SessionsTerminateResult;
+    "sessions deny", "sessions-deny" => crate::domain::sessions::SessionsLockResult;
+    "sessions allow", "sessions-allow" => crate::domain::sessions::SessionsLockResult;
     "apply", "apply" => crate::domain::apply::ApplyResult;
     "reset", "reset" => crate::domain::reset::ResetResult;
     "diff", "diff" => crate::domain::diff::DiffResult;

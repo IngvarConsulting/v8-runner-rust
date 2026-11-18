@@ -495,5 +495,5 @@ fn rfc3339(at: SystemTime) -> String {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| crate::support::time::millis(elapsed))
+        .map_or(0, crate::support::time::millis)
 }

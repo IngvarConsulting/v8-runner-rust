@@ -77,23 +77,23 @@
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-sessions-allow">sessions allow <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner sessions allow</code></pre>
-<p>снимает блокировку</p>
+<p>Снимает блокировку этой рабочей копии и восстанавливает прежнюю настройку регламентных заданий, если её изменил <code>sessions deny --jobs</code>. Чужая блокировка даёт отказ.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="planned"><td>Блокировка снята</td><td>Запреты новых сеансов и регламентных заданий сняты. <a href="#sessions-allow-success">Пример ответа</a>.</td></tr>
-<tr data-response-class="planned"><td>База уже открыта</td><td>Повторное разрешение успешно: блокировки уже отсутствуют. <a href="#sessions-allow-alternative">Пример ответа</a>.</td></tr>
+<tbody><tr data-response-class="planned"><td>Блокировка снята</td><td>Запрет новых сеансов снят. Настройка регламентных заданий возвращена, если её менял запрет. <a href="#sessions-allow-success">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>База уже открыта</td><td>Повторное разрешение успешно: запрета новых сеансов уже нет. <a href="#sessions-allow-alternative">Пример ответа</a>.</td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="sessions-allow-success">Блокировка снята</h4>
-<p>Запреты новых сеансов и регламентных заданий сняты.</p>
+<p>Запрет новых сеансов снят. Настройка регламентных заданий возвращена, если её менял запрет.</p>
 <pre data-output-example="sessions-allow-success" data-output-schema="planned"><code>origin: выбранная база
 Вход в базу и регламентные задания разрешены.</code></pre>
 <h4 id="sessions-allow-alternative">База уже открыта</h4>
-<p>Повторное разрешение успешно: блокировки уже отсутствуют.</p>
+<p>Повторное разрешение успешно: запрета новых сеансов уже нет.</p>
 <pre data-output-example="sessions-allow-alternative" data-output-schema="planned"><code>origin: выбранная база
 Блокировка отсутствует; изменение не требуется.</code></pre>
 <p><a href="project.html#keys">Настройка исполнителей и конфигурации проекта</a>.</p>

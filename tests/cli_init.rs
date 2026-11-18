@@ -234,9 +234,15 @@ fn setup_cluster_init_project(
         v8_path.display(),
     );
     fs::write(&config_path, config).expect("config");
-    if !local.is_empty() {
-        fs::write(config_path.with_file_name("v8project.local.yaml"), local).expect("local layer");
-    }
+    support::write_empty_cluster_rac(&v8_path.with_file_name("rac"));
+    let local = if local.is_empty() {
+        "infobases:\n  origin:\n    cluster:\n      ras: cluster:1545\n".to_owned()
+    } else if local.contains("      ras:") {
+        local.to_owned()
+    } else {
+        local.replace("    cluster:\n", "    cluster:\n      ras: cluster:1545\n")
+    };
+    fs::write(config_path.with_file_name("v8project.local.yaml"), local).expect("local layer");
 
     (dir, config_path, work_path, calls_log)
 }
@@ -1020,7 +1026,7 @@ fn a_cluster_base_without_a_required_dbms_field_is_refused_before_the_platform_s
 /// Превью базы в кластере называет цель и утилиту и честно говорит, что «уже есть» до
 /// создания не наблюдается; платформа не запускается.
 #[test]
-fn a_cluster_preview_names_the_target_and_starts_nothing() {
+fn a_cluster_preview_names_the_target_without_dispatching_the_designer() {
     let (_dir, config_path, _work_path, calls_log) =
         setup_cluster_init_project("exit 0", FULL_DBMS, CLUSTER_ADMIN);
 
@@ -1034,13 +1040,72 @@ fn a_cluster_preview_names_the_target_and_starts_nothing() {
     assert!(
         message.contains("server infobase 'demo' on 'cluster:1541'")
             && message.contains("the database 'demo_db' on 'db'")
-            && message.contains("not observable")
+            && message.contains("the name is not registered")
             && message.contains("silently takes an existing database")
             && message.contains("even one holding another infobase")
             && message.contains("abandoned in the DBMS"),
         "{message}"
     );
     assert!(!calls_log.exists());
+}
+
+#[test]
+fn an_existing_cluster_base_refuses_in_preview_and_before_creation() {
+    let (dir, config, _work, calls) =
+        setup_cluster_init_project("exit 0", FULL_DBMS, CLUSTER_ADMIN);
+    write_script(
+        &dir.path().join("rac"),
+        r#"case "$1 $2" in
+  'cluster list') printf 'cluster : aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nhost : cluster\nport : 1541\n';;
+  'infobase summary') printf 'infobase : bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\nname : demo\n';;
+  *) exit 98;;
+esac"#,
+    );
+    for options in [&["--dry-run"][..], &[]] {
+        let output = run_infobase_create(&config, options);
+        let payload = json_of(&output);
+        assert!(!output.status.success(), "{payload}");
+        assert!(
+            payload.to_string().contains("already registered"),
+            "{payload}"
+        );
+        assert_eq!(payload["data"]["provider_dispatched"], false);
+        assert!(!calls.exists());
+    }
+}
+
+#[test]
+fn a_missing_designer_uses_rac_to_create_an_unregistered_base() {
+    let (dir, config, _work, calls) =
+        setup_cluster_init_project("exit 0", FULL_DBMS, CLUSTER_ADMIN);
+    let root = dir.path();
+    let designer = root.join("1cv8");
+    let config_text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        config_text.replace(&designer.display().to_string(), &root.display().to_string()),
+    )
+    .unwrap();
+    fs::remove_file(&designer).unwrap();
+    write_script(
+        &root.join("rac"),
+        r#"case "$1 $2" in
+  'cluster list') printf 'cluster : aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nhost : cluster\nport : 1541\n';;
+  'infobase summary') exit 0;;
+  'infobase create')
+    for required in '--create-database' '--name=demo' '--db-name=demo_db' '--cluster-user=cadm'; do
+      printf '%s\n' "$@" | grep -Fx -- "$required" >/dev/null || exit 97
+    done
+    printf 'infobase : bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n';;
+  *) exit 98;;
+esac"#,
+    );
+    let output = run_infobase_create(&config, &[]);
+    let payload = json_of(&output);
+    assert!(output.status.success(), "{payload}");
+    assert!(payload.to_string().contains("via rac"), "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert!(!calls.exists());
 }
 
 /// Без диагностики платформы раннер даёт условную подсказку для кластера с администраторами.
@@ -1171,12 +1236,19 @@ fn a_failed_cluster_create_never_echoes_the_passwords() {
 #[test]
 fn server_infobase_create_never_echoes_the_connection_string_credentials() {
     for (dry_run, expected) in [(true, "planned"), (false, "ok")] {
-        let (_dir, config_path, _work_path, calls_log) = setup_cluster_init_project(
+        let (dir, config_path, _work_path, calls_log) = setup_cluster_init_project(
             "exit 0",
             FULL_DBMS,
             // An address the project file does not declare: seeing it in the message proves the
             // credential-bearing string from the local layer is the one the command used.
-            "infobases:\n  origin:\n    connection: 'Srvr=cluster-local:1641;Ref=demo_local;Usr=ConnUser;Pwd=conn-s3cret'\n",
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster-local:1641;Ref=demo_local;Usr=ConnUser;Pwd=conn-s3cret'\n    cluster:\n      ras: cluster-local:1545\n",
+        );
+        write_script(
+            &dir.path().join("rac"),
+            r#"case "$1 $2" in
+  'cluster list') printf 'cluster : aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nhost : cluster-local\nport : 1641\n';;
+  'infobase summary') exit 0;;
+esac"#,
         );
         let output = run_infobase_create(&config_path, if dry_run { &["--dry-run"] } else { &[] });
 

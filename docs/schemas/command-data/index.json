@@ -101,6 +101,18 @@
     "reset": [
       "reset"
     ],
+    "sessions allow": [
+      "sessions-allow"
+    ],
+    "sessions deny": [
+      "sessions-deny"
+    ],
+    "sessions list": [
+      "sessions-list"
+    ],
+    "sessions terminate": [
+      "sessions-terminate"
+    ],
     "standalone restart": [
       "standalone-restart"
     ],

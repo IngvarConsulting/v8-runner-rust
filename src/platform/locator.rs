@@ -23,6 +23,8 @@ pub enum UtilityType {
     Ibsrv,
     /// `ragent`: агент кластера, который поднимает раннер. `ras` и `rac` лежат рядом с ним.
     Ragent,
+    /// `rac`: client of the cluster administration server.
+    Rac,
 }
 
 impl UtilityType {
@@ -36,6 +38,7 @@ impl UtilityType {
             Self::Webinst => executable_name_for("webinst"),
             Self::Ibsrv => executable_name_for("ibsrv"),
             Self::Ragent => executable_name_for("ragent"),
+            Self::Rac => executable_name_for("rac"),
         }
     }
 
@@ -54,7 +57,7 @@ impl UtilityType {
             Self::V8C => "thin client",
             Self::Ibcmd => "server tools",
             Self::Ibsrv => "server tools",
-            Self::Ragent => "1C:Enterprise server",
+            Self::Ragent | Self::Rac => "1C:Enterprise server",
             Self::Webinst => "web server extensions",
             Self::EdtCli => "EDT CLI",
         }
@@ -598,6 +601,72 @@ impl Locator {
         sort_installations(found)
     }
 
+    /// The administration server can demand a different exact release from the tools used
+    /// for source sets. Try the configured preference first and keep only eligible releases.
+    pub(crate) fn rac_candidates(&mut self) -> Result<Vec<PathBuf>, LocatorError> {
+        let utility = UtilityType::Rac;
+        let preferred = self.locate(utility)?;
+        let required = match self.source_format {
+            SourceFormatRelease::Required(_) => self.format_release()?,
+            SourceFormatRelease::Unused | SourceFormatRelease::Preferred(_) => None,
+        };
+        let required = required
+            .as_ref()
+            .or(self.effective_platform_version_requirement());
+        let boundary = self
+            .platform_hint
+            .as_deref()
+            .filter(|_| self.platform_policy == PlatformResolutionPolicy::Strict)
+            .map(strict_candidate_boundary);
+        let mut candidates = canonical_candidates(
+            utility,
+            self.platform_candidates(utility),
+            boundary.as_deref(),
+        );
+        candidates.retain(|candidate| match candidate.version.as_ref() {
+            Some(UtilityVersion::Platform(version)) => {
+                *version >= MINIMUM_PLATFORM && required.is_none_or(|mask| mask.matches(version))
+            }
+            _ => false,
+        });
+        candidates
+            .sort_by(|left, right| compare_versions(right.version.as_ref(), left.version.as_ref()));
+        let mut paths = vec![preferred.path];
+        for candidate in candidates {
+            if !paths.contains(&candidate.path) {
+                paths.push(candidate.path);
+            }
+        }
+        Ok(paths)
+    }
+
+    fn platform_candidates(&self, utility: UtilityType) -> Vec<Candidate> {
+        if let Some(hint) = self.platform_hint.as_deref() {
+            let resolution = match self.platform_policy {
+                PlatformResolutionPolicy::Lenient => FileHintSiblingResolution::Lexical,
+                PlatformResolutionPolicy::Strict => {
+                    FileHintSiblingResolution::CanonicalInstallation
+                }
+            };
+            let mut candidates = explicit_direct_candidates(hint, utility, resolution);
+            if hint.is_dir() {
+                candidates.extend(platform_candidates_any_version(
+                    utility,
+                    self.platform_hint.as_slice(),
+                    ResolutionSource::Explicit,
+                ));
+            }
+            return candidates;
+        }
+        let mut candidates = platform_candidates_any_version(
+            utility,
+            &self.platform_roots,
+            ResolutionSource::DefaultRoot,
+        );
+        candidates.extend(path_candidates(utility, &self.path_roots));
+        candidates
+    }
+
     /// Resolve an executable path for the requested utility.
     pub fn locate(&mut self, utility: UtilityType) -> Result<UtilityLocation, LocatorError> {
         let cache_key = (utility, self.version_requirement_string(utility));
@@ -646,6 +715,7 @@ impl Locator {
                 | UtilityType::Ibcmd
                 | UtilityType::Ibsrv
                 | UtilityType::Ragent
+                | UtilityType::Rac
                 | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 Some(pinned),
@@ -661,6 +731,7 @@ impl Locator {
                 | UtilityType::Ibcmd
                 | UtilityType::Ibsrv
                 | UtilityType::Ragent
+                | UtilityType::Rac
                 | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 None,
@@ -679,6 +750,7 @@ impl Locator {
                 | UtilityType::Ibcmd
                 | UtilityType::Ibsrv
                 | UtilityType::Ragent
+                | UtilityType::Rac
                 | UtilityType::Webinst,
                 PlatformResolutionPolicy::Lenient,
                 Some(_) | None,
@@ -809,44 +881,15 @@ impl Locator {
             }
         }
 
-        let direct_explicit_candidates = self
-            .platform_hint
-            .as_deref()
-            .map(|hint| {
-                explicit_direct_candidates(
-                    hint,
-                    utility,
-                    match self.platform_policy {
-                        PlatformResolutionPolicy::Lenient => FileHintSiblingResolution::Lexical,
-                        PlatformResolutionPolicy::Strict => {
-                            FileHintSiblingResolution::CanonicalInstallation
-                        }
-                    },
-                )
-            })
-            .unwrap_or_default();
         let strict_boundary = match self.platform_policy {
             PlatformResolutionPolicy::Lenient => None,
             PlatformResolutionPolicy::Strict => {
                 self.platform_hint.as_deref().map(strict_candidate_boundary)
             }
         };
-        let versioned_explicit_candidates = self
-            .platform_hint
-            .as_deref()
-            .filter(|hint| hint.is_dir())
-            .map(|hint| {
-                platform_candidates_any_version(
-                    utility,
-                    std::slice::from_ref(&hint.to_path_buf()),
-                    ResolutionSource::Explicit,
-                )
-            })
-            .unwrap_or_default();
+        let candidates = self.platform_candidates(utility);
 
         if self.platform_hint.is_some() {
-            let mut explicit_candidates = direct_explicit_candidates;
-            explicit_candidates.extend(versioned_explicit_candidates);
             // `sources` и путь: выпуск формата обязателен и под путём, при любом `strict`.
             let release = match self.source_format {
                 SourceFormatRelease::Required(_) => self.format_release()?,
@@ -861,7 +904,7 @@ impl Locator {
                 .or(self.effective_platform_version_requirement());
             if let Some(location) = select_candidate(
                 utility,
-                explicit_candidates.clone(),
+                candidates.clone(),
                 required,
                 strict_boundary.as_deref(),
             ) {
@@ -873,7 +916,7 @@ impl Locator {
                 PlatformResolutionPolicy::Strict => Err(strict_resolution_error(
                     utility,
                     self.platform_hint.as_deref(),
-                    explicit_candidates,
+                    candidates,
                     required,
                     strict_boundary.as_deref(),
                 )),
@@ -893,12 +936,6 @@ impl Locator {
             };
         }
 
-        let mut candidates = platform_candidates_any_version(
-            utility,
-            &self.platform_roots,
-            ResolutionSource::DefaultRoot,
-        );
-        candidates.extend(path_candidates(utility, &self.path_roots));
         let (required, chosen_by) = match self.effective_platform_version_requirement() {
             Some(required) => (Some(required.clone()), PlatformChoice::Version),
             // Версию ничто не задало: решает формат исходников, если его выпуск установлен.
@@ -1764,6 +1801,7 @@ fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
         | UtilityType::Ibcmd
         | UtilityType::Ibsrv
         | UtilityType::Ragent
+        | UtilityType::Rac
         | UtilityType::Webinst => version_text
             .and_then(PlatformVersion::parse_strict)
             .map(UtilityVersion::Platform),
@@ -1802,6 +1840,7 @@ fn executable_name_for(base: &'static str) -> &'static str {
             "ibcmd" => "ibcmd.exe",
             "ibsrv" => "ibsrv.exe",
             "ragent" => "ragent.exe",
+            "rac" => "rac.exe",
             "1cedtcli" => "1cedtcli.exe",
             "webinst" => "webinst.exe",
             _ => base,
@@ -1884,6 +1923,7 @@ mod tests {
             UtilityType::Webinst,
             UtilityType::Ibsrv,
             UtilityType::Ragent,
+            UtilityType::Rac,
         ] {
             // Перечень обязан быть полным: новый вариант без строки здесь не соберётся.
             match utility {
@@ -1893,7 +1933,8 @@ mod tests {
                 | UtilityType::EdtCli
                 | UtilityType::Webinst
                 | UtilityType::Ibsrv
-                | UtilityType::Ragent => {}
+                | UtilityType::Ragent
+                | UtilityType::Rac => {}
             }
             assert!(
                 utility.executable_name().ends_with(".exe"),
@@ -2000,6 +2041,21 @@ mod tests {
                 utility: UtilityType::V8,
                 boundary: canonical(&explicit),
             }
+        );
+    }
+
+    #[test]
+    fn rac_candidates_follow_the_configured_mask_in_version_order() {
+        let dir = tempdir().unwrap();
+        let oldest =
+            touch_versioned_platform_executable(dir.path(), "8.3.27.2074", UtilityType::Rac, true);
+        let newest =
+            touch_versioned_platform_executable(dir.path(), "8.3.27.2342", UtilityType::Rac, false);
+        touch_versioned_platform_executable(dir.path(), "8.5.4.2028", UtilityType::Rac, true);
+        let mut locator = strict_locator(dir.path().to_path_buf(), Some("8.3.27"), vec![], vec![]);
+        assert_eq!(
+            locator.rac_candidates().unwrap(),
+            [canonical(&newest), canonical(&oldest)]
         );
     }
 

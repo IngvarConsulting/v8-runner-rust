@@ -419,7 +419,10 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
 /// как проверка читает код, держит `the_lock_guard_tells_locked_dispatches_from_unlocked_ones`.
 #[test]
 fn every_scenario_is_dispatched_under_the_workspace_lock() {
-    let report = LockBoundaryReport::of(&SourceIndex::of_src(), UNLOCKED_SCENARIOS);
+    let mut report = LockBoundaryReport::of(&SourceIndex::of_src(), UNLOCKED_SCENARIOS);
+    assert!(report.accepted_in.contains("crate::cli::sessions"));
+    // The dedicated sessions adapter dispatches the four leaves through one locked call.
+    report.accepted -= 1;
 
     assert!(
         report.violations.is_empty(),
@@ -3678,6 +3681,22 @@ fn a_full_pull_records_the_staged_tree_it_publishes() {
     assert!(
         full_dump_memory_follows_each_publication(&tokens),
         "publish_full_dump must prepare staging, then acknowledge external or finish native publication, then record that branch's memory"
+    );
+    let native_memory = tokens
+        .rfind("commit_full_snapshot(")
+        .expect("native memory");
+    let native_publication = tokens.find(".publish_dir(").expect("native publication");
+    assert!(
+        tokens[native_publication..native_memory]
+            .contains("BackupRemoval::AfterMemory(&mutprevious_tree)"),
+        "native publication must defer the replaced tree's removal"
+    );
+    let backup_cleanup = tokens
+        .find("finish_background_removal(previous_tree)")
+        .expect("full pull finishes deferred cleanup");
+    assert!(
+        native_memory < backup_cleanup,
+        "the replaced tree must not be removed while git refreshes the published tree"
     );
     for rescan in ["rescan_and_commit_full(", "scanner::", "analyze_context("] {
         assert!(

@@ -933,7 +933,14 @@ pub(super) fn generation_then_guard(
     ) {
         return Err(interrupted);
     }
-    ask_the_guard(context, config, resolved, plan)?;
+    let started = std::time::Instant::now();
+    let guarded = ask_the_guard(context, config, resolved, plan);
+    debug!(
+        source_set = %resolved.source_set_name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the incremental dump checked for uncommitted work"
+    );
+    guarded?;
     Ok(GenerationDecision::Dump)
 }
 

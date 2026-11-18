@@ -26,6 +26,10 @@ const SECRET_FLAGS: &[&str] = &[
     "password",
     "database-password",
     "db-pwd",
+    "cluster-pwd",
+    "infobase-pwd",
+    "agent-pwd",
+    "permission-code",
     "target-database-password",
     "target-db-pwd",
 ];
@@ -40,6 +44,9 @@ const IDENTITY_FLAGS: &[&str] = &[
     "user",
     "database-user",
     "db-user",
+    "cluster-user",
+    "infobase-user",
+    "agent-user",
     "target-database-user",
     "target-db-user",
 ];

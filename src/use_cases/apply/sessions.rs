@@ -93,6 +93,7 @@ impl SessionsGate {
                 };
                 known.lock = outcome.lock;
                 known.message_delivered |= outcome.message_delivered;
+                known.managed_ras |= outcome.managed_ras;
             }
         }
     }
@@ -468,6 +469,7 @@ mod tests {
             terminated,
             lock: SessionLock::unknown(),
             message_delivered: delivered,
+            managed_ras: false,
         }
     }
 
@@ -479,6 +481,9 @@ mod tests {
             started: "2026-11-11T02:49:42".to_owned(),
             user: None,
             id: None,
+            number: None,
+            from_this_machine: false,
+            excluded: false,
         }
     }
 

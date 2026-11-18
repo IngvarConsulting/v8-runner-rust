@@ -300,11 +300,20 @@ impl Copy<'_> {
             binary,
         };
         if dry_run {
+            let cluster_plan = match &creator {
+                Creator::Cluster(cluster) => {
+                    match cluster.preview(self.context, self.config, utilities) {
+                        Ok(plan) => Some(plan),
+                        Err(error) => return self.failed(error),
+                    }
+                }
+                Creator::File { .. } => None,
+            };
             return StepOutcome::planned(
                 "infobase",
                 "create",
                 self.started,
-                self.plan(&creator, &designer, &restorer),
+                self.plan(&creator, &designer, &restorer, cluster_plan.as_deref()),
             );
         }
         if let Some(outcome) = interruption_step_outcome(
@@ -352,7 +361,11 @@ impl Copy<'_> {
                     warnings.extend(self.probe_access(utilities, &designer));
                 }
                 Creator::Cluster(cluster) => {
-                    cluster.create(self.context, self.config, utilities, deferrals)?;
+                    let executor =
+                        cluster.create(self.context, self.config, utilities, deferrals)?;
+                    warnings.push(format!(
+                        "the empty cluster infobase was created via {executor}"
+                    ));
                     let restored = self.restore(&restorer, RestoreTargetMode::Replace);
                     if let Ok(result) = &restored {
                         deferrals.note_result(INFOBASE_CREATE, result);
@@ -391,7 +404,13 @@ impl Copy<'_> {
 
     /// План превью: снимок и создание; у кластера — с предупреждением, что существующая база
     /// данных с тем же именем будет перезаписана образом.
-    fn plan(&self, creator: &Creator<'_>, designer: &Path, restorer: &Restorer) -> String {
+    fn plan(
+        &self,
+        creator: &Creator<'_>,
+        designer: &Path,
+        restorer: &Restorer,
+        cluster_plan: Option<&str>,
+    ) -> String {
         let creation = match creator {
             Creator::File { .. } => format!(
                 "{} from it via {} {} {}",
@@ -404,9 +423,9 @@ impl Copy<'_> {
                     "/RestoreIB"
                 }
             ),
-            Creator::Cluster(cluster) => format!(
+            Creator::Cluster(_) => format!(
                 "{}; then /RestoreIB loads the image into it, and the data of an existing database of that name is overwritten by the image of '{}'",
-                cluster.plan(designer),
+                cluster_plan.expect("a cluster copy has a checked creation plan"),
                 self.from
             ),
         };

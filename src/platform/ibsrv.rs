@@ -5,8 +5,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::process::ProcessRequest;
+use crate::platform::process::{
+    CapturedInput, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
+};
 use crate::platform::service::ServiceRequest;
+use crate::support::error::AppError;
 
 /// Сколько портов в диапазоне прямого шлюза.
 pub const DIRECT_RANGE_WIDTH: u16 = 16;
@@ -147,13 +150,99 @@ pub enum SessionSource<'a> {
 /// Каталога данных (`--data`) этот режим не берёт: он только спрашивает работающий сервер, и на
 /// замере #613 отвечал без него за 0,1–0,2 с.
 pub fn session_list(utility: &Path, source: SessionSource<'_>) -> ProcessRequest {
+    session_request(utility, source, "list")
+}
+
+/// `ibcmd session terminate`: завершает сеанс по UUID и передаёт сообщение, если оно задано.
+pub fn session_terminate(
+    utility: &Path,
+    source: SessionSource<'_>,
+    session: &str,
+    message: Option<&str>,
+) -> ProcessRequest {
+    let mut request = session_request(utility, source, "terminate");
+    request.args.push(format!("--session={session}"));
+    if let Some(message) = message {
+        request.args.push(format!("--error-message={message}"));
+    }
+    request
+}
+
+// Точные строки локальных ресурсов ibcli 8.3.27 (корневой язык и ru).
+const SESSION_AUTH_GREETINGS: &[&str] = &[
+    "Authentication in the infobase is required to perform the operation",
+    "Для выполнения операции требуется аутентификация в информационной базе",
+];
+const SESSION_AUTH_PROMPTS: &[&str] = &["User: Password:", "Имя пользователя: Пароль:"];
+
+/// Запускает управление сеансами с учётной записью ИБ. Подтверждение нового ключа
+/// SSH остаётся за оператором: раннер даёт реквизиты только на запрос аутентификации.
+pub fn run_session(
+    runner: &dyn ProcessRunner,
+    request: &ProcessRequest,
+    policy: &ProcessExecutionPolicy,
+    source: SessionSource<'_>,
+    credential_user: Option<&str>,
+    credential_password: Option<&str>,
+) -> Result<ProcessResult, AppError> {
+    let policy = policy.stopping_a_repeated_question();
+    let Some(user) = credential_user.filter(|user| !user.is_empty()) else {
+        return runner
+            .run_with_policy(request, &policy)
+            .map_err(AppError::from);
+    };
+    let password = credential_password.unwrap_or_default();
+    if [user, password]
+        .iter()
+        .any(|value| value.contains(['\r', '\n', '\0']))
+    {
+        return Err(AppError::Validation(
+            "the infobase username and password cannot contain line breaks or NUL in ibcmd session"
+                .to_owned(),
+        ));
+    }
+    let credentials = format!("{user}\n{password}\n");
+    let bytes = credentials.as_bytes();
+    let input = match source {
+        SessionSource::Pid(_) => CapturedInput::Immediate(bytes),
+        SessionSource::Gate(_) => CapturedInput::AfterStdoutLine {
+            bytes,
+            prompts: SESSION_AUTH_GREETINGS,
+        },
+    };
+    let mut answer = runner
+        .run_with_input(request, &policy, input)
+        .map_err(AppError::from)?;
+    if answer.outcome().is_ok() {
+        let session_output = strip_authentication_prompt(&answer.stdout);
+        let prefix_len = answer.stdout.len() - session_output.len();
+        answer.stdout.drain(..prefix_len);
+    }
+    Ok(answer)
+}
+
+fn strip_authentication_prompt(stdout: &str) -> &str {
+    let Some((greeting, rest)) = stdout.split_once('\n') else {
+        return stdout;
+    };
+    if !SESSION_AUTH_GREETINGS.contains(&greeting.trim_end_matches('\r')) {
+        return stdout;
+    }
+    match rest.split_once('\n') {
+        Some((prompt, output)) if SESSION_AUTH_PROMPTS.contains(&prompt.trim_end()) => output,
+        None if SESSION_AUTH_PROMPTS.contains(&rest.trim_end()) => "",
+        _ => stdout,
+    }
+}
+
+fn session_request(utility: &Path, source: SessionSource<'_>, action: &str) -> ProcessRequest {
     let source = match source {
         SessionSource::Pid(pid) => format!("--pid={pid}"),
         SessionSource::Gate(gate) => format!("--remote=ssh://{gate}"),
     };
     ProcessRequest {
         program: utility.to_path_buf(),
-        args: vec!["session".to_owned(), "list".to_owned(), source],
+        args: vec!["session".to_owned(), action.to_owned(), source],
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: None,
@@ -174,6 +263,48 @@ mod tests {
         assert_eq!(
             by_gate.args,
             ["session", "list", "--remote=ssh://host:1543"]
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_removed_without_changing_the_session_list() {
+        let list = "session : id\nsession-id : 24\n";
+        for (greeting, prompts) in SESSION_AUTH_GREETINGS.iter().zip(SESSION_AUTH_PROMPTS) {
+            let answer = format!("{greeting}\r\n{prompts} \r\n{list}");
+            assert_eq!(strip_authentication_prompt(&answer), list);
+            assert_eq!(
+                strip_authentication_prompt(&format!("{greeting}\n{prompts} ")),
+                ""
+            );
+        }
+        let unknown_host = "Trust this host? [y/n]: ";
+        assert_eq!(strip_authentication_prompt(unknown_host), unknown_host);
+        assert_eq!(strip_authentication_prompt(list), list);
+    }
+
+    #[test]
+    fn termination_names_the_session_and_only_an_explicit_message() {
+        let request = session_terminate(Path::new("ibcmd"), SessionSource::Pid(42), "uuid", None);
+        assert_eq!(
+            request.args,
+            ["session", "terminate", "--pid=42", "--session=uuid"]
+        );
+
+        let request = session_terminate(
+            Path::new("ibcmd"),
+            SessionSource::Gate("host:1543"),
+            "uuid",
+            Some("Work has ended"),
+        );
+        assert_eq!(
+            request.args,
+            [
+                "session",
+                "terminate",
+                "--remote=ssh://host:1543",
+                "--session=uuid",
+                "--error-message=Work has ended"
+            ]
         );
     }
 
