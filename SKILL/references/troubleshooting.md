@@ -26,7 +26,7 @@ Inspect `v8project.yaml` fields that affect the failing command:
 Missing 1C platform, EDT CLI, IBCMD, or test runner utilities are environment/setup issues. Report the missing utility and the config fields used for discovery.
 
 An `infobase_busy` refusal naming an `ibsrv` PID means the runner found a local server
-with an explicit absolute database path to the same file infobase. Report the PID and use
+with an explicit absolute database path to the same file infobase. The check sees only processes whose arguments the runner user can read: an `ibsrv` service under another account is not detected. Report the PID and use
 a supported server route, or obtain a confirmed maintenance window before retrying direct access.
 
 `tools download` errors that mention the maximum download size mean the selected GitHub release asset or source archive exceeded the 512 MiB response-body limit. Do not retry with `--force`; pick a smaller artifact or install the tool manually and point `v8project.local.yaml` to that local path.
