@@ -1876,8 +1876,7 @@ fn debug_server_text(
     name: CommandName,
     result: &crate::domain::debug_server::DebugServerResult,
 ) -> Vec<String> {
-    use crate::domain::dbms::ServiceAction;
-    use crate::domain::debug_server::DebugServerOwner;
+    use crate::domain::debug_server::{DebugServerAction, DebugServerOwner};
 
     let owner = match result.owner {
         Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
@@ -1885,27 +1884,26 @@ fn debug_server_text(
         Some(DebugServerOwner::Runner) | None => "the debug server",
     };
     let mut lines = vec![match result.action {
-        ServiceAction::Started => format!(
+        DebugServerAction::Started => format!(
             "{}: {owner} answers at {}",
             name.as_str(),
             result.url.as_deref().unwrap_or("?")
         ),
-        ServiceAction::Stopped => format!(
+        DebugServerAction::Stopped => format!(
             "{}: {owner} pid {} stopped",
             name.as_str(),
             result.stopped_pid.unwrap_or_default()
         ),
-        ServiceAction::Planned => format!("{}: planned, nothing started or stopped", name.as_str()),
-        ServiceAction::NothingToStop if result.known_session == Some(false) => format!(
+        DebugServerAction::Planned => {
+            format!("{}: planned, nothing started or stopped", name.as_str())
+        }
+        DebugServerAction::NothingToStop if result.known_session == Some(false) => format!(
             "{}: this working copy knows no such session; nothing to stop",
             name.as_str()
         ),
-        ServiceAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
-        ServiceAction::AlreadyRunning | ServiceAction::Reported => {
-            unreachable!("debug-server neither reports nor finds a running server")
-        }
+        DebugServerAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
     }];
-    if let (ServiceAction::Started, Some(session)) = (result.action, &result.session) {
+    if let (DebugServerAction::Started, Some(session)) = (result.action, &result.session) {
         lines.push(format!("session: {session}"));
     }
     if let Some(alias) = &result.infobase_alias {

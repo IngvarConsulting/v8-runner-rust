@@ -99,7 +99,7 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
 | Образ базы | `infobase dump`, `infobase restore` | Сохраняет базу с данными в `.dt` и загружает из него |
 | Стенд | `dbms`, `standalone`, `cluster`, `web`, `agent`, `publish` | PostgreSQL, автономный сервер, кластер и агент Конфигуратора раннера, веб-публикация |
 | Прямой запуск | `launch <designer\|thin\|thick\|ordinary>` | Запускает Конфигуратор и клиенты 1С; `--debug <url>` подключает клиент к серверу отладки |
-| Отладка | `debug-server start`, `debug-server stop` | Поднимает сервер отладки 1С и отдаёт его адрес: свой `dbgs` для файловой базы, сервер кластера раннера после `cluster start --debug`, `dbgs` автономного сервера раннера после `standalone start --debug` |
+| Отладка | `debug-server start`, `debug-server stop` | Поднимает сервер отладки 1С и отдаёт его адрес: свой `dbgs` для файловой базы (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)), сервер кластера раннера после `cluster start --debug` (Windows и Linux), `dbgs` автономного сервера раннера после `standalone start --debug` (Windows) |
 
 Полный каталог команд, исполнители, коды отказов и ограничения —
 [docs/CAPABILITIES.md](docs/CAPABILITIES.md). Прежние имена команд и ключей принимаются один

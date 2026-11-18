@@ -92,7 +92,8 @@ pub enum Command {
     /// Manage the private Apache of a declared cluster
     Web(WebArgs),
     /// Start and stop the 1C debug server a debugger attaches to: the runner's own dbgs for a
-    /// file infobase, the debug server of the managed cluster for its infobase
+    /// file infobase, the debug server of the managed cluster or of the managed standalone server
+    /// for its infobase
     #[command(name = "debug-server")]
     DebugServer(DebugServerArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
@@ -458,8 +459,8 @@ pub enum DebugServerCommandArgs {
 /// Сервер отладки стенда: включить, снять или оставить как закреплено.
 #[derive(Args, Debug, Clone, Copy)]
 pub struct DebugArgs {
-    /// Start the server with a 1C debug server on the loopback (Windows); it stays on for later
-    /// starts until --no-debug
+    /// Start the server with a 1C debug server on the loopback (the cluster: Windows and Linux;
+    /// the standalone server: Windows); it stays on for later starts until --no-debug
     #[arg(long, conflicts_with = "no_debug")]
     pub debug: bool,
     /// Start the server without a debug server

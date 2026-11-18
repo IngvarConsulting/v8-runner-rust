@@ -1495,26 +1495,24 @@ fn with_debug_server<T>(
     run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
-    let stand_server = |stand: debug_server::StandOwner| match stand {
-        debug_server::StandOwner::Cluster => {
-            cluster::debug_port(context, config, &RealHost::CURRENT).map(|port| {
-                debug_server::StandDebugServer {
-                    port,
-                    infobase_alias: None,
-                }
-            })
-        }
-        debug_server::StandOwner::Standalone => {
-            standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT)
-        }
+    let cluster_server = || {
+        cluster::debug_port(context, config, &RealHost::CURRENT).map(|port| {
+            debug_server::StandDebugServer {
+                port,
+                infobase_alias: None,
+            }
+        })
     };
+    let standalone_server =
+        || standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
     run(&debug_server::DebugServer {
         context,
         config,
         runner: &ProcessExecutor,
         host: &RealHost::CURRENT,
         locate_client: &locate,
-        stand_server: &stand_server,
+        cluster_server: &cluster_server,
+        standalone_server: &standalone_server,
     })
     .map_err(UseCaseFailure::without_payload)
 }

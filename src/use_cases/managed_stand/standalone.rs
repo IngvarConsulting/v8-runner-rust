@@ -1035,7 +1035,7 @@ pub(super) fn debug_server(
         DebugChoice::AsPinned,
     )?;
     let infobase = &server.declared.infobase;
-    if !host.supported() {
+    if !host.standalone_supported() {
         return Err(environment(format!(
             "the infobase '{infobase}' is on the managed standalone server, and it runs on Windows only"
         )));
@@ -2452,6 +2452,36 @@ mod tests {
         assert_eq!(witness.spawned.get(), 0);
         assert!(witness.calls.borrow().is_empty());
         assert!(!setup.paths().root().exists());
+    }
+
+    /// `debug-server start` у базы автономного сервера на Linux — тот же отказ «только Windows»,
+    /// что у `standalone start`, без обращения к процессам.
+    #[test]
+    fn linux_refuses_the_debug_server_of_the_standalone_server() {
+        let setup = setup();
+        let witness = Host::default();
+        let linux = super::super::RealHost {
+            system: super::super::System {
+                privileged: || false,
+                ..super::super::System::LINUX
+            },
+        };
+        let refused = debug_server(
+            &ExecutionContext::cli(CommandName::DebugServerStart),
+            &setup.config,
+            &Runner { host: &witness },
+            &linux,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("Windows only"), "{refused}");
+        assert_eq!(witness.spawned.get(), 0);
+        assert!(witness.calls.borrow().is_empty());
     }
 
     #[test]

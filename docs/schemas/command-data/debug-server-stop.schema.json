@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "DebugServerAction": {
+      "description": "Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не\nописывается отчётом: у `debug-server` нет ни `status`, ни повторного `start` того же сеанса.",
+      "oneOf": [
+        {
+          "const": "started",
+          "description": "`start`: сервер отвечает, сеанс записан.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "`stop`: свой `dbgs` сеанса остановлен.",
+          "type": "string"
+        },
+        {
+          "const": "nothing_to_stop",
+          "description": "`stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.",
+          "type": "string"
+        },
+        {
+          "const": "planned",
+          "description": "Предварительный просмотр: ничего не запущено и не остановлено.",
+          "type": "string"
+        }
+      ]
+    },
     "DebugServerOwner": {
       "description": "Кто поднял сервер отладки и кто его гасит.",
       "oneOf": [
@@ -75,18 +100,6 @@
           "type": "string"
         }
       ]
-    },
-    "ServiceAction": {
-      "description": "Что сделала команда.",
-      "enum": [
-        "started",
-        "already_running",
-        "stopped",
-        "nothing_to_stop",
-        "reported",
-        "planned"
-      ],
-      "type": "string"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/debug-server-stop.schema.json",
@@ -94,7 +107,7 @@
   "additionalProperties": false,
   "properties": {
     "action": {
-      "$ref": "#/$defs/ServiceAction",
+      "$ref": "#/$defs/DebugServerAction",
       "description": "`started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`."
     },
     "duration_ms": {

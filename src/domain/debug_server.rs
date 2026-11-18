@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::dbms::ServiceAction;
 use crate::domain::launch::PlatformResolution;
 
 /// Сеанс сервера отладки: 32 шестнадцатеричных знака в нижнем регистре. Он становится именем
@@ -86,11 +85,26 @@ pub enum DebugServerOwner {
     Standalone,
 }
 
+/// Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не
+/// описывается отчётом: у `debug-server` нет ни `status`, ни повторного `start` того же сеанса.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerAction {
+    /// `start`: сервер отвечает, сеанс записан.
+    Started,
+    /// `stop`: свой `dbgs` сеанса остановлен.
+    Stopped,
+    /// `stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.
+    NothingToStop,
+    /// Предварительный просмотр: ничего не запущено и не остановлено.
+    Planned,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DebugServerResult {
     pub ok: bool,
     /// `started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`.
-    pub action: ServiceAction,
+    pub action: DebugServerAction,
     /// Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<DebugSession>,

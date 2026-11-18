@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-START-DATA
-version: 2
+version: 1
 artifact: docs/schemas/command-data/debug-server-start.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -16,16 +16,17 @@ check:
 # `data` команды `debug-server start`
 
 `action`: `started` или `planned` в превью. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
-файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, Windows и Linux).
+файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, Windows и Linux),
+`standalone` — `dbgs` управляемого автономного сервера базы (`standalone start --debug`, Windows).
 `url` — адрес для `/DEBUGGERURL` клиента и для отладчика, `http://127.0.0.1:<порт>`; `port` — тот же порт.
-`session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет.
+`session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет. `infobase_alias` — имя
+базы для `infoBaseAlias` запросов `rdbg`: `DefAlias` у файловой базы, имя базы в сервере у автономного сервера; у
+кластера поля нет.
 
 У `owner: runner` ещё `pid` процесса `dbgs`, `owner_pid` — процесс, с концом которого сервер выходит сам
 (`--owner-pid`), `platform_resolution` — путь `dbgs` и установка тонкого клиента, из которой он взят, и `log_path`
-— журнал сервера. У `owner: cluster` процесса раннера нет, и этих полей тоже; ключи `--port` и `--owner-pid` к
-серверу кластера не применяются, о чём говорит `warnings` конверта.
-
-**Что изменила версия 2.** `owner` получил значение `standalone` — сервер отладки автономного сервера раннера (`standalone start --debug`); появилось `infobase_alias` — имя базы для `infoBaseAlias` запросов `rdbg`: `DefAlias` у файловой базы, имя базы в сервере у автономного сервера, у кластера поля нет.
+— журнал сервера. У `owner: cluster` и `owner: standalone` процесса раннера нет, и этих полей тоже; ключи `--port`
+и `--owner-pid` к серверу стенда не применяются, о чём говорит `warnings` конверта.
 
 ## Пример
 
