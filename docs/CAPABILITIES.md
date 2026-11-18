@@ -2179,7 +2179,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - `--debug <URL>` запускает клиент предприятия (`thin`, `thick`, `ordinary`, `mcp`) подключённым
   к серверу отладки: раннер добавляет `/DEBUG -http -attach /DEBUGGERURL <URL>` перед ключами
   `--raw-key`, ответ называет адрес в `debug.url`. Адрес — `http://<host>:<port>`, как его отдаёт
-  `debug-server start` ([подробности](#debug-server)); путь, параметры и userinfo — отказ.
+  `debug-server start` ([подробности](#debug-server)); путь, параметры, фрагмент, учётные данные и порт 0 — отказ; `/DEBUG` или `/DEBUGGERURL` в `--raw-key` или `tools.enterprise.additional-launch-keys` рядом с `--debug` — тоже отказ.
   Сервер перед запуском не проверяется: если его уже нет, клиент работает без отладки.
   `launch designer --debug` (у Конфигуратора свой отладчик), `launch web --debug` (веб-клиент
   не получает ключей запуска) и `/DEBUG` или `/DEBUGGERURL` в `--raw-key` рядом с `--debug` —

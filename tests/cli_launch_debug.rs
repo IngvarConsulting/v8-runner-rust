@@ -13,6 +13,11 @@ const URL: &str = "http://127.0.0.1:12961";
 
 /// Проект с файловой базой и поддельным тонким клиентом и Конфигуратором.
 fn project(dir: &Path) {
+    project_with(dir, "");
+}
+
+/// То же, с дополнительными строками секции `tools`.
+fn project_with(dir: &Path, tools: &str) {
     let bin = dir.join("platform").join("bin");
     fs::create_dir_all(&bin).expect("bin");
     for name in ["1cv8c", "1cv8"] {
@@ -26,7 +31,7 @@ fn project(dir: &Path) {
     fs::write(
         dir.join("v8project.yaml"),
         format!(
-            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ninfobase:\n  connection: 'File=ib'\n  web:\n    url: 'http://localhost/demo'\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ninfobase:\n  connection: 'File=ib'\n  web:\n    url: 'http://localhost/demo'\ntools:\n  platform:\n    path: '{}'\n{tools}",
             dir.join("platform").display()
         ),
     )
@@ -55,7 +60,7 @@ fn run(dir: &Path, arguments: &[&str]) -> (i32, Value) {
 fn a_debug_launch_preview_attaches_the_client_to_the_debug_server() {
     let dir = temp_workspace();
     project(dir.path());
-    for mode in ["thin", "thick", "ordinary"] {
+    for mode in ["thin", "thick", "ordinary", "mcp"] {
         let (code, answer) = run(dir.path(), &["launch", mode, "--debug", URL, "--dry-run"]);
         assert_eq!(code, 0, "{answer}");
         let data = &answer["data"];
@@ -83,38 +88,101 @@ fn a_debug_launch_preview_attaches_the_client_to_the_debug_server() {
     assert!(!plain.to_string().contains("/DEBUGGERURL"));
 }
 
-/// Приёмка 2: Конфигуратор и веб-клиент с `--debug`, неверный адрес и ключи отладки в
-/// `--raw-key` — отказ `invalid_argument` без запуска.
+/// Приёмка 2: Конфигуратор и веб-клиент с `--debug`, адрес не вида `http://<хост>:<порт>`
+/// и ключи отладки рядом с `--debug` — отказ `invalid_argument` без запуска; сообщение
+/// называет свою причину.
 #[test]
 fn a_debug_launch_is_refused_where_it_cannot_work() {
     let dir = temp_workspace();
     project(dir.path());
-    let cases: [&[&str]; 6] = [
-        &["launch", "designer", "--debug", URL],
-        &["launch", "web", "--debug", URL],
-        &["launch", "thin", "--debug", "127.0.0.1:12961"],
-        &["launch", "thin", "--debug", "http://127.0.0.1"],
-        &[
-            "launch",
-            "thin",
-            "--debug",
-            "http://127.0.0.1:12961/e1crdbg",
-        ],
-        &[
-            "launch",
-            "thin",
-            "--debug",
-            URL,
+    let cases: [(&[&str], &str); 11] = [
+        (&["launch", "designer", "--debug", URL], "Designer"),
+        (&["launch", "web", "--debug", URL], "web client"),
+        (
+            &["launch", "thin", "--debug", "127.0.0.1:12961"],
+            "http://<host>:<port>",
+        ),
+        (
+            &["launch", "thin", "--debug", "https://127.0.0.1:12961"],
+            "http://<host>:<port>",
+        ),
+        (
+            &["launch", "thin", "--debug", "http://127.0.0.1"],
+            "http://<host>:<port>",
+        ),
+        (
+            &[
+                "launch",
+                "thin",
+                "--debug",
+                "http://127.0.0.1:12961/e1crdbg",
+            ],
+            "http://<host>:<port>",
+        ),
+        (
+            &["launch", "thin", "--debug", "http://127.0.0.1:12961?x"],
+            "http://<host>:<port>",
+        ),
+        (
+            &["launch", "thin", "--debug", "http://127.0.0.1:12961#x"],
+            "http://<host>:<port>",
+        ),
+        (
+            &[
+                "launch",
+                "thin",
+                "--debug",
+                "http://:secret@127.0.0.1:12961",
+            ],
+            "http://<host>:<port>",
+        ),
+        (
+            &[
+                "launch",
+                "thin",
+                "--debug",
+                URL,
+                "--raw-key",
+                "/DEBUGGERURL",
+            ],
             "--raw-key",
-            "/DEBUGGERURL",
-        ],
+        ),
+        (
+            &["launch", "thin", "--debug", URL, "--raw-key", "/DEBUG"],
+            "--raw-key",
+        ),
     ];
-    for arguments in cases {
+    for (arguments, reason) in cases {
         let (code, answer) = run(dir.path(), arguments);
         assert_ne!(code, 0, "{arguments:?}: {answer}");
         assert_eq!(
             answer["error"]["code"], "invalid_argument",
             "{arguments:?}: {answer}"
         );
+        let message = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains(reason), "{arguments:?}: {message}");
+        assert!(!message.contains("secret"), "{message}");
     }
+}
+
+/// Ключи отладки в `tools.enterprise.additional_launch_keys` рядом с `--debug` дали бы клиенту
+/// второй сервер отладки — отказ.
+#[test]
+fn a_debugger_in_the_configured_launch_keys_is_refused_next_to_debug() {
+    let dir = temp_workspace();
+    project_with(
+        dir.path(),
+        "  enterprise:
+    additional-launch-keys: ['/DEBUGGERURL http://127.0.0.1:1550']
+",
+    );
+    let (code, answer) = run(dir.path(), &["launch", "thin", "--debug", URL, "--dry-run"]);
+    assert_ne!(code, 0, "{answer}");
+    assert_eq!(answer["error"]["code"], "invalid_argument", "{answer}");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("additional-launch-keys")),
+        "{answer}"
+    );
 }

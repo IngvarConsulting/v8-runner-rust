@@ -23,7 +23,7 @@ pub struct LaunchOptions {
     /// Сервер отладки, к которому клиент подключается сразу после запуска (`launch --debug`):
     /// `/DEBUG -http -attach /DEBUGGERURL <адрес>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub debugger_url: Option<String>,
+    pub debugger_url: Option<crate::domain::launch::DebuggerUrl>,
 }
 
 /// Opt-in bounded observation settings for a direct thin-client launch.

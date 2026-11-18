@@ -128,9 +128,12 @@ debug: http://127.0.0.1:12961</code></pre>
 <p>С <code>--dry-run</code> клиент не запускается; ключи отладки видны в <code>plan.args</code>. Фрагмент текстового ответа:</p>
 <pre data-output-example="launch-debug-example" data-output-schema="launch"><code>mode: thin
 binary: /opt/1cv8/bin/1cv8c
-provider dispatched: false</code></pre>
+debug: http://127.0.0.1:12961
+provider dispatched: false
+planned program: /opt/1cv8/bin/1cv8c
+planned args: ENTERPRISE /DisableStartupDialogs /IBConnectionString File=/home/user/ib /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961</code></pre>
 <h4 id="launch-debug-refused">Отладка не подходит запуску</h4>
-<p>Отказ до запуска: <code>invalid_argument</code>, выход CLI 2. Так же отвечают <code>launch web --debug</code>, адрес с путём, без порта или без <code>http://</code> и <code>/DEBUG</code> или <code>/DEBUGGERURL</code> в <code>--raw-key</code> рядом с <code>--debug</code>.</p>
+<p>Отказ до запуска: <code>invalid_argument</code>, выход CLI 2. Так же отвечают <code>launch web --debug</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code> (путь, параметры, фрагмент, учётные данные, нет порта или порт 0) и <code>/DEBUG</code> или <code>/DEBUGGERURL</code> в <code>--raw-key</code> или в <code>tools.enterprise.additional-launch-keys</code> рядом с <code>--debug</code>. Отказ не повторяет введённый адрес.</p>
 <pre data-output-example="launch-debug-refused" data-output-schema="refusal"><code>ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger</code></pre>
 <h2 class="command-variant" id="launch-preview">launch designer --dry-run <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner launch designer --dry-run</code></pre>

@@ -224,15 +224,19 @@ pub fn build_launch_command(
     }
 
     // Сервер отладки: клиент подключается к нему сразу после запуска, и `-attach` подключает
-    // его предметы отладки без ручного выбора в отладчике. У Конфигуратора свой отладчик.
+    // его предметы отладки без ручного выбора в отладчике. Конфигуратору адрес не доходит:
+    // `launch designer --debug` отвергает разбор ключей (у него свой отладчик).
+    debug_assert!(
+        !(matches!(mode, LaunchClientMode::Designer) && launch.debugger_url.is_some()),
+        "Designer is launched without a debugger url"
+    );
     if let Some(url) = launch
         .debugger_url
         .as_ref()
         .filter(|_| !matches!(mode, LaunchClientMode::Designer))
     {
-        args.extend(
-            ["/DEBUG", "-http", "-attach", "/DEBUGGERURL", url.as_str()].map(str::to_owned),
-        );
+        args.extend(["/DEBUG", "-http", "-attach", "/DEBUGGERURL"].map(str::to_owned));
+        args.push(url.to_string());
     }
 
     let mut extra_args = Vec::new();
@@ -374,7 +378,7 @@ mod tests {
     fn a_debugger_url_attaches_the_client_to_its_debug_server() {
         let connection = V8Connection::from_connection_string("File=/tmp/ib");
         let launch = LaunchOptions {
-            debugger_url: Some("http://127.0.0.1:12961".to_owned()),
+            debugger_url: crate::domain::launch::DebuggerUrl::parse("http://127.0.0.1:12961"),
             raw_args: vec!["/L ru".to_owned()],
             ..LaunchOptions::default()
         };
@@ -397,14 +401,6 @@ mod tests {
             ]
         );
         assert!(at < args.iter().position(|arg| arg == "/L ru").expect("raw key"));
-        let designer = build_launch_args(
-            LaunchClientMode::Designer,
-            &ClientAddress::Connection,
-            &connection,
-            &[],
-            &launch,
-        );
-        assert!(!designer.iter().any(|arg| arg == "/DEBUG"));
     }
 
     #[test]

@@ -2625,13 +2625,13 @@
     "url": "cli-launch.html#launch-debug-plan",
     "page": "launch",
     "section": "План запуска под отладкой",
-    "text": "План запуска под отладкой С --dry-run клиент не запускается; ключи отладки видны в plan.args . Фрагмент текстового ответа: mode: thin binary: /opt/1cv8/bin/1cv8c provider dispatched: false"
+    "text": "План запуска под отладкой С --dry-run клиент не запускается; ключи отладки видны в plan.args . Фрагмент текстового ответа: mode: thin binary: /opt/1cv8/bin/1cv8c debug: http://127.0.0.1:12961 provider dispatched: false planned program: /opt/1cv8/bin/1cv8c planned args: ENTERPRISE /DisableStartupDialogs /IBConnectionString File=/home/user/ib /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961"
   },
   {
     "url": "cli-launch.html#launch-debug-refused",
     "page": "launch",
     "section": "Отладка не подходит запуску",
-    "text": "Отладка не подходит запуску Отказ до запуска: invalid_argument , выход CLI 2. Так же отвечают launch web --debug , адрес с путём, без порта или без http:// и /DEBUG или /DEBUGGERURL в --raw-key рядом с --debug . ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
+    "text": "Отладка не подходит запуску Отказ до запуска: invalid_argument , выход CLI 2. Так же отвечают launch web --debug , адрес не вида http://<хост>:<порт> (путь, параметры, фрагмент, учётные данные, нет порта или порт 0) и /DEBUG или /DEBUGGERURL в --raw-key или в tools.enterprise.additional-launch-keys рядом с --debug . Отказ не повторяет введённый адрес. ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
   },
   {
     "url": "cli-launch.html#launch-preview",

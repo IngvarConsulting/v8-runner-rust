@@ -4967,7 +4967,7 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         None
     };
     let mut launch = map_direct_launch_options(target, &args.launch, client_mcp.is_some())?;
-    launch.debugger_url = map_launch_debug(target, args.debug.as_deref(), &launch.raw_args)?;
+    launch.debugger_url = map_launch_debug(target, args.debug.as_deref())?;
     Ok(LaunchRequest {
         target,
         launch,
@@ -4979,13 +4979,12 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
 
 /// `launch --debug <url>`: только клиент предприятия — у Конфигуратора свой отладчик, а
 /// веб-клиент ключей командной строки не получает. Адрес — `http://<хост>:<порт>`, как его
-/// отвечает `debug-server start`; ключи отладки в `--raw-key` рядом с ним — отказ, а не два
-/// сервера.
+/// отвечает `debug-server start`. Ключи отладки рядом с ним (в `--raw-key` и в настройках)
+/// проверяет сценарий запуска: только он видит настройки.
 fn map_launch_debug(
     target: crate::use_cases::request::LaunchTargetRequest,
     url: Option<&str>,
-    raw_args: &[String],
-) -> Result<Option<String>, UseCaseError> {
+) -> Result<Option<crate::domain::launch::DebuggerUrl>, UseCaseError> {
     use crate::use_cases::request::LaunchTargetRequest;
 
     let Some(url) = url else {
@@ -5007,29 +5006,13 @@ fn map_launch_debug(
         }
         LaunchTargetRequest::Enterprise(_) => {}
     }
-    let parsed = url::Url::parse(url).ok().filter(|parsed| {
-        parsed.scheme() == "http"
-            && parsed.host_str().is_some()
-            && parsed.port().is_some()
-            && parsed.path() == "/"
-            && parsed.query().is_none()
-            && parsed.username().is_empty()
-    });
-    let Some(parsed) = parsed else {
-        return refuse(format!(
-            "--debug {url}: the address of a debug server is http://<host>:<port>, as `debug-server start` answers it"
-        ));
-    };
-    if raw_args.iter().any(|raw| {
-        ["debug", "debuggerurl"]
-            .iter()
-            .any(|key| launch_key_alias_matches(raw, key))
-    }) {
-        return refuse(
-            "--debug sets /DEBUG and /DEBUGGERURL itself: remove them from --raw-key".to_owned(),
-        );
+    match crate::domain::launch::DebuggerUrl::parse(url) {
+        Some(parsed) => Ok(Some(parsed)),
+        // Введённое не повторяется: в нём могут быть учётные данные.
+        None => refuse(
+            "--debug: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it".to_owned(),
+        ),
     }
-    Ok(Some(parsed.as_str().trim_end_matches('/').to_owned()))
 }
 
 fn map_direct_launch_options(

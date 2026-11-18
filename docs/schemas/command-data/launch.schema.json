@@ -39,6 +39,11 @@
       ],
       "type": "object"
     },
+    "DebuggerUrl": {
+      "description": "Адрес сервера отладки: http://<хост>:<порт>.",
+      "pattern": "^http://.+:[0-9]+$",
+      "type": "string"
+    },
     "ExternalEpfWaitResult": {
       "additionalProperties": false,
       "description": "Legacy EPF wire projection; execute_path remains required and non-null.",
@@ -84,11 +89,11 @@
     },
     "LaunchDebug": {
       "additionalProperties": false,
-      "description": "Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`.",
+      "description": "Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`. Объект, а не\nстрока: так поле закреплено формой `launch` (`CTR.WIRE.LAUNCH-DATA`, версия 7).",
       "properties": {
         "url": {
-          "description": "Адрес сервера отладки, как его получил клиент.",
-          "type": "string"
+          "$ref": "#/$defs/DebuggerUrl",
+          "description": "Адрес сервера отладки, как его получил клиент."
         }
       },
       "required": [
