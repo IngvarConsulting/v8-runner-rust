@@ -189,7 +189,7 @@ fn run_configuration_export(
             ))
         }
     };
-    if let Err(error) = validate_platform_success(&platform_result, None) {
+    if let Err(error) = validate_platform_success(&platform_result, "export", &[]) {
         return Err(configuration_failure(
             context,
             publication.cleanup_failure(error),
@@ -388,9 +388,11 @@ fn run_infobase_snapshot(
             ))
         }
     };
-    if let Err(error) =
-        validate_platform_success(&platform_result, config.infobase.password.as_deref())
-    {
+    if let Err(error) = validate_platform_success(
+        &platform_result,
+        "export",
+        config.infobase.password.as_deref().as_slice(),
+    ) {
         return Err(snapshot_failure(
             context,
             publication.cleanup_failure(error),
@@ -673,9 +675,14 @@ fn run_infobase_restore(
             ));
         }
     };
-    if let Err(error) =
-        validate_platform_success(&platform_result, config.infobase.password.as_deref())
-    {
+    let credentials: Vec<_> = [
+        config.infobase.user.as_deref(),
+        config.infobase.password.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Err(error) = validate_platform_success(&platform_result, "restore", &credentials) {
         // The provider may have replaced part of the data before failing, and nothing
         // here can tell how much, so the target state is reported as uncertain.
         result.target_state = InfobaseTargetState::Uncertain;
@@ -755,12 +762,18 @@ pub(crate) fn run_restore_provider(
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")
                 .map_err(CommandFailure::without_deferral)?;
+            let mut connection = config.v8_connection();
+            // При создании файловой ИБ пользователи появятся только после загрузки DT.
+            if target_mode == RestoreTargetMode::Create && connection.file_path().is_some() {
+                connection.user = None;
+                connection.password = None;
+            }
             // Загрузка снимка подменяет базу целиком: фаза критическая, как у `restore-ib`
             // агента. Снятый посреди записи Конфигуратор оставил бы базу в состоянии,
             // которое не назовёт никто.
             DesignerDsl::new(
                 executable.to_path_buf(),
-                config.v8_connection(),
+                connection,
                 &runner,
                 Some(log),
                 context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
@@ -1690,21 +1703,21 @@ fn provider_log_path(config: &AppConfig, stem: &str) -> Result<PathBuf, AppError
         .map_err(|error| AppError::Runtime(format!("failed to create platform logs dir: {error}")))
 }
 
-/// Форматирует отказ, скрывая известный пароль в сырых уликах переноса базы.
+/// Форматирует отказ, скрывая известные реквизиты в диагностике переноса базы.
 fn validate_platform_success(
     result: &PlatformCommandResult,
-    password: Option<&str>,
+    operation: &str,
+    secrets: &[&str],
 ) -> Result<(), AppError> {
     if let Err(code) = result.process.outcome() {
-        let mut details = vec![format!("platform export failed with exit code {code}")];
-        let password = password.filter(|password| !password.is_empty());
-        let mut append = |label, value: &str| match password {
-            Some(password) => append_platform_diagnostic(
-                &mut details,
-                label,
-                &crate::platform::secrets::mask_text(value, &[password]),
-            ),
-            None => append_platform_diagnostic(&mut details, label, value),
+        let mut details = vec![format!("platform {operation} failed with exit code {code}")];
+        let mut append = |label, value: &str| {
+            if secrets.iter().any(|secret| !secret.is_empty()) {
+                let masked = crate::platform::secrets::mask_text(value, secrets);
+                append_platform_diagnostic(&mut details, label, &masked);
+            } else {
+                append_platform_diagnostic(&mut details, label, value);
+            }
         };
         append("stdout", &result.process.stdout);
         append("stderr", &result.process.stderr);

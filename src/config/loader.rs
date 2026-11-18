@@ -10,8 +10,8 @@ use crate::config::schema::{
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
-    validate_read_only, validate_tools_download_bootstrap, validate_without_infobase,
-    ConfigValidationError,
+    validate_read_only, validate_tools_download_bootstrap, validate_vanessa_download,
+    validate_without_infobase, ConfigValidationError,
 };
 use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
 
@@ -110,6 +110,19 @@ pub fn load_config_for_tools_download(
         workdir_override,
         selector,
         ConfigValidationMode::ToolsDownload,
+    )
+}
+
+pub fn load_config_for_vanessa_download(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::VanessaDownload,
     )
 }
 
@@ -288,6 +301,7 @@ enum ConfigValidationMode {
     InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
     ToolsDownload,
+    VanessaDownload,
     Launch,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
@@ -381,14 +395,24 @@ fn build_config(
     // отвергли выше, до границы.
     validate_main_config_schema_boundary(root.clone())
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
-    if matches!(
+    let has_selected_infobase = if matches!(
         validation_mode,
         ConfigValidationMode::WithoutInfobase { .. }
     ) {
         select_no_infobase(&mut root)?;
+        false
     } else {
-        select_infobase(&mut root, selector)?;
-    }
+        match select_infobase(&mut root, selector) {
+            Ok(()) => true,
+            Err(ConfigValidationError::OriginNotDeclared { .. })
+                if matches!(validation_mode, ConfigValidationMode::VanessaDownload) =>
+            {
+                select_no_infobase(&mut root)?;
+                false
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
@@ -424,8 +448,10 @@ fn build_config(
         )?;
     }
     crate::config::validate::validate_local_path(&config, config_dir)?;
-    project_managed_standalone(&mut config, &validation_mode)?;
-    project_managed_cluster(&mut config, &validation_mode)?;
+    if !matches!(validation_mode, ConfigValidationMode::VanessaDownload) {
+        project_managed_standalone(&mut config, &validation_mode)?;
+        project_managed_cluster(&mut config, &validation_mode)?;
+    }
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
@@ -436,6 +462,9 @@ fn build_config(
         }
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
+        ConfigValidationMode::VanessaDownload => {
+            validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
+        }
         ConfigValidationMode::Launch => validate_launch(&config)?,
         ConfigValidationMode::ManagedDbms => {
             crate::config::validate::validate_managed_dbms(&config)?
@@ -665,8 +694,7 @@ fn fold_push_synonym(
     )))
 }
 
-/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`, чтобы
-/// `AppConfig` собрался без сентинела: конфига без выбранной базы не бывает.
+/// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`.
 fn select_infobase(
     root: &mut serde_yaml::Value,
     selector: &InfobaseSelector,
@@ -743,9 +771,8 @@ fn select_infobase(
     Ok(())
 }
 
-/// Команда, которой база проекта не нужна (`make`), базу не выбирает: в документ ложится
-/// пустая секция без адреса и без имени. Её никто не читает — сценарий работает во временной
-/// базе раннера, — а `origin` может быть и не объявлен.
+/// Оставляет в `AppConfig` пустую секцию без адреса и имени для сценариев, которые
+/// обходятся без выбранной базы проекта, например `make` или загрузки Vanessa без `origin`.
 fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidationError> {
     let mapping = root_mapping_mut(root)?;
     mapping.insert(
@@ -2017,7 +2044,10 @@ mod tests {
         assert_eq!(config.work_path, config.base_path.join("work"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -2381,7 +2411,10 @@ source-set:
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
         assert_eq!(config.infobases.len(), 2, "{:?}", config.infobases.keys());
         assert_eq!(
@@ -2390,7 +2423,10 @@ source-set:
         );
         assert_eq!(
             config.infobases["test"].connection,
-            format!("File={}", config.base_path.join("build/test-ib").display()),
+            format!(
+                "File={}",
+                config.base_path.join("build").join("test-ib").display()
+            ),
             "every declared section is normalized against the config dir"
         );
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
@@ -3072,7 +3108,10 @@ source-set:
         assert_eq!(config.work_path, config.base_path.join("build"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config.base_path.join("build/ib").display())
+            format!(
+                "File={}",
+                config.base_path.join("build").join("ib").display()
+            )
         );
     }
 
@@ -3591,7 +3630,8 @@ source-set:
             config.v8_connection().file_path(),
             Some(
                 canonical(&config_dir)
-                    .join("build/my ib")
+                    .join("build")
+                    .join("my ib")
                     .to_string_lossy()
                     .as_ref()
             )
@@ -3976,11 +4016,12 @@ source-set:
         let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
             .map(|loaded| loaded.config)
             .expect("load config");
-        let config_dir = std::fs::canonicalize(dir.path()).expect("canonical config dir");
+        let config_dir = canonical(dir.path());
+        let expected = config_dir.join("platform").join("bin");
 
         assert_eq!(
-            config.tools.platform.path.as_deref(),
-            Some(config_dir.join("platform/bin").as_path())
+            config.tools.platform.path.as_deref().map(Path::as_os_str),
+            Some(expected.as_os_str())
         );
     }
 

@@ -822,10 +822,11 @@ mod tests {
         assert!(!project_dir.exists());
         assert_eq!(
             resolved,
-            std::fs::canonicalize(dir.path())
-                .expect("canonical root")
-                .join("nested")
-                .join("project")
+            crate::support::path::normalize_windows_verbatim_path(
+                &dir.path().canonicalize().expect("canonical root"),
+            )
+            .join("nested")
+            .join("project")
         );
     }
 }

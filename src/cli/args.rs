@@ -294,7 +294,7 @@ pub struct BootstrapArgs {
     pub password: Option<String>,
 
     /// Source directory for the dumped main configuration
-    #[arg(long, default_value = "src/configuration")]
+    #[arg(long, default_value = "src/cf")]
     pub source_dir: String,
 
     /// Overwrite generated config/local config/source targets
@@ -1322,6 +1322,24 @@ mod tests {
                 "{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn clone_defaults_to_src_cf() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "clone",
+            "--from",
+            "File=source-ib",
+            "--platform-version",
+            "8.3.27",
+        ])
+        .expect("parse clone");
+
+        let Command::Bootstrap(args) = cli.command else {
+            panic!("expected clone");
+        };
+        assert_eq!(args.source_dir, "src/cf");
     }
 
     #[test]

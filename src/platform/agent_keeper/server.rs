@@ -1,9 +1,11 @@
 //! Сторож живого агента: скрытая подкоманда `v8-runner agent keeper --key <hex>`.
 //!
 //! Запуск агента и данные для него приходят одной строкой JSON в stdin ([`KeeperStart`]):
-//! учётные данные базы не попадают в командную строку. Сторож сначала занимает канал (второй
+//! учётные данные базы не попадают в командную строку. Дом агента сторож находит по рабочей копии
+//! из этой строки и своему ключу ([`KeeperHome::of`]). Сторож сначала занимает канал (второй
 //! сторож того же ключа на нём отказывает), пишет свою запись, затем поднимает агента
-//! ([`ManagedAgent::launch_for_keeper`]), отключает его от базы и держит его сессию SSH.
+//! ([`ManagedAgent::launch_for_keeper`]), отключает его от базы и держит его сессию SSH. Уходя,
+//! он держит канал, пока агент не ушёл, затем убирает запись и дом агента (#735).
 //!
 //! Агентом владеет один долгоживущий поток: он поднимает процесс агента (на Linux сигнал смерти
 //! родителя привязан к потоку, `INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`) и выполняет
@@ -31,12 +33,12 @@ use super::client::KeeperStart;
 use super::protocol::{
     read_line, write_line, AgentFailure, Frame, Holder, KeeperError, KeeperStatus, Request,
 };
-use super::{credentials_digest, idle_limit, KeeperHome};
+use super::{idle_limit, KeeperHome};
 use crate::platform::agent::{
     AgentError, AgentErrorType, AgentLaunch, AgentMessage, AtOpen, HostKeyExpectation,
     ManagedAgent, WaitPolicy,
 };
-use crate::platform::live_registry::lock_agent_registry;
+use crate::platform::live_registry::Registry;
 use crate::platform::process::ProcessExecutor;
 use crate::platform::service::process_facts;
 use crate::platform::service_record::{
@@ -70,21 +72,18 @@ pub fn run_keeper(key: &str) -> i32 {
 }
 
 fn serve(key: &str) -> Result<(), String> {
-    let state = crate::support::machine::account::account_state_dir()
-        .map_err(|error| format!("no state directory: {error}"))?;
-    let home = KeeperHome::open(&state, key).map_err(|error| error.to_string())?;
+    let registry = Registry::of_account()
+        .map_err(|error| format!("the live agent registry is unknown: {error}"))?;
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
         .map_err(|error| format!("cannot read the start request from stdin: {error}"))?;
     let start: KeeperStart = serde_json::from_str(line.trim_end())
         .map_err(|error| format!("the start request is not readable: {error}"))?;
-    let digest = credentials_digest(
-        home.state(),
-        &start.credentials.user,
-        &start.credentials.password,
-    )
-    .map_err(|error| format!("cannot make the credentials digest: {error}"))?;
+    let home = KeeperHome::of(&registry, &start.launch.work_path, key)
+        .map_err(|error| error.to_string())?;
+    // Отпечаток учётных данных считает команда своей солью рабочей копии: сторож соли не читает.
+    let digest = start.credentials.digest.clone();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -271,6 +270,9 @@ impl Shared {
 }
 
 async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<(), String> {
+    home.registry()
+        .prepare()
+        .map_err(|error| format!("cannot prepare the keeper channel: {error}"))?;
     let mut listener = Listener::bind(&home.channel()).map_err(|error| error.to_string())?;
     write_record(&home, 0, None).map_err(|error| format!("cannot write the record: {error}"))?;
     let (jobs, queue) = std::sync::mpsc::channel();
@@ -299,7 +301,7 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
         stopped,
     });
 
-    let (worker_done, worker_finished) = tokio::sync::oneshot::channel::<()>();
+    let (worker_done, mut worker_finished) = tokio::sync::oneshot::channel::<()>();
     let worker = {
         let shared = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -324,16 +326,40 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
         }
     }
 
-    // Канал закрывается раньше записи: команда, нашедшая запись, не подключится к сторожу,
-    // который уже уходит, а подождёт его ухода и поднимет нового.
+    // Поток агента снимает агента после команды, которую уже ведёт. Канал остаётся открытым,
+    // пока агент не ушёл: сторож всё ещё занимает место на пределе учётной записи (его агент
+    // держит сеанс лицензии и базу) и называет себя уходящим; команда, нашедшая его, ждёт его
+    // ухода и поднимает нового.
+    shared.send(Job::Close);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(stream) => {
+                    tokio::spawn(handle(Arc::clone(&shared), stream));
+                }
+                Err(error) => warn!(%error, "the keeper channel refused a connection"),
+            },
+            _ = &mut worker_finished => break,
+        }
+    }
+    let _ = worker.join();
+    let home = if shared.lock().failed_at.is_none() {
+        HomeAfter::Removed
+    } else {
+        HomeAfter::KeptAsEvidence
+    };
+    // Уборка дома ждёт файлов, которые уходящий агент ещё держит: не в потоке, который
+    // принимает подключения.
+    let leaving = Arc::clone(&shared);
+    let _ = tokio::task::spawn_blocking(move || remove_record(&leaving.home, home)).await;
+    // Агента и записи больше нет: канал закрывается до ответа `stop`. Ответ пишут задачи уже
+    // принятых подключений, когда поток уступит; команда, получившая `stopped`, считает живых
+    // сторожей по каналам и этого уже не видит — иначе место на пределе освобождалось бы позже
+    // ответа, и команда, снявшая простаивающего агента ради места, его бы не получила.
     listener.remove();
     drop(listener);
-    // Поток агента снимает агента после команды, которую уже ведёт.
-    shared.send(Job::Close);
-    let _ = worker_finished.await;
-    let _ = worker.join();
-    remove_record(&shared.home);
     let _ = shared.stopped.send(true);
+    // Ответы `stop` уходят в канал, затем процесс выходит.
     tokio::time::sleep(STOP_FLUSH).await;
     info!("the keeper is done");
     Ok(())
@@ -354,11 +380,7 @@ fn breaks_the_session(error: &AgentError) -> bool {
 /// Поток агента: поднимает агента и выполняет работу по одной, затем отпускает и снимает его.
 fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<Job>) {
     let infobase = start.launch.infobase.clone();
-    let work_path = start
-        .launch
-        .work_path
-        .as_ref()
-        .map(|path| path.display().to_string());
+    let work_path = Some(start.launch.work_path.display().to_string());
     let at_open = start.at_open;
     let mut agent = match launch(&shared.home, start) {
         Ok(launched) => launched,
@@ -797,9 +819,9 @@ fn launch(home: &KeeperHome, start: KeeperStart) -> Result<ManagedAgent, AgentEr
         infobase_args: launch.infobase_args,
         port: launch.port,
         host_key: launch.host_key,
-        key_work_path: home.key_dir(),
+        host_key_dir: home.host_keys(),
         base_dir: home.base_dir(),
-        workdir: root.join("workdir"),
+        workdir: home.workdir(),
         process_log: root.join("agent.process"),
         user: credentials.user,
         password: credentials.password,
@@ -819,6 +841,11 @@ fn launch(home: &KeeperHome, start: KeeperStart) -> Result<ManagedAgent, AgentEr
 /// не считается.
 fn alive(pid: u32, started: Option<u64>) -> bool {
     process_facts(pid).is_some_and(|facts| started.is_none_or(|started| facts.started == started))
+}
+
+/// Убран ли дом агента: нет записи сторожа или `AgentBaseDir`.
+fn home_is_gone(home: &KeeperHome) -> bool {
+    !home.paths().record().is_file() || !home.base_dir().is_dir()
 }
 
 /// Сроки: держатели, простой, просьба закрыться.
@@ -848,6 +875,12 @@ async fn tick(shared: Arc<Shared>) {
                 if !alive(pid, started) {
                     shared.request_close("the agent process is gone");
                 }
+            }
+            // Дом агента убрали, пока сторож жив (`git clean`, удалённый `workPath`): без записи
+            // команды его не найдут, а без `AgentBaseDir` агент им не годится. Сторож уходит сам,
+            // доведя начатое, и следующая команда поднимает нового агента (#735).
+            if agent.is_some() && home_is_gone(&shared.home) {
+                shared.request_close("the agent's home in the working copy is gone");
             }
         }
         let now_ms = now_ms();
@@ -921,6 +954,17 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
         }
     };
     let answer = match request {
+        Request::Whereabouts => {
+            let state = shared.lock();
+            Frame::Whereabouts {
+                key: shared.home.key().to_owned(),
+                home: shared.home.paths().root().to_path_buf(),
+                pid: std::process::id(),
+                closing: state.close_requested
+                    || state.stop_requested
+                    || shared.shutdown.is_cancelled(),
+            }
+        }
         Request::Status => match shared.ready().await {
             Ok((agent_pid, fingerprint)) => {
                 let state = shared.lock();
@@ -1283,13 +1327,15 @@ fn client_gone(shared: &Shared, cancel: &CancellationToken, started: &AtomicBool
     }
 }
 
-/// Запись сторожа: он сам и, когда поднят, его агент. Пишется под замком реестра.
+/// Запись сторожа: он сам и, когда поднят, его агент. Пишется под замком ключа; дом, который
+/// уборка успела убрать, заводится заново.
 fn write_record(
     home: &KeeperHome,
     port: u16,
     agent: Option<LiveAgentFacts>,
 ) -> std::io::Result<()> {
-    let _registry = lock_agent_registry(home.state())?;
+    let _held = home.lock()?;
+    home.prepare()?;
     let own = std::process::id();
     let facts = process_facts(own);
     let record = ServiceRecord {
@@ -1309,15 +1355,36 @@ fn write_record(
     write_json(&home.paths().record(), &record)
 }
 
-/// Убирает запись, если она всё ещё своя: следующий сторож мог уже записать свою.
-fn remove_record(home: &KeeperHome) {
-    let Ok(_registry) = lock_agent_registry(home.state()) else {
+/// Убирает запись, если она всё ещё своя: следующий сторож или команда, которая его поднимает,
+/// могли уже записать свою. С записью уходит и дом агента (`AgentBaseDir`, текущий каталог,
+/// ключ хоста, журналы процесса агента), если агент поднимался: дом не поднявшегося агента
+/// остаётся уликой рядом с выводом сторожа. Чужая запись — дом не трогают.
+fn remove_record(home: &KeeperHome, after: HomeAfter) {
+    // Дома уже нет (рабочую копию убрали): убирать нечего, а замок завёл бы каталоги заново.
+    if !home.paths().root().is_dir() {
+        return;
+    }
+    let Ok(_held) = home.lock() else {
         return;
     };
     let path = home.paths().record();
-    if read_json::<ServiceRecord>(&path)
-        .is_some_and(|record| record.pid == Some(std::process::id()))
-    {
-        let _ = std::fs::remove_file(path);
+    match read_json::<ServiceRecord>(&path) {
+        Some(record) if record.pid == Some(std::process::id()) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Some(_) => return,
+        None => {}
     }
+    if after == HomeAfter::Removed {
+        home.remove();
+    }
+}
+
+/// Что сторож делает с домом агента, уходя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeAfter {
+    /// Агент поднимался: дом убирается.
+    Removed,
+    /// Агент не поднялся: дом остаётся уликой рядом с выводом сторожа.
+    KeptAsEvidence,
 }

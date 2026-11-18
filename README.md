@@ -61,7 +61,7 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
    дописывает в `.gitignore` — [CAPABILITIES](docs/CAPABILITIES.md#init).
    Из существующей базы вместо этого:
    `v8-runner clone --from "File=/path/to/ib" --platform-version 8.3.27` — проект и выгрузка
-   основной конфигурации в `src/configuration`.
+   основной конфигурации в `src/cf` по умолчанию.
 2. **Инструменты тестов.** `v8-runner tools download yaxunit --sources` и
    `v8-runner tools download vanessa` — последний выпуск YAxUnit и Vanessa Automation
    ([подробнее](docs/CAPABILITIES.md#tools-download)).

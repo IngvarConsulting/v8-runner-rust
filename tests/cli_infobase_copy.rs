@@ -54,6 +54,7 @@ if [ -n "$restore" ]; then
   fi
   if [ -f '{fail_restore}' ]; then
     printf 'the image is not loaded: %s\n' "$*" >&2
+    cat '{fail_restore}' >&2
     exit 1
   fi
   if [ -n "$base" ]; then mkdir -p "$base" && cat "$restore" > "$base/1Cv8.1CD"; fi
@@ -835,8 +836,8 @@ fn a_copy_the_runner_cannot_open_names_the_users_of_the_source() {
     );
 }
 
-/// Неудачная загрузка образа в файловую базу: пароли новой базы и источника, которые
-/// напечатал Конфигуратор, в отказе скрыты.
+/// В новую файловую базу образ загружается без реквизитов. Если платформа всё же
+/// напечатает пароли новой базы или источника, квитанция их скрывает.
 #[test]
 fn a_failed_load_into_a_file_base_hides_the_passwords() {
     let stand = Stand::new();
@@ -851,19 +852,30 @@ fn a_failed_load_into_a_file_base_hides_the_passwords() {
             source.display()
         ),
     );
-    // Keep exercising Designer diagnostics that actually echo the target credentials.
     let project = fs::read_to_string(&worktree).expect("project");
     fs::write(
         &worktree,
         project.replace("providers:\n", "providers:\n  infobase.create: designer\n"),
     )
     .expect("explicit Designer");
-    fs::write(stand.root().join("fail-restore"), "").expect("fail restore");
+    fs::write(
+        stand.root().join("fail-restore"),
+        "test diagnostics: ib-s3cret src-s3cret\n",
+    )
+    .expect("fail restore");
 
     let output = run(&worktree, &["infobase", "create", "--from", "upstream"]);
 
     assert!(!output.status.success());
-    assert!(calls(stand.root()).contains("ib-s3cret"));
+    let calls = calls(stand.root());
+    let restore = calls
+        .lines()
+        .find(|line| line.contains("/RestoreIB"))
+        .expect("Designer restore");
+    assert!(
+        !restore.contains(" /N ") && !restore.contains(" /P "),
+        "{restore}"
+    );
     let payload = envelope(&output);
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("the image is not loaded"), "{message}");

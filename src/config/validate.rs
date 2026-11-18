@@ -4,7 +4,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::config::model::{
-    names_an_ipv6_host, AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+    names_an_ipv6_host, AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
     ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
 use crate::domain::capability::Operation;
@@ -733,13 +733,27 @@ fn validate_project_checks_with(
 
 /// Validate only the configuration parts required to bootstrap downloaded tools.
 ///
-/// `tools download` may be invoked specifically to create Vanessa Automation and
-/// client MCP paths, so those tool-dependent checks must not block the command.
+/// This mode keeps the selected infobase available for choosing an extension installer.
 pub fn validate_tools_download_bootstrap(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_work_path(&config.work_path)?;
     validate_providers(config, &Operation::ALL)?;
     validate_connection_contract(config)?;
+    validate_tools_download_settings(config)
+}
+
+/// Vanessa needs neither a running infobase nor a provider to publish its EPF.
+pub fn validate_vanessa_download(
+    config: &AppConfig,
+    selected: Option<&InfobaseConfig>,
+) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_work_path(&config.work_path)?;
+    validate_connection_forms(config, selected)?;
+    validate_tools_download_settings(config)
+}
+
+fn validate_tools_download_settings(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_platform_version(config)?;
     validate_mcp_admission_timeout(config)?;
     validate_mcp_config(config)?;
@@ -1182,6 +1196,21 @@ fn validate_source_set_name(name: &str) -> Result<(), ConfigValidationError> {
 /// мешает работать с `origin`. Ошибка невыбранной секции называет её имя; выбранная
 /// отвечает так же, как отвечала единственная.
 fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_connection_forms(config, Some(&config.infobase))?;
+    match ManagedServer::of(&config.infobase) {
+        // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
+        Some(server) if config.infobase.connection.trim().is_empty() => {
+            return Err(server.not_running());
+        }
+        _ => {}
+    }
+    validate_selected_infobase_environment(config)
+}
+
+fn validate_connection_forms(
+    config: &AppConfig,
+    selected: Option<&InfobaseConfig>,
+) -> Result<(), ConfigValidationError> {
     for (name, infobase) in &config.infobases {
         if config.infobase_name.as_deref() == Some(name) {
             continue;
@@ -1193,24 +1222,17 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
             }
         })?;
     }
-    validate_infobase_form(&config.infobase)?;
-    match ManagedServer::of(&config.infobase) {
-        // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
-        Some(server) if config.infobase.connection.trim().is_empty() => {
-            return Err(server.not_running());
-        }
-        _ => {}
+    if let Some(infobase) = selected {
+        validate_infobase_form(infobase)?;
     }
-    validate_selected_infobase_environment(config)
+    Ok(())
 }
 
 /// Вид цели отвечает на три вопроса по порядку: есть секция `standalone` — автономный
 /// сервер; иначе в строке есть `File=` — файловая база; иначе — кластер, и третий ответ
 /// получает только строка серверной формы, которую платформа примет
 /// (`DEC.2026-09-21.TARGET-KIND-IS-ANSWERED-BY-THREE-QUESTIONS`).
-fn validate_infobase_form(
-    infobase: &crate::config::model::InfobaseConfig,
-) -> Result<(), ConfigValidationError> {
+fn validate_infobase_form(infobase: &InfobaseConfig) -> Result<(), ConfigValidationError> {
     // Значение в отказ не идёт: в строке бывают реквизиты, а управляющий символ назван кодом.
     if let Some(character) = crate::platform::connection::control_character(&infobase.connection) {
         return Err(ConfigValidationError::ConnectionHasControlCharacter {

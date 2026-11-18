@@ -33,9 +33,11 @@ pub struct ParsedExternalDescriptor {
     pub purpose: SourceDescriptorPurpose,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SourceDescriptorParseError {
+    #[error("{0}")]
     Xml(String),
+    #[error("unexpected end of XML")]
     UnexpectedEof,
 }
 
@@ -156,23 +158,27 @@ pub fn extract_configuration_logical_name(
         return Ok(None);
     }
 
-    extract_configuration_property(content, is_configuration_name_path)
+    extract_descriptor_property(content, is_configuration_name_path, None)
 }
 
 /// Version of the main configuration, as exported by Designer.
 pub fn extract_designer_configuration_version(
     content: &str,
 ) -> Result<Option<String>, SourceDescriptorParseError> {
-    extract_configuration_property(content, |path| {
-        matches!(
-            path,
-            [root, configuration, properties, version]
-                if root == "MetaDataObject"
-                    && configuration == "Configuration"
-                    && properties == "Properties"
-                    && version == "Version"
-        )
-    })
+    extract_descriptor_property(
+        content,
+        |path| {
+            matches!(
+                path,
+                [root, configuration, properties, version]
+                    if root == "MetaDataObject"
+                        && configuration == "Configuration"
+                        && properties == "Properties"
+                        && version == "Version"
+            )
+        },
+        None,
+    )
 }
 
 pub fn scan_designer_external_root(
@@ -392,24 +398,49 @@ fn extract_logical_name(content: &str) -> Result<Option<String>, ExternalDescrip
     Ok(logical_name)
 }
 
-fn extract_configuration_property(
+pub(crate) fn designer_language_code(
+    content: &str,
+) -> Result<Option<String>, SourceDescriptorParseError> {
+    extract_descriptor_property(
+        content,
+        |stack| {
+            matches!(
+                stack,
+                [root, object, properties, code] if root == "MetaDataObject" && object == "Language"
+                    && properties == "Properties" && code == "LanguageCode"
+            )
+        },
+        Some("LanguageCode"),
+    )
+}
+
+fn extract_descriptor_property(
     content: &str,
     is_property: impl Fn(&[String]) -> bool,
+    unique_property: Option<&str>,
 ) -> Result<Option<String>, SourceDescriptorParseError> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut stack = Vec::<String>::new();
     let mut value = None;
+    let mut found = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(event)) => {
-                stack.push(xml_local_name(event.name().as_ref()));
-            }
-            Ok(Event::Empty(event)) => {
-                stack.push(xml_local_name(event.name().as_ref()));
-                stack.pop();
+        let event = reader.read_event_into(&mut buf);
+        match event {
+            Ok(Event::Start(ref tag) | Event::Empty(ref tag)) => {
+                stack.push(xml_local_name(tag.name().as_ref()));
+                if let Some(name) = unique_property.filter(|_| is_property(&stack)) {
+                    if std::mem::replace(&mut found, true) {
+                        return Err(SourceDescriptorParseError::Xml(format!(
+                            "duplicate {name} element"
+                        )));
+                    }
+                }
+                if matches!(event, Ok(Event::Empty(_))) {
+                    stack.pop();
+                }
             }
             Ok(Event::Text(text)) if value.is_none() && is_property(&stack) => {
                 value = Some(

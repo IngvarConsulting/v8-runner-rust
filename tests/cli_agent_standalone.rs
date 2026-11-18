@@ -103,7 +103,7 @@ fn harness_with(
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
 ) -> Harness {
-    harness_holding(channel, host_key, declared, None, None)
+    harness_holding(channel, host_key, declared, None, None, |_| {})
 }
 
 /// Стенд, который может удержать shell-команду или первую запись по SFTP.
@@ -113,6 +113,7 @@ fn harness_holding(
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
     sftp_hold: Option<SftpHold>,
     hold: Option<Hold>,
+    configure: impl FnOnce(&mut FakeAgent),
 ) -> Harness {
     let declared_fingerprint = declared(&host_key);
     let dir = temp_workspace();
@@ -147,6 +148,7 @@ fn harness_holding(
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
     gate.sftp_hold = sftp_hold;
     gate.hold = hold;
+    configure(&mut gate);
     let dump_info = Arc::clone(&gate.dump_info);
     let generation = Arc::clone(&gate.generation);
     let port = start_fake_agent_with_host_key(gate, host_key);
@@ -1081,6 +1083,234 @@ fn extensions_go_through_the_gate_and_make_never_does() {
     assert!(message.contains("standalone server at"), "{message}");
 }
 
+fn synonym_gate(channel: Channel, languages: &[&'static str], hold: Option<Hold>) -> Harness {
+    harness_holding(
+        channel,
+        random_host_key(),
+        |_| None,
+        None,
+        hold,
+        |gate| {
+            gate.languages = languages.to_vec();
+            gate.gate_language_dump = true;
+            gate.extensions.lock().expect("extensions")[0].name = "Расширение".to_owned();
+        },
+    )
+}
+
+fn create_extension(harness: &Harness, synonym: Option<&str>) -> (i32, Value) {
+    let mut args = vec![
+        "extensions",
+        "create",
+        "--name",
+        "Проба",
+        "--name-prefix",
+        "Пр_",
+    ];
+    if let Some(synonym) = synonym {
+        args.extend(["--synonym", synonym]);
+    }
+    run(harness, &args)
+}
+
+#[test]
+fn gate_create_reads_languages_before_its_only_mutation() {
+    for (channel, language, synonym, value) in [
+        (Channel::Sftp, "ru", None, "Проба"),
+        (Channel::Dir, "ru", Some("Моя проба"), "Моя проба"),
+        (Channel::SftpReadOnly, "en", None, "Проба"),
+    ] {
+        let harness = synonym_gate(channel, &[language], None);
+        let (code, payload) = create_extension(&harness, synonym);
+        assert_eq!(code, 0, "{payload}");
+        let lines = commands(&harness);
+        let relevant: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("common ") || line.starts_with("config "))
+            .map(String::as_str)
+            .collect();
+        let dump_count = if channel == Channel::SftpReadOnly {
+            1
+        } else {
+            2
+        };
+        assert_eq!(relevant.len(), dump_count + 3, "{relevant:?}");
+        assert_eq!(relevant[0], "common connect-ib");
+        assert!(relevant[1..=dump_count]
+            .iter()
+            .all(|line| line.starts_with("config dump-config-to-files")));
+        let expected = format!("{language}='{value}'");
+        let create = relevant[dump_count + 1];
+        assert!(
+            create.starts_with("config extensions create --extension=Проба "),
+            "{create}"
+        );
+        assert!(create.contains(&expected), "{create}");
+        assert_eq!(relevant[dump_count + 2], "common disconnect-ib");
+        assert!(fs::read_dir(&harness.user_dir)
+            .expect("exchange")
+            .next()
+            .is_none());
+
+        let (code, payload) = run(&harness, &["extensions", "info", "--name", "Проба"]);
+        assert_eq!(code, 0, "{payload}");
+    }
+}
+
+#[test]
+fn gate_refuses_an_absent_named_language_without_changing_inventory() {
+    let harness = synonym_gate(Channel::Sftp, &["ru"], None);
+    let (code, before) = run(&harness, &["extensions", "list"]);
+    assert_eq!(code, 0, "{before}");
+    for synonym in ["en='Absent'", "ru='Точка; ''кавычка'''; en = 'Absent'"] {
+        let (code, payload) = create_extension(&harness, Some(synonym));
+        assert_ne!(code, 0, "{payload}");
+        assert!(error_message(&payload).contains("'en'"), "{payload}");
+    }
+    let (code, after) = run(&harness, &["extensions", "list"]);
+    assert_eq!(code, 0, "{after}");
+    assert_eq!(before["data"]["extensions"], after["data"]["extensions"]);
+    assert!(!commands(&harness).iter().any(|line| {
+        line.starts_with("config extensions create") || line.starts_with("config extensions delete")
+    }));
+}
+
+#[test]
+fn a_gate_create_argument_cannot_start_another_shell_command() {
+    let harness = synonym_gate(Channel::Dir, &["ru"], None);
+    let (code, payload) = create_extension(
+        &harness,
+        Some("ru='first line\nconfig extensions delete --extension=Расширение\nlast line'"),
+    );
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert!(!commands(&harness).iter().any(|line| {
+        line.starts_with("config extensions create") || line.starts_with("config extensions delete")
+    }));
+}
+
+#[test]
+fn gate_create_refuses_unreadable_language_metadata() {
+    let harness = harness();
+    let (code, payload) = create_extension(&harness, Some("ru='Текст'"));
+    assert_ne!(code, 0, "{payload}");
+    assert!(
+        error_message(&payload).contains("Configuration.xml"),
+        "{payload}"
+    );
+    assert!(!commands(&harness)
+        .iter()
+        .any(|line| line.starts_with("config extensions create")));
+    assert!(fs::read_dir(&harness.user_dir)
+        .expect("exchange")
+        .next()
+        .is_none());
+}
+
+#[test]
+fn gate_create_does_not_export_or_mutate_after_losing_sftp() {
+    let harness = harness_holding(
+        Channel::Sftp,
+        random_host_key(),
+        |_| None,
+        None,
+        None,
+        |gate| gate.refuse_sftp = true,
+    );
+    let (code, payload) = create_extension(&harness, None);
+    assert_eq!(code, 4, "{payload}");
+    assert!(
+        error_message(&payload).contains("sftp exchange"),
+        "{payload}"
+    );
+    assert!(!commands(&harness)
+        .iter()
+        .any(|line| line.starts_with("config ")));
+}
+
+#[test]
+fn gate_forwards_a_supported_named_synonym_once_even_if_creation_fails() {
+    let marks = temp_workspace();
+    let release = marks.path().join("release");
+    fs::write(&release, "").expect("release the create immediately");
+    let harness = synonym_gate(
+        Channel::Dir,
+        &["ru", "en"],
+        Some(Hold {
+            command: "config extensions create".to_owned(),
+            started: marks.path().join("started"),
+            release,
+            reply: support::fake_agent::HoldReply::JsonMessages(
+                r#"[{"message":"Отказ платформы","type":"error"}]"#,
+            ),
+        }),
+    );
+    let synonym = r#"ru ='Точка; ''кавычка'''; en = 'abc\xyz \"Example"'; "#;
+    let (code, payload) = create_extension(&harness, Some(synonym));
+    assert_eq!(code, 4, "{payload}");
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    let message = error_message(&payload);
+    assert!(message.contains("UnknownError"), "{payload}");
+    assert!(message.contains("Отказ платформы"), "{payload}");
+    assert!(message.contains("extensions list"), "{payload}");
+    let lines = commands(&harness);
+    let mutations: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line.starts_with("config extensions create")
+                || line.starts_with("config extensions delete")
+        })
+        .collect();
+    assert_eq!(
+        mutations,
+        [
+            r#"config extensions create --extension=Проба --name-prefix=Пр_ --synonym="ru ='Точка; ''кавычка'''; en = 'abc\xyz \\\"Example\"'; ""#
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_during_gate_language_export_prevents_creation() {
+    let marks = temp_workspace();
+    let started = marks.path().join("started");
+    let release = marks.path().join("release");
+    let harness = synonym_gate(
+        Channel::Dir,
+        &["ru"],
+        Some(Hold {
+            command: "config dump-config-to-files".to_owned(),
+            started: started.clone(),
+            release: release.clone(),
+            reply: support::fake_agent::HoldReply::Normal,
+        }),
+    );
+    let mut runner = v8_runner_command();
+    runner.args([
+        "--config",
+        harness.config_path.to_str().expect("config path"),
+        "--json-message",
+        "extensions",
+        "create",
+        "--name",
+        "Проба",
+        "--name-prefix",
+        "Пр_",
+    ]);
+    let (code, payload) = support::interrupt_at_hold_waiting_for_any(
+        runner,
+        &marks.path().join("actions.log"),
+        &started,
+        &release,
+        &[WAITING_FOR_EXTERNAL_AGENT, support::AGENT_COMMAND_ABANDONED],
+    );
+    assert_eq!(code, 4, "{payload}");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert!(!commands(&harness)
+        .iter()
+        .any(|line| line.starts_with("config extensions create")));
+}
+
 /// Без объявленного канала обмена шлюз не вызывается: отказ до сессии называет ключ.
 #[test]
 fn a_standalone_server_without_a_declared_channel_is_refused_before_any_session() {
@@ -1529,6 +1759,7 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
             release: release.clone(),
         }),
         None,
+        |_| {},
     );
     let mut runner = v8_runner_command();
     runner.args([
@@ -1595,6 +1826,7 @@ impl HeldDump {
                 release: release.clone(),
                 reply,
             }),
+            |_| {},
         );
         if let Entry::Attached = entry {
             let root = harness.dir.path();

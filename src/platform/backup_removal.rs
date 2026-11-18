@@ -43,6 +43,8 @@ pub enum SpawnRefusal {
     NotTheRunner,
     #[error("the path is not valid Unicode: {0}")]
     NotUnicode(PathBuf),
+    #[error("the runner executable '{0}' has no directory to start in")]
+    NoDirectory(PathBuf),
     #[error(transparent)]
     Spawn(#[from] ServiceSpawnError),
 }
@@ -53,11 +55,19 @@ pub fn spawn(backup: &Path) -> Result<u32, SpawnRefusal> {
     let path = backup
         .to_str()
         .ok_or_else(|| SpawnRefusal::NotUnicode(backup.to_path_buf()))?;
+    let workdir = program
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| SpawnRefusal::NoDirectory(program.clone()))?;
     let request = ServiceRequest {
         program: program.clone(),
         args: vec![COMMAND.to_owned(), "--path".to_owned(), path.to_owned()],
-        // Текущий каталог процесса держится открытым: не каталог проекта.
-        workdir: Some(std::env::temp_dir()),
+        // Текущий каталог процесса держится открытым: не каталог проекта и не `workPath`
+        // (`INV.USE-CASES.DELETING-THE-WORKPATH-KEEPS-STANDS-AND-BASES`), а каталог исполняемого
+        // файла раннера, который процесс и так держит своим образом. Временный каталог ОС для
+        // этого не нужен (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+        workdir: Some(workdir),
         // Отказ виден по оставшемуся дереву, его доберёт следующая команда: журнал не нужен.
         log_path: PathBuf::from(if cfg!(windows) { "NUL" } else { "/dev/null" }),
         stdin: None,

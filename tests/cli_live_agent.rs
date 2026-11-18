@@ -2,8 +2,8 @@
 //! настоящего процесса `v8-runner agent keeper`, а тот держит двойника агента
 //! (`support::fake_agent`) между командами.
 //!
-//! У каждого стенда свой каталог состояния учётной записи (`V8_RUNNER_STATE_DIR`): параллельные
-//! тесты не делят предел живых агентов. В конце стенд снимает своих сторожей и их агентов.
+//! У каждого стенда свой каталог состояния учётной записи (`V8_RUNNER_STATE_DIR`: он называет
+//! реестр живых агентов учётной записи): параллельные тесты не делят предел живых агентов. В конце стенд снимает своих сторожей и их агентов.
 #![cfg(unix)]
 
 mod support;
@@ -21,7 +21,9 @@ use support::fake_agent::{
 use support::{interrupt_at_hold, temp_workspace, v8_runner_command, AGENT_COMMAND_ABANDONED};
 
 /// Каталог состояния стенда: короткий путь в `/tmp`, потому что путь сокета сторожа ограничен.
-struct State(tempfile::TempDir);
+/// Записи сторожей лежат в рабочих копиях стендов (`workPath/agent/live`, #735): каталог
+/// состояния помнит их.
+struct State(tempfile::TempDir, std::cell::RefCell<Vec<PathBuf>>);
 
 impl State {
     fn new() -> Self {
@@ -30,6 +32,7 @@ impl State {
                 .prefix("v8rl")
                 .tempdir_in("/tmp")
                 .expect("state dir"),
+            std::cell::RefCell::new(Vec::new()),
         )
     }
 
@@ -37,13 +40,19 @@ impl State {
         self.0.path()
     }
 
-    /// Записи сторожей этого каталога состояния.
+    /// Рабочая копия стенда с этим каталогом состояния.
+    fn remember(&self, work: PathBuf) {
+        self.1.borrow_mut().push(work);
+    }
+
+    /// Записи сторожей рабочих копий с этим каталогом состояния.
     fn records(&self) -> Vec<Value> {
-        let Ok(keys) = fs::read_dir(self.path().join("agents")) else {
-            return Vec::new();
-        };
-        keys.flatten()
-            .filter_map(|key| fs::read(key.path().join("agent").join("record.json")).ok())
+        self.1
+            .borrow()
+            .iter()
+            .filter_map(|work| fs::read_dir(work.join("agent").join("live")).ok())
+            .flat_map(|homes| homes.flatten())
+            .filter_map(|home| fs::read(home.path().join("record.json")).ok())
             .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
             .collect()
     }
@@ -63,15 +72,36 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
-        for record in self.records() {
-            for pid in [&record["pid"], &record["agent"]["pid"]] {
-                if let Some(pid) = pid.as_u64() {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-9", &pid.to_string()])
-                        .status();
-                }
+        kill_keepers(self.records());
+    }
+}
+
+/// Снимает сторожей и агентов по их записям.
+fn kill_keepers(records: Vec<Value>) {
+    for record in records {
+        for pid in [&record["pid"], &record["agent"]["pid"]] {
+            if let Some(pid) = pid.as_u64() {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
             }
         }
+    }
+}
+
+/// Стенд уходит раньше каталога состояния: его сторожей снимают по записям в его рабочей копии,
+/// пока она есть.
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let live = self.dir.path().join("work").join("agent").join("live");
+        let records = fs::read_dir(live)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|home| fs::read(home.path().join("record.json")).ok())
+            .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
+            .collect();
+        kill_keepers(records);
     }
 }
 
@@ -93,6 +123,7 @@ fn harness(state: &State, ib: Option<&Path>, agent_yaml: &str, hold: Option<Hold
     fs::create_dir_all(&project).expect("configuration");
     fs::write(project.join("Configuration.xml"), "<Configuration/>").expect("root");
     fs::create_dir_all(root.join("work")).expect("work dir");
+    state.remember(root.join("work"));
     let ib = ib.map_or_else(
         || {
             let ib = root.join("ib");

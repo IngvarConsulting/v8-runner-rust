@@ -140,16 +140,18 @@ impl RunnerVersionFile {
 
     /// Захват описи из стадии полной выгрузки до публикации: стадия уходит в каталог без неё,
     /// а копией опись становится только после удачной публикации ([`Self::record_prepared`]).
-    /// Частный временный файл держит большую опись вне памяти процесса.
-    pub(crate) fn prepare_from(stage: &Path) -> Result<Option<File>, AppError> {
+    /// Частный временный файл в `workPath/temp` держит большую опись вне памяти процесса
+    /// (`INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY`).
+    pub(crate) fn prepare_from(stage: &Path, work_path: &Path) -> Result<Option<File>, AppError> {
         let path = stage.join(VERSION_FILE_NAME);
         let mut input = match File::open(&path) {
             Ok(input) => input,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io_error("read", &path, &error)),
         };
-        let mut prepared =
-            tempfile::tempfile().map_err(|error| io_error("prepare", &path, &error))?;
+        let mut prepared = crate::support::temp::temp_root(work_path)
+            .and_then(tempfile::tempfile_in)
+            .map_err(|error| io_error("prepare", &path, &error))?;
         io::copy(&mut input, &mut prepared).map_err(|error| io_error("prepare", &path, &error))?;
         drop(input);
         fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
@@ -659,9 +661,14 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
         let description = staged(root.path(), "full");
-        let prepared =
-            RunnerVersionFile::prepare_from(description.parent().expect("stage")).expect("taken");
+        let work = root.path().join("work");
+        let prepared = RunnerVersionFile::prepare_from(description.parent().expect("stage"), &work)
+            .expect("taken");
         assert!(!description.exists(), "the tree is published without it");
+        assert!(
+            work.join("temp").is_dir(),
+            "the description waits in workPath/temp, not in the system temp"
+        );
         file.record_prepared(prepared).expect("recorded");
         assert_eq!(fs::read(&file.copy).expect("copy"), b"full");
         assert!(file.usable().expect("usable").is_some());

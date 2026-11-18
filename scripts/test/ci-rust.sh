@@ -12,17 +12,22 @@ case "$CI_SCOPE" in
   contract)
     case "$TARGET_OS_LABEL" in
       Windows|MINGW*|MSYS*|CYGWIN*)
-        echo "Windows contract scope runs native infobase export and external full-pull CLI tests, support::fs unit tests, and selected OS regressions."
+        echo "Windows contract scope runs native infobase export, external full-pull, init and help CLI tests, plus selected unit regressions."
         # Сборочная проверка сюда не входит: на Windows шаг Lint в ci.yml прогоняет
         # `cargo clippy --locked --bins`, а тестовые цели собирает сам `cargo test` ниже.
         cargo test --locked --test cli_infobase_cross_platform
         cargo test --locked --test cli_external_full_pull
+        cargo test --locked --test cli_config_init --test cli_help
         cargo test --locked --bin v8-runner 'support::fs::tests::'
         cargo test --locked --bin v8-runner 'config::loader::tests::declared_infobases_'
         cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'
         windows_contract_tests=(
           "a_closed_job_keeps_the_agent_one_shot"
           "a_ctrl_break_from_another_process_group_cancels_like_ctrl_c"
+          "config::loader::tests::load_config_normalizes_relative_platform_path_against_config_directory"
+          "domain::source_set::tests::accepts_absolute_path"
+          "platform::locator::tests::a_missing_component_is_named_together_with_the_installations_that_have_it"
+          "support::temp::tests::creates_temp_files_in_new_locations"
           "platform::designer::tests::cf_exports_pass_windows_drive_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_pass_windows_unc_paths_without_verbatim_prefix"
           "platform::designer::tests::cf_exports_preserve_regular_windows_targets"

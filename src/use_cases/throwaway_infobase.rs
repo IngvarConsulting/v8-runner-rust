@@ -250,7 +250,7 @@ impl FileInfobase {
     }
 
     pub(crate) fn connection(&self) -> V8Connection {
-        V8Connection::from_connection_string(&format!("File={}", self.database_path().display()))
+        V8Connection::for_file(&self.database_path())
     }
 
     pub(crate) fn create(

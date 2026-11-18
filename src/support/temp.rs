@@ -275,14 +275,9 @@ mod tests {
 
         let partial = partial_list_file(dir.path()).expect("partial file");
         let dump_partial = dump_object_list_file(dir.path()).expect("dump partial file");
-        assert!(partial
-            .path()
-            .to_string_lossy()
-            .contains("temp/partial-lists"));
-        assert!(dump_partial
-            .path()
-            .to_string_lossy()
-            .contains("temp/partial-lists"));
+        let expected = dir.path().join("temp").join("partial-lists");
+        assert_eq!(partial.path().parent(), Some(expected.as_path()));
+        assert_eq!(dump_partial.path().parent(), Some(expected.as_path()));
     }
 
     #[test]

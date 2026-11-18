@@ -1,11 +1,8 @@
 //! Каким адресом клиент открывает базу. Правило одно у `launch` и у клиента тестов:
 //! объявленная строка подключения, а без неё — клиентский адрес `infobase.web.url`.
 //!
-//! Автономная цель здесь не особый случай адреса: её строка подключения — строка прямого
-//! шлюза, и клиент идёт по ней, как в кластер, с реквизитами базы. Особое у неё другое:
-//! толстый клиент и обычное приложение против неё не запускаются, а клиентский адрес идёт
-//! без реквизитов, пока их приём по `/WS` не замерен (#184). Здесь и только здесь решается,
-//! идут ли реквизиты при клиентском адресе.
+//! Для автономного сервера строка подключения ведёт к прямому шлюзу. Реквизиты базы
+//! используются и по строке подключения, и по клиентскому адресу.
 
 use crate::config::model::{AppConfig, StandaloneWay};
 use crate::domain::capability::{Provider, TargetKind};
@@ -48,29 +45,18 @@ pub(crate) fn resolve(
     }
     let connection_declared = config.connection_declared();
     match requested {
-        Some(LaunchVia::Web) => web_address(config).map(|url| web(config, url)),
+        Some(LaunchVia::Web) => web_address(config).map(|url| ClientAddress::Web(url.to_owned())),
         Some(LaunchVia::Connection) if connection_declared => Ok(ClientAddress::Connection),
         Some(LaunchVia::Connection) => Err(direct_gate_undeclared(THIN_CLIENT)),
         None if connection_declared => Ok(ClientAddress::Connection),
         None if thin => match web_address(config) {
-            Ok(url) => Ok(web(config, url)),
+            Ok(url) => Ok(ClientAddress::Web(url.to_owned())),
             Err(_) => Err(AppError::Validation(format!(
                 "{}; or declare infobase.web.url, the client address",
                 StandaloneWay::DirectGate.undeclared(THIN_CLIENT)
             ))),
         },
         None => Err(direct_gate_undeclared(who(mode))),
-    }
-}
-
-/// Клиентский адрес и решение о реквизитах при нём. Файловой и кластерной цели они идут;
-/// автономной — нет: приём `/N` и `/P` клиентом по `/WS` автономного сервера не замерен
-/// (#184), а по строке прямого шлюза реквизиты идут, как в кластер.
-fn web(config: &AppConfig, url: &str) -> ClientAddress {
-    if config.target_kind() == TargetKind::Standalone {
-        ClientAddress::WebWithoutCredentials(url.to_owned())
-    } else {
-        ClientAddress::Web(url.to_owned())
     }
 }
 
