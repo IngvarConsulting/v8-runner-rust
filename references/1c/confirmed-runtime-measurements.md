@@ -6865,14 +6865,25 @@ ragent -port 27540 -regport 27541 -range 27560:27591 -d <реестр> \
 На той же платформе `attachDebugUI` с двумя полями из #768 вернул
 HTTP 400 (`Error transforming XML data`). С XML-декларацией,
 `options/foregroundAbility=false` и без заголовка `Accept` результат —
-HTTP 200 с `result=registered`. Обёртка `request` без пространства имён. Поля `infoBaseAlias`,
-`idOfDebuggerUI` и `options` находятся в
+HTTP 200 с `result=registered`. Обёртка `request` без пространства имён.
+Поля `infoBaseAlias`, `idOfDebuggerUI` и `options` находятся в
 `http://v8.1c.ru/8.3/debugger/debugRDBGRequestResponse`, вложенный
 `foregroundAbility` наследует это пространство имён. HTTP 200 получен
 для `DefAlias`, имени базы из `Ref` и обеих форм адреса базы.
-Регистрация без запущенных целей не показывает, какой из этих алиасов
-увидит `Server` и `ManagedClient`. Для отдельного управляемого кластера
-Конфигуратор сообщил `License not found on the 1C:Enterprise server`.
+
+После `launch thin --debug` `getDbgTargets` через 3 с вернул `Server`,
+а через 6 с — `Server` и `ManagedClient`. Обе цели появились только
+при запросе с именем базы из `Ref` (`debug768`). При `DefAlias`,
+`127.0.0.1:28565\debug768` и `Srvr=127.0.0.1:28565;Ref=debug768;`
+ответ остался пустым. `seanceId` обеих целей совпал с UUID сеанса
+`1CV8C` из `sessions list`.
+
+В первом прогоне от `victor` рабочий процесс попытался открыть файл
+`.lic` из `/var/1C/licenses` с `O_RDWR` и получил `EACCES`. Файл
+имел режим `0644` и принадлежал `usr1cv8`. В успешном прогоне отдельный
+стенд запущен от `usr1cv8` с собственным каталогом и реестром. Лицензия
+разработчика позволила загрузить тестовую конфигурацию и запустить
+тонкий клиент. Права на файл лицензии остались прежними.
 
 ## Версии агента кластера и временного RAS (#213)
 
