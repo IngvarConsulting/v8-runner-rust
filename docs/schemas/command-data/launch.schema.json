@@ -39,6 +39,11 @@
       ],
       "type": "object"
     },
+    "DebuggerUrl": {
+      "description": "Адрес сервера отладки: http://<хост>:<порт>.",
+      "pattern": "^http://.+:[0-9]+$",
+      "type": "string"
+    },
     "ExternalEpfWaitResult": {
       "additionalProperties": false,
       "description": "Legacy EPF wire projection; execute_path remains required and non-null.",
@@ -79,6 +84,20 @@
         "timed_out",
         "output_path",
         "stderr_path"
+      ],
+      "type": "object"
+    },
+    "LaunchDebug": {
+      "additionalProperties": false,
+      "description": "Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`. Объект, а не\nстрока: так поле закреплено формой `launch` (`CTR.WIRE.LAUNCH-DATA`, версия 7).",
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/DebuggerUrl",
+          "description": "Адрес сервера отладки, как его получил клиент."
+        }
+      },
+      "required": [
+        "url"
       ],
       "type": "object"
     },
@@ -250,6 +269,17 @@
         }
       ],
       "description": "Bounded thin-client wait without an external EPF."
+    },
+    "debug": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchDebug"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Сервер отладки, к которому подключён клиент (`launch --debug`)."
     },
     "external_epf_wait": {
       "anyOf": [

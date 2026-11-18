@@ -93,10 +93,12 @@
 <h3 id="no-lock">Без замка рабочей копии</h3>
 <p><code>debug-server start</code> и <code>debug-server stop</code> не ждут замка <code>workPath</code> и замка стенда и базу не открывают: отладчик гасит сервер при отсоединении, даже если в это время идёт <code>push</code>. Сеанс, который прямо сейчас запускает другая команда, <code>stop</code> не трогает и отказывает <code>workspace_busy</code>.</p>
 <h3 id="client">Клиент под отладкой</h3>
-<p>Адрес из ответа передают отладчику и клиенту: тонкий клиент запускается с ключами <code>/DEBUG -http -attach /DEBUGGERURL &lt;url&gt;</code>, и отладчик сам подключает его предметы отладки, зарегистрированные на сервере <span class="ref">(<a href="platform.html#t112">112</a>)</span>.</p>
-<pre class="sh"><code>"C:\Program Files\1cv8\8.3.27.2342\bin\1cv8c.exe" ENTERPRISE /F "C:\work\ib" /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961</code></pre>
-<h3 id="launch-debug">launch --debug <span class="plan-badge">План</span></h3>
-<p><code>launch --debug</code> передаёт клиенту адрес сервера отладки.</p>
+<p>Адрес из ответа передают отладчику и клиенту: <a href="cli-launch.html#launch-debug"><code>launch thin --debug &lt;url&gt;</code></a> запускает клиент с ключами <code>/DEBUG -http -attach /DEBUGGERURL &lt;url&gt;</code>, и отладчик сам подключает его предметы отладки, зарегистрированные на сервере <span class="ref">(<a href="platform.html#t112">112</a>)</span>. Обычный порядок работы отладчика:</p>
+<pre class="sh"><code>v8-runner debug-server start --owner-pid 9312
+v8-runner launch thin --debug http://127.0.0.1:12961
+v8-runner debug-server stop 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
+<h3 id="launch-debug">launch --debug</h3>
+<p><a href="cli-launch.html#launch-debug"><code>launch --debug &lt;url&gt;</code></a> передаёт адрес сервера отладки клиенту предприятия: <code>thin</code>, <code>thick</code>, <code>ordinary</code> или <code>mcp</code>. Ответ <code>launch</code> называет его в <code>debug.url</code>. Перед запуском раннер сервер не проверяет: адрес подтвердил <code>debug-server start</code>, а если сервера уже нет, клиент работает без отладки. <code>launch designer --debug</code> и <code>launch web --debug</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code> и ключи отладки в <code>--raw-key</code> рядом с <code>--debug</code> — отказ <code>invalid_argument</code>.</p>
 <h3 id="who">Кто поднимает сервер отладки</h3>
 <div class="tablewrap"><table>
 <thead><tr><th>База</th><th>Сервер отладки</th><th><code>owner</code></th></tr></thead>

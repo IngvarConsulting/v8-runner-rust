@@ -223,6 +223,22 @@ pub fn build_launch_command(
         args.push(encode_launch_parameter(c));
     }
 
+    // Сервер отладки: клиент подключается к нему сразу после запуска, и `-attach` подключает
+    // его предметы отладки без ручного выбора в отладчике. Конфигуратору адрес не доходит:
+    // `launch designer --debug` отвергает разбор ключей (у него свой отладчик).
+    debug_assert!(
+        !(matches!(mode, LaunchClientMode::Designer) && launch.debugger_url.is_some()),
+        "Designer is launched without a debugger url"
+    );
+    if let Some(url) = launch
+        .debugger_url
+        .as_ref()
+        .filter(|_| !matches!(mode, LaunchClientMode::Designer))
+    {
+        args.extend(["/DEBUG", "-http", "-attach", "/DEBUGGERURL"].map(str::to_owned));
+        args.push(url.to_string());
+    }
+
     let mut extra_args = Vec::new();
     if !matches!(mode, LaunchClientMode::Designer) {
         extra_args.extend(filtered_raw_launch_args(additional_launch_keys));
@@ -354,6 +370,37 @@ mod tests {
                 "http://localhost/base".to_owned(),
             ]
         );
+    }
+
+    /// `launch --debug`: клиент подключается к серверу отладки сразу после запуска, ключи идут
+    /// до сырых ключей; у Конфигуратора их нет.
+    #[test]
+    fn a_debugger_url_attaches_the_client_to_its_debug_server() {
+        let connection = V8Connection::from_connection_string("File=/tmp/ib");
+        let launch = LaunchOptions {
+            debugger_url: crate::domain::launch::DebuggerUrl::parse("http://127.0.0.1:12961"),
+            raw_args: vec!["/L ru".to_owned()],
+            ..LaunchOptions::default()
+        };
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            &ClientAddress::Connection,
+            &connection,
+            &[],
+            &launch,
+        );
+        let at = args.iter().position(|arg| arg == "/DEBUG").expect("/DEBUG");
+        assert_eq!(
+            args[at..at + 5],
+            [
+                "/DEBUG",
+                "-http",
+                "-attach",
+                "/DEBUGGERURL",
+                "http://127.0.0.1:12961"
+            ]
+        );
+        assert!(at < args.iter().position(|arg| arg == "/L ru").expect("raw key"));
     }
 
     #[test]

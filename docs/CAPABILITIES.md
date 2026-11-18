@@ -909,7 +909,9 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   отдаёт адрес сервера отладки кластера с `owner: "cluster"`, без `pid`; `--port` и `--owner-pid` игнорируются с
   предупреждением в `warnings`. Кластер не работает или без `--debug` — `environment_unavailable` с нужной командой.
   `stop` такого сеанса кластер не трогает (`nothing_to_stop`). Кластер, запущенный не раннером, — `target`.
-- Клиент под отладкой запускают с `/DEBUG -http -attach /DEBUGGERURL <url>`. Перед удалением `workPath` —
+- Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
+  `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
+  `launch thin --debug <url>` → `debug-server stop <session>`. Перед удалением `workPath` —
   `debug-server stop` по каждому сеансу.
 
 ### `web`
@@ -2185,9 +2187,9 @@ v8-runner status [--deep | --all]
 ### `launch`
 
 ```bash
-v8-runner launch <designer|thin|thick|ordinary> [--via <web|connection>] [--dry-run] [FLAGS]
+v8-runner launch <designer|thin|thick|ordinary> [--via <web|connection>] [--debug <URL>] [--dry-run] [FLAGS]
 v8-runner launch web [--dry-run]
-v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>] [--wait-ready] [FLAGS]
+v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>] [--debug <URL>] [--wait-ready] [FLAGS]
 ```
 
 - Для обычного запуска (`designer`/`thin`/`thick`/`ordinary`) режим задаётся позиционным
@@ -2212,6 +2214,14 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - Пользовательский `/IBConnectionString` из `tools.enterprise.additional-launch-keys`
   встаёт после адреса раннера (`/S` или `/IBConnectionString`), хотя справка платформы
   требует его раньше `/S`: известный предел, раннер порядок не меняет.
+- `--debug <URL>` запускает клиент предприятия (`thin`, `thick`, `ordinary`, `mcp`) подключённым
+  к серверу отладки: раннер добавляет `/DEBUG -http -attach /DEBUGGERURL <URL>` перед ключами
+  `--raw-key`, ответ называет адрес в `debug.url`. Адрес — `http://<host>:<port>`, как его отдаёт
+  `debug-server start` ([подробности](#debug-server)); путь, параметры, фрагмент, учётные данные и порт 0 — отказ; `/DEBUG` или `/DEBUGGERURL` в `--raw-key` или `tools.enterprise.additional-launch-keys` рядом с `--debug` — тоже отказ.
+  Сервер перед запуском не проверяется: если его уже нет, клиент работает без отладки.
+  `launch designer --debug` (у Конфигуратора свой отладчик), `launch web --debug` (веб-клиент
+  не получает ключей запуска) и `/DEBUG` или `/DEBUGGERURL` в `--raw-key` рядом с `--debug` —
+  отказ `invalid_argument` до запуска.
 - Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
   userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
@@ -2408,5 +2418,3 @@ v8-runner mcp serve http
 - Отдельная пользовательская настройка EDT `working-directory`.
 - `debug-server` для базы на автономном сервере: отказ `target`
   ([#759](https://github.com/IngvarConsulting/v8-runner-rust/issues/759)).
-- `launch --debug`: запуск клиента с адресом сервера отладки
-  ([#758](https://github.com/IngvarConsulting/v8-runner-rust/issues/758)).

@@ -4725,6 +4725,7 @@ fn map_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<LaunchOptions
         internal_out: None,
         raw_args: args.raw_keys.clone(),
         external_epf_wait: None,
+        debugger_url: None,
     })
 }
 
@@ -5095,13 +5096,53 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         }
         None
     };
+    let mut launch = map_direct_launch_options(target, &args.launch, client_mcp.is_some())?;
+    launch.debugger_url = map_launch_debug(target, args.debug.as_deref())?;
     Ok(LaunchRequest {
         target,
-        launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
+        launch,
         client_mcp,
         via: map_launch_via(args.via.as_deref())?,
         dry_run,
     })
+}
+
+/// `launch --debug <url>`: только клиент предприятия — у Конфигуратора свой отладчик, а
+/// веб-клиент ключей командной строки не получает. Адрес — `http://<хост>:<порт>`, как его
+/// отвечает `debug-server start`. Ключи отладки рядом с ним (в `--raw-key` и в настройках)
+/// проверяет сценарий запуска: только он видит настройки.
+fn map_launch_debug(
+    target: crate::use_cases::request::LaunchTargetRequest,
+    url: Option<&str>,
+) -> Result<Option<crate::domain::launch::DebuggerUrl>, UseCaseError> {
+    use crate::use_cases::request::LaunchTargetRequest;
+
+    let Some(url) = url else {
+        return Ok(None);
+    };
+    let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    match target {
+        LaunchTargetRequest::Designer => {
+            return refuse(
+                "--debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
+                    .to_owned(),
+            )
+        }
+        LaunchTargetRequest::Web => {
+            return refuse(
+                "--debug is for the 1C:Enterprise client: the web client takes no launch keys"
+                    .to_owned(),
+            )
+        }
+        LaunchTargetRequest::Enterprise(_) => {}
+    }
+    match crate::domain::launch::DebuggerUrl::parse(url) {
+        Some(parsed) => Ok(Some(parsed)),
+        // Введённое не повторяется: в нём могут быть учётные данные.
+        None => refuse(
+            "--debug: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it".to_owned(),
+        ),
+    }
 }
 
 fn map_direct_launch_options(
@@ -5165,6 +5206,7 @@ fn map_direct_launch_options(
         internal_out: None,
         raw_args: common.raw_keys.clone(),
         external_epf_wait,
+        debugger_url: None,
     })
 }
 
@@ -5194,6 +5236,7 @@ fn map_mcp_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Use
         internal_out: None,
         raw_args: args.raw_keys.clone(),
         external_epf_wait: None,
+        debugger_url: None,
     })
 }
 
@@ -6402,6 +6445,9 @@ fn render_launch_text_with_status(
     if let Some(pid) = result.pid {
         details.push(format!("pid: {pid}"));
     }
+    if let Some(debug) = &result.debug {
+        details.push(format!("debug: {}", debug.url));
+    }
     if !result.provider_dispatched {
         details.push("provider dispatched: false".to_owned());
     }
@@ -6883,6 +6929,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -6915,6 +6962,7 @@ mod tests {
                     internal_out: None,
                     raw_args: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
                     external_epf_wait: None,
+                    debugger_url: None,
                 },
                 client_mcp: None,
                 dry_run: false,
@@ -6923,6 +6971,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "ordinary".to_owned(),
                     mcp_scenario: None,
@@ -6941,6 +6990,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -6959,6 +7009,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
@@ -6982,6 +7033,7 @@ mod tests {
                     internal_out: None,
                     raw_args: Vec::new(),
                     external_epf_wait: None,
+                    debugger_url: None,
                 },
                 client_mcp: Some(ClientMcpOptionsRequest {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),
@@ -7055,6 +7107,7 @@ mod tests {
         .expect_err("dump mode should be rejected");
         let launch_error = map_launch_request(
             &LaunchArgs {
+                debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
@@ -7486,6 +7539,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Launch(LaunchArgs {
+                debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,

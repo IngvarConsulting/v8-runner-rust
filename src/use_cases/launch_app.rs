@@ -119,6 +119,7 @@ fn run_launch(
     let reported_url = web_url.map(mask_url_userinfo);
 
     let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
+    refuse_a_second_debugger(config, &launch).map_err(UseCaseFailure::without_payload)?;
     if launch.c.as_ref().is_some_and(|value| value.contains('\0')) {
         return Err(UseCaseFailure::without_payload(AppError::Validation(
             "--c must not contain NUL".to_owned(),
@@ -211,6 +212,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         });
     }
 
@@ -293,6 +295,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait,
             client_wait,
+            debug: launch_debug(&launch),
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -332,6 +335,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -397,6 +401,7 @@ fn run_launch(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: launch_debug(&launch),
     })
 }
 
@@ -645,6 +650,7 @@ fn execute_web(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: None,
         });
     }
 
@@ -670,7 +676,41 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: None,
     })
+}
+
+/// `--debug` ставит `/DEBUG` и `/DEBUGGERURL` сам: такие ключи в `--raw-key` или в
+/// `tools.enterprise.additional-launch-keys` дали бы клиенту второй сервер отладки.
+fn refuse_a_second_debugger(config: &AppConfig, launch: &LaunchOptions) -> Result<(), AppError> {
+    if launch.debugger_url.is_none() {
+        return Ok(());
+    }
+    let configured = &config.tools.enterprise.additional_launch_keys;
+    let names_a_debugger = |key: &String| {
+        ["debug", "debuggerurl"]
+            .iter()
+            .any(|name| crate::domain::runner::launch_key_alias_matches(key, name))
+    };
+    if launch.raw_args.iter().any(names_a_debugger) {
+        return Err(AppError::Validation(
+            "--debug sets /DEBUG and /DEBUGGERURL itself: remove them from --raw-key".to_owned(),
+        ));
+    }
+    if configured.iter().any(names_a_debugger) {
+        return Err(AppError::Validation(
+            "--debug sets /DEBUG and /DEBUGGERURL itself: tools.enterprise.additional-launch-keys already names a debugger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Отладка в ответе — тот адрес, что получил клиент.
+fn launch_debug(launch: &LaunchOptions) -> Option<Box<crate::domain::launch::LaunchDebug>> {
+    launch
+        .debugger_url
+        .clone()
+        .map(|url| Box::new(crate::domain::launch::LaunchDebug { url }))
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {
