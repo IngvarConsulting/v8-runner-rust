@@ -1,6 +1,7 @@
 //! Автономный сервер `ibsrv`, которого поднимает раннер: ключи запуска. Что запускать и в каком
 //! порядке, решает `use_cases/managed_stand`.
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,50 @@ pub struct DbmsTarget<'a> {
 /// Ключи запуска, которые называют файловую базу. По ним же узнают чужой сервер над ней.
 pub fn file_base_keys(db_path: &Path) -> Vec<String> {
     vec![format!("--db-path={}", db_path.display())]
+}
+
+/// A local ibsrv which names this physical file base in its launch arguments.
+pub(super) fn file_server_pid(base: &Path, cancelled: impl Fn() -> bool) -> Option<u32> {
+    use crate::platform::file_base_hold::DATABASE_FILE;
+    use crate::support::path::filesystem_object_identity;
+
+    let directory = filesystem_object_identity(base).ok()?;
+    let data = filesystem_object_identity(&base.join(DATABASE_FILE)).ok();
+    crate::platform::service::first_process_with_arguments("ibsrv", cancelled, |arguments| {
+        explicit_file_base(arguments).is_some_and(|path| {
+            filesystem_object_identity(path).is_ok_and(|server_dir| server_dir == directory)
+                || data.as_ref().is_some_and(|data| {
+                    filesystem_object_identity(&path.join(DATABASE_FILE))
+                        .is_ok_and(|server_data| &server_data == data)
+                })
+        })
+    })
+}
+
+fn explicit_file_base<'a>(argv: &[&'a OsStr]) -> Option<&'a Path> {
+    let mut arguments = argv.iter().skip(1);
+    let mut path = None;
+    while let Some(argument) = arguments.next() {
+        let bytes = argument.as_encoded_bytes();
+        let end = bytes
+            .iter()
+            .position(|&byte| byte == b'=')
+            .unwrap_or(bytes.len());
+        if !matches!(&bytes[..end], b"--db-path" | b"--database-path") {
+            continue;
+        }
+        let value = if end == bytes.len() {
+            arguments.next()?
+        } else {
+            // SAFETY: the bytes came from this OsStr and '=' is an ASCII boundary.
+            unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[end + 1..]) }
+        };
+        if path.replace(Path::new(value)).is_some() {
+            return None;
+        }
+    }
+    // Relative paths depend on the data directory chosen by the running server.
+    path.filter(|path| path.is_absolute())
 }
 
 /// Ключи запуска, которые называют базу в СУБД. По ним же узнают чужой сервер над ней.

@@ -242,6 +242,20 @@ impl Recreation {
         context: &ExecutionContext,
         config: &AppConfig,
     ) -> Result<SetAside, (UseCaseError, Vec<RemovedEntry>)> {
+        if let OldBase::File(base) = &self.old {
+            crate::platform::ibcmd::refuse_file_base_served_by_ibsrv(
+                &base.dir,
+                &context.cancellation(),
+            )
+            .map_err(crate::support::error::AppError::from)
+            .map_err(|error| (UseCaseError::from(error), Vec::new()))?;
+        }
+        if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "before setting the old infobase aside",
+        ) {
+            return Err((UseCaseError::from(error), Vec::new()));
+        }
         let agents = settle_live_agents(
             config,
             "infobase create",

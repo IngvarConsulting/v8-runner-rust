@@ -188,12 +188,14 @@ pub fn processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        windows_processes(images)
+        windows_processes(images, || false)
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn windows_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
+fn windows_processes(images: &[&str], cancelled: impl Fn() -> bool) -> Option<Vec<ProcessRow>> {
+    use std::io::Read as _;
+
     if !cfg!(windows) || images.is_empty() {
         return Some(Vec::new());
     }
@@ -206,38 +208,113 @@ fn windows_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"{filter}\" | ForEach-Object {{ [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId + ' ' + $_.CommandLine }}"
     );
     let mut powershell = std::process::Command::new("powershell");
-    // `CTRL_BREAK` группе раннера не обрывает запрос посреди отмены.
+    // CTRL_BREAK to the runner must not interrupt the child during cleanup.
     #[cfg(windows)]
     crate::platform::process::outside_the_runner_process_group(&mut powershell);
-    let Ok(mut child) = powershell
+    let mut child = powershell
         .args(["-NoProfile", "-NonInteractive", "-Command", &query])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-    else {
-        return None;
-    };
-    // Ответ не дольше этого: зависший запрос не должен держать замок.
+        .ok()?;
+    let stdout = child.stdout.take().expect("piped process inventory stdout");
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+    std::thread::scope(|scope| {
+        // Drain while the child is running, so a full pipe cannot prevent it from exiting.
+        let reader = scope.spawn(move || {
+            let mut listing = Vec::new();
+            let limit = 8 * 1024 * 1024;
+            stdout.take(limit + 1).read_to_end(&mut listing).ok()?;
+            (listing.len() as u64 <= limit).then_some(listing)
+        });
+        let status = loop {
+            if cancelled() {
+                break None;
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => break None,
             }
+        };
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        let listing = reader.join().ok()??;
+        status?
+            .success()
+            .then(|| process_rows(&String::from_utf8_lossy(&listing)))
+    })
+}
+
+/// Finds a live local process by image and native arguments.
+pub(super) fn first_process_with_arguments(
+    image: &str,
+    cancelled: impl Fn() -> bool,
+    matches: impl Fn(&[&std::ffi::OsStr]) -> bool,
+) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        let image = format!("{image}.exe");
+        if imp::has_image(&image) == Some(false) || cancelled() {
+            return None;
+        }
+        windows_processes(&[&image], &cancelled)?
+            .into_iter()
+            .take_while(|_| !cancelled())
+            .find_map(|row| {
+                let tokens = command_tokens(&row.command);
+                let argv: Vec<_> = tokens.iter().map(std::ffi::OsStr::new).collect();
+                (matches(&argv) && process_facts(row.pid).is_some_and(|facts| facts.image == image))
+                    .then_some(row.pid)
+            })
     }
-    let output = child.wait_with_output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| process_rows(&String::from_utf8_lossy(&output.stdout)))
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        use crate::support::path::filesystem_object_identity;
+
+        let mounts = std::fs::read_link("/proc/self/ns/mnt").ok()?;
+        let root = filesystem_object_identity(Path::new("/")).ok()?;
+        visit_linux_processes(
+            cancelled,
+            |name| name == image,
+            LinuxProcessImage::Executable,
+            |pid, _, argv| {
+                let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+                // Identical path strings may identify different bases across container roots.
+                if std::fs::read_link(proc_dir.join("ns/mnt")).ok().as_ref() != Some(&mounts)
+                    || filesystem_object_identity(&proc_dir.join("root"))
+                        .ok()
+                        .as_ref()
+                        != Some(&root)
+                {
+                    return false;
+                }
+                let Some(argv) = argv.strip_suffix(b"\0") else {
+                    return false;
+                };
+                let args: Vec<_> = argv
+                    .split(|&byte| byte == 0)
+                    .map(OsStr::from_bytes)
+                    .collect();
+                matches(&args)
+            },
+        )
+        .ok()
+        .flatten()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (image, cancelled, matches);
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -248,36 +325,78 @@ fn proc_pids() -> std::io::Result<impl Iterator<Item = u32>> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
+enum LinuxProcessImage {
+    Comm,
+    Executable,
+}
+
+#[cfg(target_os = "linux")]
+fn visit_linux_processes(
+    cancelled: impl Fn() -> bool,
+    name_matches: impl Fn(&str) -> bool,
+    image: LinuxProcessImage,
+    mut visit: impl FnMut(u32, u32, &[u8]) -> bool,
+) -> std::io::Result<Option<u32>> {
     use crate::support::machine::proc_stat_field;
 
-    let mut rows = Vec::new();
-    for pid in proc_pids().ok()? {
-        let path = PathBuf::from(format!("/proc/{pid}"));
-        let Ok(name) = std::fs::read_to_string(path.join("comm")) else {
-            continue;
+    for pid in proc_pids()?.take_while(|_| !cancelled()) {
+        let dir = PathBuf::from(format!("/proc/{pid}"));
+        let name = match image {
+            LinuxProcessImage::Comm => std::fs::read_to_string(dir.join("comm"))
+                .ok()
+                .map(|name| name.trim_end().to_owned()),
+            LinuxProcessImage::Executable => std::fs::read_link(dir.join("exe"))
+                .ok()
+                .map(|path| image_name(&imp::without_deleted_mark(path))),
         };
-        if !images.contains(&name.trim_end()) {
+        if !name.is_some_and(|name| name_matches(&name)) {
             continue;
         }
-        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
+        let Ok(stat) = std::fs::read_to_string(dir.join("stat")) else {
+            continue;
+        };
+        let Some(parent) = proc_stat_field(&stat, 4).and_then(|value| value.parse().ok()) else {
             continue;
         };
         if matches!(proc_stat_field(&stat, 3), Some("Z" | "X")) {
             continue;
         }
-        let parent = proc_stat_field(&stat, 4)?.parse().ok()?;
-        let command = match std::fs::read(path.join("cmdline")) {
-            Ok(command) => command,
+        let argv = match std::fs::read(dir.join("cmdline")) {
+            Ok(argv) => argv,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            Err(_) if matches!(image, LinuxProcessImage::Executable) => continue,
+            Err(error) => return Err(error),
         };
-        rows.push(ProcessRow {
-            pid,
-            parent,
-            command: String::from_utf8_lossy(&command).into_owned(),
-        });
+        if visit(pid, parent, &argv)
+            && process_facts(pid).is_some_and(|facts| {
+                Some(facts.started)
+                    == proc_stat_field(&stat, 22).and_then(|value| value.parse().ok())
+                    && (matches!(image, LinuxProcessImage::Comm) || name_matches(&facts.image))
+            })
+        {
+            return Ok(Some(pid));
+        }
     }
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
+    let mut rows = Vec::new();
+    visit_linux_processes(
+        || false,
+        |name| images.contains(&name),
+        LinuxProcessImage::Comm,
+        |pid, parent, command| {
+            rows.push(ProcessRow {
+                pid,
+                parent,
+                command: String::from_utf8_lossy(command).into_owned(),
+            });
+            false
+        },
+    )
+    .ok()?;
     Some(rows)
 }
 
@@ -394,13 +513,16 @@ fn command_tokens(command: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut quoted = false;
+    let mut started = false;
     let mut slashes = 0usize;
     for symbol in command.chars() {
         if symbol == BACKSLASH {
+            started = true;
             slashes += 1;
             continue;
         }
         if symbol == QUOTE_MARK {
+            started = true;
             token.extend(std::iter::repeat_n(BACKSLASH, slashes / 2));
             if slashes % 2 == 1 {
                 token.push(QUOTE_MARK);
@@ -412,16 +534,18 @@ fn command_tokens(command: &str) -> Vec<String> {
         }
         token.extend(std::iter::repeat_n(BACKSLASH, slashes));
         slashes = 0;
-        if symbol.is_whitespace() && !quoted {
-            if !token.is_empty() {
+        if matches!(symbol, ' ' | '\t') && !quoted {
+            if started {
                 tokens.push(std::mem::take(&mut token));
+                started = false;
             }
         } else {
+            started = true;
             token.push(symbol);
         }
     }
     token.extend(std::iter::repeat_n(BACKSLASH, slashes));
-    if !token.is_empty() {
+    if started {
         tokens.push(token);
     }
     tokens
@@ -468,6 +592,15 @@ mod listing_tests {
         assert_eq!(rows[0].parent, 4);
         assert_eq!(rows[0].command, "C:\\1cv8\\rmngr.exe -port 24001 -host w");
         assert_eq!(rows[1].command, "");
+    }
+
+    #[test]
+    fn windows_arguments_keep_unicode_spaces_and_empty_quoted_values() {
+        let path = "C:\\my\u{a0}base";
+        assert_eq!(
+            command_tokens(&format!("ibsrv.exe \"\" --db-path={path}\t--name=main")),
+            ["ibsrv.exe", "", &format!("--db-path={path}"), "--name=main"]
+        );
     }
 
     #[test]
@@ -536,16 +669,20 @@ mod imp {
     use std::io;
     use std::io::Write as _;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, FALSE, FILETIME, HANDLE,
-        HANDLE_FLAG_INHERIT, TRUE, WAIT_OBJECT_0,
+        CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, ERROR_NO_MORE_FILES, FALSE,
+        FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::JobObjects::{
         IsProcessInJob, JobObjectExtendedLimitInformation, QueryInformationJobObject,
@@ -564,6 +701,33 @@ mod imp {
     };
 
     use super::{image_name, ProcessFacts, ServiceRequest, ServiceSpawnError};
+
+    pub(super) fn has_image(image: &str) -> Option<bool> {
+        // SAFETY: TH32CS_SNAPPROCESS ignores the PID and returns an owned snapshot handle.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        // SAFETY: a successful snapshot returns a live handle which must be closed.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the handle and the correctly sized output live for the call.
+        let mut present = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+        while present != FALSE {
+            let end = entry.szExeFile.iter().position(|&unit| unit == 0)?;
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            if name.eq_ignore_ascii_case(image) {
+                return Some(true);
+            }
+            // SAFETY: the same valid snapshot and output are used for each entry.
+            present = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+        }
+        (io::Error::last_os_error().raw_os_error() == Some(ERROR_NO_MORE_FILES as i32))
+            .then_some(false)
+    }
 
     const SW_HIDE: u16 = 0;
     const AF_INET: u32 = 2;
