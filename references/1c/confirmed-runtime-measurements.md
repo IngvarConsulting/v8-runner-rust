@@ -5002,6 +5002,84 @@ cluster start → test → cluster restart → test → cluster stop` прохо
 до базы не дошла. Подключённый агент держит загрузку конфигурации в файловую базу от пакетного
 Конфигуратора, `ibcmd` и второго агента, но не сеанс Предприятия. Серверная база не замерялась.
 
+## Подключённый агент после завершения сеанса и перезапуска стенда (#649)
+
+17.11.2026, Windows, 1С 8.3.27.2342, PostgreSQL для 1С 17.11 с `mchar`, серверная
+копия БСП 3.1 в отдельном кластере, поднятом раннером `cde7f1b9`. Агент запущен
+напрямую с `/AgentMode` и отдельными `/AgentPort`, `/AgentSSHHostKey` и
+`/AgentBaseDir`. Клиент Paramiko 4.0.0 открывал SSH без псевдотерминала. В каждом опыте
+на свежем подключении выполнили `options set --show-prompt=no --output-format=json`,
+`common connect-ib` и контрольный `config generation-id` с токеном. Перед воздействием
+`rac session list --cluster=<uuid> --infobase=<uuid>` подтверждал новый UUID сеанса
+Конфигуратора. После воздействия исследуемую команду выполняли первой в том же SSH.
+На здоровом подключении проверили все три команды. Для загрузки использовали XML из
+контрольной выгрузки с `--dir=input`. Каждая измеряемая выгрузка писала в новый каталог.
+
+| Воздействие | `config generation-id` | `config dump-config-to-files --dir=<dir>` | `config load-config-from-files --dir=input` | SSH |
+| --- | --- | --- | --- | --- |
+| `rac session terminate --cluster=<uuid> --session=<uuid>` | `UnknownError` | `UnknownError` | `UnknownError` | Открыт во всех трёх опытах |
+| Перезапуск кластера | `success`, прежний токен | `success` | `success` с предупреждением загрузки | Открыт во всех трёх опытах |
+| Перезапуск PostgreSQL | `success`, прежний токен | `success` | `success` с предупреждением загрузки | Открыт во всех трёх опытах |
+
+После завершения сеанса через `rac` его UUID исчезал из списка. Все три команды вернули
+по одному массиву с одной записью `type: error`, `error-type: UnknownError`,
+`message: "Сеанс работы завершен администратором."`, `body: []`. В том же SSH
+`common disconnect-ib` → `common connect-ib` → `config generation-id` возвращали
+`success`, чтение поколения снова отдавало токен.
+
+При перезапуске кластера принудительно завершали `ragent`, `rmngr`, `rphost` и `ras` изолированного стенда,
+сверяя порты, PID и пути исполняемых файлов. После освобождения портов запускали
+`ragent /agent /port <agent> /regport <regport> /range <first>:<last> /d <registry>`
+и `ras cluster --port=<ras> 127.0.0.1:<agent>` на закреплённых портах. Ждали успешных
+`rac cluster list` и `rac infobase summary list`. У `ragent` менялся PID, у PostgreSQL
+оставался прежним. В опытах с СУБД выполняли
+`pg_ctl -D <data> -l <log> -m fast -w -t 45 restart` и проверяли `pg_isready`.
+PID postmaster менялся, PID `ragent` оставался прежним. При `success` терминальный
+пакет не содержал `error-type`. У чтения поколения поля `message` не было, у выгрузок
+и загрузок оно содержало пустую строку. Предупреждение в `body` загрузки совпало с
+предупреждением здорового контроля. У выгрузок проверили `Configuration.xml`.
+
+На этом стенде штатные попытки `v8-runner cluster restart` не завершили перезапуск.
+`v8-runner dbms restart` при работающем кластере вернул `invalid_argument` с требованием
+сначала выполнить `cluster stop`. Это соответствует
+[`INV.USE-CASES.MANAGED-DBMS-OWNERSHIP`](../../spec/rules/use-cases/managed-dbms-ownership.md).
+Строки таблицы фиксируют ответы после прямых перезапусков.
+
+Дополнительная проба завершила здоровый сеанс через
+`rac session terminate ... --error-message=probe649-custom`. Следующий `config generation-id`
+снова вернул `UnknownError`, а текст начался с `probe649-custom` и содержал подробности
+«Сеанс отсутствует или удален» с UUID и местом ошибки. Канал SSH остался открыт.
+На здоровом подключении и после этого отказа `infobase-tools debug-info` вернул
+`success` с одинаковым телом (`enabled: false`, пустые `protocol` и `server-address`),
+а повторный `common connect-ib` вернул `DesignerAlreadyConnectedToInfoBase`.
+Эти два пробных вызова не различили состояние подключения. Признак для автоповтора
+по машинному ответу в этой серии не найден
+([`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`](../../spec/rules/platform/prose-debt-only-shrinks.md)).
+
+### Связь PID агента с UUID серверного сеанса
+
+На том же стенде включили технологический журнал отдельной копии платформы для
+Designer и `rphost`. В интервале одного `common connect-ib` клиентский
+`SCALL` с `MName=startServerSeance` сопоставили с серверным `CALL` по `CallID`,
+`Interface`, `Method` и паре `DstClientID` / `t:clientID`. PID рабочего процесса
+из каталога журнала сопоставили с UUID процесса через `rac process list`. По этому UUID
+и `SessionID` из серверного вызова нашли UUID текущего сеанса в `rac session list`.
+
+Для агента PID 53388 получились `CallID=11166`, `t:clientID=25` и `SessionID=1`.
+После `rac session terminate` его UUID исчез. Агент PID 45104, запущенный при живом
+первом процессе, получил `CallID=2024`, `t:clientID=28`, тот же `SessionID=1` и
+другой UUID. На прежних SSH-каналах первый агент вернул `UnknownError`, второй
+вернул `success` на `config generation-id`. Одновременное подключение двух агентов к ИБ
+не подтвердили. Клиентский журнал отдельно не дал `SessionID` ни до отказа, ни сразу
+после. Без ограничения интервалом `common connect-ib` совпадения указывали на
+`SessionID=2`, а для искомого UUID `rac` возвращал `session-id=1`.
+
+`rac session info --cluster=<cluster-uuid> --session=<session-uuid>` вернул код 0
+и запись для живого UUID. Для завершённого UUID, случайного UUID сеанса и
+несуществующего UUID кластера Windows вернул одинаковый код `0xFFFFFFFF` и пустой
+stdout. Различался текст stderr. Один этот вызов не устанавливает причину отказа
+структурно.
+
 ## Управляемый агент: ключ, порт и Windows ACL на Linux и Windows (#429)
 
 Замер 07.11.2026, продолжение [#429](https://github.com/IngvarConsulting/v8-runner-rust/issues/429)
