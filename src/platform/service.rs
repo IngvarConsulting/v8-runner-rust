@@ -135,6 +135,13 @@ pub use imp::{listening_pid, process_facts, spawn_hidden};
 /// `SIGKILL`. Успех вызова ничего не доказывает: конец процесса подтверждает ожидание
 /// (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`).
 #[cfg(unix)]
+#[cfg_attr(
+    target_os = "linux",
+    allow(
+        dead_code,
+        reason = "на Linux службу гасит signal_owned_process; группе сигнал шлёт macOS"
+    )
+)]
 pub fn signal_service_group(pid: u32, hard: bool) {
     imp::signal_group(pid, hard);
 }
@@ -1177,6 +1184,13 @@ mod imp {
         Ok(pid)
     }
 
+    #[cfg_attr(
+        target_os = "linux",
+        allow(
+            dead_code,
+            reason = "на Linux службу гасит signal_owned_process; группе сигнал шлёт macOS"
+        )
+    )]
     pub fn signal_group(pid: u32, hard: bool) {
         // Номер 0 и 1 — не служба: сигнал своей группе или `init` раннер не шлёт.
         let Ok(group) = libc::pid_t::try_from(pid) else {
