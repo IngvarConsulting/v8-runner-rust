@@ -14,7 +14,7 @@ check:
 # `data` команды `debug-server start`
 
 `action`: `started` или `planned` в превью. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
-файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, только Windows).
+файловой базы, `cluster` — сервер отладки управляемого кластера базы (`cluster start --debug`, Windows и Linux).
 `url` — адрес для `/DEBUGGERURL` клиента и для отладчика, `http://127.0.0.1:<порт>`; `port` — тот же порт.
 `session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет.
 
