@@ -97,6 +97,17 @@ impl TempDirMetadata {
     pub fn is_superseded_backup(&self) -> bool {
         matches!(self.kind, TempDirKind::Backup) && self.superseded
     }
+
+    fn identifies_superseded_backup(&self, path: &Path) -> bool {
+        self.is_superseded_backup()
+            && is_known_tool_name(&self.tool)
+            && parent_dir(path).is_some()
+            && parent_dir(path) == parent_dir(&self.target_path)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&format!("-{}", self.run_id)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,9 +181,34 @@ pub struct SupersededBackup {
     dir: PathBuf,
 }
 
+const BACKUP_IGNORE: &str = ".gitignore";
+const BACKUP_IGNORE_HEADER: &[u8] = b"*\n# v8-runner superseded backup: ";
+
 impl SupersededBackup {
     pub fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// Keep Git's ignore rule and the recovery marker in one file until the old tree is empty.
+    pub fn hide_from_git(&self) -> std::io::Result<()> {
+        let sidecar = metadata_sidecar_path(&self.dir);
+        let raw = std::fs::read(&sidecar)?;
+        let metadata = decode_temp_dir_metadata(&raw)?;
+        if !metadata.is_superseded_backup() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "only a completed replacement can hide its backup",
+            ));
+        }
+        let mut ignore = tempfile::NamedTempFile::new_in(&self.dir)?;
+        ignore.write_all(BACKUP_IGNORE_HEADER)?;
+        serde_json::to_writer(&mut ignore, &metadata).map_err(std::io::Error::other)?;
+        ignore.write_all(b"\n")?;
+        ignore.as_file().sync_all()?;
+        // Replace the entry itself, which can be a link in the previous tree.
+        ignore.persist(self.dir.join(BACKUP_IGNORE))?;
+        best_effort_fsync_dir(&self.dir)?;
+        std::fs::remove_file(sidecar)
     }
 
     /// Removes the tree, then its metadata. The text returned is a warning for the answer.
@@ -981,9 +1017,30 @@ fn mark_backup_superseded(backup: &Path) -> std::io::Result<()> {
 }
 
 pub fn read_temp_dir_metadata(dir: &Path) -> std::io::Result<TempDirMetadata> {
-    let raw = std::fs::read(metadata_sidecar_path(dir))?;
-    serde_json::from_slice(&raw)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    let missing = match std::fs::read(metadata_sidecar_path(dir)) {
+        Ok(raw) => return decode_temp_dir_metadata(&raw),
+        Err(error) if error.kind() == ErrorKind::NotFound => error,
+        Err(error) => return Err(error),
+    };
+    let ignore = dir.join(BACKUP_IGNORE);
+    if !std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.is_dir())
+        || !std::fs::symlink_metadata(&ignore).is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(missing);
+    }
+    let raw = std::fs::read(ignore)?;
+    let Some(marker) = raw.strip_prefix(BACKUP_IGNORE_HEADER) else {
+        return Err(missing);
+    };
+    let metadata = decode_temp_dir_metadata(marker)?;
+    if !metadata.identifies_superseded_backup(dir) {
+        return Err(missing);
+    }
+    Ok(metadata)
+}
+
+fn decode_temp_dir_metadata(raw: &[u8]) -> std::io::Result<TempDirMetadata> {
+    serde_json::from_slice(raw).map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
 }
 
 /// Copy a directory tree into `destination`, creating it; existing files are overwritten.
@@ -1032,19 +1089,19 @@ pub fn remove_tree_in_parallel(path: &Path) -> std::io::Result<()> {
     let is_real_dir = std::fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
     if is_real_dir {
-        let workers = thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(MAX_REMOVAL_WORKERS);
-        if workers > 1 {
-            unlink_files_in_parallel(path, workers);
-        }
+        pre_unlink_files(path, None);
     }
     remove_path_if_exists(path)
 }
 
-/// Unlink every file under `root` that can be unlinked, the directories shared between
-/// `workers` threads. Links are unlinked as files or left in place, never entered.
-fn unlink_files_in_parallel(root: &Path, workers: usize) {
+/// Best-effort parallel pass. Each worker takes directories from the same queue.
+fn pre_unlink_files(root: &Path, retained_at_root: Option<&str>) {
+    let workers = thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_REMOVAL_WORKERS);
+    if workers <= 1 {
+        return;
+    }
     use std::sync::{Condvar, Mutex, PoisonError};
 
     struct Queue {
@@ -1095,6 +1152,9 @@ fn unlink_files_in_parallel(root: &Path, workers: usize) {
         };
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
+                if dir == root && retained_at_root.is_some_and(|name| entry.file_name() == name) {
+                    continue;
+                }
                 match entry.file_type() {
                     // A link, a junction included, is not a directory here: it is unlinked,
                     // or left for the sequential pass, and never entered.
@@ -1269,17 +1329,7 @@ pub fn swap_dir_atomically(
 /// background removal (#616) takes nothing else, whatever path it is given.
 pub fn remove_superseded_backup(backup: &Path) -> std::io::Result<()> {
     let metadata = read_temp_dir_metadata(backup)?;
-    let named_for_its_run = backup
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(&format!("-{}", metadata.run_id)));
-    let beside_its_target =
-        parent_dir(backup).is_some() && parent_dir(backup) == parent_dir(&metadata.target_path);
-    if !is_known_tool_name(&metadata.tool)
-        || !metadata.is_superseded_backup()
-        || !named_for_its_run
-        || !beside_its_target
-    {
+    if !metadata.identifies_superseded_backup(backup) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -1297,7 +1347,7 @@ pub fn remove_superseded_backup(backup: &Path) -> std::io::Result<()> {
 /// Removes a backup tree and then its metadata: the metadata goes last, so a removal that
 /// stops halfway leaves a tree the orphan cleanup still recognises.
 fn remove_backup_tree(backup_dir: &Path) -> Option<String> {
-    if let Err(error) = remove_tree_in_parallel(backup_dir) {
+    if let Err(error) = remove_backup_contents(backup_dir) {
         return Some(format!(
             "failed to remove backup dir '{}': {error}",
             backup_dir.display()
@@ -1310,6 +1360,30 @@ fn remove_backup_tree(backup_dir: &Path) -> Option<String> {
             sidecar.display()
         )
     })
+}
+
+/// Leave the ignore rule (and metadata it may carry) in place until all payload is gone.
+fn remove_backup_contents(path: &Path) -> std::io::Result<()> {
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return remove_path_if_exists(path);
+    }
+    pre_unlink_files(path, Some(BACKUP_IGNORE));
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name() != BACKUP_IGNORE {
+            remove_path_if_exists(&entry.path())?;
+        }
+    }
+    remove_path_if_exists(&path.join(BACKUP_IGNORE))?;
+    match std::fs::remove_dir(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 pub fn replace_file_atomically(

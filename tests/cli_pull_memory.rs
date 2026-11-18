@@ -1388,10 +1388,9 @@ fn a_full_pull_answers_before_the_replaced_tree_is_removed() {
         trees[0].join("old.txt").is_file(),
         "it is the previous tree"
     );
-    assert_eq!(
-        fs::read_to_string(trees[0].join(".gitignore")).expect("hidden from git"),
-        "*\n"
-    );
+    assert!(fs::read_to_string(trees[0].join(".gitignore"))
+        .expect("hidden from git")
+        .starts_with("*\n"));
     assert!(project.sources.join("Module.bsl").is_file(), "published");
     assert!(
         support::wait_until(
@@ -1418,6 +1417,75 @@ fn a_full_pull_answers_before_the_replaced_tree_is_removed() {
         "its metadata goes too: {:?}",
         backup_entries()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn git_add_can_overlap_background_removal_after_a_full_pull() {
+    let project = project("designer", false);
+    let root = project.config.parent().expect("project root");
+    full_pull_with_removal_delay(&project, 60_000);
+    let trees = replaced_trees(&project);
+    assert_eq!(trees.len(), 1);
+    let backup = &trees[0];
+    let runner = support::v8_runner_binary();
+
+    // Initialize Git after the pull, as in a workspace placed under Git for the first time.
+    git(root, &["init", "-q"]);
+    fs::write(
+        root.join(".gitattributes"),
+        ".00-user.txt filter=finish-cleanup\n",
+    )
+    .expect("attributes");
+    fs::write(root.join(".00-user.txt"), "user file\n").expect("user file");
+
+    let git_output = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git")
+    };
+    let pending = git_output(&["status", "--porcelain", "--untracked-files=all"]);
+    assert!(pending.status.success(), "{}", output_text(&pending));
+
+    // Git has collected candidates by the time it indexes this early-sorting user file.
+    // Start the actual remover before Git opens a later candidate such as the old sidecar.
+    let finish = format!(
+        "filter.finish-cleanup.clean='{}' remove-backup --path '{}' && cat",
+        runner.display(),
+        backup.display()
+    );
+    let add = git_output(&[
+        "-c",
+        &finish,
+        "-c",
+        "filter.finish-cleanup.required=true",
+        "add",
+        "-A",
+    ]);
+    assert!(add.status.success(), "{}", output_text(&add));
+    assert!(
+        !backup.exists(),
+        "Git's clean filter must have run the remover"
+    );
+    let pending = String::from_utf8_lossy(&pending.stdout);
+    assert!(
+        pending.lines().any(|line| line == "?? .00-user.txt"),
+        "{pending}"
+    );
+    assert!(!pending.contains(".dump-backup-"), "{pending}");
+
+    let staged = git_output(&["diff", "--cached", "--name-only"]);
+    assert!(staged.status.success(), "{}", output_text(&staged));
+    let names = String::from_utf8_lossy(&staged.stdout);
+    assert!(names.lines().any(|name| name == ".00-user.txt"), "{names}");
+    assert!(
+        names.lines().any(|name| name == "sources/Module.bsl"),
+        "{names}"
+    );
+    assert!(!names.contains(".dump-backup-"), "{names}");
 }
 
 /// Прежний каталог, который фон не успел удалить, убирает уборка следующей команды.
