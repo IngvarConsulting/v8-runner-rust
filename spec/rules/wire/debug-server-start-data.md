@@ -9,6 +9,7 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::start_answers_with_the_address_that_answered_as_a_debug_server
   - src/use_cases/managed_stand/debug_server.rs::a_cluster_infobase_gets_the_debug_server_of_the_cluster
   - src/use_cases/managed_stand/debug_server.rs::a_standalone_infobase_gets_the_debug_server_of_the_server
+  - src/use_cases/managed_stand/standalone.rs::the_debug_server_of_the_standalone_server_needs_a_debug_start
   - src/use_cases/managed_stand/debug_server.rs::a_preview_starts_and_writes_nothing
 ---
 

@@ -6,6 +6,9 @@ check:
   - src/use_cases/managed_stand/standalone.rs::a_debug_server_that_does_not_start_stops_the_server
   - src/use_cases/managed_stand/standalone.rs::a_taken_debug_port_moves_the_block_only_with_the_debug_server
   - src/use_cases/managed_stand/standalone.rs::a_debug_server_left_by_a_fallen_server_is_stopped_before_the_start
+  - src/use_cases/managed_stand/standalone.rs::a_running_server_whose_debug_server_is_gone_needs_a_restart
+  - src/use_cases/managed_stand/standalone.rs::a_silent_debug_server_is_stopped_with_the_server
+  - src/use_cases/managed_stand/standalone.rs::a_cancellation_while_the_debug_server_starts_stops_both
   - src/platform/ibsrv.rs::a_debug_server_registers_its_targets_on_the_given_debugger
 ---
 
@@ -32,4 +35,4 @@ check:
 `dbgs` выходит вместе с `ibsrv`; `standalone stop` и `restart` дожидаются его конца и называют его pid в
 `stopped_debug_pid`. `dbgs` упавшего сервера следующий `start` дожидается или гасит по записи, не считая его порт
 занятым чужим процессом. PostgreSQL шага `restart` не трогает. Управляемый автономный сервер есть только на Windows
-(`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS`).
+(`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).

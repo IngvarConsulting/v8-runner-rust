@@ -220,6 +220,26 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "web start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "web status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "web stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "web restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "debug-server start",
         preview: Preview::Runs,
         base: Base::Resolves,

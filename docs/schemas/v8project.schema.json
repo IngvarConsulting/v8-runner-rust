@@ -1,5 +1,18 @@
 {
   "$defs": {
+    "ApacheToolSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Apache 2.4 executable, installation root or bin directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "BuildSchema": {
       "additionalProperties": false,
       "type": "object"
@@ -469,6 +482,13 @@
           "description": "Physical directory the publication is written to (`webinst -dir`); must exist.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "managed": {
+          "description": "Publish to the local Apache of a managed cluster.",
+          "type": [
+            "boolean",
             "null"
           ]
         },
@@ -1045,6 +1065,16 @@
     "ToolsSchema": {
       "additionalProperties": false,
       "properties": {
+        "apache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApacheToolSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "client_mcp": {
           "$ref": "#/$defs/ClientMcpToolSchema",
           "description": "onec-client-mcp tool settings."

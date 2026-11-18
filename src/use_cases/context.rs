@@ -43,6 +43,10 @@ pub enum CommandName {
     ClusterStatus,
     ClusterStop,
     ClusterRestart,
+    WebStart,
+    WebStatus,
+    WebStop,
+    WebRestart,
     DebugServerStart,
     DebugServerStop,
     AgentHold,
@@ -78,8 +82,11 @@ impl CommandName {
             | Self::StandaloneRestart
             | Self::ClusterStart
             | Self::ClusterStop
-            | Self::ClusterRestart => StandChange::Always,
-            Self::Init => StandChange::WhenManaged,
+            | Self::ClusterRestart
+            | Self::WebStart
+            | Self::WebStop
+            | Self::WebRestart => StandChange::Always,
+            Self::Init | Self::Publish => StandChange::WhenManaged,
             Self::Bootstrap
             | Self::ToolsDownload
             | Self::Extensions
@@ -97,11 +104,11 @@ impl CommandName {
             | Self::Artifacts
             | Self::Syntax
             | Self::Launch
-            | Self::Publish
             | Self::Platforms
             | Self::DbmsStatus
             | Self::StandaloneStatus
             | Self::ClusterStatus
+            | Self::WebStatus
             | Self::DebugServerStart
             | Self::DebugServerStop
             | Self::AgentHold
@@ -163,10 +170,14 @@ impl CommandName {
             Self::StandaloneRestart => "standalone restart",
             Self::ClusterStart => "cluster start",
             Self::ClusterStatus => "cluster status",
-            Self::DebugServerStart => "debug-server start",
-            Self::DebugServerStop => "debug-server stop",
             Self::ClusterStop => "cluster stop",
             Self::ClusterRestart => "cluster restart",
+            Self::WebStart => "web start",
+            Self::WebStatus => "web status",
+            Self::WebStop => "web stop",
+            Self::WebRestart => "web restart",
+            Self::DebugServerStart => "debug-server start",
+            Self::DebugServerStop => "debug-server stop",
             Self::AgentHold => "agent hold",
             Self::AgentRelease => "agent release",
             Self::AgentStop => "agent stop",

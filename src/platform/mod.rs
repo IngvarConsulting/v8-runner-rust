@@ -1,6 +1,7 @@
 /// Designer agent driven through the system `ssh` client.
 pub mod agent;
 pub mod agent_keeper;
+pub mod apache;
 /// Removal of the replaced tree of a full pull in a detached runner process (#616).
 pub mod backup_removal;
 /// Opening a URL in the user's browser.

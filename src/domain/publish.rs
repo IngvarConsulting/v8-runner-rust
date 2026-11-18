@@ -40,13 +40,14 @@ pub struct PublishResult {
     /// start answers this form with `ok: false` and `true`.
     pub provider_dispatched: bool,
     pub action: PublishAction,
-    /// Web server named in `infobase.web.server`.
+    /// Web server named in `infobase.web.server`; `apache24` for `infobase.web.managed`.
     pub server: String,
     /// Virtual directory of the publication.
     pub wsdir: String,
-    /// Physical directory the publication is written to.
+    /// Physical directory the publication is written to; under `localPath` for a managed base.
     pub dir: PathBuf,
-    /// Address the published infobase opens at, when `infobase.web.url` is declared.
+    /// Address the published infobase opens at: `infobase.web.url` when declared, the loopback
+    /// address of the private Apache for `infobase.web.managed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

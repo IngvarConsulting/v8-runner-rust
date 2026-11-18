@@ -5,6 +5,9 @@ mod cluster;
 mod debug_server;
 mod recreate;
 mod standalone;
+mod web;
+pub use web::{execute_web, web_status, WebCommand};
+pub(crate) use web::{publication, ManagedPublication, Reload};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
@@ -21,12 +24,12 @@ use sha2::{Digest, Sha256};
 use crate::config::model::AppConfig;
 use crate::domain::dbms::{DbmsResult, ServiceAction, ServiceState};
 use crate::platform::postgres::{self, PostgresBuild};
-use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessRunner, WorkGiven,
-};
+#[cfg(any(test, windows))]
+use crate::platform::process::ProcessRequest;
+use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner, WorkGiven};
 use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
-    machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
+    observe_service, read_json, record_names_own_process, stand_machine_fingerprint, write_json,
     Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord, StandService,
 };
 use crate::use_cases::context::ExecutionContext;
@@ -56,13 +59,33 @@ const SERVERS: [(StandService, &str); 2] = [
 /// Что о машине и её процессах нужно сценарию. Подменяется в тестах.
 pub(crate) trait ServiceHost {
     fn supported(&self) -> bool;
+    fn standalone_supported(&self) -> bool {
+        self.supported()
+    }
+    /// Службы стенда не запускаются от root: единственное место, где раннер спрашивает
+    /// систему о своих правах.
+    fn can_start_as_current_user(&self) -> bool {
+        true
+    }
     fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError>;
     fn facts(&self, pid: u32) -> Option<ProcessFacts>;
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
-    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
-    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
+    fn soft_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    );
+    fn hard_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    );
     fn sleep(&self, duration: Duration);
     /// Сколько ждать. Подмена в тестах не ждёт настоящего времени.
     fn patience(&self, default: Duration) -> Duration {
@@ -70,6 +93,10 @@ pub(crate) trait ServiceHost {
     }
     /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю. `None` —
     /// перечня нет.
+    fn process_session(&self, _pid: u32) -> Option<u32> {
+        None
+    }
+
     fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
         Some(Vec::new())
     }
@@ -77,13 +104,98 @@ pub(crate) trait ServiceHost {
     fn rdbg_answers(&self, _port: u16) -> bool {
         false
     }
+    /// Мягкий перезапуск процесса с этой идентичностью: Apache перечитывает конфиг, не
+    /// закрывая порт. Где его нет — отказ.
+    fn graceful_reload(&self, _pid: u32, _started: Option<u64>) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+    /// Чем поднять права одного `webinst` управляемой публикации. `None` — права не нужны.
+    fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
+        Ok(None)
+    }
+    /// Владелец файла (uid); `None` — система его не называет.
+    fn file_owner(&self, path: &Path) -> Option<u32> {
+        service::file_owner(path)
+    }
 }
 
-struct RealHost;
+/// Что раннер поднимает на системе (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+#[derive(Debug, Clone, Copy)]
+struct System {
+    /// `dbms`, `cluster` и `web`.
+    services: bool,
+    /// `standalone`: `ibsrv` замерен только на Windows.
+    standalone: bool,
+    /// `webinst` публикует только от root (замер #610).
+    webinst_needs_root: bool,
+    /// Работает ли раннер от root: службы стенда от root не запускаются.
+    privileged: fn() -> bool,
+}
+
+impl System {
+    const WINDOWS: Self = Self {
+        services: true,
+        standalone: true,
+        webinst_needs_root: false,
+        privileged: never_privileged,
+    };
+    const LINUX: Self = Self {
+        services: true,
+        standalone: false,
+        webinst_needs_root: true,
+        privileged: effective_root,
+    };
+    const OTHER: Self = Self {
+        services: false,
+        standalone: false,
+        webinst_needs_root: false,
+        privileged: never_privileged,
+    };
+}
+
+fn never_privileged() -> bool {
+    false
+}
+
+/// Единственный вопрос раннера к системе о своих правах.
+fn effective_root() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid takes no arguments, cannot fail and has no side effects.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Машина, на которой работает раннер.
+struct RealHost {
+    system: System,
+}
+
+impl RealHost {
+    const CURRENT: Self = Self {
+        system: if cfg!(windows) {
+            System::WINDOWS
+        } else if cfg!(target_os = "linux") {
+            System::LINUX
+        } else {
+            System::OTHER
+        },
+    };
+}
 
 impl ServiceHost for RealHost {
     fn supported(&self) -> bool {
-        cfg!(windows)
+        self.system.services
+    }
+    fn standalone_supported(&self) -> bool {
+        self.system.standalone
+    }
+    fn can_start_as_current_user(&self) -> bool {
+        !(self.system.privileged)()
     }
     fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError> {
         ProcessExecutor.spawn_service(request, work)
@@ -92,7 +204,7 @@ impl ServiceHost for RealHost {
         service::process_facts(pid)
     }
     fn machine(&self) -> Option<String> {
-        machine_fingerprint()
+        stand_machine_fingerprint()
     }
     fn listening_pid(&self, port: u16) -> Option<u32> {
         service::listening_pid(port)
@@ -100,12 +212,61 @@ impl ServiceHost for RealHost {
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
     }
-    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        stop_service(runner, pid, false, context);
+    fn soft_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (runner, context);
+            let _ = service::signal_owned_process(pid, started, libc::SIGTERM);
+        }
+        #[cfg(windows)]
+        service::with_process_identity(pid, started, || {
+            let request = stop_request(pid, false);
+            let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        });
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let _ = (runner, context);
+            signal_if_own(pid, started, false);
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = (runner, pid, started, context);
     }
-    fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
-        stop_service(runner, pid, true, context);
+    fn hard_stop(
+        &self,
+        runner: &dyn ProcessRunner,
+        pid: u32,
+        started: Option<u64>,
+        context: &ExecutionContext,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (runner, context);
+            let _ = service::signal_owned_process(pid, started, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        service::with_process_identity(pid, started, || {
+            let request = stop_request(pid, true);
+            let _ = runner.run_with_policy(&request, &context.cleanup_policy());
+        });
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let _ = (runner, context);
+            signal_if_own(pid, started, true);
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = (runner, pid, started, context);
     }
+    #[cfg(target_os = "linux")]
+    fn process_session(&self, pid: u32) -> Option<u32> {
+        service::process_session(pid)
+    }
+
     fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
         service::processes(images)
     }
@@ -115,37 +276,54 @@ impl ServiceHost for RealHost {
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
+    fn graceful_reload(&self, pid: u32, started: Option<u64>) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            service::signal_owned_process(pid, started, libc::SIGUSR1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (pid, started);
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+    }
+    /// На Linux `webinst` публикует только от root (замер #610): права поднимает `sudo -n`, а
+    /// разрешает их правило sudoers для этой программы.
+    fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
+        if !self.system.webinst_needs_root {
+            return Ok(None);
+        }
+        service::system_program("sudo", &["/usr/bin", "/bin"])
+            .map(Some)
+            .ok_or_else(|| {
+                environment(
+                    "sudo was not found: on Linux webinst publishes only as root, and the runner elevates it alone with sudo -n",
+                )
+            })
+    }
 }
 
-/// Остановка службы: `taskkill` на Windows, сигнал её группе на Unix. Жёсткая на Windows берёт
-/// и дерево (`/T`): потомки службы не переживают её.
+/// macOS: сигнал группе службы, только если pid ещё тот же процесс (время старта совпало).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn signal_if_own(pid: u32, started: Option<u64>, hard: bool) {
+    let same =
+        service::process_facts(pid).is_some_and(|facts| started.is_none_or(|s| s == facts.started));
+    if same {
+        service::signal_service_group(pid, hard);
+    }
+}
+
 #[cfg(windows)]
-fn stop_service(runner: &dyn ProcessRunner, pid: u32, hard: bool, context: &ExecutionContext) {
+fn stop_request(pid: u32, force: bool) -> ProcessRequest {
     let pid = pid.to_string();
-    let args: &[&str] = if hard {
-        &["/PID", &pid, "/T", "/F"]
+    let (program, args) = if force {
+        ("taskkill", vec!["/PID", &pid, "/T", "/F"])
     } else {
-        &["/PID", &pid]
+        ("taskkill", vec!["/PID", &pid])
     };
-    let _ = runner.run_with_policy(&taskkill(args), &context.cleanup_policy());
-}
-
-#[cfg(unix)]
-fn stop_service(_runner: &dyn ProcessRunner, pid: u32, hard: bool, _context: &ExecutionContext) {
-    service::signal_service_group(pid, hard);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn stop_service(_runner: &dyn ProcessRunner, _pid: u32, _hard: bool, _context: &ExecutionContext) {}
-
-#[cfg_attr(
-    not(windows),
-    allow(dead_code, reason = "taskkill есть только на Windows")
-)]
-fn taskkill(args: &[&str]) -> ProcessRequest {
     ProcessRequest {
-        program: PathBuf::from("taskkill"),
-        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        program: PathBuf::from(program),
+        args: args.into_iter().map(str::to_owned).collect(),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: None,
@@ -194,9 +372,7 @@ fn sessions_refusal(
 }
 
 fn not_on_this_system() -> UseCaseError {
-    environment(
-        "managed services run on Windows only: on this system the runner starts no PostgreSQL",
-    )
+    environment("managed PostgreSQL is only supported on Windows and Linux")
 }
 
 fn being_started(what: &str, infobase: &str) -> UseCaseError {
@@ -236,6 +412,131 @@ fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: D
 /// которого агент поднимает лениво, вместе с первым рабочим процессом (замер «Сервер отладки
 /// `dbgs`»).
 const DEBUG_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Свой `dbgs`, запущенный с записью `starting`: запись уже называет его pid.
+struct SpawnedDebugger {
+    record: ServiceRecord,
+    pid: u32,
+}
+
+/// Чем кончился запуск своего `dbgs`.
+enum DebuggerSpawn {
+    Spawned(Box<SpawnedDebugger>),
+    /// Вышел, едва запустившись: запись снята, причину знает журнал.
+    ExitedAtOnce,
+    Failed(UseCaseError),
+}
+
+/// Что запускать как свой `dbgs` и где его запись.
+struct DebuggerLaunch<'a> {
+    paths: &'a ServicePaths,
+    program: &'a Path,
+    port: crate::platform::dbgs::DebugPort,
+    notify: &'a Path,
+    owner: Option<u32>,
+    machine: String,
+    version: Option<String>,
+}
+
+/// Единственный запуск своего `dbgs` с записью — для сеанса `debug-server` и для автономного
+/// сервера: запись `starting` до запуска, pid и время старта сразу после. Не запустился или
+/// запись не легла — процесс гасится, запись снимается. Готовность проверяет вызывающий.
+fn spawn_debugger(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    launch: DebuggerLaunch<'_>,
+) -> DebuggerSpawn {
+    use crate::platform::dbgs::DebugPort;
+
+    let (first, explicit) = match launch.port {
+        DebugPort::Exact(port) => (port, true),
+        DebugPort::Window { first, .. } => (first, false),
+    };
+    let mut record = ServiceRecord {
+        state: RecordState::Starting,
+        pid: None,
+        started: None,
+        image: None,
+        machine: Some(launch.machine),
+        starter: {
+            let pid = std::process::id();
+            host.facts(pid).map(|facts| (pid, facts.started))
+        },
+        port: first,
+        explicit,
+        bin: launch.program.to_path_buf(),
+        version: launch.version,
+        agent: None,
+        location: launch.paths.location(),
+    };
+    if let Err(error) = write_record(launch.paths, &record) {
+        return DebuggerSpawn::Failed(error);
+    }
+    let request = crate::platform::dbgs::start_request(
+        launch.program,
+        launch.port,
+        launch.notify,
+        launch.owner,
+        &launch.paths.log(),
+    );
+    let pid = match host.spawn(&request, context.work()) {
+        Ok(pid) => pid,
+        Err(error) => {
+            forget_record(launch.paths);
+            // Job, из которого нельзя выйти, — дело окружения: сервер умер бы с командой.
+            return DebuggerSpawn::Failed(match error {
+                ServiceSpawnError::Io(_) => UseCaseError::new(
+                    UseCaseErrorKind::Platform,
+                    format!("dbgs did not start: {error}"),
+                ),
+                _ => environment(format!("dbgs did not start: {error}")),
+            });
+        }
+    };
+    let Some(facts) = host.facts(pid) else {
+        forget_record(launch.paths);
+        return DebuggerSpawn::ExitedAtOnce;
+    };
+    record.pid = Some(pid);
+    record.started = Some(facts.started);
+    record.image = Some(facts.image);
+    if let Err(error) = write_record(launch.paths, &record) {
+        if stop_confirmed(host, runner, context, pid, record.started, Duration::ZERO) {
+            forget_record(launch.paths);
+            return DebuggerSpawn::Failed(error);
+        }
+        return DebuggerSpawn::Failed(error.followed_by(format!("dbgs pid {pid} did not stop")));
+    }
+    DebuggerSpawn::Spawned(Box::new(SpawnedDebugger { record, pid }))
+}
+
+/// Сколько ждать конца процесса после каждого шага остановки.
+const DEBUGGER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Единственная остановка своего процесса с подтверждением конца
+/// (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`) для серверов отладки: сначала `grace` — процесс
+/// может выйти сам (`dbgs` выходит вместе со своим владельцем), затем мягко, затем
+/// принудительно. `true` — конец подтверждён.
+fn stop_confirmed(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    pid: u32,
+    started: Option<u64>,
+    grace: Duration,
+) -> bool {
+    let patience = host.patience(DEBUGGER_STOP_TIMEOUT);
+    if !grace.is_zero() && await_gone(host, pid, started, host.patience(grace)) {
+        return true;
+    }
+    host.soft_stop(runner, pid, started, context);
+    if await_gone(host, pid, started, patience) {
+        return true;
+    }
+    host.hard_stop(runner, pid, started, context);
+    await_gone(host, pid, started, patience)
+}
 
 /// Чем кончилось ожидание сервера отладки.
 enum RdbgWait {
@@ -357,10 +658,47 @@ fn occupant_name(pid: u32) -> String {
 fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
     let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    (0..PORT_TRIES).map(move |attempt| {
-        let offset = seed.wrapping_add(attempt.wrapping_mul(PORT_STEP)) % PORT_SPAN;
-        u16::try_from(PORT_BASE + offset).expect("the span stays below 49152")
+    // На Linux динамический диапазон задаёт система и он пересекает стенды: годны только
+    // начала блоков, весь блок которых вне него. На Windows диапазон выше `PORT_SPAN`.
+    let allowed: Vec<u16> = if cfg!(target_os = "linux") {
+        let dynamic = dynamic_ports();
+        (PORT_BASE..PORT_BASE + PORT_SPAN)
+            .filter_map(|port| u16::try_from(port).ok())
+            .filter(|port| {
+                !(*port..=port.saturating_add(PORT_STEP as u16 - 1))
+                    .any(|port| dynamic.contains(&port))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (0..PORT_TRIES).filter_map(move |attempt| {
+        let step = seed.wrapping_add(attempt.wrapping_mul(PORT_STEP));
+        if cfg!(target_os = "linux") {
+            allowed
+                .get((step as usize).checked_rem(allowed.len())?)
+                .copied()
+        } else {
+            u16::try_from(PORT_BASE + step % PORT_SPAN).ok()
+        }
     })
+}
+
+fn dynamic_ports() -> std::ops::RangeInclusive<u16> {
+    #[cfg(target_os = "linux")]
+    {
+        let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|text| {
+                let mut values = text.split_whitespace();
+                Some(values.next()?.parse().ok()?..=values.next()?.parse().ok()?)
+            });
+        range.unwrap_or(32_768..=60_999)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        49_152..=65_535
+    }
 }
 
 /// База команды: объявленная, с `dbms.managed`. Строка соединения — отказ
@@ -577,10 +915,8 @@ impl<'a> Stand<'a> {
     fn database_exists(&self, port: u16, bin: &Path, name: &str) -> Result<bool, UseCaseError> {
         let passfile = self.paths.passfile();
         let password = self.password()?;
-        crate::support::fs::write_file_atomically(&passfile, |file| {
-            file.write_all(postgres::passfile_line(port, &password).as_bytes())
-        })
-        .map_err(|error| io_failure("cannot write", &passfile, &error))?;
+        postgres::write_passfile(&passfile, port, &password)
+            .map_err(|error| io_failure("cannot write", &passfile, &error))?;
         let build = PostgresBuild::at(bin.to_path_buf());
         let asked = self.runner.run_with_policy(
             &build.database_exists(port, &passfile, name),
@@ -722,6 +1058,11 @@ impl<'a> Stand<'a> {
             return Err(not_on_this_system());
         }
         // Без идентификатора машины свою службу не опознать и потому не остановить.
+        if !self.host.can_start_as_current_user() {
+            return Err(environment(
+                "run managed PostgreSQL as an unprivileged user",
+            ));
+        }
         let Some(machine) = self.host.machine() else {
             return Err(environment(
                 "this system gives no machine id: the runner could not tell its PostgreSQL from a foreign one",
@@ -993,7 +1334,8 @@ impl<'a> Stand<'a> {
         self.stop_tool(&build);
         let pid = record.pid.expect("an own service has a pid");
         if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
-            self.host.hard_stop(self.runner, pid, self.context);
+            self.host
+                .hard_stop(self.runner, pid, record.started, self.context);
             if !self.await_gone(pid, record.started, self.host.patience(STOP_TIMEOUT)) {
                 return Err(UseCaseError::new(
                     UseCaseErrorKind::Platform,
@@ -1088,7 +1430,7 @@ fn write_password(path: &Path) -> std::io::Result<()> {
         .iter()
         .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
         .collect();
-    crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+    crate::support::fs::create_file_once(path, |file| file.write_all(text.as_bytes())).map(|_| ())
 }
 
 /// `standalone start|stop|restart`: команда записи, под замком `workPath`.
@@ -1104,7 +1446,7 @@ pub(crate) fn create_standalone_base(
         binary,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1120,7 +1462,7 @@ pub fn execute_standalone(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
 }
@@ -1153,16 +1495,26 @@ fn with_debug_server<T>(
     run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
-    let cluster_port = || cluster::debug_port(context, config, &RealHost);
-    let standalone_server = || standalone::debug_server(context, config, &RealHost);
+    let stand_server = |stand: debug_server::StandOwner| match stand {
+        debug_server::StandOwner::Cluster => {
+            cluster::debug_port(context, config, &RealHost::CURRENT).map(|port| {
+                debug_server::StandDebugServer {
+                    port,
+                    infobase_alias: None,
+                }
+            })
+        }
+        debug_server::StandOwner::Standalone => {
+            standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT)
+        }
+    };
     run(&debug_server::DebugServer {
         context,
         config,
         runner: &ProcessExecutor,
-        host: &RealHost,
+        host: &RealHost::CURRENT,
         locate_client: &locate,
-        cluster_port: &cluster_port,
-        standalone_server: &standalone_server,
+        stand_server: &stand_server,
     })
     .map_err(UseCaseFailure::without_payload)
 }
@@ -1188,7 +1540,7 @@ pub fn standalone_status(
         StandaloneCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
 }
@@ -1210,7 +1562,7 @@ pub fn execute_cluster(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate(config, crate::platform::locator::UtilityType::Ragent),
     )
 }
@@ -1226,7 +1578,7 @@ pub fn cluster_status(
         ClusterCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate(config, crate::platform::locator::UtilityType::Ragent),
     )
 }
@@ -1237,7 +1589,13 @@ pub(crate) fn cluster_base(
     config: &AppConfig,
     dry_run: bool,
 ) -> Result<ClusterBase, UseCaseError> {
-    cluster::cluster_base(context, config, dry_run, &ProcessExecutor, &RealHost)
+    cluster::cluster_base(
+        context,
+        config,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost::CURRENT,
+    )
 }
 
 /// Путь к `ibcmd` и PID или шлюз, которыми управляются сеансы автономного сервера.
@@ -1245,7 +1603,7 @@ pub(crate) fn standalone_session_target<'a>(
     context: &ExecutionContext,
     config: &'a AppConfig,
 ) -> Option<(PathBuf, crate::platform::ibsrv::SessionSource<'a>)> {
-    standalone::session_target(context, config, &ProcessExecutor, &RealHost)
+    standalone::session_target(context, config, &ProcessExecutor, &RealHost::CURRENT)
 }
 
 /// Чужие живые сеансы серверной базы — признак «базу держат сеансы» у применения, когда
@@ -1261,7 +1619,7 @@ pub(crate) fn awake_server_sessions(
     context: &ExecutionContext,
     config: &AppConfig,
 ) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
-    awake_server_sessions_with(context, config, &ProcessExecutor, &RealHost)
+    awake_server_sessions_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
 }
 
 fn awake_server_sessions_with(
@@ -1370,7 +1728,7 @@ pub fn execute_dbms(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1383,7 +1741,7 @@ pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseRes
         ServiceCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1476,7 +1834,7 @@ mod tests {
             tests: Default::default(),
         };
         let ask = |config: &crate::config::model::AppConfig| {
-            super::awake_server_sessions_with(&context, config, &Never, &super::RealHost)
+            super::awake_server_sessions_with(&context, config, &Never, &super::RealHost::CURRENT)
         };
         assert_eq!(ask(&config), None);
         config.infobase = crate::config::model::InfobaseConfig::file("Srvr=host;Ref=ib");
@@ -1681,8 +2039,21 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
-        fn soft_stop(&self, _runner: &dyn ProcessRunner, _pid: u32, _context: &ExecutionContext) {}
-        fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
+        fn soft_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            _pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
+        }
+        fn hard_stop(
+            &self,
+            _runner: &dyn ProcessRunner,
+            pid: u32,
+            _started: Option<u64>,
+            _context: &ExecutionContext,
+        ) {
             self.hard_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
         }

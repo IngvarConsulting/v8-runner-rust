@@ -72,7 +72,7 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  apache:\n    path: test-httpd\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
             www.display(),
@@ -92,6 +92,9 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         name: demo
     dbms:
       managed: {}
+    web:
+      managed: true
+      wsdir: demo
   server:
     standalone:
       managed:
@@ -100,6 +103,8 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
 ",
     )
     .expect("write local config");
+    // Сборка Apache для превью `web`: её путь объявлен в `tools.apache.path` выше.
+    fs::write(dir.join("test-httpd"), "").expect("fake Apache path");
     config_path
 }
 
@@ -247,6 +252,24 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             &["--infobase", "stand", "cluster", "restart"],
             "cluster restart",
             "cluster restart",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "start"],
+            "web start",
+            "web start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "stop"],
+            "web stop",
+            "web stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "web", "restart"],
+            "web restart",
+            "web restart",
             work.clone(),
         ),
         row(&["extensions"], "extensions", "extensions", work.clone()),

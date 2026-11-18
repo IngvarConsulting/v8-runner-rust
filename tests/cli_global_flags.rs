@@ -62,6 +62,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["dbms", "status"], "dbms status"),
     (&["standalone", "status"], "standalone status"),
     (&["cluster", "status"], "cluster status"),
+    (&["web", "status"], "web status"),
     (&["diff"], "diff"),
     (&["sessions", "list"], "sessions list"),
     (&["sessions", "terminate", "--all"], "sessions terminate"),

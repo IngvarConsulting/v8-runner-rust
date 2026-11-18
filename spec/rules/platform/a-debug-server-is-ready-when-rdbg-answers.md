@@ -12,6 +12,8 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::an_answer_from_another_process_is_not_readiness
   - src/use_cases/managed_stand/cluster.rs::the_debug_port_of_the_cluster_needs_a_debug_start
   - src/use_cases/managed_stand/standalone.rs::a_debug_server_that_does_not_start_stops_the_server
+  - src/use_cases/managed_stand/standalone.rs::a_silent_debug_server_is_stopped_with_the_server
+  - src/use_cases/managed_stand/standalone.rs::the_debug_server_of_the_standalone_server_needs_a_debug_start
 ---
 
 # Сервер отладки готов, когда отвечает по `rdbg`
