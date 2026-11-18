@@ -1059,13 +1059,9 @@ fn execution_error(
             ExecutionStage::Queued => "queued",
             ExecutionStage::Running => "running",
         },
-        "timeoutMs": timeout.map(duration_to_millis),
+        "timeoutMs": timeout.map(crate::support::time::millis),
     });
     ErrorData::internal_error(message, Some(data))
-}
-
-fn duration_to_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn extract_http_rpc_method(

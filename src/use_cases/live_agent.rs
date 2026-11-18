@@ -130,7 +130,7 @@ pub fn hold(
         holders: holders.iter().map(holder_receipt).collect(),
         keeper_pid: client.keeper_pid(),
         agent_pid: client.agent_pid(),
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     })
 }
 
@@ -148,7 +148,7 @@ pub fn release(
         released: false,
         holders: Vec::new(),
         disconnected: false,
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     };
     let Some(home) = own_home(config)? else {
         return Ok(nothing(None));
@@ -185,7 +185,7 @@ pub fn release(
         released: !marks.is_empty(),
         holders: holders.iter().map(holder_receipt).collect(),
         disconnected,
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     })
 }
 
@@ -201,7 +201,7 @@ pub fn stop(
     let nothing = |started: Instant| AgentStopResult {
         stopped: Vec::new(),
         refused: Vec::new(),
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     };
     // Реестр учётной записи не назван (система не называет каталог состояния) — живых
     // агентов не найти, и снимать нечего.
@@ -253,7 +253,7 @@ pub fn stop(
     Ok(AgentStopResult {
         stopped,
         refused,
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     })
 }
 
@@ -268,7 +268,7 @@ pub fn status(
     let Ok(registry) = Registry::of_account() else {
         return Ok(AgentStatusResult {
             agents: Vec::new(),
-            duration_ms: elapsed_ms(started),
+            duration_ms: crate::support::time::elapsed_ms(started),
         });
     };
     let own = match scope {
@@ -278,7 +278,7 @@ pub fn status(
             None => {
                 return Ok(AgentStatusResult {
                     agents: Vec::new(),
-                    duration_ms: elapsed_ms(started),
+                    duration_ms: crate::support::time::elapsed_ms(started),
                 })
             }
         },
@@ -299,7 +299,7 @@ pub fn status(
         .collect();
     Ok(AgentStatusResult {
         agents,
-        duration_ms: elapsed_ms(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
     })
 }
 
@@ -495,11 +495,5 @@ fn rfc3339(at: SystemTime) -> String {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        .map_or(0, |elapsed| crate::support::time::millis(elapsed))
 }

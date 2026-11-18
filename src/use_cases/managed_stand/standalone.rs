@@ -184,7 +184,7 @@ impl Server<'_> {
             stopped_pid: None,
             stopped_dbms_pid: None,
             previous_port: None,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms: crate::support::time::elapsed_ms(self.started_at),
             warnings: Vec::new(),
         }
     }

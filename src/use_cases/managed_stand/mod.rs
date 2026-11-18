@@ -7,7 +7,7 @@ mod recreate;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
-pub use cluster::ClusterCommand;
+pub use cluster::{ClusterCommand, DebugChoice};
 pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 
@@ -226,6 +226,49 @@ fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: D
         }
         if Instant::now() >= deadline {
             return false;
+        }
+        host.sleep(POLL);
+    }
+}
+
+/// Сколько ждать, пока сервер отладки ответит по `rdbg`: свой `dbgs` и сервер кластера,
+/// которого агент поднимает лениво, вместе с первым рабочим процессом (замер «Сервер отладки
+/// `dbgs`»).
+const DEBUG_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Чем кончилось ожидание сервера отладки.
+enum RdbgWait {
+    /// По этому порту ответил обработчик `rdbg`.
+    Ready(u16),
+    /// Процесс сервера вышел, не ответив.
+    Gone,
+    TimedOut,
+    Interrupted(UseCaseError),
+}
+
+/// Единственное ожидание сервера отладки (`INV.PLATFORM.A-DEBUG-SERVER-IS-READY-WHEN-RDBG-ANSWERS`):
+/// `port` называет, какой порт пробовать сейчас (`None` — ещё нечего), `alive` — жив ли ещё
+/// сервер. Отмена проверяется в каждой точке ожидания.
+fn await_rdbg(
+    host: &dyn ServiceHost,
+    context: &ExecutionContext,
+    what: &str,
+    port: &dyn Fn() -> Option<u16>,
+    alive: &dyn Fn() -> bool,
+) -> RdbgWait {
+    let deadline = Instant::now() + host.patience(DEBUG_READY_TIMEOUT);
+    loop {
+        if let Some(error) = interruption_before_safe_point(context, what) {
+            return RdbgWait::Interrupted(error.into());
+        }
+        if let Some(port) = port().filter(|port| host.rdbg_answers(*port)) {
+            return RdbgWait::Ready(port);
+        }
+        if !alive() {
+            return RdbgWait::Gone;
+        }
+        if Instant::now() >= deadline {
+            return RdbgWait::TimedOut;
         }
         host.sleep(POLL);
     }
@@ -619,7 +662,7 @@ impl<'a> Stand<'a> {
             stale_record: false,
             occupant_pid: None,
             stopped_pid: None,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms: crate::support::time::elapsed_ms(self.started_at),
         }
     }
 

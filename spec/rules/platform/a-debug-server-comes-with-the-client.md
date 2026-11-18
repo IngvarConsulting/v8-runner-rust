@@ -2,6 +2,7 @@
 id: INV.PLATFORM.A-DEBUG-SERVER-COMES-WITH-THE-CLIENT
 check:
   - src/platform/dbgs.rs::the_server_lies_beside_the_client
+  - tests/cli_debug_server.rs::start_runs_the_debug_server_beside_the_client_and_stop_ends_it
   - src/use_cases/managed_stand/debug_server.rs::a_missing_debug_server_is_an_environment_refusal_naming_the_installation
 ---
 

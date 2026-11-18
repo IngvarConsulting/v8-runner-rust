@@ -5,7 +5,10 @@
 mod support;
 
 use std::fs;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 use support::{hold_workspace_lock, temp_workspace, v8_runner_command};
@@ -72,4 +75,131 @@ fn a_session_that_is_not_hex_is_refused_by_the_parser() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid value"), "{stderr}");
+}
+
+/// Платформа с поддельным `dbgs` из `tests/fixtures/fake-dbgs.rs` рядом с тонким клиентом;
+/// возвращает каталог установки.
+fn platform_with_a_fake_debug_server(dir: &Path) -> PathBuf {
+    let install = dir.join("platform");
+    let bin = install.join("bin");
+    fs::create_dir_all(&bin).expect("bin");
+    let exe = std::env::consts::EXE_SUFFIX;
+    let client = bin.join(format!("1cv8c{exe}"));
+    fs::write(&client, "").expect("client");
+    #[cfg(unix)]
+    support::make_executable(&client);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-dbgs.rs");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+    let built = Command::new(rustc)
+        .args(["--edition", "2021", "-C", "opt-level=0", "-o"])
+        .arg(bin.join(format!("dbgs{exe}")))
+        .arg(source)
+        .output()
+        .expect("rustc");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    install
+}
+
+/// Отвечает ли по адресу обработчик `rdbg` отказом 400.
+fn rdbg_status(port: u16) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream
+        .write_all(
+            b"POST /e1crdbg/rdbg?cmd=getDbgTargets HTTP/1.1
+Host: 127.0.0.1
+Content-Type: application/xml
+Content-Length: 0
+Connection: close
+
+",
+        )
+        .ok()?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).ok()?;
+    answer.lines().next().map(str::to_owned)
+}
+
+/// Приёмка 1 и 2 на настоящем запуске службы: раннер запускает `dbgs` рядом с тонким
+/// клиентом, читает его адрес из файла `--notify`, ждёт ответа `rdbg`, и сервер переживает
+/// команду; `stop` его гасит, повторный `stop` ничего не трогает.
+#[test]
+fn start_runs_the_debug_server_beside_the_client_and_stop_ends_it() {
+    let dir = temp_workspace();
+    let install = platform_with_a_fake_debug_server(dir.path());
+    fs::create_dir_all(dir.path().join("src")).expect("src");
+    fs::write(
+        dir.path().join("src/Configuration.xml"),
+        "<MetaDataObject/>",
+    )
+    .expect("set");
+    fs::write(
+        dir.path().join("v8project.yaml"),
+        format!(
+            "workPath: work
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src
+infobase:
+  connection: 'File=ib'
+tools:
+  platform:
+    path: '{}'
+",
+            install.display()
+        ),
+    )
+    .expect("project");
+    let (code, started) = run(dir.path(), &["debug-server", "start"]);
+    // `cargo test` на Windows держит тесты в Job, из которого выйти нельзя: сервер умер бы с
+    // командой, и раннер отказывает, ничего не оставив. Полный путь идёт на Linux и macOS.
+    if cfg!(windows)
+        && started["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Job"))
+    {
+        assert_eq!(
+            started["error"]["code"], "environment_unavailable",
+            "{started}"
+        );
+        let sessions = dir.path().join("work").join("debug-server");
+        let left = fs::read_dir(&sessions)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "a refused start leaves no session");
+        return;
+    }
+    assert_eq!(code, 0, "{started}");
+    let data = &started["data"];
+    assert_eq!(data["action"], "started", "{started}");
+    assert_eq!(data["owner"], "runner");
+    let port = u16::try_from(data["port"].as_u64().expect("port")).expect("u16");
+    assert!((10_000..20_000).contains(&port), "{port}");
+    assert_eq!(data["url"], format!("http://127.0.0.1:{port}"));
+    assert!(
+        data["platform_resolution"]["path"]
+            .as_str()
+            .is_some_and(|path| path.contains("dbgs")),
+        "{started}"
+    );
+    // Команда вышла, сервер работает.
+    let status = rdbg_status(port).expect("the server outlived the command");
+    assert!(status.contains("400"), "{status}");
+    let session = data["session"].as_str().expect("session").to_owned();
+
+    let (code, stopped) = run(dir.path(), &["debug-server", "stop", &session]);
+    assert_eq!(code, 0, "{stopped}");
+    assert_eq!(stopped["data"]["action"], "stopped", "{stopped}");
+    assert_eq!(stopped["data"]["stopped_pid"], data["pid"]);
+    assert!(rdbg_status(port).is_none(), "the server is stopped");
+
+    let (code, again) = run(dir.path(), &["debug-server", "stop", &session]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["action"], "nothing_to_stop");
+    assert_eq!(again["data"]["known_session"], false);
 }

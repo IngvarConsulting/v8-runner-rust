@@ -397,12 +397,12 @@ pub struct ClusterDebugArgs {
 }
 
 impl ClusterDebugArgs {
-    /// `None` — ключа нет: как закреплено.
-    pub fn choice(self) -> Option<bool> {
+    pub fn choice(self) -> crate::use_cases::managed_stand::DebugChoice {
+        use crate::use_cases::managed_stand::DebugChoice;
         match (self.debug, self.no_debug) {
-            (true, _) => Some(true),
-            (_, true) => Some(false),
-            _ => None,
+            (true, _) => DebugChoice::On,
+            (_, true) => DebugChoice::Off,
+            (false, false) => DebugChoice::AsPinned,
         }
     }
 }

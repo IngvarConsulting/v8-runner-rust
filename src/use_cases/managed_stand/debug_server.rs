@@ -28,10 +28,12 @@ use crate::platform::service_record::{
 };
 use crate::support::error::{AppError, CapabilityReason, EnvironmentLayer};
 use crate::use_cases::context::ExecutionContext;
-use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-use super::{await_gone, occupant_name, occupant_of, write_record, ServiceHost, POLL};
+use super::{
+    await_gone, await_rdbg, occupant_name, occupant_of, write_record, RdbgWait, ServiceHost,
+    DEBUG_READY_TIMEOUT,
+};
 
 /// Каталог сеансов под `workPath`.
 const SESSIONS: &str = "debug-server";
@@ -41,8 +43,6 @@ const NOTIFY: &str = "notify";
 const CLUSTER_SESSION: &str = "cluster.json";
 /// Журнал неудачной попытки: каталог сеанса снят, а причина отказа остаётся читаемой.
 const FAILED_LOG_PREFIX: &str = "failed-";
-/// Сколько ждать, пока `dbgs` назовёт адрес и ответит по `rdbg`.
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Каталог без записи моложе этого — его, возможно, прямо сейчас заводит другой `start`.
 const FRESH: Duration = Duration::from_secs(60);
@@ -151,7 +151,7 @@ impl DebugServer<'_> {
             Server::Cluster => self.cluster(request, dry_run)?,
             Server::Runner => self.runner_server(request, dry_run)?,
         };
-        result.duration_ms = elapsed_ms(started);
+        result.duration_ms = crate::support::time::elapsed_ms(started);
         Ok(result)
     }
 
@@ -199,11 +199,8 @@ impl DebugServer<'_> {
         self.sweep();
         let session = DebugSession::new();
         let paths = session_paths(self.config, session);
-        write_json(
-            &paths.root().join(CLUSTER_SESSION),
-            &ClusterSession { port },
-        )
-        .map_err(|error| super::io_failure("cannot write", paths.root(), &error))?;
+        write_json(&paths.root().join(CLUSTER_SESSION), &ClusterSession {})
+            .map_err(|error| super::io_failure("cannot write", paths.root(), &error))?;
         result.action = ServiceAction::Started;
         result.session = Some(session);
         result.port = Some(port);
@@ -282,11 +279,17 @@ impl DebugServer<'_> {
         let pid = match self.host.spawn(&spawn, self.context.work()) {
             Ok(pid) => pid,
             Err(error) => {
-                let log = self.abandon(&paths);
-                return Err(UseCaseError::new(
-                    UseCaseErrorKind::Platform,
-                    format!("dbgs did not start: {error}; log: {}", log.display()),
-                ));
+                forget(&paths);
+                // Job, из которого нельзя выйти, — дело окружения: сервер умер бы с командой.
+                return Err(match error {
+                    crate::platform::service::ServiceSpawnError::Io(_) => UseCaseError::new(
+                        UseCaseErrorKind::Platform,
+                        format!("dbgs did not start: {error}"),
+                    ),
+                    _ => UseCaseError::from(AppError::environment(format!(
+                        "dbgs did not start: {error}"
+                    ))),
+                });
             }
         };
         let Some(facts) = self.host.facts(pid) else {
@@ -347,43 +350,47 @@ impl DebugServer<'_> {
         notify: &Path,
         port: DebugPort,
     ) -> Result<u16, UseCaseError> {
-        let deadline = Instant::now() + self.host.patience(READY_TIMEOUT);
-        loop {
-            if let Some(error) =
-                interruption_before_safe_point(self.context, "waiting for the debug server")
-            {
-                return Err(self.give_up(paths, record, session, error.into()));
-            }
-            if let Some(actual) = dbgs::notified_port(notify) {
-                let listener = self.host.listening_pid(actual);
-                let ours = listener.is_none_or(|listener| listener == pid);
-                if ours && self.host.rdbg_answers(actual) {
-                    return Ok(actual);
-                }
-            }
-            let gone = self
-                .host
+        // Порт из файла адреса, если его слушает этот процесс, а не чужой (на Unix слушающего
+        // система не называет).
+        let named = || {
+            dbgs::notified_port(notify).filter(|actual| {
+                self.host
+                    .listening_pid(*actual)
+                    .is_none_or(|listener| listener == pid)
+            })
+        };
+        let alive = || {
+            self.host
                 .facts(pid)
-                .is_none_or(|facts| Some(facts.started) != record.started);
-            if gone {
+                .is_some_and(|facts| Some(facts.started) == record.started)
+        };
+        match await_rdbg(
+            self.host,
+            self.context,
+            "waiting for the debug server",
+            &named,
+            &alive,
+        ) {
+            RdbgWait::Ready(actual) => Ok(actual),
+            RdbgWait::Gone => {
                 let log = self.abandon(paths);
-                return Err(self.exited(
+                Err(self.exited(
                     &log,
                     port,
                     "dbgs exited before it answered as a debug server",
-                ));
+                ))
             }
-            if Instant::now() >= deadline {
+            RdbgWait::TimedOut => {
                 let timeout = UseCaseError::new(
                     UseCaseErrorKind::TimedOut,
                     format!(
                         "dbgs did not answer as a debug server in {} s",
-                        READY_TIMEOUT.as_secs()
+                        DEBUG_READY_TIMEOUT.as_secs()
                     ),
                 );
-                return Err(self.give_up(paths, record, session, timeout));
+                Err(self.give_up(paths, record, session, timeout))
             }
-            self.host.sleep(POLL);
+            RdbgWait::Interrupted(error) => Err(self.give_up(paths, record, session, error)),
         }
     }
 
@@ -447,7 +454,7 @@ impl DebugServer<'_> {
         let paths = session_paths(self.config, session);
         let mut result = self.stop_session(&paths, dry_run)?;
         result.session = Some(session);
-        result.duration_ms = elapsed_ms(started);
+        result.duration_ms = crate::support::time::elapsed_ms(started);
         Ok(result)
     }
 
@@ -467,10 +474,10 @@ impl DebugServer<'_> {
             ServiceAction::NothingToStop
         });
         result.known_session = Some(true);
-        if let Some(cluster) = read_json::<ClusterSession>(&paths.root().join(CLUSTER_SESSION)) {
+        // Адрес сервера кластера сеанс не хранит: порты кластера могли смениться, а живой адрес
+        // называет `cluster status`.
+        if read_json::<ClusterSession>(&paths.root().join(CLUSTER_SESSION)).is_some() {
             result.owner = Some(DebugServerOwner::Cluster);
-            result.port = Some(cluster.port);
-            result.url = Some(dbgs::url(cluster.port));
             if !dry_run {
                 forget(paths);
             }
@@ -599,11 +606,10 @@ impl DebugServer<'_> {
     }
 }
 
-/// Сеанс сервера отладки кластера: только его порт.
+/// Метка сеанса сервера отладки кластера. Порта в ней нет: он принадлежит закреплённому
+/// кластера и меняется вместе с ним.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct ClusterSession {
-    port: u16,
-}
+struct ClusterSession {}
 
 /// Снимает сеанс целиком: запись, файл адреса и журнал.
 fn forget(paths: &ServicePaths) {
@@ -635,10 +641,6 @@ fn port_taken(port: u16, pid: u32) -> UseCaseError {
         "port {port} is taken by {}: the debug server did not start; pass another --port or none",
         occupant_name(pid)
     )))
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Сценарий `debug-server` над подделкой системы: запуск, готовность, остановка и уборка без
@@ -821,7 +823,7 @@ mod tests {
     }
 
     struct Setup {
-        root: tempfile::TempDir,
+        _root: tempfile::TempDir,
         config: AppConfig,
         client: PathBuf,
     }
@@ -852,7 +854,7 @@ mod tests {
             tests: Default::default(),
         };
         Setup {
-            root,
+            _root: root,
             config,
             client,
         }
@@ -1341,6 +1343,7 @@ mod tests {
         let stopped = setup.stop(started.session.unwrap(), &host).unwrap();
         assert_eq!(stopped.action, ServiceAction::NothingToStop);
         assert_eq!(stopped.owner, Some(DebugServerOwner::Cluster));
+        assert_eq!(stopped.url, None, "the session keeps no stale address");
         assert!(host.soft_stops.borrow().is_empty());
         assert!(setup.sessions().is_empty());
     }

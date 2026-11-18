@@ -1732,7 +1732,7 @@ pub(crate) fn log_reply(command: &str, secrets: &[&str], reply: &AgentReply, ela
     debug!(
         command = %crate::platform::secrets::mask_text(command, secrets),
         messages = reply.messages.len(),
-        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms = crate::support::time::millis(elapsed),
         "agent replied"
     );
 }

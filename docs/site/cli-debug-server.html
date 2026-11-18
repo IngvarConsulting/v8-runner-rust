@@ -116,7 +116,7 @@
 <tr data-response-class="success"><td>Сервер остановлен</td><td><code>debug-server stop</code> подтвердил конец процесса: <code>action: stopped</code>, <code>stopped_pid</code>. <a href="#debug-server-stopped">Пример</a></td></tr>
 <tr data-response-class="success"><td>Сеанс неизвестен</td><td>Повторный <code>stop</code> или сеанс другой рабочей копии: <code>nothing_to_stop</code>, <code>known_session: false</code>, ничего не тронуто. <a href="#debug-server-unknown">Пример</a></td></tr>
 <tr data-response-class="success"><td>Сервер уже вышел</td><td>Запись была, процесса нет — например, сервер вышел с концом владельца: <code>nothing_to_stop</code>, <code>stale_record: true</code>. <a href="#debug-server-stale">Пример</a></td></tr>
-<tr data-response-class="success"><td>Сеанс сервера кластера снят</td><td><code>stop</code> по сеансу с <code>owner: cluster</code>: <code>nothing_to_stop</code>, кластер работает. <a href="#debug-server-cluster-stop">Пример</a></td></tr>
+<tr data-response-class="success"><td>Сеанс сервера кластера снят</td><td><code>stop</code> по сеансу с <code>owner: cluster</code>: <code>nothing_to_stop</code>, кластер работает; адреса в ответе нет — его называет <code>cluster status</code>. <a href="#debug-server-cluster-stop">Пример</a></td></tr>
 <tr data-response-class="refusal"><td>Нет <code>dbgs</code> рядом с клиентом</td><td>В установке тонкого клиента нет сервера отладки: <code>environment_unavailable</code> со слоем <code>platform</code>, выход CLI 2; отказ называет версию и путь клиента, процесс не запускается. <a href="#debug-server-no-dbgs">Пример</a></td></tr>
 <tr data-response-class="refusal"><td>Порт занят</td><td>Явный <code>--port</code> держит другой процесс: <code>environment_unavailable</code>, выход CLI 2; он остаётся работать. Тот же отказ, если заняты все окна полосы. <a href="#debug-server-port-taken">Пример</a></td></tr>
 <tr data-response-class="refusal"><td>У кластера нет сервера отладки</td><td>Кластер раннера не запущен или запущен без <code>--debug</code>: <code>environment_unavailable</code>, выход CLI 2; отказ называет нужную команду <code>cluster</code>. <a href="#debug-server-no-cluster-debug">Пример</a></td></tr>
@@ -282,8 +282,6 @@ session: 9a41c07e2d5b4f6e8c3a1b2d4e6f8a0c</code></pre>
       "action": "nothing_to_stop",
       "session": "9a41c07e2d5b4f6e8c3a1b2d4e6f8a0c",
       "owner": "cluster",
-      "url": "http://127.0.0.1:46778",
-      "port": 46778,
       "known_session": true,
       "duration_ms": 5
     },
