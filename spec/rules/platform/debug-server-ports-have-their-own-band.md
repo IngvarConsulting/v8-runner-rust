@@ -6,6 +6,7 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::a_port_taken_during_the_start_is_named_as_taken
   - src/platform/ragent.rs::the_debug_port_follows_the_worker_range_inside_the_block
   - src/use_cases/managed_stand/cluster.rs::a_taken_debug_port_moves_no_registry
+  - src/use_cases/managed_stand/standalone.rs::a_taken_debug_port_moves_the_block_only_with_the_debug_server
 ---
 
 # У портов сервера отладки своя полоса
@@ -18,3 +19,6 @@ check:
 
 Сервер отладки кластера слушает порт следом за диапазоном рабочих процессов, внутри шага его закреплённого блока:
 диапазон `/range` не меняется, потому что реестр кластера помнит прежний.
+
+`dbgs` автономного сервера слушает порт следом за диапазоном прямых соединений, внутри шага его закреплённого
+блока; при включённой отладке занятость этого порта переносит блок целиком (`INV.USE-CASES.THE-STANDALONE-DEBUG-SERVER-STAYS-ON-UNTIL-NO-DEBUG`).

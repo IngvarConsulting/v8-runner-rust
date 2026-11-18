@@ -361,7 +361,36 @@ pub enum ServiceCommandArgs {
 #[derive(Args, Debug)]
 pub struct StandaloneArgs {
     #[command(subcommand)]
-    pub command: ServiceCommandArgs,
+    pub command: StandaloneCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum StandaloneCommandArgs {
+    /// Start the service of this infobase and wait until it accepts connections
+    Start {
+        #[command(flatten)]
+        debug: DebugArgs,
+    },
+    /// Say whether it runs, who started it and where it listens
+    Status,
+    /// Stop the service this working copy started; the data stays
+    Stop,
+    /// Stop and start it again
+    Restart {
+        #[command(flatten)]
+        debug: DebugArgs,
+    },
+}
+
+impl StandaloneCommandArgs {
+    pub fn service(self) -> ServiceCommandArgs {
+        match self {
+            Self::Start { .. } => ServiceCommandArgs::Start,
+            Self::Status => ServiceCommandArgs::Status,
+            Self::Stop => ServiceCommandArgs::Stop,
+            Self::Restart { .. } => ServiceCommandArgs::Restart,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -379,7 +408,7 @@ pub enum ClusterCommandArgs {
         #[arg(long)]
         new_regport: bool,
         #[command(flatten)]
-        debug: ClusterDebugArgs,
+        debug: DebugArgs,
     },
     /// Say whether it runs, who started it and where it listens
     Status,
@@ -388,7 +417,7 @@ pub enum ClusterCommandArgs {
     /// Stop and start it again
     Restart {
         #[command(flatten)]
-        debug: ClusterDebugArgs,
+        debug: DebugArgs,
     },
 }
 
@@ -418,19 +447,19 @@ pub enum DebugServerCommandArgs {
     },
 }
 
-/// Сервер отладки кластера: включить, снять или оставить как закреплено.
+/// Сервер отладки стенда: включить, снять или оставить как закреплено.
 #[derive(Args, Debug, Clone, Copy)]
-pub struct ClusterDebugArgs {
-    /// Start the agent with its HTTP debug server on the loopback (Windows); it stays on for later
+pub struct DebugArgs {
+    /// Start the server with a 1C debug server on the loopback (Windows); it stays on for later
     /// starts until --no-debug
     #[arg(long, conflicts_with = "no_debug")]
     pub debug: bool,
-    /// Start the agent without a debug server
+    /// Start the server without a debug server
     #[arg(long)]
     pub no_debug: bool,
 }
 
-impl ClusterDebugArgs {
+impl DebugArgs {
     pub fn choice(self) -> crate::use_cases::managed_stand::DebugChoice {
         use crate::use_cases::managed_stand::DebugChoice;
         match (self.debug, self.no_debug) {

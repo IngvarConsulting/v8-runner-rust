@@ -810,7 +810,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
-        Command::Standalone(args) => match args.command {
+        Command::Standalone(args) => match args.command.service() {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
@@ -1606,23 +1606,33 @@ fn execute_dbms(
 /// `standalone`: запись под замком `workPath`, `status` без него.
 fn execute_standalone(
     config: &AppConfig,
-    action: crate::cli::args::ServiceCommandArgs,
+    action: crate::cli::args::StandaloneCommandArgs,
     command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::cli::args::StandaloneCommandArgs as Action;
     use crate::use_cases::managed_stand::{
-        execute_standalone as run, standalone_status, ServiceCommand,
+        execute_standalone as run, standalone_status, StandaloneCommand,
     };
 
     let (name, command) = match action {
-        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
-        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
-        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
-        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
+        Action::Start { debug } => (
+            CommandName::StandaloneStart,
+            StandaloneCommand::Start {
+                debug: debug.choice(),
+            },
+        ),
+        Action::Status => (CommandName::StandaloneStatus, StandaloneCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, StandaloneCommand::Stop),
+        Action::Restart { debug } => (
+            CommandName::StandaloneRestart,
+            StandaloneCommand::Restart {
+                debug: debug.choice(),
+            },
+        ),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1655,7 +1665,7 @@ fn execute_standalone(
             Err(error)
         }
     };
-    if command == ServiceCommand::Status {
+    if command == StandaloneCommand::Status {
         return present(standalone_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1741,6 +1751,7 @@ fn debug_server_text(
 
     let owner = match result.owner {
         Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
+        Some(DebugServerOwner::Standalone) => "the debug server of the standalone server",
         Some(DebugServerOwner::Runner) | None => "the debug server",
     };
     let mut lines = vec![match result.action {
@@ -1766,6 +1777,9 @@ fn debug_server_text(
     }];
     if let (ServiceAction::Started, Some(session)) = (result.action, &result.session) {
         lines.push(format!("session: {session}"));
+    }
+    if let Some(alias) = &result.infobase_alias {
+        lines.push(format!("infobase alias: {alias}"));
     }
     if let Some(pid) = result.pid {
         lines.push(format!("pid: {pid}"));
@@ -1829,6 +1843,7 @@ fn standalone_text(
         ("direct gate", result.connection.clone()),
         ("ssh gate", result.gate.clone()),
         ("http", result.http.clone()),
+        ("debug server", result.debug_url.clone()),
         (
             "data",
             result
@@ -1850,6 +1865,10 @@ fn standalone_text(
         (
             "PostgreSQL stopped",
             result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
+        (
+            "debug server stopped",
+            result.stopped_debug_pid.map(|pid| format!("pid {pid}")),
         ),
         (
             "previous port",
@@ -7630,6 +7649,8 @@ mod tests {
             stopped_pid: Some(8576),
             stopped_dbms_pid: Some(6320),
             previous_port: None,
+            debug_url: None,
+            stopped_debug_pid: None,
             duration_ms: 0,
             warnings: Vec::new(),
         };

@@ -7,9 +7,10 @@ mod recreate;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
-pub use cluster::{ClusterCommand, DebugChoice};
+pub use cluster::ClusterCommand;
 pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
+pub use standalone::StandaloneCommand;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -1110,7 +1111,7 @@ pub(crate) fn create_standalone_base(
 pub fn execute_standalone(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: StandaloneCommand,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
     standalone::run_standalone(
@@ -1153,6 +1154,7 @@ fn with_debug_server<T>(
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
     let cluster_port = || cluster::debug_port(context, config, &RealHost);
+    let standalone_server = || standalone::debug_server(context, config, &RealHost);
     run(&debug_server::DebugServer {
         context,
         config,
@@ -1160,6 +1162,7 @@ fn with_debug_server<T>(
         host: &RealHost,
         locate_client: &locate,
         cluster_port: &cluster_port,
+        standalone_server: &standalone_server,
     })
     .map_err(UseCaseFailure::without_payload)
 }
@@ -1182,7 +1185,7 @@ pub fn standalone_status(
     standalone::run_standalone(
         context,
         config,
-        ServiceCommand::Status,
+        StandaloneCommand::Status,
         false,
         &ProcessExecutor,
         &RealHost,
@@ -1320,6 +1323,29 @@ fn locate(
         // Род и код отказа решает сама ошибка поиска: отказ выпуска формата исходников
         // остаётся собой, а не пересказом.
         .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
+}
+
+/// Сервер отладки стенда, о котором просит запуск кластера или автономного сервера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugChoice {
+    /// `--debug`: поднять с сервером отладки и закрепить это.
+    On,
+    /// `--no-debug`: поднять без него и закрепить это.
+    Off,
+    /// Ключа нет: как закреплено.
+    #[default]
+    AsPinned,
+}
+
+impl DebugChoice {
+    /// Что просят явно; `None` — как закреплено.
+    pub(crate) fn requested(self) -> Option<bool> {
+        match self {
+            Self::On => Some(true),
+            Self::Off => Some(false),
+            Self::AsPinned => None,
+        }
+    }
 }
 
 /// Какая из команд службы: `dbms`, `standalone` или `cluster`.

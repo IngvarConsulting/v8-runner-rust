@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STANDALONE-RESTART-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/standalone-restart.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -13,6 +13,8 @@ check:
 Форма та же, что у `standalone start`. Состояние `state`: `not_running`, `starting`, `started_by_this_copy`, `foreign` — порт записи слушает чужой
 процесс, его pid в `occupant_pid`. `connection` — строка прямого шлюза, `gate` — адрес SSH-шлюза, `http` — адрес HTTP.
 `stale_record` говорит, что запись была, а процесса из неё уже нет.
+
+**Что изменила версия 3.** Появились `debug_url` и `stopped_debug_pid`.
 
 ## Пример
 

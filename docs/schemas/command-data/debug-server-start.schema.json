@@ -12,6 +12,11 @@
           "const": "cluster",
           "description": "Сервер отладки управляемого кластера (`cluster start --debug`); `stop` его не трогает.",
           "type": "string"
+        },
+        {
+          "const": "standalone",
+          "description": "Сервер отладки управляемого автономного сервера (`standalone start --debug`); `stop` его\nне трогает.",
+          "type": "string"
         }
       ]
     },
@@ -96,6 +101,13 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "infobase_alias": {
+      "description": "Имя базы, под которым отладчик видит её цели (`infoBaseAlias` запросов `rdbg`):\n`DefAlias` у файловой базы, имя базы в сервере у автономного сервера. У сервера кластера\nполя нет: не замерено.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "known_session": {
       "description": "`stop`: раннер знает этот сеанс. `false` — записи нет: сеанс уже остановлен или\nзапущен из другой рабочей копии.",

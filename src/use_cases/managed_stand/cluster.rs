@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::{
     await_gone, being_started, block_conflict, environment, first_taken, forget_record, io_failure,
     occupant_of, other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record,
-    Database, MoveCause, ServiceHost, Stand,
+    Database, DebugChoice, MoveCause, ServiceHost, Stand,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -40,29 +40,6 @@ const AGENT_IMAGE: &str = "ragent.exe";
 const REMNANT_IMAGES: [&str; 3] = ["rmngr.exe", "rphost.exe", "dbgs.exe"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
-
-/// Сервер отладки агента, о котором просит запуск.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DebugChoice {
-    /// `--debug`: поднять с сервером отладки и закрепить это.
-    On,
-    /// `--no-debug`: поднять без него и закрепить это.
-    Off,
-    /// Ключа нет: как закреплено.
-    #[default]
-    AsPinned,
-}
-
-impl DebugChoice {
-    /// Что просят явно; `None` — как закреплено.
-    fn requested(self) -> Option<bool> {
-        match self {
-            Self::On => Some(true),
-            Self::Off => Some(false),
-            Self::AsPinned => None,
-        }
-    }
-}
 
 /// Команда кластера. Ключ `--new-regport` есть только у запуска.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3793,7 +3770,9 @@ mod tests {
         let refused = super::super::standalone::run_standalone(
             &ExecutionContext::cli(CommandName::StandaloneStart),
             &config,
-            ServiceCommand::Start,
+            super::super::StandaloneCommand::Start {
+                debug: DebugChoice::AsPinned,
+            },
             false,
             &Runner { host: &host },
             &host,

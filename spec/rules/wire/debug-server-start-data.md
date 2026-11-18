@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-START-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/debug-server-start.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -8,6 +8,7 @@ check:
   - tests/cli_debug_server.rs::start_runs_the_debug_server_beside_the_client_and_stop_ends_it
   - src/use_cases/managed_stand/debug_server.rs::start_answers_with_the_address_that_answered_as_a_debug_server
   - src/use_cases/managed_stand/debug_server.rs::a_cluster_infobase_gets_the_debug_server_of_the_cluster
+  - src/use_cases/managed_stand/debug_server.rs::a_standalone_infobase_gets_the_debug_server_of_the_server
   - src/use_cases/managed_stand/debug_server.rs::a_preview_starts_and_writes_nothing
 ---
 
@@ -22,6 +23,8 @@ check:
 (`--owner-pid`), `platform_resolution` — путь `dbgs` и установка тонкого клиента, из которой он взят, и `log_path`
 — журнал сервера. У `owner: cluster` процесса раннера нет, и этих полей тоже; ключи `--port` и `--owner-pid` к
 серверу кластера не применяются, о чём говорит `warnings` конверта.
+
+**Что изменила версия 2.** `owner` получил значение `standalone` — сервер отладки автономного сервера раннера (`standalone start --debug`); появилось `infobase_alias` — имя базы для `infoBaseAlias` запросов `rdbg`: `DefAlias` у файловой базы, имя базы в сервере у автономного сервера, у кластера поля нет.
 
 ## Пример
 

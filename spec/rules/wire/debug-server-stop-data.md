@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-STOP-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/debug-server-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -21,6 +21,8 @@ check:
 другой процесс, которого раннер не трогает. У сеанса сервера кластера (`owner: cluster`) `action` —
 `nothing_to_stop`: сервер отладки живёт с кластером, `stop` снимает только сеанс. `url` и `port` у такого
 сеанса нет: порты кластера могли смениться, его живой адрес называет `cluster status`.
+
+**Что изменила версия 2.** `owner` получил значение `standalone`: `stop` по такому сеансу ничего не гасит.
 
 ## Пример
 
