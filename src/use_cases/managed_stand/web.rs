@@ -1535,6 +1535,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn status_marks_the_publication_stale_after_the_regport_moves() {
         let (stand, host) = running();
         publish(&stand, &host, false).unwrap();
@@ -1549,6 +1551,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn publish_runs_the_located_webinst_on_the_private_config_and_reloads_apache() {
         let (stand, host) = running();
         let port = port_of(&status(&stand, &host));
@@ -1671,6 +1675,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn only_webinst_is_elevated_and_a_refusing_sudo_names_the_sudoers_rule() {
         let (stand, host) = running();
         let sudo = stand.config.base_path.join("sudo");
@@ -1719,6 +1725,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn files_webinst_leaves_as_root_are_taken_back_after_success_and_failure() {
         let (stand, host) = running();
         host.elevation
@@ -1802,6 +1810,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn webinst_comes_from_the_platform_search_not_from_the_cluster_record() {
         let (stand, host) = running();
         let record_path = stand.agent().record();
