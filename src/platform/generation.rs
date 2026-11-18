@@ -7,22 +7,6 @@
 //! последняя непустая строка из сорока шестнадцатеричных знаков. Что иначе — ответа нет:
 //! ни совпадения, ни расхождения он не даёт.
 
-use crate::domain::capability::{Provider, TargetKind};
-
-/// Отвечает ли инструмент поколением у такой цели. Единственное место этого признака.
-///
-/// Для Конфигуратора обмен использует поколение файловой базы, а для серверных целей
-/// действует gap #184 (`INV.USE-CASES.A-CLUSTER-DESIGNER-GENERATION-IS-READ-LIKE-A-FILE-ONE`).
-/// Проба прямого шлюза использует токен как подтверждение входа в ИБ. Без поколения обмен
-/// советует полную выгрузку
-/// (`INV.USE-CASES.WITHOUT-A-GENERATION-ANSWER-A-NO-MEMORY-REFUSAL-OFFERS-PULL-FORCE`).
-pub fn answers_generation(tool: Provider, target: TargetKind) -> bool {
-    match tool {
-        Provider::Designer => target == TargetKind::File,
-        Provider::Ibcmd | Provider::Agent | Provider::IbcmdRs | Provider::Webinst => true,
-    }
-}
-
 /// Число знаков токена поколения.
 const TOKEN_LENGTH: usize = 40;
 
@@ -63,8 +47,7 @@ mod tests {
         );
     }
 
-    /// Ответ, которого раннер не узнаёт, — отсутствие ответа: и у файловой базы, и у базы
-    /// в кластере, где формат ответа Конфигуратора не замерен.
+    /// Ответ без строки с токеном считается отсутствующим у любой цели.
     #[test]
     fn an_unrecognized_answer_is_no_answer() {
         for text in [

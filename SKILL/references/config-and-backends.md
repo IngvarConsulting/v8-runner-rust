@@ -44,12 +44,29 @@ matrix, and `providers.<operation>` names one explicitly.
   through the SSH gate. Without a key a file-base `push`/`pull` where every set goes whole runs
   `ibcmd → agent → designer` (receipt `reason: whole`), except with an attached agent; by
   changes the agent leads (`reason: by_changes`). `infobase.create` — file `ibcmd → designer`,
-  cluster Designer; `infobase.dump`/`infobase.restore` — `agent → designer` (experimental IBCMD
-  DT only when named); `upload` and `syntax` are Designer-only; `extensions` — file
+  cluster Designer; `infobase.dump`/`infobase.restore` — `agent → designer` (POSIX file DT
+  also accepts explicit `ibcmd`); `upload` and `syntax` are Designer-only; `extensions` — file
   `ibcmd → agent`, cluster `agent → designer`. `format: EDT` drops the agent from `push`/`pull`.
 - An override is strict: if the named executor is not ready the command refuses with a reason
   and never falls back to the default chain.
 - The key is allowed in `v8project.local.yaml` too; the response receipt names the file it came from.
+
+## Direct ibcmd decision examples
+
+Apply the [direct ibcmd guardrail](../SKILL.md#direct-ibcmd-access) to these inputs before dispatch:
+
+| Situation | Expected action |
+| --- | --- |
+| The cluster is running, its state is unknown, or only one HA node is confirmed stopped. The target has `dbms`. | Refuse direct access. Use a supported cluster route or report the missing confirmation. |
+| A running `ibsrv` serves the same DBMS database or file as the requested direct target. | Refuse the direct invocation, including through a file-target executor. |
+| No sessions are listed or logins are blocked, yet the serving processes are running. | Refuse direct access. |
+| A prior stop check is stale, or an automatic restart, manual start or HA takeover remains possible. | Obtain fresh evidence and a controlled window before direct access. |
+| A file-target command can fall back to `ibcmd`; preview selects Designer, and server inventory is unknown. | Use a supported server route that excludes direct `ibcmd` in every step, or stop and report the missing evidence. |
+| File-target `upload .cfe` loads through Designer and reads installed extensions through direct `ibcmd`. The server-stop check is unverified. | Stop or use a supported server target. Changing `providers.extensions` leaves the direct inventory step in place. |
+| All serving processes are confirmed stopped and cannot restart during the operation. | The server-stop check passes. Check the operation, version, permissions and any exclusive-access requirement before running. |
+| `--pid` or `--remote` reaches the verified `ibsrv` serving the intended base, and the operation is supported, and no step opens that base directly. | Keep `ibsrv` running and use that channel subject to operation-specific requirements. |
+| `--remote` is present, but the destination, supported operation or absence of a direct substep is unverified. | Verify the route or stop. Do not switch to direct access. |
+| The operation only converts source files and never opens an infobase. | Proceed without the server-stop check. |
 
 ## Format And Backend Rules
 
@@ -57,8 +74,9 @@ matrix, and `providers.<operation>` names one explicitly.
   make/upload/artifact workflows if configured.
 - `format=EDT`: `infobase create` and `push` through EDT export to Designer files, EDT syntax checks,
   extensions, and tests.
-- `ibcmd` as the executor for `push` covers file infobases and server infobases with `infobase.dbms`;
-  for an EDT project it runs after the EDT export to Designer files and requires a file infobase.
+- `push` can select `ibcmd` for a file target, subject to the direct-access check. For EDT it runs
+  after EDT export to Designer files. Cluster and standalone targets use their server routes,
+  regardless of `dbms`.
 - `infobase.cluster` (`ras`, `user`/`password`, `agent.address`/`user`/`password`) declares the
   administration server and the two administrator levels above the infobase user; it is refused
   next to `File=` or `standalone`, and no command reads it yet (`sessions`, the runner's own `ras`
@@ -71,7 +89,8 @@ matrix, and `providers.<operation>` names one explicitly.
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
 - `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.
-- Every IBCMD command on the project infobase uses project-local standalone-server data under `workPath/ibcmd-data`.
+- Direct file-target IBCMD operations such as `pull` and `extensions list` use the project-local
+  data directory `workPath/ibcmd-data`. Confirm server ownership of the physical base separately.
 - `pull --object` (partial) with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
 - `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.

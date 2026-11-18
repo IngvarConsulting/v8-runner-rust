@@ -104,7 +104,7 @@ v8-runner infobase create
 - A generated projection of a checkout (a separate config dir an integration runs `pull` from) names the checkout in its `v8project.local.yaml` as `working-copy: <dir>`; the owner marker then treats it as that checkout (no "another working copy" warning on its own base). The named dir must declare the same infobase, else `validation` before the platform; the key is refused in `v8project.yaml`.
 - Unsure how the sources and the base relate: run `v8-runner status` (memory only, no platform, works without one) — per set `memory` (`none` → `push` is refused `untracked_base`), the recorded generation, `changed_files` and `detection` (`git`/`git+fsmonitor` — git named the changes; `scan` with `reason` — every file was read); for a file base `holders.owners` — the live copies holding it (gone ones are not listed; `this_copy`, `this_machine`), so an owner other than this copy means writes will hit another copy's base; `status --all` for every declared base. `status --deep` asks the platform (the `push` executor): `base.comparison: moved_ahead` means a `push` that loads this set without `--force` is refused `non_fast_forward` — pull first; `extensions.installed[].source_set: null` with `tool: false` is an extension of the base with no project set (names match case-insensitively); `base.unapplied: true` means the base holds loaded but not applied changes (`apply` them or `reset`), `null` — not known (agent). It writes no memory, only logs; in a git working tree its `git status` may refresh file stats in the git index, as a plain `git status` does. An ad hoc `--infobase` connection string is not listed by `--all`. Read the generation executor in `data.provider`, including `endpoint.live` for a managed agent; when it is the agent, the same session lists the extensions (`extensions.provider` names the agent, no `ibcmd` process) unless `providers.extensions` names another executor. CLI only.
 - `v8-runner diff` lists metadata version changes against the runner's copy of the main set's `ConfigDumpInfo.xml` without exporting sources. `data.full_dump: true` means the platform could not enumerate changes. After `push` every loaded object is listed until a pull refreshes the copy. The `--against` report is UTF-16LE with a BOM. `diff --against db|vendor:<name>|<file>` returns the full Designer TXT report path in `data.report`. Quote names and paths containing spaces. An explicit `providers.diff: ibcmd` cannot produce a report. CLI only.
-- `push` checks, in order: who holds the base, memory of it, its generation. No memory for a set (fresh `localPath`, even an empty base; memory of another base or directory counts as none) → `untracked_base` (exit 3; also for `push --full`, `push --dry-run` and `test`): run `pull <SET>` if the base is right (`pull <SET> --force` for a cluster base reached through Designer, which gives no generation yet: a dump over the directory would not record memory), `push --force` if the sources are; `infobase create`, a full `pull` and any successful push write memory. Base moved ahead of the recorded generation → `non_fast_forward` (exit 3, `base_generation`/`local_generation`, `next: pull <SET>`); a server base may have been changed by another copy. After taking a base over (no marker / gone owner) the only way out until the first push is `push --force`. `push --force` loads every selected set in full and overwrites the base; it is the only way past the memory and generation checks (`--full` is checked too); CLI only, not in MCP.
+- `push` checks, in order: who holds the base, memory of it, its generation. No memory for a set (fresh `localPath`, even an empty base; memory of another base or directory counts as none) → `untracked_base` (exit 3; also for `push --full`, `push --dry-run` and `test`): run `pull <SET>` if the base is right, `push --force` if the sources are; `infobase create`, a full `pull` and any successful push write memory. Base moved ahead of the recorded generation → `non_fast_forward` (exit 3, `base_generation`/`local_generation`, `next: pull <SET>`); a server base may have been changed by another copy. After taking a base over (no marker / gone owner) the only way out until the first push is `push --force`. `push --force` loads every selected set in full and overwrites the base; it is the only way past the memory and generation checks (`--full` is checked too); CLI only, not in MCP.
 - A `pull` message saying the infobase was changed while being dumped: the next `push` is refused `non_fast_forward`; pull again before pushing. A failed push leaves the base unverified: if its generation moved, the next push is refused naming the failed load — pull or `push --force`.
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
 - Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration through Designer or `ibcmd` (chain order); `providers.download: agent` and a standalone server (agent only) refuse it with `capability_unavailable` before the platform starts.
@@ -160,6 +160,7 @@ v8-runner infobase create
   refuses with its holder PID. On Windows, both previews and actual DT requests refuse IBCMD
   during provider selection until its session probe is measured.
   `restore --create` skips the agent.
+- Apply the [direct ibcmd guardrail](#direct-ibcmd-access) before running a command that can select it.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`. Without a `providers` key a file-base `push`/`pull` where every set goes
   whole (`--force`, `--full`, a set without hash memory, a pull without a usable version file)
@@ -170,7 +171,9 @@ v8-runner infobase create
   for names-only inventory. Other extension operations with that override fail `capability_unavailable`.
   The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
   with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared. A collision on an automatically selected port allows one relaunch on a different port before the startup timeout expires. A collision on a declared port fails immediately. If the managed agent does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster or standalone server uses the `extensions list` provider, which needs no `dbms`; if the selected agent cannot start, the upload fails `environment` before loading. `providers.<op>: designer` restores the Designer-first choice;
-  a cluster base refuses `providers.<op>: ibcmd` for these operations.
+  a cluster base refuses `providers.<op>: ibcmd` for these operations. On a file target,
+  `upload .cfe` checks the installed extensions through direct `ibcmd` before the Designer load,
+  regardless of `providers.extensions`. Apply the guardrail to that step too.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
@@ -323,8 +326,9 @@ v8-runner infobase create
   reports `name_prefix` from the applied DB configuration; for the agent it is `null` (not
   attested, unlike `""`). With a live agent of the working copy up, `extensions list` on a file
   base reads through it (`provider.selected: agent`, `ibcmd` in `skipped`), so `name_prefix` is
-  `null`; need the prefix — `agent stop` first or set `providers.extensions: ibcmd`. Never fill it from source files
-  or the working configuration after `upload` without `apply`. A read that fails after the
+  `null`; if you need the prefix, apply the [direct ibcmd guardrail](#direct-ibcmd-access)
+  before switching away from the live agent or setting `providers.extensions: ibcmd`. Never fill
+  it from source files or the working configuration after `upload` without `apply`. A read that fails after the
   platform got the request answers `ok: false` with an empty `extensions`: the composition is
   unknown, not empty — check `ok` first.
   Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
@@ -332,7 +336,7 @@ v8-runner infobase create
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
   Launch uses the configured infobase and client settings; no source-set is required.
-- Client address: `launch thin`, `launch mcp` and the `test` client go by `infobase.connection`, or by `infobase.web.url` as a ws connection when no connection string is declared; `launch thin --via web|connection` picks one explicitly, and `--via` is accepted only where the client is thin. On a standalone server the connection string is the direct gate (`/S host:port\name` with `/N`/`/P` from `infobase.user`/`password`; its `web.url` gets no credentials until #184 measures them), `launch designer` goes by it too, and `thick`/`ordinary` (also `test --client-mode`) are refused with code `target`. A `/IBConnectionString` in `tools.enterprise.additional-launch-keys` lands after the runner's address, though the platform wants it before `/S` — declare the address in `infobase.*`, not there.
+- Client address: `launch thin`, `launch mcp` and the `test` client go by `infobase.connection`, or by `infobase.web.url` as a ws connection when no connection string is declared; `launch thin --via web|connection` picks one explicitly, and `--via` is accepted only where the client is thin. On a standalone server the connection string is the direct gate (`/S host:port\name`), `launch designer` goes by it too, and `thick`/`ordinary` (also `test --client-mode`) are refused with code `target`. Both `/S` and `/WS` pass `infobase.user`/`infobase.password` as `/N` and `/P`, with the password masked in command output. A `/IBConnectionString` in `tools.enterprise.additional-launch-keys` lands after the runner's address, though the platform wants it before `/S` — declare the address in `infobase.*`, not there.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values
@@ -358,6 +362,40 @@ v8-runner infobase create
 - Report missing local 1C utilities as environment/setup issues, not as project source failures:
   a missing or wrong-version utility answers `environment_unavailable` (exit 2).
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
+
+### Direct ibcmd access
+
+Apply this check before any direct `ibcmd` access to a physical infobase. The agent owns the
+check both for raw invocations and for v8-runner commands. Check every step that can reach the base, including
+implicit operations and default or fallback executors. A preview naming one executor only shows
+that selection. If the check cannot be met, use a supported server route that excludes direct access
+throughout the operation (pin an executor where the operation allows it), or stop and report the
+missing evidence.
+
+- Identify the physical target (resolved file location or DBMS instance and database) and the access
+  mode separately. Identify every cluster process and `ibsrv` instance that serves that target,
+  including remote nodes, HA standbys and aliases for the same storage.
+- Before opening the base directly, obtain current, verifiable evidence from the relevant hosts
+  or their service managers that all those processes are stopped, or that the target has no server
+  assigned. Require a controlled maintenance window covering the operation, with manual starts,
+  automatic restarts and HA failover prevented for the target until the operation ends. Use evidence
+  that identifies the target, services and time. A timestamped status alone leaves a restart race.
+  Leave unrelated servers running. Stop infrastructure only when separately instructed.
+- Treat unknown mode, incomplete coverage, unavailable checks and stale evidence as a refusal of
+  direct access. An empty session list, blocked logins, an unreachable port or RAS, an empty local
+  process list, `File=`, a `dbms` section, the utility name and a previous successful run are
+  insufficient. Check operation support, platform version, permissions and any exclusive-access
+  requirement separately, including for file bases.
+- For a supported `ibcmd --pid` or `--remote` operation, verify the running `ibsrv` instance,
+  the physical base it serves, operation support and its access requirements. Keep the server
+  running for this route and verify that no step opens the same base directly. If the channel
+  is unavailable, report that or use another supported server channel. Use the runner's published
+  providers as documented and avoid substituting direct access for a server call.
+- Operations that open no infobase, such as source-file-only conversions, skip this check. If
+  `make` or package `convert` uses a runner build or temporary infobase, assess that actual
+  target. Those workflows do not open the project infobase.
+
+See [executor decision examples](references/config-and-backends.md#direct-ibcmd-decision-examples).
 
 ## Output Discipline
 

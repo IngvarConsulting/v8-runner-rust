@@ -75,21 +75,25 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
         &agent.base_dir_file,
     );
 
-    let output = v8_runner_command()
-        .args(bootstrap_args(
-            &project_dir,
-            &platform_path,
-            &format!("File={tmp}/source ib"),
-        ))
-        .output()
-        .expect("run command");
+    let (code, payload) = run_clone_json(bootstrap_args(
+        &project_dir,
+        &platform_path,
+        &format!("File={tmp}/source ib"),
+    ));
 
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(code, Some(0), "{payload}");
+    assert_data_matches_its_command_form(&payload, "`clone`");
+    let source_dir = dir
+        .path()
+        .canonicalize()
+        .expect("canonical workspace")
+        .join("project/src/cf");
+    for key in ["source_dir", "dump_target_path"] {
+        assert_eq!(
+            payload["data"][key],
+            source_dir.to_str().expect("source path")
+        );
+    }
     let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
     assert!(config.contains("format: DESIGNER"));
     assert!(!config.contains("builder:"));
@@ -100,7 +104,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
         .expect("local")
         .contains(&format!("connection: '/F \"{tmp}/source ib\"'")));
-    assert!(config.contains("path: 'src/configuration'"));
+    assert!(config.contains("path: 'src/cf'"));
     assert!(config.contains("version: '8.3.27'"));
     assert!(!config.contains("platform_path"));
     assert!(!config.contains("secret"));
@@ -111,9 +115,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     assert!(local.contains(platform_path.display().to_string().as_str()));
     let gitignore = fs::read_to_string(project_dir.join(".gitignore")).expect("gitignore");
     assert_eq!(gitignore, "v8project.local.yaml\n.dump-*.lock*\n");
-    assert!(project_dir
-        .join("src/configuration/Configuration.xml")
-        .exists());
+    assert!(project_dir.join("src/cf/Configuration.xml").exists());
 
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(read_or_empty(&agent.commands_log).contains("config dump-config-to-files"));
@@ -422,17 +424,13 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
 fn bootstrap_rejects_existing_targets_without_force() {
     let bases = support::temp_workspace();
     let tmp = bases.path().display().to_string();
-    for target in [
-        "v8project.yaml",
-        "v8project.local.yaml",
-        "src/configuration",
-    ] {
+    for target in ["v8project.yaml", "v8project.local.yaml", "src/cf"] {
         let dir = temp_workspace();
         let project_dir = dir.path().join("project");
         let platform_path = dir.path().join("1cv8");
         let calls_log = dir.path().join("calls.log");
         write_designer_dump_script(&platform_path, &calls_log, 0);
-        if target.ends_with("configuration") {
+        if target == "src/cf" {
             fs::create_dir_all(project_dir.join(target)).expect("target dir");
         } else {
             fs::create_dir_all(&project_dir).expect("project dir");
@@ -506,7 +504,7 @@ fn bootstrap_force_overwrites_existing_targets() {
         &agent.pid_file,
         &agent.base_dir_file,
     );
-    fs::create_dir_all(project_dir.join("src/configuration")).expect("source dir");
+    fs::create_dir_all(project_dir.join("src/cf")).expect("source dir");
     fs::write(project_dir.join("v8project.yaml"), "existing").expect("config");
     fs::write(project_dir.join("v8project.local.yaml"), "existing").expect("local");
     let mut args = bootstrap_args(
@@ -522,9 +520,64 @@ fn bootstrap_force_overwrites_existing_targets() {
         .expect("run command");
 
     assert!(output.status.success());
-    assert!(project_dir
-        .join("src/configuration/Configuration.xml")
-        .exists());
+    assert!(project_dir.join("src/cf/Configuration.xml").exists());
+}
+
+#[test]
+fn clone_force_overwrites_the_explicit_source_target() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
+    let source_dir = project_dir.join("src/custom");
+    fs::create_dir_all(&source_dir).expect("source dir");
+    let source_dir = source_dir.canonicalize().expect("canonical source dir");
+    let mut args = bootstrap_args(
+        &project_dir,
+        &platform_path,
+        &format!("File={tmp}/source-ib"),
+    );
+    args[0] = "clone".to_owned();
+    args.extend(["--source-dir".to_owned(), "src/custom".to_owned()]);
+
+    let (code, payload) = run_clone_json(args.clone());
+
+    assert_eq!(code, Some(2), "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("already exists"), "{message}");
+    assert!(
+        message.contains(source_dir.to_str().expect("source path")),
+        "{message}"
+    );
+    assert!(
+        !calls_log.exists(),
+        "clone launched the platform after refusal"
+    );
+
+    args.push("--force".to_owned());
+    let (code, payload) = run_clone_json(args);
+
+    assert_eq!(code, Some(0), "{payload}");
+    assert_eq!(payload["data"]["dumped"], true, "{payload}");
+    for key in ["source_dir", "dump_target_path"] {
+        assert_eq!(
+            payload["data"][key],
+            source_dir.to_str().expect("source path")
+        );
+    }
+    assert!(source_dir.join("Configuration.xml").is_file());
+    assert!(!project_dir.join("src/cf").exists());
+    let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
+    assert!(config.contains("path: 'src/custom'"), "{config}");
 }
 
 #[test]
@@ -688,7 +741,7 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     assert!(payload["data"]["dump_target_path"]
         .as_str()
         .expect("target")
-        .contains("src/configuration"));
+        .contains("src/cf"));
     let log = fs::read_to_string(action_log).expect("action log");
     assert!(
         !log.contains("Admin"),
@@ -1263,6 +1316,17 @@ fn clone_preview_names_the_project_it_would_write_and_writes_nothing() {
     assert_eq!(payload["data"]["provider_dispatched"], false);
     assert_eq!(payload["data"]["dumped"], false);
     assert_eq!(payload["data"]["ok"], true);
+    let source_dir = dir
+        .path()
+        .canonicalize()
+        .expect("canonical workspace")
+        .join("project/src/cf");
+    for key in ["source_dir", "dump_target_path"] {
+        assert_eq!(
+            payload["data"][key],
+            source_dir.to_str().expect("source path")
+        );
+    }
     // Утилиту, которой выгружал бы, превью называет словами: квитанции эта форма не несёт.
     let message = payload["data"]["message"].as_str().expect("message");
     assert!(
@@ -1560,6 +1624,7 @@ fn clone_takes_its_source_from_the_from_key() {
         .expect("run help");
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--from <CONNECTION>"), "{help}");
+    assert!(help.contains("[default: src/cf]"), "{help}");
     assert!(!help.contains("--connection"), "{help}");
 }
 
@@ -1695,9 +1760,7 @@ fn clone_into_a_directory_holding_only_git_writes_the_project() {
     assert_eq!(code, Some(0), "{payload}");
     assert_eq!(payload["data"]["dumped"], true, "{payload}");
     assert!(project_dir.join("v8project.yaml").exists());
-    assert!(project_dir
-        .join("src/configuration/Configuration.xml")
-        .exists());
+    assert!(project_dir.join("src/cf/Configuration.xml").exists());
 }
 
 /// `--force` снимает отказ по непустому каталогу: чужой файл остаётся, проект пишется.
@@ -1748,7 +1811,7 @@ fn a_clone_refusal_does_not_offer_force() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let source_dir = project_dir.join("src").join("configuration");
+    let source_dir = project_dir.join("src/cf");
     fs::create_dir_all(&source_dir).expect("source dir");
     let vcs = |args: &[&str]| {
         let status = std::process::Command::new("git")

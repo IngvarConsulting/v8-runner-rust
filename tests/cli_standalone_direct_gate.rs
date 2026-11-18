@@ -54,7 +54,12 @@ if [ -n "$file" ]; then
   mkdir -p "$(dirname "$file")"
   printf 'payload' > "$file"
 fi
-if [ -n "$out" ]; then : > "$out"; fi
+if [ -n "$out" ]; then
+  case "$*" in
+    *'/DumpDBCfgList -AllExtensions'*) printf '\357\273\277ReportedExtension\r\n' > "$out" ;;
+    *) : > "$out" ;;
+  esac
+fi
 exit 0"#,
         calls = root.join("calls.log").display(),
         invalid_probe = root.join("invalid-probe").display(),
@@ -394,6 +399,42 @@ fn the_direct_gate_serves_what_the_ssh_gate_lacks() {
             "{switch}: {calls:?}"
         );
     }
+}
+
+/// Измеренный формат /Out прямого шлюза, включая BOM и CRLF, годится обоим обходам.
+#[test]
+fn pull_and_download_discover_extensions_through_the_direct_gate() {
+    let project = Project::direct_gate_only();
+    support::commit_sources(project.root());
+
+    let pull = succeeded(&project.run(&["pull", "--all"]));
+    assert_eq!(
+        pull["data"]["declared"][0]["name"], "ReportedExtension",
+        "{pull}"
+    );
+    let download = succeeded(&project.run(&["download", "--output", "dist"]));
+    assert!(
+        download["data"]["sets"]
+            .as_array()
+            .expect("sets")
+            .iter()
+            .any(|set| {
+                set["output"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("ReportedExtension.cfe"))
+            }),
+        "{download}"
+    );
+
+    let calls = project.calls();
+    assert_every_call_goes_to_the_direct_gate(&calls);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.contains("/DumpDBCfgList -AllExtensions"))
+            .count(),
+        2
+    );
 }
 
 /// Превью `upload` и подъёма снимка называют Конфигуратор: их у автономного сервера
