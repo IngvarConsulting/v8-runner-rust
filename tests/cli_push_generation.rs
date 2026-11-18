@@ -1386,29 +1386,26 @@ fn a_generation_record_does_not_make_memory_of_another_pair_own() {
     assert!(project.calls().is_empty(), "{}", project.calls());
 }
 
-/// Конфигуратор у базы в кластере поколением заведомо не отвечает (#184): выгрузка поверх
-/// каталога памяти не записала бы, и отказ без памяти советует полную `pull <SET> --force`,
-/// предупреждая о потере незакоммиченного. У файловой базы совет — `pull <SET>`.
+/// Для кластерного Конфигуратора обычная выгрузка может записать поколение.
 #[test]
-fn without_a_generation_answer_a_no_memory_refusal_offers_pull_force() {
+fn a_cluster_base_without_memory_offers_an_incremental_pull() {
     let project = Project::new("Srvr=cluster;Ref=dev");
-
     let payload = envelope(&project.run(&["push"]));
 
     assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     assert_eq!(payload["error"]["next"]["source_set"], "main", "{payload}");
-    assert_eq!(payload["error"]["next"]["keys"]["--force"], "", "{payload}");
+    assert!(payload["error"]["next"].get("keys").is_none(), "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("pull main --force`"), "{message}");
-    assert!(
-        message.contains("discards its uncommitted changes"),
-        "{message}"
-    );
+    assert!(message.contains("pull main`"), "{message}");
+    assert!(project.calls().is_empty(), "{}", project.calls());
 
-    let file = envelope(&Project::new("File=ib").run(&["push"]));
-    assert_eq!(file["error"]["next"]["command"], "pull", "{file}");
-    assert!(file["error"]["next"].get("keys").is_none(), "{file}");
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["pull", "main"]));
+    assert_eq!(project.ledger()["main"]["token"], FIRST);
+    project.edit();
+    succeeded(&project.run(&["push"]));
 }
 
 /// Запись памяти о базе — от Конфигуратора с нулевым токеном: его ответ поколением с ней

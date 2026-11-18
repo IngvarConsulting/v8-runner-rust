@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::change_detection::analyzer::{self, SnapshotMemory};
 use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Operation, Provider, TargetKind};
+use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::reset::HashMemoryFate;
 use crate::domain::source_set::SourceSetContext;
@@ -345,8 +345,6 @@ impl Standing {
 enum WayOut {
     /// `pull <SET>`: выгрузка поверх каталога; память запишет ответ о поколении.
     Pull,
-    /// `pull <SET> --force`: полная выгрузка, которая и без ответа о поколении пишет память.
-    PullForce,
     /// `push [<SET>] --force`: перезапись базы.
     PushForce,
 }
@@ -356,9 +354,6 @@ impl WayOut {
     fn step(self, pull_set: &str, push_set: Option<&str>) -> NextStep {
         match self {
             Self::Pull => NextStep::command("pull").for_source_set(pull_set),
-            Self::PullForce => NextStep::command("pull")
-                .with_key("--force", "")
-                .for_source_set(pull_set),
             Self::PushForce => {
                 let next = NextStep::command("push").with_key("--force", "");
                 match push_set {
@@ -412,39 +407,20 @@ pub(crate) fn require_memory(
             "; the memory kept under its name was written for another infobase or source directory, or cannot be read, and is not used",
         );
     }
-    // Выгрузка поверх каталога пишет память только через ответ о поколении; инструмент,
-    // который его заведомо не даёт, оставил бы копию без памяти, и отказ повторился бы.
-    let way_out = match (
-        standing.offers_pull(),
-        crate::platform::generation::answers_generation(
-            config.selected_provider(Operation::Dump),
-            config.target_kind(),
-        ),
-    ) {
-        (false, _) => WayOut::PushForce,
-        (true, true) => WayOut::Pull,
-        (true, false) => WayOut::PullForce,
+    let way_out = if standing.offers_pull() {
+        WayOut::Pull
+    } else {
+        WayOut::PushForce
     };
     match way_out {
-        WayOut::Pull | WayOut::PullForce => {
+        WayOut::Pull => {
             let pulls = forgotten
                 .iter()
-                .map(|set| match way_out {
-                    WayOut::PullForce => context.advised_pull_force(set.name()),
-                    WayOut::Pull | WayOut::PushForce => {
-                        context.advised_command(&format!("pull {}", shell_word(set.name())))
-                    }
-                })
+                .map(|set| context.advised_command(&format!("pull {}", shell_word(set.name()))))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let pull = match way_out {
-                WayOut::PullForce => format!(
-                    "take its state with a full dump {pulls}, which replaces the source directory and discards its uncommitted changes (the dump over the directory would leave no memory: this tool gives no configuration generation for this infobase)"
-                ),
-                WayOut::Pull | WayOut::PushForce => format!("see what is there with {pulls}"),
-            };
             message.push_str(&format!(
-                ". If the infobase holds the right state, {pull}; if the source directory does, run {overwrite}"
+                ". If the infobase holds the right state, see what is there with {pulls}; if the source directory does, run {overwrite}"
             ));
         }
         WayOut::PushForce => message.push_str(&format!(". To load the sources run {overwrite}")),
@@ -891,7 +867,7 @@ impl<'a> GenerationGate<'a> {
             (WayOut::Pull, GenerationAfter::Build | GenerationAfter::Dump) => message.push_str(
                 &format!("; take its changes first with {pull}, or overwrite them with {push_force}"),
             ),
-            (WayOut::PullForce | WayOut::PushForce, _) => {
+            (WayOut::PushForce, _) => {
                 message.push_str(&format!("; to overwrite them run {push_force}"));
             }
         }

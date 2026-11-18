@@ -354,6 +354,52 @@ fn status_deep_predicts_the_push_generation_check() {
     assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
 }
 
+/// BOM и CRLF в серверном /Out разбираются так же, как в файловом.
+#[test]
+fn status_deep_reads_designer_generation_on_server_targets() {
+    for target in ["", "    standalone: {}\n"] {
+        let project = Project::new();
+        let config = fs::read_to_string(&project.config).expect("config");
+        fs::write(
+            &project.config,
+            config.replace(support::DESIGNER_LEADS, "providers:\n  push: designer\n"),
+        )
+        .expect("configure the push provider");
+        fs::write(
+            project.root().join("v8project.local.yaml"),
+            format!(
+                "infobases:\n  origin:\n    connection: 'Srvr=127.0.0.1:1541;Ref=dev'\n{target}"
+            ),
+        )
+        .expect("local layer");
+        project.remember(FIRST);
+
+        for (output, token, comparison) in [
+            (format!("\u{feff}{FIRST}"), Value::from(FIRST), "unchanged"),
+            (
+                format!("\u{feff}{SECOND}"),
+                Value::from(SECOND),
+                "moved_ahead",
+            ),
+            ("unrecognized".to_owned(), Value::Null, "no_answer"),
+        ] {
+            project.base_generation(&output);
+            project.forget_calls();
+            let status = succeeded(&project.run(&["status", "--deep"]));
+            let main = set(&status["data"]["infobases"][0], "main");
+            assert_eq!(main["base"]["tool"], "designer", "{status}");
+            assert_eq!(main["base"]["token"], token, "{status}");
+            assert_eq!(main["base"]["comparison"], comparison, "{status}");
+            let calls = project.calls();
+            assert!(
+                calls.contains("/S 127.0.0.1:1541\\dev")
+                    && calls.contains("/GetConfigGenerationID"),
+                "{calls}"
+            );
+        }
+    }
+}
+
 /// `status --deep`, которому `push` назначил `ibcmd`, спрашивает базу с каталогом данных
 /// проекта: умолчательный один на пользователя, и чтение отказало бы команде другого проекта.
 #[test]

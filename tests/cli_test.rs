@@ -698,8 +698,7 @@ fn a_test_client_goes_by_the_direct_gate_of_a_standalone_server() {
     );
 }
 
-/// Без строки прямого шлюза клиент тестов идёт по клиентскому адресу, и реквизиты при нём
-/// не идут: их приём по `/WS` автономного сервера не замерен (#184).
+/// Без строки прямого шлюза клиент тестов получает адрес /WS и реквизиты ИБ.
 #[test]
 fn a_test_client_without_the_direct_gate_goes_by_the_web_address() {
     let (dir, config_path, build_calls, test_calls, _captured_config) =
@@ -727,9 +726,11 @@ fn a_test_client_without_the_direct_gate_goes_by_the_web_address() {
     assert!(calls.contains("/WS http://localhost/standalone"), "{calls}");
     assert!(!calls.contains("/S "), "{calls}");
     assert!(
-        !calls.contains("/N ") && !calls.contains("/P ") && !calls.contains("s3cret"),
+        calls.contains("/WS http://localhost/standalone /N Admin /P s3cret"),
         "{calls}"
     );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("s3cret"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("s3cret"));
 }
 
 #[test]
