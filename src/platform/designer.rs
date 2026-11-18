@@ -636,9 +636,24 @@ impl<'a> DesignerDsl<'a> {
 
     fn run_raw(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
         if self.connection.direct_gate {
-            self.probe_direct_gate()?;
+            // Шлюз пробуется один раз на команду для этих Конфигуратора, адреса и реквизитов.
+            let key = self.gate_key();
+            let probes = &self.execution_policy.gate_probes;
+            if !probes.passed(key) {
+                self.probe_direct_gate()?;
+                probes.record(key);
+            }
         }
         self.run_once(args, self.log_file.as_deref(), &self.execution_policy)
+    }
+
+    /// Ключ пробы шлюза: Конфигуратор, адрес и реквизиты ИБ. Хранится только хеш.
+    fn gate_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.binary.hash(&mut hasher);
+        self.connection.args().hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Проверяет протокол и вход в ИБ тем же Конфигуратором, который получит работу.
@@ -847,6 +862,58 @@ mod tests {
                 assert!(calls[1].iter().any(|arg| arg == "/DumpCfg"));
             }
         }
+    }
+
+    #[test]
+    fn a_direct_gate_is_probed_once_per_command() {
+        let config: crate::config::model::AppConfig = serde_yaml::from_str(
+            "basePath: .
+infobase: { connection: 'Srvr=server:1541;Ref=demo', user: Admin, password: stub-password, standalone: {} }",
+        )
+        .expect("direct gate config");
+        let probes = |calls: &[Vec<String>]| {
+            calls
+                .iter()
+                .filter(|args| args.iter().any(|arg| arg == "/GetConfigGenerationID"))
+                .count()
+        };
+        let dir = tempdir().expect("temporary log directory");
+        let dump = |runner: &DirectGateRunner, policy: &ProcessExecutionPolicy| {
+            DesignerDsl::new(
+                "1cv8.exe".into(),
+                config.v8_connection(),
+                runner,
+                Some(dir.path().join("designer.log")),
+                policy.clone(),
+            )
+            .dump_cfg(&dir.path().join("result.cf"), None)
+        };
+
+        // Два шага одной команды — две операции, одна проба.
+        let runner = DirectGateRunner {
+            calls: Default::default(),
+            reply: "0123456789abcdef0123456789abcdef01234567",
+        };
+        let command = ProcessExecutionPolicy::default();
+        dump(&runner, &command).expect("first step");
+        dump(&runner, &command).expect("second step");
+        assert_eq!(probes(&runner.calls.borrow()), 1, "{:?}", runner.calls);
+        assert_eq!(runner.calls.borrow().len(), 3);
+
+        // Следующая команда пробует снова.
+        dump(&runner, &ProcessExecutionPolicy::default()).expect("next command");
+        assert_eq!(probes(&runner.calls.borrow()), 2);
+
+        // Отказ пробы не запоминается: следующий шаг пробует снова.
+        let refusing = DirectGateRunner {
+            calls: Default::default(),
+            reply: "not a generation",
+        };
+        let command = ProcessExecutionPolicy::default();
+        assert!(dump(&refusing, &command).is_err());
+        assert!(dump(&refusing, &command).is_err());
+        assert_eq!(probes(&refusing.calls.borrow()), 2);
+        assert_eq!(refusing.calls.borrow().len(), 2);
     }
 
     impl ProcessRunner for CapturingRunner {

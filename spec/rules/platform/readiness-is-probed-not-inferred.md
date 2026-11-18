@@ -8,6 +8,7 @@ check:
   - tests/cli_agent_standalone.rs::gate_create_reads_languages_before_its_only_mutation
   - src/platform/edt_session.rs::baseline_probe_mismatch_restarts_and_drains_queue
   - src/platform/designer.rs::only_a_ready_direct_gate_dispatches_the_designer_request
+  - src/platform/designer.rs::a_direct_gate_is_probed_once_per_command
   - tests/cli_standalone_direct_gate.rs::unready_direct_gate_refuses_before_dispatching_the_request
   - src/use_cases/cluster_admin.rs::a_foreign_listener_prevents_the_rac_probe
   - src/use_cases/cluster_admin.rs::command_ras_discards_a_mismatched_candidate_before_trying_the_exact_version
@@ -23,7 +24,7 @@ check:
 | Агент `attached` | SSH-аутентификация с настройками подключаемого агента и открытие shell |
 | Агент `gate` | SSH-аутентификация шлюза, открытие shell и `common connect-ib` |
 | Общая сессия EDT (MCP) | Приглашение CLI при запуске, проверка рабочего каталога при восстановлении исходного состояния |
-| Прямой шлюз автономного сервера | Ответ Конфигуратора на `/GetConfigGenerationID` с теми же адресом и реквизитами ИБ |
+| Прямой шлюз автономного сервера | Ответ Конфигуратора на `/GetConfigGenerationID` с теми же адресом и реквизитами ИБ — один раз за команду для этих Конфигуратора, адреса и реквизитов; отказ пробы не запоминается |
 | RAS раннера | Слушатель принадлежит запущенному процессу, `rac cluster list` подтверждает доступ к агенту кластера и возвращает разбираемый список |
 
 Повторное использование живого агента сохраняет установленное соединение по правилу

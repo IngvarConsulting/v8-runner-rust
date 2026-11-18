@@ -306,6 +306,36 @@ impl WorkGiven {
     }
 }
 
+/// Пробы прямого шлюза, которые эта команда уже прошла
+/// (`INV.PLATFORM.READINESS-IS-PROBED-NOT-INFERRED`). Ключ — Конфигуратор, адрес и реквизиты
+/// ИБ; отказ пробы не запоминается. Общая на команду, как [`WorkGiven`]: политику, собранную
+/// мимо контекста команды, проба не минует.
+#[derive(Debug, Clone, Default)]
+pub struct GateProbes(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>);
+
+impl GateProbes {
+    /// Память одной команды: её заводит контекст команды.
+    pub(crate) fn for_command() -> Self {
+        Self::default()
+    }
+
+    /// Проба с этим ключом уже прошла в этой команде.
+    pub(in crate::platform) fn passed(&self, key: u64) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key)
+    }
+
+    /// Проба с этим ключом прошла.
+    pub(in crate::platform) fn record(&self, key: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+    }
+}
+
 /// Сколько снимаемый процесс ждёт мягкого завершения, прежде чем его убьют.
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -324,6 +354,8 @@ pub struct ProcessExecutionPolicy {
     /// (`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`).
     /// Ставит адаптер утилиты, которая так спрашивает, — [`Self::stopping_a_repeated_question`].
     pub(in crate::platform) stops_a_repeated_question: bool,
+    /// Пробы прямого шлюза, пройденные командой.
+    pub(in crate::platform) gate_probes: GateProbes,
 }
 
 /// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
@@ -355,6 +387,15 @@ impl ProcessExecutionPolicy {
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: Some(work),
             stops_a_repeated_question: false,
+            gate_probes: GateProbes::for_command(),
+        }
+    }
+
+    /// Та же политика с памятью проб шлюза своей команды.
+    pub(crate) fn with_gate_probes(self, gate_probes: GateProbes) -> Self {
+        Self {
+            gate_probes,
+            ..self
         }
     }
 
@@ -372,6 +413,7 @@ impl ProcessExecutionPolicy {
             graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
             work: None,
             stops_a_repeated_question: false,
+            gate_probes: GateProbes::for_command(),
         }
     }
 

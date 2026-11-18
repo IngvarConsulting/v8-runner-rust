@@ -4,7 +4,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::capability::SessionEndpoint;
-use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety, WorkGiven};
+use crate::platform::process::{
+    GateProbes, ProcessExecutionPolicy, ProcessInterruptionSafety, WorkGiven,
+};
 
 /// Identifies the logical command being executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +392,9 @@ pub struct ExecutionContext {
     abandonment: CancellationToken,
     /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
     work: WorkGiven,
+    /// Пробы прямого шлюза, пройденные этой командой: следующий шаг к тому же шлюзу их не
+    /// повторяет.
+    gate_probes: GateProbes,
     /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
     /// читает квитанция исполнителя. Клоны контекста делят этот слот, как и `work`:
     /// клон для другой команды унаследовал бы отметку.
@@ -418,6 +423,7 @@ impl ExecutionContext {
             cancellation: CancellationToken::new(),
             abandonment: CancellationToken::new(),
             work: WorkGiven::for_command(),
+            gate_probes: GateProbes::for_command(),
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
             full_pull: None,
@@ -577,6 +583,7 @@ impl ExecutionContext {
             safety.process_safety(),
             self.work.clone(),
         )
+        .with_gate_probes(self.gate_probes.clone())
     }
 
     /// Политика шага, который снимает поднятое этой командой. Отмена его не касается: отменённая
@@ -588,6 +595,7 @@ impl ExecutionContext {
             InterruptionSafetyClass::GracefulThenKill.process_safety(),
             self.work.clone(),
         )
+        .with_gate_probes(self.gate_probes.clone())
     }
 
     /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
