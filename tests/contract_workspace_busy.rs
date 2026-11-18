@@ -48,6 +48,14 @@ const LEAVES_WITHOUT_THE_LOCK: &[(&str, &str)] = &[
         "спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
+        "debug-server start",
+        "сервер отладки не трогает базу и стенд; гонку команд сеанса решает его запись",
+    ),
+    (
+        "debug-server stop",
+        "отладчик гасит сервер при отсоединении, даже пока идёт другая команда",
+    ),
+    (
         "agent stop",
         "снимает агентов учётной записи без замка: агента зависшей команды можно снять из её же каталога",
     ),
@@ -132,6 +140,12 @@ fn locking_leaves(
     let work = dir.join("work");
     let mut rows: Vec<_> = with_preview(dir)
         .into_iter()
+        // Лист с превью, но без замка (`debug-server`), здесь не проверяется.
+        .filter(|row| {
+            !LEAVES_WITHOUT_THE_LOCK
+                .iter()
+                .any(|(unlocked, _)| *unlocked == row.leaf)
+        })
         .map(|row| {
             // У `clone` рабочий каталог — `.build/v8-runner` проекта, которого ещё нет.
             let work_path = if row.leaf == "clone" {

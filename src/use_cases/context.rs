@@ -47,6 +47,8 @@ pub enum CommandName {
     WebStatus,
     WebStop,
     WebRestart,
+    DebugServerStart,
+    DebugServerStop,
     AgentHold,
     AgentRelease,
     AgentStop,
@@ -107,6 +109,8 @@ impl CommandName {
             | Self::StandaloneStatus
             | Self::ClusterStatus
             | Self::WebStatus
+            | Self::DebugServerStart
+            | Self::DebugServerStop
             | Self::AgentHold
             | Self::AgentRelease
             | Self::AgentStop
@@ -172,6 +176,8 @@ impl CommandName {
             Self::WebStatus => "web status",
             Self::WebStop => "web stop",
             Self::WebRestart => "web restart",
+            Self::DebugServerStart => "debug-server start",
+            Self::DebugServerStop => "debug-server stop",
             Self::AgentHold => "agent hold",
             Self::AgentRelease => "agent release",
             Self::AgentStop => "agent stop",

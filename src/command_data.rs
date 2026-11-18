@@ -123,6 +123,8 @@ command_data_forms! {
     "web status", "web-status" => crate::domain::web::WebResult;
     "web stop", "web-stop" => crate::domain::web::WebResult;
     "web restart", "web-restart" => crate::domain::web::WebResult;
+    "debug-server start", "debug-server-start" => crate::domain::debug_server::DebugServerResult;
+    "debug-server stop", "debug-server-stop" => crate::domain::debug_server::DebugServerResult;
     "agent hold", "agent-hold" => crate::domain::live_agent::AgentHoldResult;
     "agent release", "agent-release" => crate::domain::live_agent::AgentReleaseResult;
     "agent stop", "agent-stop" => crate::domain::live_agent::AgentStopResult;

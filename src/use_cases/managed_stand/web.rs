@@ -503,9 +503,11 @@ impl<'a> Web<'a> {
             .find(|&port| {
                 Some(port) != pg_port
                     && !super::dynamic_ports().contains(&port)
-                    && cluster_ports
-                        .as_ref()
-                        .is_none_or(|pins| !pins.ports.all().any(|value| value == port))
+                    && cluster_ports.as_ref().is_none_or(|pins| {
+                        // Порт сервера отладки кластера (`cluster start --debug`) в блок не
+                        // входит, но Apache его занимать не должен.
+                        !pins.ports.all().any(|value| value == port) && pins.ports.debug() != port
+                    })
                     && occupant_of(self.host, port).is_none()
             })
             .ok_or_else(|| environment("no free stand port for Apache"))
@@ -1420,6 +1422,22 @@ mod stand_tests {
         assert_eq!(assert_form("web-restart", &planned)["action"], "planned");
     }
 
+    /// Порт сервера отладки кластера в его блок не входит, но Apache его не занимает: иначе
+    /// `cluster start --debug` отказал бы из-за своего же Apache.
+    #[test]
+    fn apache_never_takes_the_debug_port_of_the_cluster() {
+        let (stand, host) = running();
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        let debug = stand.pins().ports.debug();
+        write_json(
+            &stand.agent().sibling(StandService::Web).pins(),
+            &PinnedPorts { port: debug },
+        )
+        .unwrap();
+        let started = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert_ne!(port_of(&started), debug);
+    }
+
     #[test]
     fn a_taken_port_moves_apache_and_the_answer_names_the_previous_one() {
         let (stand, host) = running();
@@ -1535,6 +1553,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn status_marks_the_publication_stale_after_the_regport_moves() {
         let (stand, host) = running();
         publish(&stand, &host, false).unwrap();
@@ -1549,6 +1569,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn publish_runs_the_located_webinst_on_the_private_config_and_reloads_apache() {
         let (stand, host) = running();
         let port = port_of(&status(&stand, &host));
@@ -1671,6 +1693,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn only_webinst_is_elevated_and_a_refusing_sudo_names_the_sudoers_rule() {
         let (stand, host) = running();
         let sudo = stand.config.base_path.join("sudo");
@@ -1719,6 +1743,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn files_webinst_leaves_as_root_are_taken_back_after_success_and_failure() {
         let (stand, host) = running();
         host.elevation
@@ -1802,6 +1828,8 @@ mod stand_tests {
     }
 
     #[test]
+    // Перезагрузки Apache на macOS нет (`ReloadStrategy::Unsupported`): публикация там отказывает.
+    #[cfg(any(windows, target_os = "linux"))]
     fn webinst_comes_from_the_platform_search_not_from_the_cluster_record() {
         let (stand, host) = running();
         let record_path = stand.agent().record();

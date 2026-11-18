@@ -3420,6 +3420,7 @@ source-set:
             registry: "registry-24001".to_owned(),
             registered: false,
             previous: None,
+            debug: false,
         };
         write_json(&paths.pins(), &pins).unwrap();
         write_json(

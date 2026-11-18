@@ -6879,6 +6879,55 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
 (`INV.PLATFORM.A-REPEATED-IBCMD-QUESTION-IS-AN-INFOBASE-USER-REFUSAL`). Живой прогон
 исправления на этой базе — приёмка #742.
 
+## Сервер отладки `dbgs`: запуск, адрес, готовность (#757)
+
+[#757](https://github.com/IngvarConsulting/v8-runner-rust/issues/757), Windows,
+платформа 8.3.27.2342; `dbgs.exe` есть и в `bin` установок 8.3.24.1819 … 8.5.4.2028.
+
+- `dbgs --addr=127.0.0.1 --portRange=1560:1591 --notify=<файл>` выбирает свободный порт
+  диапазона: если 1560 занят, берёт 1561. Фактический адрес `127.0.0.1:1561` он пишет
+  в файл `--notify` в UTF-16 LE с BOM, без перевода строки.
+- Явный `--port` уже занятого порта: код выхода 1, в выводе «Не удалось запустить сервер
+  отладки: порт 1560 занят». Файл `--notify` не создаётся. Слушающий процесс не страдает.
+- `--ownerPID=<pid>`: после завершения процесса-владельца `dbgs` выходит сам примерно
+  через 3 с с кодом 0.
+- Ответы на запросы к `http://127.0.0.1:<порт>`:
+
+  | Запрос | Ответ |
+  | --- | --- |
+  | `GET /e1crdbg/rdbg` | 501 |
+  | `POST` без `Content-Type: application/xml` | 406 |
+  | `POST /e1crdbg/rdbg?cmd=getDbgTargets` с `Content-Type: application/xml`, тело пустое или с неизвестным `idOfDebuggerUI` | 400, JSON `{"#exception":"{http://v8.1c.ru/8.2/virtual-resource-system}Exception","exception":{…,"reason":400,"descr":"…UI+ - часть отладки не зарегистрирована"}}` |
+  | `POST` на чужой путь `/e1crdbg/nope` | 404 |
+  | `GET /` | 200, HTML в UTF-16 |
+
+  Тот же запрос без заголовка `Accept` (так шлёт `reqwest`) получает тот же 400, но телом
+  XML: `<exception xmlns="http://v8.1c.ru/8.2/virtual-resource-system" xsi:type="Exception"
+  reason="400">`; с `Accept: */*` или `application/json` — JSON. Первый живой прогон
+  `debug-server start` ждал только JSON и не дождался готовности.
+  Ответ 400 с `reason: 400` приходит от обработчика rdbg без регистрации отладчика и без
+  побочных эффектов. `attachDebugUI` регистрирует отладчик и для проверки не годится.
+- Кластер: `ragent /agent /port 27540 /regport 27541 /range 27560:27591 /d <каталог>
+  -debug -http -debugServerPort 27550 -debugServerAddr 127.0.0.1`.
+  - `rmngr` получает `-debug -http -debugServerAddr`, `rphost` — ещё и `-debugServerPort 27550`.
+  - Сам `ragent` позже запускает дочерний `dbgs.exe --addr=127.0.0.1 --port=27550`. Через
+    8 с после старта агента `dbgs` ещё не было, через 18 с он слушал порт вместе с первым
+    `rphost`.
+  - Проба `getDbgTargets` выше отвечает и у этого сервера.
+  - `taskkill /T` дерева `ragent` завершает и `dbgs`. Сервер — потомок агента, как `rmngr`
+    и `rphost`.
+- Явный свободный `--port=27650` тоже пишет адрес в файл `--notify`. Путь к файлу с
+  кириллицей и пробелом (`…\папка отладки
+.txt`) работает.
+- `taskkill /PID` без `/F` останавливает `dbgs`, запущенный со скрытым окном: через 3 с
+  процесса нет.
+- Тонкий клиент 8.3.27.2342, запущенный `1cv8c ENTERPRISE /F <база> /DEBUG -http -attach
+  /DEBUGGERURL http://127.0.0.1:<порт>` к `dbgs`, который поднял `debug-server start`,
+  регистрирует на нём две цели файловой базы: `getDbgTargets` отвечает JSON со списком `id`,
+  где `targetType` — `ManagedClient` и `ServerEmulation`, `infoBaseAlias` — `DefAlias`.
+- Не мерено: `dbgs` на Linux и macOS (наличие в установке, `--notify`, `--ownerPID`),
+  `ibsrv --debug=http`.
+
 ## Частный Apache 2.4 и кластерная публикация на Linux (#610)
 
 Ubuntu 24.04.4, Apache 2.4.58, 1С 8.5.1.1343, PostgreSQL 18.3-5.1C.

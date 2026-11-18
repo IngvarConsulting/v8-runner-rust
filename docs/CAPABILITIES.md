@@ -42,6 +42,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
+| `debug-server` | Файловая база — свой `dbgs` раннера (Windows, Linux, macOS); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux); чужой кластер и автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует базу кластера раннера в его частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` берёт из выпуска кластера ([`web`](#web)) |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `localPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Квитанция `data.provider` относится к чтению поколения. Для имён из пакетного Конфигуратора активность имеет значение `null` |
 | `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
@@ -838,10 +839,10 @@ v8-runner standalone restart [--dry-run]
 ### `cluster`
 
 ```text
-v8-runner cluster start [--dry-run] [--new-regport]
+v8-runner cluster start [--dry-run] [--new-regport] [--debug | --no-debug]
 v8-runner cluster status
 v8-runner cluster stop [--dry-run]
-v8-runner cluster restart [--dry-run]
+v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 ```
 
 - Поднимают кластер базы из `cluster.managed` на Windows и Linux, без службы: `ragent` с `rmngr` и `rphost`, затем `ras`;
@@ -872,6 +873,44 @@ v8-runner cluster restart [--dry-run]
 - `start`, `stop` и `restart` всех трёх команд стенда берут замок `<localPath>/.lock` после замка `workPath`. Запись
   службы помнит свой каталог и проект: копия `.local` в другой каталог чужой сервер своим не считает и не гасит, а при
   `localPath`, общем у двух проектов, команды стенда второго отказывают `workspace_busy`, называя первый проект.
+- `--debug` поднимает агента с сервером отладки HTTP на `127.0.0.1` (`-debug -http`): его `dbgs` агент запускает сам
+  вместе с первым рабочим процессом, `cluster stop` снимает и его. Порт — следующий за диапазоном рабочих процессов
+  внутри закреплённого блока; `/range` не меняется. Признак закрепляется с портами: `start` и `restart` без ключа
+  поднимают кластер так же, пока `--no-debug` его не снимет. Пока кластер с отладкой работает, `start`, `restart` и
+  `status` называют адрес в `debug_url`. Работающий кластер с другим признаком `start` не перезапускает:
+  `invalid_argument` с `cluster restart --debug` или `--no-debug`.
+
+### `debug-server`
+
+```text
+v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
+v8-runner debug-server stop <SESSION> [--dry-run]
+```
+
+- Сервер отладки 1С для отладчика. Windows, Linux и macOS. Базу команды не открывают и не берут замок `workPath` и
+  стенда: `stop` отвечает и пока идёт другая команда.
+- Файловая база: `start` запускает `dbgs` из установки тонкого клиента (той же, что у `launch thin`) на `127.0.0.1`, без
+  пароля, и отвечает, когда сервер назвал адрес и ответил по протоколу `rdbg`. Ответ: `url`
+  (`http://127.0.0.1:<порт>`), `port`, `pid`, `session` (32 hex), `owner: "runner"`, `platform_resolution`,
+  `log_path`. Сервер переживает команду; запись сеанса и журнал — в `workPath/debug-server/<session>/`. Каждый `start` —
+  новый сервер и новый сеанс.
+- Порт без `--port`: первый свободный в окне из 32 портов в полосе 10000–19999, окно выводится из пути `workPath`.
+  Занятый явный `--port` — `environment_unavailable` до запуска, слушающий процесс не тронут. Нет `dbgs` рядом с
+  клиентом — `environment_unavailable` с `layer: platform`, называющий версию и путь клиента.
+- `--owner-pid <PID>` передаётся в `dbgs --ownerPID`: с концом процесса отладчика сервер выходит сам. Мёртвый pid —
+  `invalid_argument` до запуска. Сеансы вышедших серверов убирает следующий `start`.
+- Выход `dbgs` до готовности — `platform_failure`, срок готовности (60 с) — `timed_out`, отмена — `cancelled`; во всех
+  трёх случаях процесс попытки и запись сеанса снимаются.
+- `stop <session>` гасит только сервер этого сеанса, подтверждая конец процесса: `action: stopped`, `stopped_pid`.
+  Неизвестный, уже остановленный или чужой рабочей копии сеанс — `nothing_to_stop`, `known_session: false`; вышедший
+  сам сервер — `stale_record: true`; процесс, занявший pid сервера, раннер не трогает. Сеанс, который сейчас запускает
+  другая команда, — `workspace_busy`.
+- База на кластере раннера (`cluster.managed`, Windows и Linux), поднятом `cluster start --debug`: `start` ничего не запускает и
+  отдаёт адрес сервера отладки кластера с `owner: "cluster"`, без `pid`; `--port` и `--owner-pid` игнорируются с
+  предупреждением в `warnings`. Кластер не работает или без `--debug` — `environment_unavailable` с нужной командой.
+  `stop` такого сеанса кластер не трогает (`nothing_to_stop`). Кластер, запущенный не раннером, — `target`.
+- Клиент под отладкой запускают с `/DEBUG -http -attach /DEBUGGERURL <url>`. Перед удалением `workPath` —
+  `debug-server stop` по каждому сеансу.
 
 ### `web`
 
@@ -2367,3 +2406,7 @@ v8-runner mcp serve http
 - Переименование расширения на месте по совпавшему внутреннему идентификатору и
   `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.
+- `debug-server` для базы на автономном сервере: отказ `target`
+  ([#759](https://github.com/IngvarConsulting/v8-runner-rust/issues/759)).
+- `launch --debug`: запуск клиента с адресом сервера отладки
+  ([#758](https://github.com/IngvarConsulting/v8-runner-rust/issues/758)).

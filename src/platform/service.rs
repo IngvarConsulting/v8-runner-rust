@@ -130,6 +130,22 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
+/// Unix: сигнал группе службы. `spawn_hidden` уводит службу в свой сеанс (`setsid`), поэтому её
+/// pid — номер её группы, и сигнал доходит до всех её потомков. Мягкий — `SIGTERM`, жёсткий —
+/// `SIGKILL`. Успех вызова ничего не доказывает: конец процесса подтверждает ожидание
+/// (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`).
+#[cfg(unix)]
+#[cfg_attr(
+    target_os = "linux",
+    allow(
+        dead_code,
+        reason = "на Linux службу гасит signal_owned_process; группе сигнал шлёт macOS"
+    )
+)]
+pub fn signal_service_group(pid: u32, hard: bool) {
+    imp::signal_group(pid, hard);
+}
+
 /// Мгновение старта процесса по [`ProcessFacts::started`]: тики FILETIME на Windows, тики часов
 /// после загрузки на Linux, микросекунды эпохи на macOS. `None` — система мгновения не называет.
 #[cfg(windows)]
@@ -1168,6 +1184,36 @@ mod imp {
         Ok(pid)
     }
 
+    #[cfg_attr(
+        target_os = "linux",
+        allow(
+            dead_code,
+            reason = "на Linux службу гасит signal_owned_process; группе сигнал шлёт macOS"
+        )
+    )]
+    pub fn signal_group(pid: u32, hard: bool) {
+        // Номер 0 и 1 — не служба: сигнал своей группе или `init` раннер не шлёт.
+        let Ok(group) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        if group <= 1 {
+            return;
+        }
+        let signal = if hard { libc::SIGKILL } else { libc::SIGTERM };
+        // SAFETY: `kill` с числовыми аргументами; отсутствующая группа отвечает `ESRCH`. Тот ли
+        // это процесс, вызывающий сверил по записи (pid и время старта) перед остановкой: пока
+        // жива группа, её номер система другому процессу не отдаёт.
+        let sent = unsafe { libc::kill(-group, signal) };
+        if sent == -1 {
+            // Процесс не лидер своей группы — например, pid PostgreSQL из `postmaster.pid`, а не
+            // из `spawn_hidden`: сигнал идёт ему самому.
+            // SAFETY: то же.
+            unsafe {
+                libc::kill(group, signal);
+            }
+        }
+    }
+
     /// Помечает «закрыть при `exec`» все дескрипторы, кроме stdin, stdout и stderr, даже
     /// открытые чужим кодом без `O_CLOEXEC`. Вызывается между `fork` и `exec`.
     fn close_on_exec_beyond_stdio() {
@@ -1395,6 +1441,26 @@ mod imp {
             assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "clean");
             assert_eq!(session, pid);
             assert_eq!(group, pid);
+        }
+
+        /// Мягкая остановка доходит до всей группы службы: её потомки не переживают её.
+        #[test]
+        fn a_signal_to_the_service_group_ends_its_children_too() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            let pid = spawn_hidden(&shell("sleep 30 & echo started; wait", &log, None)).unwrap();
+            assert!(wait_for(&log, "started"), "the service did not start");
+            super::super::signal_service_group(pid, false);
+            let group = libc::pid_t::try_from(pid).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            // SAFETY: сигнал 0 только спрашивает, есть ли ещё процессы группы.
+            while unsafe { libc::kill(-group, 0) } == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the group outlived SIGTERM"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
 
         #[cfg(target_os = "linux")]

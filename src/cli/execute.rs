@@ -260,6 +260,9 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::DebugServer(args) => {
+            execute_debug_server(config, args.command, presenter, dry_run, cancellation)
+        }
         Command::Sessions(args) => super::sessions::execute(
             config,
             &args.command,
@@ -828,6 +831,10 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::ClusterStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::ClusterRestart,
+        },
+        Command::DebugServer(args) => match args.command {
+            crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
+            crate::cli::args::DebugServerCommandArgs::Stop { .. } => CommandName::DebugServerStop,
         },
         Command::Dbms(args) => match args.command {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
@@ -1792,6 +1799,113 @@ fn execute_standalone(
     )
 }
 
+/// `debug-server start|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
+fn execute_debug_server(
+    config: &AppConfig,
+    action: crate::cli::args::DebugServerCommandArgs,
+    presenter: &Presenter,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::DebugServerCommandArgs as Action;
+    use crate::use_cases::managed_stand::{
+        debug_server_start, debug_server_stop, DebugServerStart,
+    };
+
+    let name = match action {
+        Action::Start { .. } => CommandName::DebugServerStart,
+        Action::Stop { .. } => CommandName::DebugServerStop,
+    };
+    let context = cli_context(config, name, cancellation);
+    let outcome = match action {
+        Action::Start { port, owner_pid } => debug_server_start(
+            &context,
+            config,
+            DebugServerStart { port, owner_pid },
+            dry_run,
+        ),
+        Action::Stop { session } => debug_server_stop(&context, config, session, dry_run),
+    };
+    match outcome {
+        Ok(mut result) => {
+            if presenter.is_json() {
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
+            } else {
+                for line in debug_server_text(name, &result) {
+                    presenter.print_bare(&line);
+                }
+                for warning in &result.warnings {
+                    presenter.print_bare(&format!("warning: {warning}"));
+                }
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn debug_server_text(
+    name: CommandName,
+    result: &crate::domain::debug_server::DebugServerResult,
+) -> Vec<String> {
+    use crate::domain::dbms::ServiceAction;
+    use crate::domain::debug_server::DebugServerOwner;
+
+    let owner = match result.owner {
+        Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
+        Some(DebugServerOwner::Runner) | None => "the debug server",
+    };
+    let mut lines = vec![match result.action {
+        ServiceAction::Started => format!(
+            "{}: {owner} answers at {}",
+            name.as_str(),
+            result.url.as_deref().unwrap_or("?")
+        ),
+        ServiceAction::Stopped => format!(
+            "{}: {owner} pid {} stopped",
+            name.as_str(),
+            result.stopped_pid.unwrap_or_default()
+        ),
+        ServiceAction::Planned => format!("{}: planned, nothing started or stopped", name.as_str()),
+        ServiceAction::NothingToStop if result.known_session == Some(false) => format!(
+            "{}: this working copy knows no such session; nothing to stop",
+            name.as_str()
+        ),
+        ServiceAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
+        ServiceAction::AlreadyRunning | ServiceAction::Reported => {
+            unreachable!("debug-server neither reports nor finds a running server")
+        }
+    }];
+    if let (ServiceAction::Started, Some(session)) = (result.action, &result.session) {
+        lines.push(format!("session: {session}"));
+    }
+    if let Some(pid) = result.pid {
+        lines.push(format!("pid: {pid}"));
+    }
+    if let Some(log) = &result.log_path {
+        lines.push(format!("log: {}", log.display()));
+    }
+    lines
+}
+
 fn render_standalone_text(
     name: CommandName,
     result: &crate::domain::standalone::StandaloneResult,
@@ -2151,13 +2265,21 @@ fn execute_cluster(
     use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ClusterCommand};
 
     let (name, command) = match action {
-        Action::Start { new_regport } => (
+        Action::Start { new_regport, debug } => (
             CommandName::ClusterStart,
-            ClusterCommand::Start { new_regport },
+            ClusterCommand::Start {
+                new_regport,
+                debug: debug.choice(),
+            },
         ),
         Action::Status => (CommandName::ClusterStatus, ClusterCommand::Status),
         Action::Stop => (CommandName::ClusterStop, ClusterCommand::Stop),
-        Action::Restart => (CommandName::ClusterRestart, ClusterCommand::Restart),
+        Action::Restart { debug } => (
+            CommandName::ClusterRestart,
+            ClusterCommand::Restart {
+                debug: debug.choice(),
+            },
+        ),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -2263,6 +2385,7 @@ fn render_cluster_text(
         ("agent", result.agent.clone()),
         ("ras", result.ras.clone()),
         ("worker range", result.worker_range.clone()),
+        ("debug server", result.debug_url.clone()),
         ("ras pid", result.ras_pid.map(|pid| pid.to_string())),
         (
             "rac cluster list",

@@ -91,6 +91,10 @@ pub enum Command {
     Cluster(ClusterArgs),
     /// Manage the private Apache of a declared cluster
     Web(WebArgs),
+    /// Start and stop the 1C debug server a debugger attaches to: the runner's own dbgs for a
+    /// file infobase, the debug server of the managed cluster for its infobase
+    #[command(name = "debug-server")]
+    DebugServer(DebugServerArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -382,13 +386,67 @@ pub enum ClusterCommandArgs {
         /// infobase in it over its database
         #[arg(long)]
         new_regport: bool,
+        #[command(flatten)]
+        debug: ClusterDebugArgs,
     },
     /// Say whether it runs, who started it and where it listens
     Status,
     /// Stop the cluster this working copy started, with its remnants; the data stays
     Stop,
     /// Stop and start it again
-    Restart,
+    Restart {
+        #[command(flatten)]
+        debug: ClusterDebugArgs,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct DebugServerArgs {
+    #[command(subcommand)]
+    pub command: DebugServerCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum DebugServerCommandArgs {
+    /// Start a debug server, wait until it answers and print its address and session; it outlives
+    /// the command
+    Start {
+        /// Listen on this port; without it the first free port of the working copy's window
+        #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
+        /// The debugger process: the debug server ends by itself when this process ends
+        #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
+        owner_pid: Option<u32>,
+    },
+    /// Stop the debug server of this session; a repeated or unknown session stops nothing
+    Stop {
+        /// The session `debug-server start` answered
+        #[arg(value_name = "SESSION")]
+        session: crate::domain::debug_server::DebugSession,
+    },
+}
+
+/// Сервер отладки кластера: включить, снять или оставить как закреплено.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct ClusterDebugArgs {
+    /// Start the agent with its HTTP debug server on the loopback (Windows); it stays on for later
+    /// starts until --no-debug
+    #[arg(long, conflicts_with = "no_debug")]
+    pub debug: bool,
+    /// Start the agent without a debug server
+    #[arg(long)]
+    pub no_debug: bool,
+}
+
+impl ClusterDebugArgs {
+    pub fn choice(self) -> crate::use_cases::managed_stand::DebugChoice {
+        use crate::use_cases::managed_stand::DebugChoice;
+        match (self.debug, self.no_debug) {
+            (true, _) => DebugChoice::On,
+            (_, true) => DebugChoice::Off,
+            (false, false) => DebugChoice::AsPinned,
+        }
+    }
 }
 
 impl ClusterCommandArgs {
@@ -397,7 +455,7 @@ impl ClusterCommandArgs {
             Self::Start { .. } => ServiceCommandArgs::Start,
             Self::Status => ServiceCommandArgs::Status,
             Self::Stop => ServiceCommandArgs::Stop,
-            Self::Restart => ServiceCommandArgs::Restart,
+            Self::Restart { .. } => ServiceCommandArgs::Restart,
         }
     }
 }

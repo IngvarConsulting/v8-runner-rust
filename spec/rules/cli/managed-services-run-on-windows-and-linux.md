@@ -15,3 +15,7 @@ check:
 `web` запускает обычный пользователь: от root их `start` и `publish` управляемой базы отказывают.
 `standalone start|restart` на Linux и запуск этих служб на остальных платформах отвечают
 `environment_unavailable` до запуска процессов.
+
+Сервер отладки `debug-server` службой стенда не является и работает на Windows, Linux и macOS. Сервер отладки
+кластера (`cluster start --debug`) есть там же, где управляемый кластер, — на Windows и Linux; на остальных
+платформах `--debug` отвечает `environment_unavailable`.

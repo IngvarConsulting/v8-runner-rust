@@ -2,6 +2,7 @@
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
 mod cluster;
+mod debug_server;
 mod recreate;
 mod standalone;
 mod web;
@@ -9,7 +10,8 @@ pub use web::{execute_web, web_status, WebCommand};
 pub(crate) use web::{publication, ManagedPublication, Reload};
 
 pub(crate) use cluster::ClusterBase;
-pub use cluster::ClusterCommand;
+pub use cluster::{ClusterCommand, DebugChoice};
+pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 
 use std::io::Write as _;
@@ -96,6 +98,10 @@ pub(crate) trait ServiceHost {
 
     fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
         Some(Vec::new())
+    }
+    /// Отвечает ли на порту сервер отладки по протоколу `rdbg`.
+    fn rdbg_answers(&self, _port: u16) -> bool {
+        false
     }
     /// Мягкий перезапуск процесса с этой идентичностью: Apache перечитывает конфиг, не
     /// закрывая порт. Где его нет — отказ.
@@ -222,7 +228,12 @@ impl ServiceHost for RealHost {
             let request = stop_request(pid, false);
             let _ = runner.run_with_policy(&request, &context.cleanup_policy());
         });
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let _ = (runner, context);
+            signal_if_own(pid, started, false);
+        }
+        #[cfg(not(any(unix, windows)))]
         let _ = (runner, pid, started, context);
     }
     fn hard_stop(
@@ -242,7 +253,12 @@ impl ServiceHost for RealHost {
             let request = stop_request(pid, true);
             let _ = runner.run_with_policy(&request, &context.cleanup_policy());
         });
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let _ = (runner, context);
+            signal_if_own(pid, started, true);
+        }
+        #[cfg(not(any(unix, windows)))]
         let _ = (runner, pid, started, context);
     }
     #[cfg(target_os = "linux")]
@@ -252,6 +268,9 @@ impl ServiceHost for RealHost {
 
     fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
         service::processes(images)
+    }
+    fn rdbg_answers(&self, port: u16) -> bool {
+        crate::platform::dbgs::rdbg_answers(port)
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
@@ -280,6 +299,16 @@ impl ServiceHost for RealHost {
                     "sudo was not found: on Linux webinst publishes only as root, and the runner elevates it alone with sudo -n",
                 )
             })
+    }
+}
+
+/// macOS: сигнал группе службы, только если pid ещё тот же процесс (время старта совпало).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn signal_if_own(pid: u32, started: Option<u64>, hard: bool) {
+    let same =
+        service::process_facts(pid).is_some_and(|facts| started.is_none_or(|s| s == facts.started));
+    if same {
+        service::signal_service_group(pid, hard);
     }
 }
 
@@ -373,6 +402,49 @@ fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: D
         }
         if Instant::now() >= deadline {
             return false;
+        }
+        host.sleep(POLL);
+    }
+}
+
+/// Сколько ждать, пока сервер отладки ответит по `rdbg`: свой `dbgs` и сервер кластера,
+/// которого агент поднимает лениво, вместе с первым рабочим процессом (замер «Сервер отладки
+/// `dbgs`»).
+const DEBUG_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Чем кончилось ожидание сервера отладки.
+enum RdbgWait {
+    /// По этому порту ответил обработчик `rdbg`.
+    Ready(u16),
+    /// Процесс сервера вышел, не ответив.
+    Gone,
+    TimedOut,
+    Interrupted(UseCaseError),
+}
+
+/// Единственное ожидание сервера отладки (`INV.PLATFORM.A-DEBUG-SERVER-IS-READY-WHEN-RDBG-ANSWERS`):
+/// `port` называет, какой порт пробовать сейчас (`None` — ещё нечего), `alive` — жив ли ещё
+/// сервер. Отмена проверяется в каждой точке ожидания.
+fn await_rdbg(
+    host: &dyn ServiceHost,
+    context: &ExecutionContext,
+    what: &str,
+    port: &dyn Fn() -> Option<u16>,
+    alive: &dyn Fn() -> bool,
+) -> RdbgWait {
+    let deadline = Instant::now() + host.patience(DEBUG_READY_TIMEOUT);
+    loop {
+        if let Some(error) = interruption_before_safe_point(context, what) {
+            return RdbgWait::Interrupted(error.into());
+        }
+        if let Some(port) = port().filter(|port| host.rdbg_answers(*port)) {
+            return RdbgWait::Ready(port);
+        }
+        if !alive() {
+            return RdbgWait::Gone;
+        }
+        if Instant::now() >= deadline {
+            return RdbgWait::TimedOut;
         }
         host.sleep(POLL);
     }
@@ -801,7 +873,7 @@ impl<'a> Stand<'a> {
             stale_record: false,
             occupant_pid: None,
             stopped_pid: None,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms: crate::support::time::elapsed_ms(self.started_at),
         }
     }
 
@@ -1267,6 +1339,56 @@ pub fn execute_standalone(
         &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
+}
+
+/// `debug-server start`: сервер отладки для отладчика. Без замка `workPath`
+/// (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
+pub fn debug_server_start(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: DebugServerStart,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
+    with_debug_server(context, config, |server| server.start(request, dry_run))
+}
+
+/// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.
+pub fn debug_server_stop(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    session: crate::domain::debug_server::DebugSession,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
+    with_debug_server(context, config, |server| server.stop(session, dry_run))
+}
+
+/// Сценарий `debug-server` над настоящей системой.
+fn with_debug_server<T>(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
+) -> UseCaseResult<T> {
+    let locate = || locate_client(config);
+    let cluster_port = || cluster::debug_port(context, config, &RealHost::CURRENT);
+    run(&debug_server::DebugServer {
+        context,
+        config,
+        runner: &ProcessExecutor,
+        host: &RealHost::CURRENT,
+        locate_client: &locate,
+        cluster_port: &cluster_port,
+    })
+    .map_err(UseCaseFailure::without_payload)
+}
+
+/// Тонкий клиент так, как его выберет `launch thin`: из его установки берётся `dbgs`.
+fn locate_client(
+    config: &AppConfig,
+) -> Result<crate::domain::launch::PlatformResolution, UseCaseError> {
+    crate::platform::utilities::PlatformUtilities::from_config(config)
+        .locate(crate::platform::locator::UtilityType::V8C)
+        .map(|location| crate::use_cases::platforms::platform_resolution(&location))
+        .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
 }
 
 /// `standalone status`: читает запись без замка, чтобы отвечать и пока идёт другая команда.

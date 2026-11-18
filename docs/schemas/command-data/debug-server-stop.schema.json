@@ -1,0 +1,202 @@
+{
+  "$defs": {
+    "DebugServerOwner": {
+      "description": "Кто поднял сервер отладки и кто его гасит.",
+      "oneOf": [
+        {
+          "const": "runner",
+          "description": "`dbgs`, которого поднял раннер для этого сеанса; `stop` его гасит.",
+          "type": "string"
+        },
+        {
+          "const": "cluster",
+          "description": "Сервер отладки управляемого кластера (`cluster start --debug`); `stop` его не трогает.",
+          "type": "string"
+        }
+      ]
+    },
+    "DebugSession": {
+      "description": "Сеанс сервера отладки: его передают в `debug-server stop`.",
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "PlatformResolution": {
+      "additionalProperties": false,
+      "description": "Canonical platform installation metadata exposed by `launch` JSON results.",
+      "properties": {
+        "installation_root": {
+          "description": "Absolute canonical root shared by platform utilities from this installation.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute canonical path to the selected executable.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/PlatformResolutionSource",
+          "description": "Discovery source used for the selected executable."
+        },
+        "version": {
+          "description": "Platform version inferred from the canonical installation path, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source",
+        "installation_root"
+      ],
+      "type": "object"
+    },
+    "PlatformResolutionSource": {
+      "description": "Typed discovery sources exposed by `launch` resolution metadata.",
+      "oneOf": [
+        {
+          "const": "explicit",
+          "description": "The configured utility or installation hint.",
+          "type": "string"
+        },
+        {
+          "const": "default-root",
+          "description": "An operating-system-specific default installation root.",
+          "type": "string"
+        },
+        {
+          "const": "path",
+          "description": "A directory captured from `PATH` when the locator was created.",
+          "type": "string"
+        }
+      ]
+    },
+    "ServiceAction": {
+      "description": "Что сделала команда.",
+      "enum": [
+        "started",
+        "already_running",
+        "stopped",
+        "nothing_to_stop",
+        "reported",
+        "planned"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/debug-server-stop.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ServiceAction",
+      "description": "`started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`."
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "known_session": {
+      "description": "`stop`: раннер знает этот сеанс. `false` — записи нет: сеанс уже остановлен или\nзапущен из другой рабочей копии.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "owner": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DebugServerOwner"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "owner_pid": {
+      "description": "Процесс, с концом которого `dbgs` выходит сам (`--owner-pid`).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "pid": {
+      "description": "Процесс `dbgs` раннера; у сервера кластера его нет.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "platform_resolution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformResolution"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Установка, из которой взят `dbgs`: та же, из которой запускается тонкий клиент."
+    },
+    "port": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "session": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DebugSession"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет."
+    },
+    "stale_record": {
+      "description": "Запись была, но процесса из неё уже нет: сервер вышел сам, например с концом владельца.",
+      "type": "boolean"
+    },
+    "stopped_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "url": {
+      "description": "Адрес для `/DEBUGGERURL` клиента и для отладчика: `http://127.0.0.1:<порт>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ok",
+    "action",
+    "duration_ms"
+  ],
+  "title": "DebugServerResult",
+  "type": "object"
+}

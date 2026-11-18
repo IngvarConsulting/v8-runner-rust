@@ -310,6 +310,7 @@ pub fn run() -> i32 {
         | Command::Standalone(_)
         | Command::Cluster(_)
         | Command::Web(_)
+        | Command::DebugServer(_)
         | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)

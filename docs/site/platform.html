@@ -60,6 +60,10 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-debug-server.html#op-debug-server-start">debug-server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -90,6 +94,7 @@
   <li><a href="#agent">Режим агента Конфигуратора</a></li>
   <li><a href="#ibcmd">ibcmd</a></li>
   <li><a href="#edt">EDT и 1cedtcli</a></li>
+  <li><a href="#debug">Отладка</a></li>
 </ul>
 
 <h2 id="ib">Что такое информационная база</h2>
@@ -273,6 +278,15 @@
 <tr id="t109"><td class="n"><a href="#t109">109</a></td><td>Проект EDT содержит одну конфигурацию. Изменения базы, сделанные извне, EDT импортирует через сравнение и объединение; конфликты разрешаются вручную в редакторе.</td><td>Слияние в EDT — интерактивная операция.</td><td class="src"><a href="https://its.1c.ru/db/edtdoc/content/32/hdoc">EDT: Проект конфигурации</a></td></tr>
 <tr id="t110"><td class="n"><a href="#t110">110</a></td><td>Проект расширения и проект внешних отчётов и обработок — отдельные виды проектов. Внешние импортируются из .epf, .erf или XML.</td><td>Три типа наборов исходников есть и в EDT.</td><td class="src"><a href="https://its.1c.ru/db/edtdoc/content/10538/hdoc">EDT: Проект расширения</a> <a href="https://its.1c.ru/db/edtdoc/content/10543/hdoc">EDT: Проект внешних отчётов и обработок</a></td></tr>
 <tr id="t111"><td class="n"><a href="#t111">111</a></td><td>Операции, которых нет в EDT, выполняются в Конфигураторе: правила поставки, комплекты поставки.</td><td>EDT не заменяет Конфигуратор.</td><td class="src"><a href="https://its.1c.ru/db/edtdoc/content/10328/hdoc">EDT: Загрузить и выгрузить содержимое базы</a></td></tr>
+</tbody></table></div>
+
+<h2 id="debug">Отладка</h2>
+<p>Кто поднимает сервер отладки, к которому подключаются отладчик и клиент.</p>
+
+<div class="tablewrap"><table class="theses">
+<thead><tr><th>№</th><th>Платформа утверждает</th><th>Что из этого следует</th><th>Где написано</th></tr></thead>
+<tbody>
+<tr id="t112"><td class="n"><a href="#t112">112</a></td><td>Клиентское приложение запускается под отладкой ключом /Debug с режимом http и ключом /DebuggerURL с адресом отладчика; с -attach отладчик сам подключает предметы отладки, зарегистрированные на сервере отладки. Сервер отладки по HTTP — dbgs из поставки платформы. Конфигуратор при отладке поднимает его сам, агент кластера — при запуске с -debug -http, автономный сервер — с --debug=http.</td><td>Сервер отладки поднимает тот, кто держит базу. У файловой базы такого нет: свой dbgs из установки клиента поднимает раннер командой debug-server start. Кластер раннера поднимает свой сервер отладки при cluster start --debug.</td><td class="src"></td></tr>
 </tbody></table></div>
 
 <h2 id="measured">Чего документация не говорит</h2>
