@@ -106,6 +106,10 @@ pub(crate) trait ServiceHost {
     fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
         Ok(None)
     }
+    /// Владелец файла (uid); `None` — система его не называет.
+    fn file_owner(&self, path: &Path) -> Option<u32> {
+        service::file_owner(path)
+    }
 }
 
 /// Что раннер поднимает на системе (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
@@ -1339,7 +1343,7 @@ pub(crate) fn standalone_session_target<'a>(
     context: &ExecutionContext,
     config: &'a AppConfig,
 ) -> Option<(PathBuf, crate::platform::ibsrv::SessionSource<'a>)> {
-    standalone::session_target(context, config, &ProcessExecutor, &RealHost)
+    standalone::session_target(context, config, &ProcessExecutor, &RealHost::CURRENT)
 }
 
 /// Чужие живые сеансы серверной базы — признак «базу держат сеансы» у применения, когда

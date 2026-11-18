@@ -57,6 +57,7 @@ fn run_publish(
 
 /// Выход сценария с уже выбранным стендом; его берут сценарии частного Apache с подделанной
 /// машиной.
+#[cfg(test)]
 pub(crate) fn execute_with(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -253,8 +254,11 @@ fn publish_with(
     let finished = match finished {
         Ok(finished) => finished,
         Err(mut failure) => {
-            if let Some(snapshot) = snapshot {
-                if let Err(rollback) = snapshot.restore() {
+            if let (Some(publication), Some(snapshot)) = (&managed, snapshot) {
+                for rollback in [snapshot.restore().err(), publication.reclaim_files().err()]
+                    .into_iter()
+                    .flatten()
+                {
                     failure.error = failure.error.followed_by(rollback.to_string());
                 }
             }
@@ -269,9 +273,13 @@ fn publish_with(
             if let Some(publication) = &managed {
                 if let Err(mut error) = publication.activate() {
                     if let Some(snapshot) = snapshot {
-                        if let Err(rollback) = snapshot
+                        // Файлы `webinst` забираются и тогда, когда откат конфига не удался.
+                        let restored = snapshot
                             .restore()
-                            .and_then(|()| publication.reload(Reload::Recover))
+                            .and_then(|()| publication.reload(Reload::Recover));
+                        for rollback in [restored.err(), publication.reclaim_files().err()]
+                            .into_iter()
+                            .flatten()
                         {
                             error = error.followed_by(rollback.to_string());
                         }
@@ -304,8 +312,11 @@ fn publish_with(
                     crate::use_cases::result::UseCaseError::from(AppError::Platform(message))
                 });
             done.message = Some(error.to_string());
-            if let Some(snapshot) = snapshot {
-                if let Err(rollback) = snapshot.restore() {
+            if let (Some(publication), Some(snapshot)) = (&managed, snapshot) {
+                for rollback in [snapshot.restore().err(), publication.reclaim_files().err()]
+                    .into_iter()
+                    .flatten()
+                {
                     error = error.followed_by(rollback.to_string());
                 }
             }

@@ -867,7 +867,7 @@ impl ManagedPublication<'_> {
                 .any(|line| line.trim_start().starts_with("sudo:")))
         .then(|| {
             environment(format!(
-                "sudo -n did not run webinst: on Linux webinst publishes only as root; allow exactly this program for your user in sudoers, for example `<user> ALL=(root) NOPASSWD: {}`; sudo said: {}",
+                "sudo -n did not run webinst: on Linux webinst publishes only as root; allow in sudoers exactly the command line that `publish --dry-run` shows after `sudo -n --` (`{}` with these arguments), not the program with any arguments: its -dir and -confpath would let any file be written as root; sudo said: {}",
                 self.webinst.display(),
                 finished.stderr.trim()
             ))
@@ -913,11 +913,19 @@ impl ManagedPublication<'_> {
     /// После удачного `webinst`: файлы под `localPath` снова принадлежат пользователю раннера, а
     /// Apache перечитывает конфиг.
     pub(crate) fn activate(&self) -> Result<(), UseCaseError> {
-        if self.elevation.is_some() {
-            reclaim(self.web.paths.root())
-                .map_err(|err| io_failure("cannot take back", self.web.paths.root(), &err))?;
-        }
+        self.reclaim_files()?;
         self.reload(Reload::Activate)
+    }
+
+    /// Файлы, которые `webinst` с поднятыми правами записал под каталогом Apache, снова
+    /// принадлежат пользователю раннера. Зовётся и после удачи, и после отката.
+    pub(crate) fn reclaim_files(&self) -> Result<(), UseCaseError> {
+        if self.elevation.is_none() {
+            return Ok(());
+        }
+        let root = self.web.paths.root();
+        reclaim(root, &|path| self.web.host.file_owner(path))
+            .map_err(|err| io_failure("cannot take back", root, &err))
     }
 
     pub(crate) fn reload(&self, mode: Reload) -> Result<(), UseCaseError> {
@@ -1038,14 +1046,16 @@ fn apache_workers(
         .collect())
 }
 
-/// Файлы, которые `webinst` с поднятыми правами записал под каталогом Apache, снова
-/// принадлежат владельцу каталога: раннер переписывает их от своего имени с прежними правами.
-/// Каталог чужого владельца раннеру не переписать — это отказ с его путём.
-#[cfg(unix)]
-fn reclaim(root: &Path) -> std::io::Result<()> {
+/// Файлы под каталогом Apache чужого владельца — их записал `webinst` с поднятыми правами —
+/// снова принадлежат владельцу каталога: раннер переписывает их от своего имени с прежними
+/// правами. Символические ссылки не трогаются. Каталог чужого владельца раннеру не переписать —
+/// отказ называет путь и команду, которой его убрать. `owner` — владелец пути; `None` у корня —
+/// система владельцев не называет, забирать нечего.
+fn reclaim(root: &Path, owner: &dyn Fn(&Path) -> Option<u32>) -> std::io::Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::MetadataExt as _;
-    let owner = std::fs::symlink_metadata(root)?.uid();
+    let Some(ours) = owner(root) else {
+        return Ok(());
+    };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)? {
@@ -1054,26 +1064,22 @@ fn reclaim(root: &Path) -> std::io::Result<()> {
             if meta.file_type().is_symlink() {
                 continue;
             }
+            let theirs = owner(&path);
             if meta.is_dir() {
-                if meta.uid() != owner {
+                if theirs != Some(ours) {
+                    let uid = theirs.map_or_else(String::new, |uid| format!(" uid {uid}"));
                     return Err(std::io::Error::other(format!(
-                        "'{}' belongs to uid {}: remove it as that user",
-                        path.display(),
-                        meta.uid()
+                        "webinst left the directory '{0}' owned by{uid}, which the runner cannot take back: remove it with `sudo rm -r '{0}'` and publish again",
+                        path.display()
                     )));
                 }
                 pending.push(path);
-            } else if meta.uid() != owner {
+            } else if theirs != Some(ours) {
                 let contents = std::fs::read(&path)?;
                 crate::support::fs::write_file_atomically(&path, |file| file.write_all(&contents))?;
             }
         }
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn reclaim(_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1101,6 +1107,93 @@ impl PublicationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    /// Владелец в подделке: пути из `foreign` принадлежат root, остальное — пользователю.
+    fn owners(foreign: &HashSet<PathBuf>) -> impl Fn(&Path) -> Option<u32> + '_ {
+        move |path| Some(if foreign.contains(path) { 0 } else { 1000 })
+    }
+
+    #[test]
+    fn reclaim_rewrites_a_foreign_file_as_the_runner_with_its_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("web");
+        std::fs::create_dir_all(root.join("publication")).unwrap();
+        let file = root.join("publication").join("default.vrd");
+        std::fs::write(&file, "descriptor").unwrap();
+        let ours = root.join("httpd.conf");
+        std::fs::write(&ours, "config").unwrap();
+        // Жёсткие ссылки вне каталога видят, заменён ли файл новым.
+        let alias = directory.path().join("vrd.alias");
+        std::fs::hard_link(&file, &alias).unwrap();
+        let ours_alias = directory.path().join("conf.alias");
+        std::fs::hard_link(&ours, &ours_alias).unwrap();
+        let foreign = HashSet::from([file.clone()]);
+
+        reclaim(&root, &owners(&foreign)).unwrap();
+
+        std::fs::write(&alias, "changed").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "descriptor",
+            "the foreign file is replaced by the runner's copy"
+        );
+        std::fs::write(&ours_alias, "changed").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ours).unwrap(),
+            "changed",
+            "the runner's own file is left as it is"
+        );
+    }
+
+    #[test]
+    fn reclaim_refuses_a_foreign_directory_and_names_the_command_to_remove_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("web");
+        let foreign_dir = root.join("publication").join("cache");
+        std::fs::create_dir_all(&foreign_dir).unwrap();
+        let foreign = HashSet::from([foreign_dir.clone()]);
+
+        let refused = reclaim(&root, &owners(&foreign)).unwrap_err().to_string();
+        assert!(refused.contains("sudo rm -r"), "{refused}");
+        assert!(
+            refused.contains(&foreign_dir.display().to_string()),
+            "{refused}"
+        );
+        assert!(foreign_dir.is_dir(), "nothing is removed");
+    }
+
+    #[test]
+    fn reclaim_without_owners_changes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("file"), "text").unwrap();
+        reclaim(directory.path(), &|_| None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("file")).unwrap(),
+            "text"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_leaves_symbolic_links_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, "elsewhere").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let foreign = HashSet::from([link.clone(), outside.clone()]);
+
+        reclaim(&root, &owners(&foreign)).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "elsewhere");
+    }
 
     #[test]
     fn publication_rollback_restores_both_files() {
@@ -1600,7 +1693,10 @@ mod stand_tests {
             UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
         );
         assert!(
-            refused.error.message().contains("NOPASSWD"),
+            refused
+                .error
+                .message()
+                .contains("not the program with any arguments"),
             "{}",
             refused.error
         );
@@ -1613,6 +1709,54 @@ mod stand_tests {
             refused.error
         );
         assert_eq!(host.webinst_runs.get(), runs, "webinst did not run");
+    }
+
+    #[test]
+    fn files_webinst_leaves_as_root_are_taken_back_after_success_and_failure() {
+        let (stand, host) = running();
+        host.elevation
+            .replace(Some(stand.config.base_path.join("sudo")));
+        host.webinst_leaves_a_root_file.set(true);
+        let web = paths(&stand).root().to_owned();
+        let backup = web.join("httpd.conf.bak");
+        let alias = web.parent().unwrap().join("httpd.conf.bak.alias");
+
+        publish(&stand, &host, false).unwrap();
+        std::fs::write(&alias, "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "backup");
+
+        for breaks in [Breaks::Webinst, Breaks::Config] {
+            match breaks {
+                Breaks::Webinst => host.webinst_fails.set(true),
+                Breaks::Config => {
+                    host.webinst_fails.set(false);
+                    host.webinst_breaks_the_config.set(true);
+                }
+            }
+            publish(&stand, &host, false).unwrap_err();
+            std::fs::write(&alias, "changed").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&backup).unwrap(),
+                "backup",
+                "{breaks:?}: the rollback takes the root file back too"
+            );
+        }
+
+        host.webinst_breaks_the_config.set(false);
+        host.webinst_fails.set(true);
+        host.webinst_leaves_a_root_dir.set(true);
+        let refused = publish(&stand, &host, false).unwrap_err();
+        assert!(
+            refused.error.message().contains("sudo rm -r"),
+            "{}",
+            refused.error
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Breaks {
+        Webinst,
+        Config,
     }
 
     #[test]

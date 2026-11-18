@@ -1842,6 +1842,20 @@ pub(super) mod tests {
                         format!("<point base=\"/demo\" ib=\"{connection}\"/>"),
                     )
                     .unwrap();
+                    let web = conf.parent().unwrap();
+                    if host.webinst_leaves_a_root_file.get() {
+                        let backup = web.join("httpd.conf.bak");
+                        std::fs::write(&backup, "backup").unwrap();
+                        let alias = web.parent().unwrap().join("httpd.conf.bak.alias");
+                        let _ = std::fs::remove_file(&alias);
+                        std::fs::hard_link(&backup, alias).unwrap();
+                        host.foreign_owned.borrow_mut().insert(backup);
+                    }
+                    if host.webinst_leaves_a_root_dir.get() {
+                        let directory = web.join("root-dir");
+                        std::fs::create_dir_all(&directory).unwrap();
+                        host.foreign_owned.borrow_mut().insert(directory);
+                    }
                     if host.webinst_fails.get() {
                         exit_code = 1;
                     }
@@ -1928,6 +1942,12 @@ pub(super) mod tests {
         pub(crate) web_rows: RefCell<Vec<ProcessRow>>,
         /// Мягкие перезапуски Apache.
         pub(crate) reloads: Cell<u32>,
+        /// Пути чужого владельца (root); остальное принадлежит пользователю раннера.
+        pub(crate) foreign_owned: RefCell<HashSet<PathBuf>>,
+        /// `webinst` оставляет файл root `httpd.conf.bak` и его жёсткую ссылку вне каталога.
+        pub(crate) webinst_leaves_a_root_file: Cell<bool>,
+        /// `webinst` оставляет каталог root `root-dir`.
+        pub(crate) webinst_leaves_a_root_dir: Cell<bool>,
         /// Отмена команды, наступающая, как только поднят `ragent`.
         cancel_on_agent: RefCell<Option<tokio_util::sync::CancellationToken>>,
         processes: RefCell<HashMap<u32, ProcessFacts>>,
@@ -2023,6 +2043,13 @@ pub(super) mod tests {
         }
         fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
             Ok(self.elevation.borrow().clone())
+        }
+        fn file_owner(&self, path: &std::path::Path) -> Option<u32> {
+            Some(if self.foreign_owned.borrow().contains(path) {
+                0
+            } else {
+                1000
+            })
         }
         fn spawn(
             &self,

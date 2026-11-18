@@ -297,6 +297,20 @@ fn process_rows(listing: &str) -> Vec<ProcessRow> {
         .collect()
 }
 
+/// Владелец файла или каталога (uid), не следуя ссылке; `None` — система владельцев не называет.
+pub fn file_owner(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::symlink_metadata(path).ok().map(|meta| meta.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Программа системы по имени: каталоги `PATH`, затем стандартные каталоги.
 pub fn system_program(name: &str, standard: &[&str]) -> Option<PathBuf> {
     std::env::var_os("PATH")

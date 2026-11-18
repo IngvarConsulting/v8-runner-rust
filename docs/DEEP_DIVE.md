@@ -398,11 +398,14 @@ Apache и записью PID раннер не оставляет сироту: 
 возвращает снятое и перезагружает Apache на прежнем конфиге без учёта отмены команды.
 
 Права. Службы стенда и сам `publish` работают от обычного пользователя; от root они отказывают
-(`ServiceHost::can_start_as_current_user`, единственный `geteuid` — в `managed_stand::System`). На Linux
+(`ServiceHost::can_start_as_current_user`; единственный `geteuid` — в `managed_stand::effective_root`, на
+который ссылается `System::LINUX`). На Linux
 `webinst` пишет публикацию только от root (замер #610), поэтому раннер поднимает права только ему:
-`sudo -n -- <webinst> …`. Без правила sudoers `sudo -n` отказывает, и отказ называет нужную строку. Файлы,
+`sudo -n -- <webinst> …`. Без правила sudoers `sudo -n` отказывает, и отказ просит разрешить ровно командную
+строку из превью: `webinst` с любыми ключами записал бы через `-dir` и `-confpath` любой файл от root. Файлы,
 которые `webinst` записал под каталогом Apache, раннер переписывает от своего имени (`reclaim`): под
-`localPath` и `workPath` не остаётся файлов root, а следующий `publish` и `web stop` работают без sudo.
+`localPath` и `workPath` не остаётся файлов root — и после удачи, и после отката (`reclaim_files`); каталог
+root раннеру не переписать, и отказ называет `sudo rm -r` с его путём, а следующий `publish` и `web stop` работают без sudo.
 
 ### Сеансы и временный RAS
 

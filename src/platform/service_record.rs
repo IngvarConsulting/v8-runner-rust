@@ -362,7 +362,7 @@ pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> 
 pub fn running_ras(local: &LocalDir, infobase: &str) -> Option<ServiceRecord> {
     running_cluster(local, infobase)?;
     let paths = ServicePaths::new(local, infobase, StandService::Ras);
-    let machine = machine_fingerprint();
+    let machine = stand_machine_fingerprint();
     paths.own_record().filter(|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
             && record
@@ -394,12 +394,14 @@ pub fn record_names_own_process(
         .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
-/// Preserve the identity already written by the live agent keeper.
+/// Отпечаток машины в записи хранителя живого агента: её формат прежний. Записи служб стенда
+/// пишут и читают [`stand_machine_fingerprint`].
 pub fn machine_fingerprint() -> Option<String> {
     Some(machine_hash(&machine_id()?))
 }
 
-/// Linux stand process ticks are relative to the current boot.
+/// Отпечаток машины в записях служб стенда — единственный, которым их пишут и читают. На Linux
+/// время старта процесса считается от загрузки, поэтому в отпечаток входит `boot_id`.
 pub fn stand_machine_fingerprint() -> Option<String> {
     let machine = machine_id()?;
     #[cfg(target_os = "linux")]
@@ -577,6 +579,80 @@ mod tests {
             .map(|path| path.display().to_string())
             .collect();
         assert!(offenders.is_empty(), "{offenders:?}");
+    }
+
+    /// Защита от повторения: записи стенда пишутся отпечатком стенда, и читатель с отпечатком
+    /// хранителя агента на Linux их не узнаёт (`running_ras` после #747). Отпечаток хранителя
+    /// зовут только сам хранитель и его определение.
+    #[test]
+    fn only_the_agent_keeper_reads_records_with_its_fingerprint() {
+        let offenders: Vec<String> = source_files()
+            .iter()
+            .filter(|path| {
+                let shown = path.to_string_lossy().replace('\\', "/");
+                !shown.contains("platform/agent_keeper/")
+            })
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                text.lines()
+                    .filter(|line| {
+                        line.contains("machine_fingerprint()")
+                            && !line.contains(".contains(")
+                            && !line.contains("stand_machine_fingerprint()")
+                            && !line.contains("fn machine_fingerprint()")
+                    })
+                    .map(|line| format!("{}: {}", path.display(), line.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(offenders.is_empty(), "{offenders:?}");
+    }
+
+    /// RAS кластера стенда, записанный отпечатком стенда, узнаётся читателем (`sessions`,
+    /// `cluster_admin`). На Linux отпечаток стенда несёт `boot_id`, и читатель с отпечатком
+    /// хранителя агента его не находил.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn a_ras_written_with_the_stand_fingerprint_is_the_running_ras() {
+        use crate::platform::ragent::ClusterPorts;
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalDir::new(&dir.path().join(".local"), dir.path());
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let ras_port = listener.local_addr().unwrap().port();
+        let pid = std::process::id();
+        let facts = process_facts(pid).unwrap();
+        let record = |paths: &ServicePaths, port: u16| ServiceRecord {
+            state: RecordState::Running,
+            pid: Some(pid),
+            started: Some(facts.started),
+            image: Some(facts.image.clone()),
+            machine: stand_machine_fingerprint(),
+            starter: None,
+            port,
+            explicit: true,
+            bin: PathBuf::from("ragent"),
+            version: None,
+            agent: None,
+            location: paths.location(),
+        };
+        let cluster = ServicePaths::new(&local, "origin", StandService::Cluster);
+        write_json(
+            &cluster.pins(),
+            &ClusterPins {
+                ports: ClusterPorts::from_first(24000),
+                registry: "registry-24001".to_owned(),
+                registered: true,
+                previous: None,
+            },
+        )
+        .unwrap();
+        write_json(&cluster.record(), &record(&cluster, 24000)).unwrap();
+        let ras = ServicePaths::new(&local, "origin", StandService::Ras);
+        write_json(&ras.record(), &record(&ras, ras_port)).unwrap();
+
+        let found = running_ras(&local, "origin").expect("the stand's RAS is recognised");
+        assert_eq!(found.port, ras_port);
+        drop(listener);
     }
 
     #[test]

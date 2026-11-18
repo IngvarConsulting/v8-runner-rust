@@ -768,9 +768,17 @@ infobases:
 системные сценарии `apachectl` и `apache2ctl` — отказ. Раннер Apache не скачивает и не
 устанавливает. `webinst` раннер находит поиском утилит платформы (`tools.platform`) и сверяет его
 выпуск с выпуском работающего кластера. На Linux `webinst` публикует только от root: раннер
-запускает его через `sudo -n`, поэтому разрешите эту программу в sudoers, например
-`<user> ALL=(root) NOPASSWD: /opt/1cv8/x86_64/<версия>/webinst`; сам `publish` выполняйте от
-обычного пользователя.
+запускает его через `sudo -n`; сам `publish` выполняйте от обычного пользователя. Не разрешайте
+в sudoers `webinst` с любыми ключами: через `-dir` и `-confpath` он запишет от root любой файл.
+Разрешите ровно ту командную строку, которую `publish --dry-run` показывает после `sudo -n --`:
+правило sudoers с ключами совпадает только с ними. Например:
+
+```text
+<user> ALL=(root) NOPASSWD: /opt/1cv8/x86_64/<версия>/webinst -publish -apache24 -wsdir demo -dir <localPath>/infobases/<база>/managed/web/publication -connstr Srvr\=127.0.0.1\:<regport>;Ref\=demo -confpath <localPath>/infobases/<база>/managed/web/httpd.conf
+```
+
+В ключах правила `=`, `:`, `,` и `\` экранируются обратной косой чертой. После переноса `regport`
+кластера строка меняется — обновите правило; для `publish --delete` нужна своя строка.
 
 Исполнители автономного сервера:
 
