@@ -4,7 +4,7 @@ version: 1
 artifact: docs/schemas/command-data/web-restart.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
-  - tests/cli_web.rs::web_status_of_a_declared_cluster_writes_nothing
+  - src/use_cases/managed_stand/web.rs::web_answers_take_the_forms_of_their_commands
 ---
 
 # `data` команды `web restart`

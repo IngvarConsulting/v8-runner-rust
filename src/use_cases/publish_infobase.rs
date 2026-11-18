@@ -21,6 +21,7 @@ use crate::platform::webinst::{webinst_args, write_diagnostics};
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::managed_stand::{ManagedPublication, Reload};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
@@ -44,14 +45,6 @@ fn run_publish(
     config: &AppConfig,
     request: &PublishRequest,
 ) -> UseCaseResult<PublishResult> {
-    let started = Instant::now();
-    debug!(
-        command = context.command().as_str(),
-        action = request.action.as_str(),
-        dry_run = request.dry_run,
-        "executing publish use case"
-    );
-
     let managed = crate::use_cases::managed_stand::publication(
         context,
         config,
@@ -59,6 +52,39 @@ fn run_publish(
         request.dry_run,
     )
     .map_err(UseCaseFailure::without_payload)?;
+    publish_with(context, config, request, managed)
+}
+
+/// Выход сценария с уже выбранным стендом; его берут сценарии частного Apache с подделанной
+/// машиной.
+pub(crate) fn execute_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PublishRequest,
+    managed: Option<ManagedPublication<'_>>,
+) -> UseCaseResult<PublishResult> {
+    stamp_dispatch(
+        publish_with(context, config, request, managed),
+        context.work(),
+    )
+}
+
+/// Публикация с уже выбранным стендом: у базы управляемого кластера `managed` несёт частный
+/// Apache, его исполнителя и `webinst` выпуска кластера.
+fn publish_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PublishRequest,
+    managed: Option<ManagedPublication<'_>>,
+) -> UseCaseResult<PublishResult> {
+    let started = Instant::now();
+    debug!(
+        command = context.command().as_str(),
+        action = request.action.as_str(),
+        dry_run = request.dry_run,
+        managed = managed.is_some(),
+        "executing publish use case"
+    );
     let web = managed
         .as_ref()
         .map(|publication| &publication.target)
@@ -115,6 +141,11 @@ fn run_publish(
                 target.connection.as_str()
             }),
     );
+    // На Linux управляемая публикация поднимает права только у `webinst`.
+    let (program, args) = match &managed {
+        Some(publication) => publication.command(args),
+        None => (program, args),
+    };
     let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
     let result = |plan: Option<PublishPlan>| PublishResult {
         provider: Some(receipt.clone()),
@@ -193,7 +224,10 @@ fn run_publish(
         startup_probe: None,
         windows_verbatim_args: Vec::new(),
     };
-    let runner = utilities.runner_for(UtilityType::Webinst);
+    let runner = match &managed {
+        Some(publication) => publication.runner(),
+        None => utilities.runner_for(UtilityType::Webinst),
+    };
     let finished = runner
         .run_with_policy(
             &process,
@@ -233,10 +267,11 @@ fn run_publish(
     match finished.outcome() {
         Ok(()) => {
             if let Some(publication) = &managed {
-                if let Err(mut error) = publication.reload(false) {
+                if let Err(mut error) = publication.activate() {
                     if let Some(snapshot) = snapshot {
-                        if let Err(rollback) =
-                            snapshot.restore().and_then(|()| publication.reload(true))
+                        if let Err(rollback) = snapshot
+                            .restore()
+                            .and_then(|()| publication.reload(Reload::Recover))
                         {
                             error = error.followed_by(rollback.to_string());
                         }
@@ -262,9 +297,13 @@ fn run_publish(
                 wsdir,
                 server.as_str()
             );
-            done.message = Some(message.clone());
-            let mut error =
-                crate::use_cases::result::UseCaseError::from(AppError::Platform(message));
+            let mut error = managed
+                .as_ref()
+                .and_then(|publication| publication.elevation_refusal(&finished))
+                .unwrap_or_else(|| {
+                    crate::use_cases::result::UseCaseError::from(AppError::Platform(message))
+                });
+            done.message = Some(error.to_string());
             if let Some(snapshot) = snapshot {
                 if let Err(rollback) = snapshot.restore() {
                     error = error.followed_by(rollback.to_string());

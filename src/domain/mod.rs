@@ -70,3 +70,5 @@ pub mod test;
 pub mod tools_download;
 /// Предупреждение ответа и его машинный код.
 pub mod warning;
+/// Ответ команд `web`.
+pub mod web;

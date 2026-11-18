@@ -238,6 +238,17 @@ fn process_rows(listing: &str) -> Vec<ProcessRow> {
         .collect()
 }
 
+/// Программа системы по имени: каталоги `PATH`, затем стандартные каталоги.
+pub fn system_program(name: &str, standard: &[&str]) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(standard.iter().map(PathBuf::from))
+        .map(|directory| directory.join(name))
+        .find(|path| path.is_file())
+}
+
 /// Find a process using the same Apache configuration, including absolute aliases.
 pub fn process_using_config(rows: &[ProcessRow], config: &Path) -> Option<u32> {
     let wanted = crate::support::path::compared_path(config);

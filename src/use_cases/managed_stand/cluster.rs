@@ -516,8 +516,11 @@ impl Cluster<'_> {
     }
 
     fn stop(&self, dry_run: bool) -> Result<ClusterResult, UseCaseError> {
-        super::web::Web::new(self.config, self.context, self.runner, self.host)?
-            .stop(true, dry_run)?;
+        // Apache, поднятый шагом, гаснет первым: ему нужен кластер.
+        if !dry_run {
+            super::web::Web::new(self.config, self.context, self.runner, self.host)?
+                .stop(super::web::StopScope::ClusterStep)?;
+        }
         let mut result = self.stop_cluster(dry_run)?;
         // Кластер гаснет первым: СУБД нужна ему до конца. Пока над ней работает свой автономный
         // сервер этой базы, она нужна ему.
@@ -659,7 +662,7 @@ impl Cluster<'_> {
                 result.ready = self.probe(&record.bin, ras.port).is_some();
                 if super::web::declared(self.config) {
                     super::web::Web::new(self.config, self.context, self.runner, self.host)?
-                        .start(false, false)?;
+                        .start(super::web::Ownership::ClusterStep)?;
                 }
                 return Ok(self.describe(result, Some(&record)));
             }
@@ -718,7 +721,7 @@ impl Cluster<'_> {
         let outcome = outcome.and_then(|result| {
             if super::web::declared(self.config) {
                 let web = super::web::Web::new(self.config, self.context, self.runner, self.host)?;
-                if let Err(error) = web.start(false, false) {
+                if let Err(error) = web.start(super::web::Ownership::ClusterStep) {
                     return match self.stop_cluster(false) {
                         Ok(_) => Err(error),
                         Err(stop) => {
@@ -1690,9 +1693,10 @@ pub(super) fn register_again(
     mark_registered(&cluster, pins)
 }
 
-/// Сценарий `cluster` с подделкой утилит и машины: файлы настоящие, процессы нет.
+/// Сценарий `cluster` с подделкой утилит и машины: файлы настоящие, процессы нет. Подделки
+/// служат и сценариям частного Apache (`web`).
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
 
@@ -1714,14 +1718,18 @@ mod tests {
     const RMNGR_PID: u32 = 7004;
     const RPHOST_PID: u32 = 7005;
     const PG_PID: u32 = 7002;
-    const WEB_PID: u32 = 7006;
-    const STARTED: u64 = 11;
+    pub(crate) const WEB_PID: u32 = 7006;
+    /// Рабочие процессы Apache после мягкого перезапуска — от этого номера.
+    const WEB_WORKER_PID: u32 = 7100;
+    pub(crate) const STARTED: u64 = 11;
     const MACHINE: &str = "machine";
+    /// Выпуск платформы подделки, у которого есть `webinst` и модуль Apache.
+    pub(crate) const RELEASE: &str = "8.5.4.2028";
     const CLUSTER_ID: &str = "6c5a8a62-3a8c-4e4b-b0a6-2f4c4b1f1d10";
 
-    /// `rac` и утилиты PostgreSQL.
-    struct Runner<'a> {
-        host: &'a Host,
+    /// `rac`, утилиты PostgreSQL, `httpd -t` и `webinst`.
+    pub(crate) struct Runner<'a> {
+        pub(crate) host: &'a Host,
     }
 
     impl ProcessRunner for Runner<'_> {
@@ -1731,15 +1739,45 @@ mod tests {
             _policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
             let host = self.host;
+            let mut program = request.program.clone();
+            let mut args = request.args.clone();
+            host.ran.borrow_mut().push(
+                std::iter::once(program.display().to_string())
+                    .chain(args.iter().cloned())
+                    .collect(),
+            );
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let mut exit_code = 0;
+            // `sudo -n -- <программа> <ключи>`: права поднимаются у одной программы.
+            if program.file_stem().is_some_and(|stem| stem == "sudo") {
+                if host.sudo_refuses.get() {
+                    return Ok(ProcessResult {
+                        exit_code: 1,
+                        stdout,
+                        stderr: "sudo: a password is required\n".to_owned(),
+                        interruption: None,
+                    });
+                }
+                assert_eq!(
+                    args[..2],
+                    ["-n", "--"],
+                    "sudo takes no password and one program"
+                );
+                program = PathBuf::from(&args[2]);
+                args = args[3..].to_vec();
+            }
+            let request = &ProcessRequest {
+                program,
+                args,
+                ..request.clone()
+            };
             let tool = request
                 .program
                 .file_stem()
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            let mut exit_code = 0;
             let databases = &host.databases;
             match tool.as_str() {
                 // БД по именам: вопрос о БД и команды SQL пересоздания.
@@ -1774,7 +1812,40 @@ mod tests {
                         known.remove(&quoted(&sql)[0]);
                     }
                 }
-                "httpd" => {}
+                "httpd" => {
+                    let conf =
+                        std::fs::read_to_string(request.args.last().unwrap()).unwrap_or_default();
+                    if host.webinst_breaks_the_config.get() && conf.contains(WEBINST_LINE) {
+                        exit_code = 1;
+                        stderr = "Syntax error".to_owned();
+                    }
+                }
+                "webinst" => {
+                    host.webinst_runs.set(host.webinst_runs.get() + 1);
+                    let value = |key: &str| {
+                        let at = request.args.iter().position(|arg| arg == key).unwrap();
+                        PathBuf::from(&request.args[at + 1])
+                    };
+                    let conf = value("-confpath");
+                    let mut text = std::fs::read_to_string(&conf).unwrap();
+                    text.push_str(WEBINST_LINE);
+                    text.push('\n');
+                    std::fs::write(&conf, text).unwrap();
+                    let connection = request
+                        .args
+                        .iter()
+                        .position(|arg| arg == "-connstr")
+                        .map(|at| request.args[at + 1].clone())
+                        .unwrap_or_default();
+                    std::fs::write(
+                        value("-dir").join("default.vrd"),
+                        format!("<point base=\"/demo\" ib=\"{connection}\"/>"),
+                    )
+                    .unwrap();
+                    if host.webinst_fails.get() {
+                        exit_code = 1;
+                    }
+                }
                 "initdb" => {
                     let data = PathBuf::from(&request.args[1]);
                     std::fs::create_dir_all(&data).unwrap();
@@ -1835,16 +1906,35 @@ mod tests {
         }
     }
 
+    /// Строка, которую подделка `webinst` дописывает в конфиг Apache.
+    pub(crate) const WEBINST_LINE: &str = "# 1c publication demo";
+
     #[derive(Default)]
-    struct Host {
+    pub(crate) struct Host {
         unsupported: Cell<bool>,
+        /// Раннер работает от root.
+        pub(crate) root: Cell<bool>,
+        /// Чем поднимаются права `webinst`.
+        pub(crate) elevation: RefCell<Option<PathBuf>>,
+        /// `sudo -n` требует пароль.
+        pub(crate) sudo_refuses: Cell<bool>,
+        /// Каждый запуск исполнителя: программа и ключи.
+        pub(crate) ran: RefCell<Vec<Vec<String>>>,
+        pub(crate) webinst_runs: Cell<u32>,
+        pub(crate) webinst_fails: Cell<bool>,
+        /// После `webinst` проверка конфига Apache не проходит.
+        pub(crate) webinst_breaks_the_config: Cell<bool>,
+        /// Процессы Apache в перечне: главный, рабочие и чужие.
+        pub(crate) web_rows: RefCell<Vec<ProcessRow>>,
+        /// Мягкие перезапуски Apache.
+        pub(crate) reloads: Cell<u32>,
         /// Отмена команды, наступающая, как только поднят `ragent`.
         cancel_on_agent: RefCell<Option<tokio_util::sync::CancellationToken>>,
         processes: RefCell<HashMap<u32, ProcessFacts>>,
         /// Родитель процесса, как его видит перечень.
         parents: RefCell<HashMap<u32, u32>>,
-        listeners: RefCell<HashMap<u16, u32>>,
-        spawned: RefCell<Vec<String>>,
+        pub(crate) listeners: RefCell<HashMap<u16, u32>>,
+        pub(crate) spawned: RefCell<Vec<String>>,
         agent_args: RefCell<Vec<String>>,
         agent_exits_at_once: Cell<bool>,
         cluster_silent: Cell<bool>,
@@ -1871,7 +1961,7 @@ mod tests {
     }
 
     impl Host {
-        fn live(&self, pid: u32, image: &str) {
+        pub(crate) fn live(&self, pid: u32, image: &str) {
             self.processes.borrow_mut().insert(
                 pid,
                 ProcessFacts {
@@ -1881,7 +1971,7 @@ mod tests {
             );
         }
         /// Процесс, начавшийся в это время.
-        fn live_since(&self, pid: u32, image: &str, started: u64) {
+        pub(crate) fn live_since(&self, pid: u32, image: &str, started: u64) {
             self.processes.borrow_mut().insert(
                 pid,
                 ProcessFacts {
@@ -1890,21 +1980,49 @@ mod tests {
                 },
             );
         }
-        fn kill(&self, pid: u32) {
+        pub(crate) fn kill(&self, pid: u32) {
             if self.immortal.borrow().contains(&pid) {
                 return;
             }
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
-        fn alive(&self, pid: u32) -> bool {
+        pub(crate) fn alive(&self, pid: u32) -> bool {
             self.processes.borrow().contains_key(&pid)
+        }
+        /// Вызовы исполнителя, где встречается это слово.
+        pub(crate) fn ran_with(&self, word: &str) -> Vec<Vec<String>> {
+            self.ran
+                .borrow()
+                .iter()
+                .filter(|call| call.iter().any(|arg| arg.contains(word)))
+                .cloned()
+                .collect()
         }
     }
 
     impl ServiceHost for Host {
         fn supported(&self) -> bool {
             !self.unsupported.get()
+        }
+        fn can_start_as_current_user(&self) -> bool {
+            !self.root.get()
+        }
+        fn graceful_reload(&self, pid: u32, started: Option<u64>) -> std::io::Result<()> {
+            assert_eq!(started, self.facts(pid).map(|facts| facts.started));
+            let worker = WEB_WORKER_PID + self.reloads.get();
+            self.reloads.set(self.reloads.get() + 1);
+            let image = self.facts(pid).unwrap().image;
+            self.live(worker, &image);
+            self.web_rows.borrow_mut().push(ProcessRow {
+                pid: worker,
+                parent: pid,
+                command: String::new(),
+            });
+            Ok(())
+        }
+        fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
+            Ok(self.elevation.borrow().clone())
         }
         fn spawn(
             &self,
@@ -1963,7 +2081,15 @@ mod tests {
                     Ok(AGENT_PID)
                 }
                 "httpd" => {
-                    let conf = std::fs::read_to_string(request.args.last().unwrap()).unwrap();
+                    let path = request.args.last().unwrap();
+                    let conf = std::fs::read_to_string(path).unwrap();
+                    let root = PathBuf::from(path).parent().unwrap().to_path_buf();
+                    std::fs::write(root.join("httpd.pid"), WEB_PID.to_string()).unwrap();
+                    self.web_rows.borrow_mut().push(ProcessRow {
+                        pid: WEB_PID,
+                        parent: 1,
+                        command: format!("{}\0-f\0{path}\0", request.program.display()),
+                    });
                     let port = conf
                         .lines()
                         .find_map(|line| line.strip_prefix("Listen 127.0.0.1:"))
@@ -2028,6 +2154,19 @@ mod tests {
             if self.unlisted.get() {
                 return None;
             }
+            if images
+                .iter()
+                .any(|image| image.starts_with("httpd") || *image == "apache2")
+            {
+                return Some(
+                    self.web_rows
+                        .borrow()
+                        .iter()
+                        .filter(|row| self.alive(row.pid))
+                        .cloned()
+                        .collect(),
+                );
+            }
             if images == [AGENT_IMAGE] {
                 return Some(
                     self.foreign_agents
@@ -2059,13 +2198,13 @@ mod tests {
         }
     }
 
-    struct Setup {
+    pub(crate) struct Setup {
         _root: tempfile::TempDir,
-        config: AppConfig,
+        pub(crate) config: AppConfig,
     }
 
     /// Кластер над PostgreSQL раннера.
-    fn setup() -> Setup {
+    pub(crate) fn setup() -> Setup {
         let root = tempfile::tempdir().unwrap();
         let build = root.path().join("pg");
         std::fs::create_dir_all(build.join("bin")).unwrap();
@@ -2114,17 +2253,59 @@ mod tests {
         }
     }
 
+    /// Каталог `bin` выпуска подделки: `ragent`, `webinst` и модуль Apache.
+    pub(crate) fn release_bin(config: &AppConfig) -> PathBuf {
+        config.base_path.join("1cv8").join(RELEASE).join("bin")
+    }
+
+    /// Файл подделки, который поиск утилит считает исполняемым.
+    pub(crate) fn executable(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Кластер с частным Apache (`infobase.web.managed`): сборка Apache и выпуск платформы с
+    /// `webinst` и модулем.
+    pub(crate) fn with_web(stand: &mut Setup) {
+        let base = &stand.config.base_path;
+        let apache = base.join(format!("httpd{}", std::env::consts::EXE_SUFFIX));
+        executable(&apache);
+        let bin = release_bin(&stand.config);
+        executable(&bin.join(format!("webinst{}", std::env::consts::EXE_SUFFIX)));
+        std::fs::write(
+            crate::platform::apache::platform_module(&bin.join("ragent.exe")),
+            "",
+        )
+        .unwrap();
+        stand.config.tools.apache.path = Some(apache);
+        stand.config.tools.platform.path = Some(bin);
+        stand.config.infobase.web = Some(crate::config::model::InfobaseWebConfig {
+            managed: true,
+            wsdir: Some("demo".to_owned()),
+            ..Default::default()
+        });
+    }
+
     impl Setup {
-        fn agent(&self) -> ServicePaths {
+        pub(crate) fn agent(&self) -> ServicePaths {
             ServicePaths::new(&self.config.local_dir(), "origin", StandService::Cluster)
         }
         fn ras(&self) -> ServicePaths {
             ServicePaths::new(&self.config.local_dir(), "origin", StandService::Ras)
         }
-        fn pins(&self) -> ClusterPins {
+        pub(crate) fn pins(&self) -> ClusterPins {
             read_json(&self.agent().pins()).expect("pinned")
         }
-        fn run(&self, command: ServiceCommand, host: &Host) -> Result<ClusterResult, UseCaseError> {
+        pub(crate) fn run(
+            &self,
+            command: ServiceCommand,
+            host: &Host,
+        ) -> Result<ClusterResult, UseCaseError> {
             self.run_with(command, false, host)
         }
         fn run_with(
@@ -2149,7 +2330,7 @@ mod tests {
         ) -> Result<ClusterResult, UseCaseError> {
             let locate = || {
                 if super::super::web::declared(&self.config) {
-                    Ok(self.config.base_path.join("ragent.exe"))
+                    Ok(release_bin(&self.config).join("ragent.exe"))
                 } else {
                     Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"))
                 }
@@ -2284,24 +2465,7 @@ mod tests {
     #[test]
     fn cluster_stops_only_the_apache_it_started_as_a_step() {
         let mut stand = setup();
-        let base = &stand.config.base_path;
-        let apache = base.join(if cfg!(windows) { "httpd.exe" } else { "httpd" });
-        std::fs::write(&apache, "").unwrap();
-        std::fs::write(
-            base.join(if cfg!(windows) {
-                "wsap24.dll"
-            } else {
-                "wsap24.so"
-            }),
-            "",
-        )
-        .unwrap();
-        stand.config.tools.apache.path = Some(apache);
-        stand.config.infobase.web = Some(crate::config::model::InfobaseWebConfig {
-            managed: true,
-            wsdir: Some("demo".to_owned()),
-            ..Default::default()
-        });
+        with_web(&mut stand);
         let host = Host::default();
         stand.run(ServiceCommand::Start, &host).unwrap();
         assert!(host.alive(WEB_PID));
@@ -2312,10 +2476,15 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::WebStart);
         let runner = Runner { host: &host };
         let web = super::super::web::Web::new(&stand.config, &context, &runner, &host).unwrap();
-        assert_eq!(web.start(true, false).unwrap().explicit, Some(true));
+        assert_eq!(
+            web.start(super::super::web::Ownership::Explicit)
+                .unwrap()
+                .explicit,
+            Some(true)
+        );
         stand.run(ServiceCommand::Stop, &host).unwrap();
         assert!(host.alive(WEB_PID));
-        web.stop(false, false).unwrap();
+        web.stop(super::super::web::StopScope::Any).unwrap();
         assert!(!host.alive(WEB_PID));
     }
 
@@ -3431,6 +3600,89 @@ mod tests {
             refused.kind(),
             UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
         );
+    }
+
+    /// От root службы стенда не запускаются ни на одной системе: `dbms`, `cluster`, `web` и
+    /// публикация отказывают до любого процесса (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+    #[test]
+    fn under_root_no_service_of_the_stand_starts() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let witness = Host::default();
+        let root = super::super::RealHost {
+            system: super::super::System {
+                privileged: || true,
+                ..super::super::System::LINUX
+            },
+        };
+        let runner = Runner { host: &witness };
+        let environment = UseCaseErrorKind::Environment(EnvironmentReason::Unavailable);
+        let context = ExecutionContext::cli(CommandName::ClusterStart);
+        let locate = || Ok(release_bin(&stand.config).join("ragent.exe"));
+
+        let cluster = run_cluster(
+            &context,
+            &stand.config,
+            ClusterCommand::Start { new_regport: false },
+            false,
+            &runner,
+            &root,
+            &locate,
+        )
+        .map_err(|failure| failure.error)
+        .unwrap_err();
+        assert_eq!(cluster.kind(), environment, "{cluster}");
+        let dbms = super::super::run_dbms(
+            &context,
+            &stand.config,
+            ServiceCommand::Start,
+            false,
+            &runner,
+            &root,
+        )
+        .map_err(|failure| failure.error)
+        .unwrap_err();
+        assert_eq!(dbms.kind(), environment, "{dbms}");
+        let web = super::super::web::Web::new(&stand.config, &context, &runner, &root)
+            .unwrap()
+            .start(super::super::web::Ownership::Explicit)
+            .unwrap_err();
+        assert_eq!(web.kind(), environment, "{web}");
+        let publication = super::super::web::publication_with(
+            &context,
+            &stand.config,
+            crate::domain::publish::PublishAction::Publish,
+            false,
+            &runner,
+            &root,
+        )
+        .err()
+        .expect("publish under root is refused");
+        assert_eq!(publication.kind(), environment, "{publication}");
+
+        assert!(witness.ran.borrow().is_empty(), "no utility ran");
+        assert!(witness.spawned.borrow().is_empty());
+        assert!(!stand.agent().record().exists());
+    }
+
+    /// Apache, который не поднялся шагом кластера, гасит кластер и PostgreSQL, поднятые этим же
+    /// запуском (`INV.USE-CASES.MANAGED-APACHE-LIFECYCLE`).
+    #[test]
+    fn a_failed_apache_takes_down_the_cluster_and_the_postgres_this_start_raised() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        std::fs::remove_file(crate::platform::apache::platform_module(
+            &release_bin(&stand.config).join("ragent.exe"),
+        ))
+        .unwrap();
+        let host = Host::default();
+        let refused = stand.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(refused.message().contains("module"), "{refused}");
+        assert!(!host.alive(AGENT_PID), "the cluster is stopped");
+        assert!(!host.alive(RAS_PID));
+        assert!(!host.alive(PG_PID), "the step PostgreSQL is stopped");
+        assert!(!host.alive(WEB_PID));
+        assert!(!stand.agent().record().exists());
     }
 
     /// Ваша СУБД вместо PostgreSQL раннера.

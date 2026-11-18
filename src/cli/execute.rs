@@ -1613,28 +1613,23 @@ fn execute_web(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::ServiceCommandArgs as Action;
-    use crate::use_cases::managed_stand::{execute_web as run, web_status, ServiceCommand};
+    use crate::use_cases::managed_stand::{execute_web as run, web_status, WebCommand};
 
     let (name, command) = match action {
-        Action::Start => (CommandName::WebStart, ServiceCommand::Start),
-        Action::Status => (CommandName::WebStatus, ServiceCommand::Status),
-        Action::Stop => (CommandName::WebStop, ServiceCommand::Stop),
-        Action::Restart => (CommandName::WebRestart, ServiceCommand::Restart),
+        Action::Start => (CommandName::WebStart, Some(WebCommand::Start)),
+        Action::Status => (CommandName::WebStatus, None),
+        Action::Stop => (CommandName::WebStop, Some(WebCommand::Stop)),
+        Action::Restart => (CommandName::WebRestart, Some(WebCommand::Restart)),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
-        crate::use_cases::managed_stand::WebResult,
+        crate::domain::web::WebResult,
     >| match outcome {
         Ok(result) => {
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
             } else {
-                presenter.print_bare(&format!(
-                    "{}: {:?} {}",
-                    name.as_str(),
-                    result.state,
-                    result.address.as_deref().unwrap_or_default()
-                ));
+                render_web_text(name, &result, presenter);
             }
             Ok(())
         }
@@ -1654,9 +1649,9 @@ fn execute_web(
             Err(error)
         }
     };
-    if command == ServiceCommand::Status {
+    let Some(command) = command else {
         return present(web_status(&context, config));
-    }
+    };
     with_cli_workspace_lock(
         config,
         presenter,
@@ -1666,6 +1661,61 @@ fn execute_web(
         dry_run,
         || present(run(&context, config, command, dry_run)),
     )
+}
+
+/// Текст ответа `web`: что сделано, адрес и файлы частного Apache.
+fn render_web_text(
+    name: CommandName,
+    result: &crate::domain::web::WebResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started Apache{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => "Apache stopped".to_owned(),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: Apache is not running", result.infobase),
+            ServiceState::Starting => format!("{}: Apache is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: Apache, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!("{}: the port is taken by another process", result.infobase)
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("address", result.address.clone()),
+        ("config", Some(result.config_path.display().to_string())),
+        ("log", Some(result.log_path.display().to_string())),
+        (
+            "previous port",
+            result.previous_port.map(|port| port.to_string()),
+        ),
+        (
+            "publication",
+            result
+                .publication_stale
+                .then(|| "stale: run publish again".to_owned()),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}: {value}"));
+        }
+    }
 }
 
 /// `standalone`: запись под замком `workPath`, `status` без него.

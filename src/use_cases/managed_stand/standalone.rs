@@ -1634,6 +1634,42 @@ mod tests {
         assert!(!setup.config.work_path.exists());
     }
 
+    /// Linux: `ibsrv` не замерен, и `standalone start|restart` отказывают до любого процесса,
+    /// даже от обычного пользователя (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+    #[test]
+    fn linux_refuses_the_standalone_server_before_any_process() {
+        let setup = setup();
+        let witness = Host::default();
+        let linux = super::super::RealHost {
+            system: super::super::System {
+                privileged: || false,
+                ..super::super::System::LINUX
+            },
+        };
+        let locate = || Ok(PathBuf::from("ibsrv.exe"));
+        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+            let refused = run_standalone(
+                &ExecutionContext::cli(CommandName::StandaloneStart),
+                &setup.config,
+                command,
+                false,
+                &Runner { host: &witness },
+                &linux,
+                &locate,
+            )
+            .map_err(|failure| failure.error)
+            .unwrap_err();
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+                "{refused}"
+            );
+        }
+        assert_eq!(witness.spawned.get(), 0);
+        assert!(witness.calls.borrow().is_empty());
+        assert!(!setup.paths().root().exists());
+    }
+
     #[test]
     fn a_base_without_a_managed_server_is_refused() {
         let mut setup = setup();

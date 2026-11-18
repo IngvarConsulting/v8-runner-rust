@@ -2,50 +2,76 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
-
 use super::{
     await_gone, being_started, environment, forget_record, io_failure, locate, occupant_name,
     occupant_of, policy, port_offsets, refuse_a_stand_of_another_project, validation, write_record,
-    RealHost, ServiceCommand, ServiceHost, IDENTIFY_TIMEOUT, POLL, STOP_TIMEOUT,
+    RealHost, ServiceHost, IDENTIFY_TIMEOUT, POLL, STOP_TIMEOUT,
 };
 use crate::config::model::AppConfig;
 use crate::domain::dbms::{ServiceAction, ServiceState};
+use crate::domain::web::WebResult;
 use crate::platform::apache;
-use crate::platform::locator::UtilityType;
-use crate::platform::process::{ProcessExecutor, ProcessRunner};
-use crate::platform::service::image_name;
+use crate::platform::locator::{platform_version_of, UtilityType};
+use crate::platform::process::{ProcessExecutor, ProcessResult, ProcessRunner};
+use crate::platform::service::{image_name, ProcessFacts};
 use crate::platform::service_record::{
-    observe_service, read_json, write_json, Observed, PinnedPorts, RecordState, ServicePaths,
-    ServiceRecord, StandService,
+    observe_service, read_json, write_json, ClusterPins, Observed, PinnedPorts, RecordState,
+    ServicePaths, ServiceRecord, StandService,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct WebResult {
-    pub ok: bool,
-    pub infobase: String,
-    pub state: ServiceState,
-    pub action: ServiceAction,
-    pub ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub explicit: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub program: Option<PathBuf>,
-    pub config_path: PathBuf,
-    pub log_path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub occupant_pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub publication_stale: bool,
-    pub duration_ms: u64,
+/// Системные сценарии управления Apache: они правят системную службу, а не частный экземпляр
+/// (`INV.PLATFORM.A-MANAGED-APACHE-IS-PRIVATE`).
+const SYSTEM_CONTROLS: [&str; 2] = ["apachectl", "apache2ctl"];
+
+/// Команды записи `web`; `status` — отдельный вход без замка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebCommand {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Кто поднимает Apache: явный экземпляр живёт до `web stop`, шаг кластера гаснет с ним.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ownership {
+    Explicit,
+    ClusterStep,
+}
+
+/// Что гасит остановка: `web stop` — свой экземпляр любого рода, `cluster stop` — только шаг.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StopScope {
+    Any,
+    ClusterStep,
+}
+
+/// Перезагрузка после `webinst`: обычная сверяет экземпляр со снятым до публикации,
+/// восстановительная идёт после отката и не зависит от отмены команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reload {
+    Activate,
+    Recover,
+}
+
+/// Как экземпляр перечитывает конфиг: Linux — `SIGUSR1` и новые рабочие процессы,
+/// Windows — остановка и запуск.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReloadStrategy {
+    InPlace,
+    Restart,
+    Unsupported,
+}
+
+impl ReloadStrategy {
+    const OF_THIS_SYSTEM: Self = if cfg!(windows) {
+        Self::Restart
+    } else if cfg!(target_os = "linux") {
+        Self::InPlace
+    } else {
+        Self::Unsupported
+    };
 }
 
 pub(super) struct Web<'a> {
@@ -88,19 +114,63 @@ impl<'a> Web<'a> {
         self.paths.root().join("httpd.conf")
     }
 
+    fn pid_file(&self) -> PathBuf {
+        self.paths.root().join("httpd.pid")
+    }
+
     pub(super) fn observe(&self) -> Observed {
         let machine = self.host.machine();
         let facts = |pid| self.host.facts(pid);
         observe_service(&self.paths, machine.as_deref(), &facts, &|record| {
-            crate::platform::service_record::adopt_recorded_pid(record, &facts, machine.as_deref())
+            if record.pid.is_some() {
+                return crate::platform::service_record::adopt_recorded_pid(
+                    record,
+                    &facts,
+                    machine.as_deref(),
+                );
+            }
+            // Раннер упал между запуском Apache и записью PID: свой экземпляр узнаётся по
+            // PID-файлу частного конфига, образу и порту записи.
+            match self.identified_apache(record) {
+                Some((pid, facts)) => {
+                    record.pid = Some(pid);
+                    record.started = Some(facts.started);
+                    record.image = Some(facts.image);
+                    true
+                }
+                None => false,
+            }
         })
+    }
+
+    /// Живой Apache из PID-файла частного конфига: процесс с образом записи, начатый после
+    /// упавшего раннера, слушает порт записи и запущен с этим конфигом.
+    fn identified_apache(&self, record: &ServiceRecord) -> Option<(u32, ProcessFacts)> {
+        let pid = std::fs::read_to_string(self.pid_file())
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        let facts = self.host.facts(pid)?;
+        let image = image_name(&record.bin);
+        let after_starter = record
+            .starter
+            .is_none_or(|(_, started)| facts.started >= started);
+        let uses_config = self.host.processes(&[&image]).is_some_and(|rows| {
+            crate::platform::service::process_using_config(&rows, &self.conf()) == Some(pid)
+        });
+        (facts.image == image
+            && after_starter
+            && self.host.listening_pid(record.port) == Some(pid)
+            && uses_config)
+            .then_some((pid, facts))
     }
 
     fn pinned_port(&self) -> Option<u16> {
         read_json::<PinnedPorts>(&self.paths.pins()).map(|pins| pins.port)
     }
 
-    fn result(&self, action: ServiceAction) -> WebResult {
+    pub(super) fn result(&self, action: ServiceAction) -> WebResult {
         let mut result = WebResult {
             ok: true,
             infobase: self.infobase.to_owned(),
@@ -123,7 +193,7 @@ impl<'a> Web<'a> {
                 result.state = ServiceState::StartedByThisCopy;
                 result.pid = record.pid;
                 result.explicit = Some(record.explicit);
-                result.address = Some(format!("http://127.0.0.1:{}", record.port));
+                result.address = Some(address(record.port));
                 result.program = Some(record.bin);
                 result.ready =
                     record.pid.is_some() && self.host.listening_pid(record.port) == record.pid;
@@ -131,7 +201,7 @@ impl<'a> Web<'a> {
             Observed::Starting(_) => result.state = ServiceState::Starting,
             Observed::Nothing | Observed::Stale => {
                 if let Some(port) = self.pinned_port() {
-                    result.address = Some(format!("http://127.0.0.1:{port}"));
+                    result.address = Some(address(port));
                     if let Some(pid) = occupant_of(self.host, port) {
                         result.state = ServiceState::Foreign;
                         result.occupant_pid = (pid != 0).then_some(pid);
@@ -148,7 +218,7 @@ impl<'a> Web<'a> {
             return false;
         };
         let cluster = self.paths.sibling(StandService::Cluster);
-        let pins = read_json::<crate::platform::service_record::ClusterPins>(&cluster.pins());
+        let pins = read_json::<ClusterPins>(&cluster.pins());
         pins.is_some_and(|pins| {
             let authority = format!("127.0.0.1:{}", pins.ports.regport);
             !descriptor.match_indices(&authority).any(|(at, _)| {
@@ -161,9 +231,20 @@ impl<'a> Web<'a> {
     }
 
     fn program(&self) -> Result<PathBuf, UseCaseError> {
-        apache::locate(self.config.tools.apache.path.as_deref()).ok_or_else(|| environment(
+        let program = apache::locate(self.config.tools.apache.path.as_deref()).ok_or_else(|| environment(
             "Apache 2.4 was not found: set tools.apache.path to an installed httpd or apache2; use Apache Lounge on Windows or the Apache package of your Linux distribution",
-        ))
+        ))?;
+        let stem = program
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if SYSTEM_CONTROLS.contains(&stem.as_str()) {
+            return Err(validation(format!(
+                "tools.apache.path names the system control script '{}': the runner starts its own Apache, so name the httpd or apache2 executable",
+                program.display()
+            )));
+        }
+        Ok(program)
     }
 
     fn check_module(&self, ragent: &Path) -> Result<(), UseCaseError> {
@@ -189,7 +270,7 @@ impl<'a> Web<'a> {
             )
         })?;
         let config_user = crate::platform::service::process_using_config(&processes, &self.conf());
-        let pidfile_user = std::fs::read_to_string(self.paths.root().join("httpd.pid"))
+        let pidfile_user = std::fs::read_to_string(self.pid_file())
             .ok()
             .and_then(|text| text.trim().parse().ok())
             .filter(|&pid| {
@@ -209,24 +290,32 @@ impl<'a> Web<'a> {
         Ok(())
     }
 
-    pub(super) fn start(&self, explicit: bool, dry_run: bool) -> Result<WebResult, UseCaseError> {
-        if !declared(self.config) {
-            return Err(validation(
+    /// Превью запуска: программа и адрес, ничего не записано и не запущено.
+    pub(super) fn plan_start(&self) -> Result<WebResult, UseCaseError> {
+        self.refuse_undeclared()?;
+        let mut result = self.result(ServiceAction::Planned);
+        if result.program.is_none() {
+            result.program = Some(self.program()?);
+        }
+        if result.address.is_none() {
+            result.address = Some(address(self.choose_port()?));
+        }
+        Ok(result)
+    }
+
+    fn refuse_undeclared(&self) -> Result<(), UseCaseError> {
+        if declared(self.config) {
+            Ok(())
+        } else {
+            Err(validation(
                 "declare infobase.web.managed for a managed cluster",
-            ));
+            ))
         }
+    }
+
+    pub(super) fn start(&self, ownership: Ownership) -> Result<WebResult, UseCaseError> {
+        self.refuse_undeclared()?;
         let observed = self.observe();
-        if dry_run {
-            let mut result = self.result(ServiceAction::Planned);
-            if result.program.is_none() {
-                result.program = Some(self.program()?);
-            }
-            if result.address.is_none() {
-                let port = self.choose_port()?;
-                result.address = Some(format!("http://127.0.0.1:{port}"));
-            }
-            return Ok(result);
-        }
         if !self.host.supported() || !self.host.can_start_as_current_user() {
             return Err(environment(
                 "start managed Apache on Windows or as an unprivileged user on Linux",
@@ -236,7 +325,7 @@ impl<'a> Web<'a> {
             if let Some(cluster) = self.paths.sibling(StandService::Cluster).own_record() {
                 self.check_module(&cluster.bin)?;
             }
-            if explicit && !record.explicit {
+            if ownership == Ownership::Explicit && !record.explicit {
                 record.explicit = true;
                 write_record(&self.paths, &record)?;
             }
@@ -315,7 +404,7 @@ impl<'a> Web<'a> {
                 .facts(std::process::id())
                 .map(|facts| (std::process::id(), facts.started)),
             port,
-            explicit,
+            explicit: ownership == Ownership::Explicit,
             bin: program,
             version: None,
             agent: None,
@@ -407,8 +496,7 @@ impl<'a> Web<'a> {
         let pg = self.paths.sibling(StandService::Postgres);
         let pg_port = read_json::<PinnedPorts>(&pg.pins()).map(|value| value.port);
         let cluster = self.paths.sibling(StandService::Cluster);
-        let cluster_ports =
-            read_json::<crate::platform::service_record::ClusterPins>(&cluster.pins());
+        let cluster_ports = read_json::<ClusterPins>(&cluster.pins());
         self.pinned_port()
             .into_iter()
             .chain(port_offsets(self.paths.root()))
@@ -423,51 +511,11 @@ impl<'a> Web<'a> {
             .ok_or_else(|| environment("no free stand port for Apache"))
     }
 
-    fn check_publication(&self, program: &Path) -> Result<(), UseCaseError> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let pid = match self.observe() {
-                Observed::Own(record) => record.pid,
-                _ => None,
-            }
-            .ok_or_else(|| environment("Apache is no longer running"))?;
-            let meta = std::fs::metadata(format!("/proc/{pid}"))
-                .map_err(|err| environment(format!("cannot read Apache owner: {err}")))?;
-            if meta.uid() == 0 {
-                return Err(environment(
-                    "the managed Apache must run as an unprivileged user",
-                ));
-            }
-            let mut request = apache::check(program, &self.conf());
-            request.args.splice(
-                ..0,
-                [
-                    format!("--reuid={}", meta.uid()),
-                    format!("--regid={}", meta.gid()),
-                    "--clear-groups".to_owned(),
-                    "--".to_owned(),
-                    program.display().to_string(),
-                ],
-            );
-            request.program = PathBuf::from("/usr/bin/setpriv");
-            self.check_request(&request)
-        }
-        #[cfg(not(target_os = "linux"))]
-        self.check(program)
-    }
-
     fn check(&self, program: &Path) -> Result<(), UseCaseError> {
-        self.check_request(&apache::check(program, &self.conf()))
-    }
-
-    fn check_request(
-        &self,
-        request: &crate::platform::process::ProcessRequest,
-    ) -> Result<(), UseCaseError> {
+        let request = apache::check(program, &self.conf());
         let answer = self
             .runner
-            .run_with_policy(request, &policy(self.context))
+            .run_with_policy(&request, &policy(self.context))
             .map_err(|err| environment(format!("cannot check Apache configuration: {err}")))?;
         if answer.outcome().is_err() {
             return Err(environment(format!(
@@ -478,13 +526,15 @@ impl<'a> Web<'a> {
         Ok(())
     }
 
-    pub(super) fn stop(&self, only_step: bool, dry_run: bool) -> Result<WebResult, UseCaseError> {
-        if dry_run {
-            return Ok(self.result(ServiceAction::Planned));
-        }
+    /// Превью остановки: ничего не останавливается.
+    pub(super) fn plan_stop(&self) -> WebResult {
+        self.result(ServiceAction::Planned)
+    }
+
+    pub(super) fn stop(&self, scope: StopScope) -> Result<WebResult, UseCaseError> {
         let Observed::Own(record) = self.observe() else {
             let result = self.result(ServiceAction::NothingToStop);
-            if !only_step && result.state == ServiceState::Foreign {
+            if scope == StopScope::Any && result.state == ServiceState::Foreign {
                 return Err(UseCaseError::new(
                     UseCaseErrorKind::WorkspaceBusy,
                     format!(
@@ -495,7 +545,7 @@ impl<'a> Web<'a> {
             }
             return Ok(result);
         };
-        if only_step && record.explicit {
+        if scope == StopScope::ClusterStep && record.explicit {
             return Ok(self.result(ServiceAction::Reported));
         }
         let pid = record
@@ -523,34 +573,62 @@ impl<'a> Web<'a> {
         forget_record(&self.paths);
         Ok(self.result(ServiceAction::Stopped))
     }
+
+    fn restart(&self) -> Result<WebResult, UseCaseError> {
+        let ownership = match self.observe() {
+            Observed::Own(record) if !record.explicit => Ownership::ClusterStep,
+            _ => Ownership::Explicit,
+        };
+        self.stop(StopScope::Any)?;
+        self.start(ownership)
+    }
 }
 
+fn address(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// `web status`: читает запись без замка (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
 pub fn web_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<WebResult> {
     refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
-    let web = Web::new(config, context, &ProcessExecutor, &RealHost)
+    let web = Web::new(config, context, &ProcessExecutor, &RealHost::CURRENT)
         .map_err(UseCaseFailure::without_payload)?;
     Ok(web.result(ServiceAction::Reported))
 }
 
+/// `web start|stop|restart`: команда записи, под замком `workPath`.
 pub fn execute_web(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: WebCommand,
     dry_run: bool,
 ) -> UseCaseResult<WebResult> {
+    run_web(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost::CURRENT,
+    )
+}
+
+fn run_web(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: WebCommand,
+    dry_run: bool,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> UseCaseResult<WebResult> {
     refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
-    let web = Web::new(config, context, &ProcessExecutor, &RealHost)
-        .map_err(UseCaseFailure::without_payload)?;
-    let outcome = match command {
-        ServiceCommand::Status => unreachable!("web status is a read-only entry point"),
-        ServiceCommand::Start => web.start(true, dry_run),
-        ServiceCommand::Stop => web.stop(false, dry_run),
-        ServiceCommand::Restart if dry_run => web.start(true, true),
-        ServiceCommand::Restart => {
-            let explicit = !matches!(web.observe(), Observed::Own(record) if !record.explicit);
-            web.stop(false, false)
-                .and_then(|_| web.start(explicit, false))
-        }
+    let web = Web::new(config, context, runner, host).map_err(UseCaseFailure::without_payload)?;
+    let outcome = match (command, dry_run) {
+        (WebCommand::Start | WebCommand::Restart, true) => web.plan_start(),
+        (WebCommand::Stop, true) => Ok(web.plan_stop()),
+        (WebCommand::Start, false) => web.start(Ownership::Explicit),
+        (WebCommand::Stop, false) => web.stop(StopScope::Any),
+        (WebCommand::Restart, false) => web.restart(),
     };
     outcome.map_err(|error| {
         let mut result = web.result(ServiceAction::Reported);
@@ -559,47 +637,90 @@ pub fn execute_web(
     })
 }
 
+/// Публикация базы управляемого кластера в его частный Apache: куда, чем и по какому адресу.
 pub(crate) struct ManagedPublication<'a> {
     web: Web<'a>,
-    record: ServiceRecord,
+    /// Экземпляр, снятый до публикации; в превью Apache может не работать.
+    record: Option<ServiceRecord>,
     pub(crate) target: crate::config::model::InfobaseWebConfig,
     pub(crate) webinst: PathBuf,
     pub(crate) connection: String,
     pub(crate) log_root: PathBuf,
+    /// `sudo`, которым поднимаются права одного `webinst`: на Linux он публикует только от
+    /// root (замер #610). `None` — права не нужны.
+    elevation: Option<PathBuf>,
 }
 
+/// Управляемая публикация объявленной базы; `None` — у базы своя секция `infobase.web`.
 pub(crate) fn publication<'a>(
     context: &'a ExecutionContext,
     config: &'a AppConfig,
     action: crate::domain::publish::PublishAction,
     dry_run: bool,
 ) -> Result<Option<ManagedPublication<'a>>, UseCaseError> {
+    publication_with(
+        context,
+        config,
+        action,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost::CURRENT,
+    )
+}
+
+pub(crate) fn publication_with<'a>(
+    context: &'a ExecutionContext,
+    config: &'a AppConfig,
+    action: crate::domain::publish::PublishAction,
+    dry_run: bool,
+    runner: &'a dyn ProcessRunner,
+    host: &'a dyn ServiceHost,
+) -> Result<Option<ManagedPublication<'a>>, UseCaseError> {
     if !declared(config) {
         return Ok(None);
     }
     refuse_a_stand_of_another_project(config)?;
-    let web = Web::new(config, context, &ProcessExecutor, &RealHost)?;
-    let Observed::Own(record) = web.observe() else {
-        return Err(validation(
-            "start the managed Apache with cluster start or web start",
+    // Публикация идёт от обычного пользователя: права поднимаются только у `webinst`, и файлы
+    // под `localPath` root не достаются (`INV.PLATFORM.A-MANAGED-APACHE-IS-PRIVATE`).
+    if !host.can_start_as_current_user() {
+        return Err(environment(
+            "run publish as an unprivileged user: on Linux the runner elevates only webinst, with sudo -n",
         ));
+    }
+    let web = Web::new(config, context, runner, host)?;
+    let record = match web.observe() {
+        Observed::Own(record)
+            if record.pid.is_some() && host.listening_pid(record.port) == record.pid =>
+        {
+            Some(record)
+        }
+        Observed::Own(_) if !dry_run => {
+            return Err(environment("the managed Apache is not ready"));
+        }
+        _ if !dry_run => {
+            return Err(validation(
+                "start the managed Apache with cluster start or web start",
+            ));
+        }
+        _ => None,
     };
-    if record.pid.is_none() || web.host.listening_pid(record.port) != record.pid {
-        return Err(environment("the managed Apache is not ready"));
-    }
     let cluster = web.paths.sibling(StandService::Cluster);
-    if !crate::platform::service_record::record_names_own_process(
+    let cluster_record = if crate::platform::service_record::record_names_own_process(
         &cluster,
-        web.host.machine().as_deref(),
-        &|pid| web.host.facts(pid),
+        host.machine().as_deref(),
+        &|pid| host.facts(pid),
     ) {
-        return Err(validation("start the managed cluster before publishing"));
+        cluster.own_record()
+    } else {
+        None
+    };
+    if !dry_run {
+        let running = cluster_record
+            .as_ref()
+            .ok_or_else(|| validation("start the managed cluster before publishing"))?;
+        web.check_module(&running.bin)?;
     }
-    let cluster_record = cluster
-        .own_record()
-        .ok_or_else(|| validation("the managed cluster has no record"))?;
-    web.check_module(&cluster_record.bin)?;
-    let pins = read_json::<crate::platform::service_record::ClusterPins>(&cluster.pins())
+    let pins = read_json::<ClusterPins>(&cluster.pins())
         .filter(|pins| {
             pins.previous.is_none()
                 && (pins.registered || action == crate::domain::publish::PublishAction::Delete)
@@ -624,27 +745,19 @@ pub(crate) fn publication<'a>(
         .wsdir
         .as_deref()
         .ok_or_else(|| validation("infobase.web.wsdir is required"))?;
-    let dir = web.paths.root().join("publication");
-    target.dir = Some(dir);
+    let port = match &record {
+        Some(record) => record.port,
+        None => match web.pinned_port() {
+            Some(port) => port,
+            None => web.choose_port()?,
+        },
+    };
+    target.dir = Some(web.paths.root().join("publication"));
     target.conf = Some(web.conf());
-    target.url = Some(format!("http://127.0.0.1:{}/{wsdir}/", record.port));
+    target.url = Some(format!("{}/{wsdir}/", address(port)));
     target.server = Some(crate::config::model::WebServerKind::Apache24);
-    #[cfg(not(target_os = "linux"))]
-    let _ = dry_run;
-    #[cfg(target_os = "linux")]
-    // SAFETY: geteuid takes no pointers and has no side effects.
-    if !dry_run && unsafe { libc::geteuid() } != 0 {
-        return Err(environment("1C webinst requires root on Linux: invoke publish explicitly with sudo from a trusted project"));
-    }
-    let webinst = cluster_record
-        .bin
-        .with_file_name(format!("webinst{}", std::env::consts::EXE_SUFFIX));
-    if !webinst.is_file() {
-        return Err(environment(format!(
-            "the cluster release has no webinst: {}",
-            webinst.display()
-        )));
-    }
+    let webinst = cluster_webinst(config, cluster_record.as_ref())?;
+    let elevation = host.webinst_elevation()?;
     Ok(Some(ManagedPublication {
         web,
         record,
@@ -652,7 +765,39 @@ pub(crate) fn publication<'a>(
         webinst,
         connection,
         log_root,
+        elevation,
     }))
+}
+
+/// `webinst` берёт поиск утилит, а не запись кластера под `localPath`: путь из правимого
+/// пользователем файла с поднятыми правами не запускается. Выпуск найденного обязан совпасть с
+/// выпуском работающего кластера.
+fn cluster_webinst(
+    config: &AppConfig,
+    cluster: Option<&ServiceRecord>,
+) -> Result<PathBuf, UseCaseError> {
+    let webinst = locate(config, UtilityType::Webinst)?;
+    let Some(cluster) = cluster else {
+        return Ok(webinst);
+    };
+    let same_release = match (
+        platform_version_of(UtilityType::Webinst, &webinst),
+        platform_version_of(UtilityType::Ragent, &cluster.bin),
+    ) {
+        (Some(found), Some(running)) => found == running,
+        _ => {
+            crate::support::path::compared_path(webinst.parent().unwrap_or(&webinst))
+                == crate::support::path::compared_path(cluster.bin.parent().unwrap_or(&cluster.bin))
+        }
+    };
+    if !same_release {
+        return Err(environment(format!(
+            "webinst '{}' is not from the release of the running cluster '{}': set tools.platform.version to the cluster release",
+            webinst.display(),
+            cluster.bin.display()
+        )));
+    }
+    Ok(webinst)
 }
 
 pub(crate) struct PublicationSnapshot {
@@ -664,7 +809,7 @@ pub(crate) struct PublicationSnapshot {
 
 struct FileSnapshot {
     contents: Vec<u8>,
-    metadata: std::fs::Metadata,
+    permissions: std::fs::Permissions,
 }
 
 impl FileSnapshot {
@@ -675,36 +820,60 @@ impl FileSnapshot {
         }
         Ok(Self {
             contents: std::fs::read(path)?,
-            metadata,
+            permissions: metadata.permissions(),
         })
     }
 
+    /// Возвращает содержимое и права. Файл пишет раннер, поэтому владелец — пользователь
+    /// раннера, даже если `webinst` с поднятыми правами успел заменить файл своим.
     fn restore(self, path: &Path) -> std::io::Result<()> {
         use std::io::Write as _;
         crate::support::fs::write_file_atomically(path, |file| {
-            #[cfg(target_os = "linux")]
-            {
-                use std::os::fd::AsRawFd as _;
-                use std::os::unix::fs::MetadataExt as _;
-                // SAFETY: the temporary file descriptor is owned and open.
-                let temporary = file.metadata()?;
-                if temporary.uid() != self.metadata.uid() || temporary.gid() != self.metadata.gid()
-                {
-                    let result = unsafe {
-                        libc::fchown(file.as_raw_fd(), self.metadata.uid(), self.metadata.gid())
-                    };
-                    if result != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-            }
-            file.set_permissions(self.metadata.permissions())?;
+            file.set_permissions(self.permissions)?;
             file.write_all(&self.contents)
         })
     }
 }
 
 impl ManagedPublication<'_> {
+    /// Исполнитель `webinst` и перезагрузки: тот же, что у стенда.
+    pub(crate) fn runner(&self) -> &dyn ProcessRunner {
+        self.web.runner
+    }
+
+    /// Программа и ключи запуска `webinst`: с `sudo -n` права поднимаются только у него.
+    pub(crate) fn command(&self, args: Vec<String>) -> (PathBuf, Vec<String>) {
+        match &self.elevation {
+            Some(sudo) => {
+                let mut elevated = vec![
+                    "-n".to_owned(),
+                    "--".to_owned(),
+                    self.webinst.display().to_string(),
+                ];
+                elevated.extend(args);
+                (sudo.clone(), elevated)
+            }
+            None => (self.webinst.clone(), args),
+        }
+    }
+
+    /// Отказ `sudo -n` поднять права: `webinst` не запускался.
+    pub(crate) fn elevation_refusal(&self, finished: &ProcessResult) -> Option<UseCaseError> {
+        self.elevation.as_ref()?;
+        (finished.outcome().is_err()
+            && finished
+                .stderr
+                .lines()
+                .any(|line| line.trim_start().starts_with("sudo:")))
+        .then(|| {
+            environment(format!(
+                "sudo -n did not run webinst: on Linux webinst publishes only as root; allow exactly this program for your user in sudoers, for example `<user> ALL=(root) NOPASSWD: {}`; sudo said: {}",
+                self.webinst.display(),
+                finished.stderr.trim()
+            ))
+        })
+    }
+
     pub(crate) fn snapshot(&self) -> Result<PublicationSnapshot, UseCaseError> {
         let conf = self.web.conf();
         let dir = self.web.paths.root().join("publication");
@@ -741,103 +910,171 @@ impl ManagedPublication<'_> {
         })
     }
 
-    pub(crate) fn reload(&self, recovering: bool) -> Result<(), UseCaseError> {
-        if recovering {
-            let context = self
-                .web
-                .context
-                .clone()
-                .with_cancellation(tokio_util::sync::CancellationToken::new());
-            let web = Web::new(self.web.config, &context, self.web.runner, self.web.host)?;
-            return self.reload_web(&web, true);
+    /// После удачного `webinst`: файлы под `localPath` снова принадлежат пользователю раннера, а
+    /// Apache перечитывает конфиг.
+    pub(crate) fn activate(&self) -> Result<(), UseCaseError> {
+        if self.elevation.is_some() {
+            reclaim(self.web.paths.root())
+                .map_err(|err| io_failure("cannot take back", self.web.paths.root(), &err))?;
         }
-        self.reload_web(&self.web, false)
+        self.reload(Reload::Activate)
     }
 
-    fn reload_web(&self, web: &Web<'_>, recovering: bool) -> Result<(), UseCaseError> {
+    pub(crate) fn reload(&self, mode: Reload) -> Result<(), UseCaseError> {
+        self.reload_with(mode, ReloadStrategy::OF_THIS_SYSTEM)
+    }
+
+    fn reload_with(&self, mode: Reload, strategy: ReloadStrategy) -> Result<(), UseCaseError> {
+        match mode {
+            Reload::Activate => self.reload_web(&self.web, mode, strategy),
+            Reload::Recover => {
+                // Откат идёт и после отмены команды: без перезагрузки Apache остался бы на
+                // отменённом конфиге.
+                let context = self
+                    .web
+                    .context
+                    .clone()
+                    .with_cancellation(tokio_util::sync::CancellationToken::new());
+                let web = Web::new(self.web.config, &context, self.web.runner, self.web.host)?;
+                self.reload_web(&web, mode, strategy)
+            }
+        }
+    }
+
+    fn reload_web(
+        &self,
+        web: &Web<'_>,
+        mode: Reload,
+        strategy: ReloadStrategy,
+    ) -> Result<(), UseCaseError> {
+        let explicit = self.record.as_ref().is_some_and(|record| record.explicit);
+        let ownership = if explicit {
+            Ownership::Explicit
+        } else {
+            Ownership::ClusterStep
+        };
         let Observed::Own(current) = web.observe() else {
-            #[cfg(windows)]
-            if recovering {
-                web.start(self.record.explicit, false)?;
+            if mode == Reload::Recover && strategy == ReloadStrategy::Restart {
+                web.start(ownership)?;
                 return Ok(());
             }
             return Err(environment(
                 "Apache stopped before publication could be activated",
             ));
         };
-        if !recovering && (current.pid != self.record.pid || current.started != self.record.started)
-        {
+        let unchanged = self
+            .record
+            .as_ref()
+            .is_some_and(|record| current.pid == record.pid && current.started == record.started);
+        if mode == Reload::Activate && !unchanged {
             return Err(environment(
                 "Apache changed before publication could be activated",
             ));
         }
-        web.check_publication(&current.bin)?;
-        #[cfg(target_os = "linux")]
-        {
-            let pid = current
-                .pid
-                .ok_or_else(|| environment("Apache has no process identity"))?;
-            let before = self.apache_workers(pid)?;
-            crate::platform::service::signal_owned_process(pid, current.started, libc::SIGUSR1)
-                .map_err(|err| environment(format!("cannot reload Apache: {err}")))?;
-            let deadline = Instant::now() + IDENTIFY_TIMEOUT;
-            loop {
-                if self
-                    .web
-                    .host
-                    .facts(pid)
-                    .is_none_or(|facts| Some(facts.started) != current.started)
-                {
-                    return Err(environment("Apache exited during reload"));
+        web.check(&current.bin)?;
+        match strategy {
+            ReloadStrategy::InPlace => {
+                let pid = current
+                    .pid
+                    .ok_or_else(|| environment("Apache has no process identity"))?;
+                let image = image_name(&current.bin);
+                let before = apache_workers(web.host, &image, pid)?;
+                web.host
+                    .graceful_reload(pid, current.started)
+                    .map_err(|err| environment(format!("cannot reload Apache: {err}")))?;
+                let deadline = Instant::now() + web.host.patience(IDENTIFY_TIMEOUT);
+                loop {
+                    if web
+                        .host
+                        .facts(pid)
+                        .is_none_or(|facts| Some(facts.started) != current.started)
+                    {
+                        return Err(environment("Apache exited during reload"));
+                    }
+                    if apache_workers(web.host, &image, pid)?
+                        .iter()
+                        .any(|worker| !before.contains(worker))
+                        && web.host.listening_pid(current.port) == Some(pid)
+                    {
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(environment(
+                            "Apache did not activate the changed configuration",
+                        ));
+                    }
+                    web.host.sleep(POLL);
                 }
-                if self
-                    .apache_workers(pid)?
-                    .iter()
-                    .any(|worker| !before.contains(worker))
-                    && web.host.listening_pid(current.port) == Some(pid)
-                {
-                    break;
+            }
+            ReloadStrategy::Restart => {
+                web.stop(StopScope::Any)?;
+                web.start(if current.explicit {
+                    Ownership::Explicit
+                } else {
+                    Ownership::ClusterStep
+                })?;
+                Ok(())
+            }
+            ReloadStrategy::Unsupported => Err(environment(
+                "managed Apache reload is supported on Windows and Linux",
+            )),
+        }
+    }
+}
+
+/// Рабочие процессы Apache: дети главного процесса с его образом.
+fn apache_workers(
+    host: &dyn ServiceHost,
+    image: &str,
+    parent: u32,
+) -> Result<Vec<(u32, u64)>, UseCaseError> {
+    let rows = host
+        .processes(&[image])
+        .ok_or_else(|| environment("cannot inspect the Apache children after reload"))?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| row.parent == parent)
+        .filter_map(|row| host.facts(row.pid).map(|facts| (row.pid, facts.started)))
+        .collect())
+}
+
+/// Файлы, которые `webinst` с поднятыми правами записал под каталогом Apache, снова
+/// принадлежат владельцу каталога: раннер переписывает их от своего имени с прежними правами.
+/// Каталог чужого владельца раннеру не переписать — это отказ с его путём.
+#[cfg(unix)]
+fn reclaim(root: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let owner = std::fs::symlink_metadata(root)?.uid();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                if meta.uid() != owner {
+                    return Err(std::io::Error::other(format!(
+                        "'{}' belongs to uid {}: remove it as that user",
+                        path.display(),
+                        meta.uid()
+                    )));
                 }
-                if Instant::now() >= deadline {
-                    return Err(environment(
-                        "Apache did not activate the changed configuration",
-                    ));
-                }
-                web.host.sleep(POLL);
+                pending.push(path);
+            } else if meta.uid() != owner {
+                let contents = std::fs::read(&path)?;
+                crate::support::fs::write_file_atomically(&path, |file| file.write_all(&contents))?;
             }
         }
-        #[cfg(windows)]
-        {
-            web.stop(false, false)?;
-            web.start(current.explicit, false)?;
-        }
-        #[cfg(not(any(windows, target_os = "linux")))]
-        return Err(environment(
-            "managed Apache reload is supported on Windows and Linux",
-        ));
-        #[cfg(any(windows, target_os = "linux"))]
-        Ok(())
     }
+    Ok(())
+}
 
-    #[cfg(target_os = "linux")]
-    fn apache_workers(&self, parent: u32) -> Result<Vec<(u32, u64)>, UseCaseError> {
-        let image = image_name(&self.record.bin);
-        let rows = self
-            .web
-            .host
-            .processes(&[&image])
-            .ok_or_else(|| environment("cannot inspect the Apache children after reload"))?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| row.parent == parent)
-            .filter_map(|row| {
-                self.web
-                    .host
-                    .facts(row.pid)
-                    .map(|facts| (row.pid, facts.started))
-            })
-            .collect())
-    }
+#[cfg(not(unix))]
+fn reclaim(_root: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl PublicationSnapshot {
@@ -860,6 +1097,7 @@ impl PublicationSnapshot {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +1138,552 @@ mod tests {
                 0o640
             );
         }
+    }
+}
+
+/// Частный Apache на подделках кластера: процессы и `webinst` подделаны, файлы настоящие.
+#[cfg(test)]
+mod stand_tests {
+    use super::super::cluster::tests::{
+        executable, release_bin, setup, with_web, Host, Runner, Setup, RELEASE, STARTED,
+        WEBINST_LINE, WEB_PID,
+    };
+    use super::super::ServiceCommand;
+    use super::*;
+    use crate::domain::publish::{PublishAction, PublishResult};
+    use crate::platform::service::ProcessRow;
+    use crate::use_cases::context::CommandName;
+    use crate::use_cases::publish_infobase::{execute_with, PublishRequest};
+    use crate::use_cases::result::EnvironmentReason;
+
+    /// Кластер с частным Apache, поднятым его шагом, и базой в реестре.
+    fn running() -> (Setup, Host) {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        stand.run(ServiceCommand::Start, &host).unwrap();
+        assert!(host.alive(WEB_PID));
+        let mut pins = stand.pins();
+        pins.registered = true;
+        write_json(&stand.agent().pins(), &pins).unwrap();
+        (stand, host)
+    }
+
+    fn context(command: CommandName) -> ExecutionContext {
+        ExecutionContext::cli(command)
+    }
+
+    fn web(
+        stand: &Setup,
+        command: WebCommand,
+        dry_run: bool,
+        host: &Host,
+    ) -> UseCaseResult<WebResult> {
+        run_web(
+            &context(CommandName::WebStart),
+            &stand.config,
+            command,
+            dry_run,
+            &Runner { host },
+            host,
+        )
+    }
+
+    fn status(stand: &Setup, host: &Host) -> WebResult {
+        let context = context(CommandName::WebStatus);
+        Web::new(&stand.config, &context, &Runner { host }, host)
+            .unwrap()
+            .result(ServiceAction::Reported)
+    }
+
+    fn paths(stand: &Setup) -> ServicePaths {
+        stand.agent().sibling(StandService::Web)
+    }
+
+    fn port_of(result: &WebResult) -> u16 {
+        result
+            .address
+            .as_deref()
+            .and_then(|address| address.rsplit(':').next())
+            .and_then(|port| port.parse().ok())
+            .expect("an address with a port")
+    }
+
+    /// Ответ проходит закреплённую форму своей команды (`CTR.WIRE.WEB-*-DATA`).
+    fn assert_form(slug: &str, result: &WebResult) -> serde_json::Value {
+        let form = crate::command_data::command_data_forms()
+            .into_iter()
+            .find(|form| form.slug == slug)
+            .expect("a published form");
+        let value = serde_json::to_value(result).unwrap();
+        let validator = jsonschema::validator_for(&form.schema).expect("form compiles");
+        let errors: Vec<String> = validator
+            .iter_errors(&value)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{slug}: {errors:?}\n{value}");
+        value
+    }
+
+    fn publish(
+        stand: &Setup,
+        host: &Host,
+        dry_run: bool,
+    ) -> Result<PublishResult, UseCaseFailure<PublishResult>> {
+        let context = context(CommandName::Publish);
+        let runner = Runner { host };
+        let managed = publication_with(
+            &context,
+            &stand.config,
+            PublishAction::Publish,
+            dry_run,
+            &runner,
+            host,
+        )
+        .map_err(UseCaseFailure::without_payload)?;
+        execute_with(
+            &context,
+            &stand.config,
+            &PublishRequest {
+                action: PublishAction::Publish,
+                dry_run,
+            },
+            managed,
+        )
+    }
+
+    fn webinst() -> String {
+        format!("webinst{}", std::env::consts::EXE_SUFFIX)
+    }
+
+    fn httpd() -> String {
+        format!("httpd{}", std::env::consts::EXE_SUFFIX)
+    }
+
+    fn conf(stand: &Setup) -> PathBuf {
+        paths(stand).root().join("httpd.conf")
+    }
+
+    fn descriptor(stand: &Setup) -> PathBuf {
+        paths(stand).root().join("publication").join("default.vrd")
+    }
+
+    fn address_of(port: u16) -> String {
+        format!("http://127.0.0.1:{port}/demo/")
+    }
+
+    #[test]
+    fn web_answers_take_the_forms_of_their_commands() {
+        let (stand, host) = running();
+        let step = status(&stand, &host);
+        let value = assert_form("web-status", &step);
+        assert_eq!(value["state"], "started_by_this_copy");
+        assert_eq!(value["action"], "reported");
+        assert_eq!(value["explicit"], false);
+        assert_eq!(value["pid"], WEB_PID);
+        assert_eq!(value["ready"], true);
+        assert!(value["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
+        assert!(value.get("previous_port").is_none());
+        assert!(value.get("publication_stale").is_none());
+
+        let explicit = web(&stand, WebCommand::Start, false, &host).unwrap();
+        let value = assert_form("web-start", &explicit);
+        assert_eq!(value["action"], "already_running");
+        assert_eq!(value["explicit"], true);
+
+        let restarted = web(&stand, WebCommand::Restart, false, &host).unwrap();
+        let value = assert_form("web-restart", &restarted);
+        assert_eq!(value["action"], "started");
+        assert_eq!(value["explicit"], true, "restart keeps the explicit start");
+        assert_eq!(value["pid"], WEB_PID);
+
+        let stopped = web(&stand, WebCommand::Stop, false, &host).unwrap();
+        let value = assert_form("web-stop", &stopped);
+        assert_eq!(value["action"], "stopped");
+        assert_eq!(value["state"], "not_running");
+        assert!(value.get("pid").is_none());
+        assert!(value["config_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("httpd.conf"));
+        assert!(!host.alive(WEB_PID));
+
+        let nothing = web(&stand, WebCommand::Stop, false, &host).unwrap();
+        assert_eq!(
+            assert_form("web-stop", &nothing)["action"],
+            "nothing_to_stop"
+        );
+        let planned = web(&stand, WebCommand::Restart, true, &host).unwrap();
+        assert_eq!(assert_form("web-restart", &planned)["action"], "planned");
+    }
+
+    #[test]
+    fn a_taken_port_moves_apache_and_the_answer_names_the_previous_one() {
+        let (stand, host) = running();
+        let first = port_of(&status(&stand, &host));
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        host.listeners.borrow_mut().insert(first, 9001);
+        host.live(9001, "nginx");
+
+        let moved = web(&stand, WebCommand::Start, false, &host).unwrap();
+        let value = assert_form("web-start", &moved);
+        assert_eq!(value["action"], "started");
+        assert_eq!(value["previous_port"], first);
+        let second = port_of(&moved);
+        assert_ne!(second, first);
+        assert_eq!(host.listeners.borrow().get(&first), Some(&9001));
+        assert!(host.alive(9001), "the foreign listener is left alone");
+        assert_eq!(host.listeners.borrow().get(&second), Some(&WEB_PID));
+        let text = std::fs::read_to_string(conf(&stand)).unwrap();
+        assert!(
+            text.contains(&format!("Listen 127.0.0.1:{second}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_apache_holding_the_private_config_is_refused_with_its_pid() {
+        let (stand, host) = running();
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        host.live(9002, &httpd());
+        host.web_rows.borrow_mut().push(ProcessRow {
+            pid: 9002,
+            parent: 1,
+            command: format!("httpd\0-f\0{}\0", conf(&stand).display()),
+        });
+        let spawned = host.spawned.borrow().len();
+
+        let refused = web(&stand, WebCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(
+            refused.error.message().contains("9002"),
+            "{}",
+            refused.error
+        );
+        assert_eq!(host.spawned.borrow().len(), spawned, "nothing is started");
+        assert!(host.alive(9002));
+    }
+
+    #[test]
+    fn the_runner_never_runs_the_system_apache_controls() {
+        let (mut stand, host) = running();
+        web(&stand, WebCommand::Restart, false, &host).unwrap();
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        stand.run(ServiceCommand::Start, &host).unwrap();
+        stand.run(ServiceCommand::Stop, &host).unwrap();
+        for call in host.ran.borrow().iter() {
+            let program = PathBuf::from(&call[0]);
+            let stem = program
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase();
+            assert!(
+                ![
+                    "apachectl",
+                    "apache2ctl",
+                    "systemctl",
+                    "service",
+                    "net",
+                    "sc"
+                ]
+                .contains(&stem.as_str()),
+                "{call:?}"
+            );
+            if stem == "httpd" {
+                assert_eq!(call[1], "-t", "httpd is only asked to check: {call:?}");
+                assert!(!call.iter().any(|arg| arg == "-k"), "{call:?}");
+            }
+        }
+        assert!(!host.alive(WEB_PID), "the own Apache stops by its identity");
+
+        let control = stand.config.base_path.join("apachectl");
+        executable(&control);
+        stand.config.tools.apache.path = Some(control);
+        for dry_run in [true, false] {
+            let refused = web(&stand, WebCommand::Start, dry_run, &host).unwrap_err();
+            assert_eq!(refused.error.kind(), UseCaseErrorKind::Validation);
+            assert!(
+                refused.error.message().contains("control script"),
+                "{}",
+                refused.error
+            );
+        }
+    }
+
+    #[test]
+    fn a_crashed_start_leaves_an_apache_that_status_and_stop_take_over() {
+        let (stand, host) = running();
+        let paths = paths(&stand);
+        let mut record: ServiceRecord = read_json(&paths.record()).unwrap();
+        record.state = RecordState::Starting;
+        record.pid = None;
+        record.started = None;
+        record.image = None;
+        record.starter = Some((424_242, 1));
+        write_json(&paths.record(), &record).unwrap();
+
+        let taken = status(&stand, &host);
+        assert_eq!(taken.state, ServiceState::StartedByThisCopy);
+        assert_eq!(taken.pid, Some(WEB_PID));
+        let stopped = web(&stand, WebCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.action, ServiceAction::Stopped);
+        assert!(!host.alive(WEB_PID));
+    }
+
+    #[test]
+    fn status_marks_the_publication_stale_after_the_regport_moves() {
+        let (stand, host) = running();
+        publish(&stand, &host, false).unwrap();
+        assert!(!status(&stand, &host).publication_stale);
+
+        let mut pins = stand.pins();
+        pins.ports.regport += 100;
+        write_json(&stand.agent().pins(), &pins).unwrap();
+        let stale = status(&stand, &host);
+        assert!(stale.publication_stale);
+        assert_eq!(assert_form("web-status", &stale)["publication_stale"], true);
+    }
+
+    #[test]
+    fn publish_runs_the_located_webinst_on_the_private_config_and_reloads_apache() {
+        let (stand, host) = running();
+        let port = port_of(&status(&stand, &host));
+        let published = publish(&stand, &host, false).unwrap();
+        assert!(published.ok);
+        assert_eq!(published.url, Some(address_of(port)));
+        assert_eq!(published.dir, paths(&stand).root().join("publication"));
+
+        let calls = host.ran_with("-confpath");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let call = &calls[0];
+        assert_eq!(
+            PathBuf::from(&call[0]),
+            release_bin(&stand.config).join(webinst())
+        );
+        let value = |key: &str| {
+            let at = call.iter().position(|arg| arg == key).unwrap();
+            call[at + 1].clone()
+        };
+        assert_eq!(PathBuf::from(value("-confpath")), conf(&stand));
+        assert_eq!(
+            PathBuf::from(value("-dir")),
+            paths(&stand).root().join("publication")
+        );
+        assert_eq!(
+            value("-connstr"),
+            format!("Srvr=127.0.0.1:{};Ref=demo", stand.pins().ports.regport)
+        );
+        assert!(std::fs::read_to_string(conf(&stand))
+            .unwrap()
+            .contains(WEBINST_LINE));
+        assert!(descriptor(&stand).is_file());
+        assert!(host.alive(WEB_PID));
+        match ReloadStrategy::OF_THIS_SYSTEM {
+            ReloadStrategy::InPlace => assert_eq!(host.reloads.get(), 1),
+            ReloadStrategy::Restart => {
+                let httpd = host
+                    .spawned
+                    .borrow()
+                    .iter()
+                    .filter(|name| *name == "httpd")
+                    .count();
+                assert_eq!(httpd, 2, "the cluster step, then the restart");
+            }
+            ReloadStrategy::Unsupported => {}
+        }
+    }
+
+    #[test]
+    fn a_failed_webinst_restores_the_config_and_the_descriptor() {
+        let (stand, host) = running();
+        let before = std::fs::read_to_string(conf(&stand)).unwrap();
+        host.webinst_fails.set(true);
+
+        let failed = publish(&stand, &host, false).unwrap_err();
+        assert_eq!(failed.error.kind(), UseCaseErrorKind::Platform);
+        assert_eq!(failed.payload.map(|done| done.ok), Some(false));
+        assert_eq!(std::fs::read_to_string(conf(&stand)).unwrap(), before);
+        assert!(
+            !descriptor(&stand).exists(),
+            "no descriptor was there before"
+        );
+        assert!(host.alive(WEB_PID));
+        assert_eq!(host.reloads.get(), 0);
+    }
+
+    #[test]
+    fn a_publication_apache_rejects_is_rolled_back_and_apache_works_on_the_old_config() {
+        let (stand, host) = running();
+        let before = std::fs::read_to_string(conf(&stand)).unwrap();
+        host.webinst_breaks_the_config.set(true);
+
+        let failed = publish(&stand, &host, false).unwrap_err();
+        assert!(
+            failed
+                .error
+                .message()
+                .contains("invalid Apache configuration"),
+            "{}",
+            failed.error
+        );
+        assert_eq!(std::fs::read_to_string(conf(&stand)).unwrap(), before);
+        assert!(!descriptor(&stand).exists());
+        assert!(host.alive(WEB_PID), "Apache works on the restored config");
+    }
+
+    #[test]
+    fn both_reload_strategies_activate_the_same_apache() {
+        for strategy in [ReloadStrategy::InPlace, ReloadStrategy::Restart] {
+            let (stand, host) = running();
+            let context = context(CommandName::Publish);
+            let runner = Runner { host: &host };
+            let publication = publication_with(
+                &context,
+                &stand.config,
+                PublishAction::Publish,
+                false,
+                &runner,
+                &host,
+            )
+            .unwrap()
+            .unwrap();
+            publication.reload_with(Reload::Activate, strategy).unwrap();
+            let after = status(&stand, &host);
+            assert_eq!(after.pid, Some(WEB_PID), "{strategy:?}");
+            assert!(after.ready, "{strategy:?}");
+            let expected_reloads = u32::from(strategy == ReloadStrategy::InPlace);
+            assert_eq!(host.reloads.get(), expected_reloads, "{strategy:?}");
+            // Экземпляр, который перезапустила другая команда, публикацию не принимает.
+            host.live_since(WEB_PID, &httpd(), STARTED + 1);
+            let record_path = paths(&stand).record();
+            let mut record: ServiceRecord = read_json(&record_path).unwrap();
+            record.started = Some(STARTED + 1);
+            write_json(&record_path, &record).unwrap();
+            let changed = publication
+                .reload_with(Reload::Activate, strategy)
+                .unwrap_err();
+            assert!(changed.message().contains("changed"), "{changed}");
+        }
+    }
+
+    #[test]
+    fn only_webinst_is_elevated_and_a_refusing_sudo_names_the_sudoers_rule() {
+        let (stand, host) = running();
+        let sudo = stand.config.base_path.join("sudo");
+        host.elevation.replace(Some(sudo.clone()));
+        publish(&stand, &host, false).unwrap();
+        let located = release_bin(&stand.config).join(webinst());
+        let elevated = host.ran_with("-confpath");
+        assert_eq!(elevated.len(), 1);
+        assert_eq!(PathBuf::from(&elevated[0][0]), sudo);
+        assert_eq!(elevated[0][1..3], ["-n", "--"]);
+        assert_eq!(PathBuf::from(&elevated[0][3]), located);
+        for call in host.ran.borrow().iter() {
+            if !call.iter().any(|arg| arg == "-confpath") {
+                assert_ne!(
+                    PathBuf::from(&call[0]),
+                    sudo,
+                    "only webinst is elevated: {call:?}"
+                );
+            }
+        }
+
+        host.sudo_refuses.set(true);
+        let runs = host.webinst_runs.get();
+        let refused = publish(&stand, &host, false).unwrap_err();
+        assert_eq!(
+            refused.error.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert!(
+            refused.error.message().contains("NOPASSWD"),
+            "{}",
+            refused.error
+        );
+        assert!(
+            refused
+                .error
+                .message()
+                .contains(&located.display().to_string()),
+            "{}",
+            refused.error
+        );
+        assert_eq!(host.webinst_runs.get(), runs, "webinst did not run");
+    }
+
+    #[test]
+    fn publish_as_root_is_refused_before_anything_runs() {
+        let (stand, host) = running();
+        host.root.set(true);
+        let ran = host.ran.borrow().len();
+        for dry_run in [false, true] {
+            let refused = publish(&stand, &host, dry_run).unwrap_err();
+            assert_eq!(
+                refused.error.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
+        }
+        assert_eq!(host.ran.borrow().len(), ran);
+        assert!(!descriptor(&stand).exists());
+    }
+
+    #[test]
+    fn webinst_comes_from_the_platform_search_not_from_the_cluster_record() {
+        let (stand, host) = running();
+        let record_path = stand.agent().record();
+        let mut record: ServiceRecord = read_json(&record_path).unwrap();
+        let located = release_bin(&stand.config).join(webinst());
+
+        // Тот же выпуск в другом каталоге: запись правит пользователь, программа — из поиска.
+        let elsewhere = stand
+            .config
+            .base_path
+            .join("copy")
+            .join(RELEASE)
+            .join("bin");
+        executable(&elsewhere.join(webinst()));
+        record.bin = elsewhere.join("ragent.exe");
+        write_json(&record_path, &record).unwrap();
+        let preview = publish(&stand, &host, true).unwrap();
+        let plan = preview.plan.expect("a preview plan");
+        assert_eq!(plan.program, located);
+
+        // Другой выпуск в записи: найденный `webinst` кластеру не подходит.
+        let other = stand
+            .config
+            .base_path
+            .join("copy")
+            .join("8.3.27.1000")
+            .join("bin");
+        executable(&other.join(webinst()));
+        record.bin = other.join("ragent.exe");
+        write_json(&record_path, &record).unwrap();
+        let refused = publish(&stand, &host, true).unwrap_err();
+        assert!(
+            refused.error.message().contains("release"),
+            "{}",
+            refused.error
+        );
+        assert_eq!(host.webinst_runs.get(), 0);
+    }
+
+    #[test]
+    fn a_preview_with_apache_stopped_names_the_pinned_address_and_writes_nothing() {
+        let (stand, host) = running();
+        let port = port_of(&status(&stand, &host));
+        web(&stand, WebCommand::Stop, false, &host).unwrap();
+        let before = std::fs::read_to_string(conf(&stand)).unwrap();
+
+        let preview = publish(&stand, &host, true).unwrap();
+        assert_eq!(preview.url, Some(address_of(port)));
+        assert!(preview.plan.is_some());
+        assert_eq!(std::fs::read_to_string(conf(&stand)).unwrap(), before);
+        assert!(!descriptor(&stand).exists());
+        assert_eq!(host.webinst_runs.get(), 0);
+        assert!(!host.alive(WEB_PID));
     }
 }

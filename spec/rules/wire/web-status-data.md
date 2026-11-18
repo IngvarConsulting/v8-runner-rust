@@ -4,6 +4,8 @@ version: 1
 artifact: docs/schemas/command-data/web-status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
+  - src/use_cases/managed_stand/web.rs::web_answers_take_the_forms_of_their_commands
+  - src/use_cases/managed_stand/web.rs::status_marks_the_publication_stale_after_the_regport_moves
   - tests/cli_web.rs::web_status_of_a_declared_cluster_writes_nothing
 ---
 

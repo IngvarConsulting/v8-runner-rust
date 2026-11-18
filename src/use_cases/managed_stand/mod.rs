@@ -5,8 +5,8 @@ mod cluster;
 mod recreate;
 mod standalone;
 mod web;
-pub(crate) use web::publication;
-pub use web::{execute_web, web_status, WebResult};
+pub use web::{execute_web, web_status, WebCommand};
+pub(crate) use web::{publication, ManagedPublication, Reload};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
@@ -44,6 +44,8 @@ const POLL: Duration = Duration::from_millis(200);
 const PORT_BASE: u32 = 20_000;
 const PORT_SPAN: u32 = 29_000;
 const PORT_TRIES: u32 = 64;
+/// Шаг перебора: блок портов сервера занимает столько же, порт PostgreSQL не мешает.
+const PORT_STEP: u32 = 32;
 const PASSWORD_LENGTH: usize = 24;
 /// Службы сервера над этой СУБД: их запись делает `dbms stop` отказом.
 const SERVERS: [(StandService, &str); 2] = [
@@ -57,6 +59,8 @@ pub(crate) trait ServiceHost {
     fn standalone_supported(&self) -> bool {
         self.supported()
     }
+    /// Службы стенда не запускаются от root: единственное место, где раннер спрашивает
+    /// систему о своих правах.
     fn can_start_as_current_user(&self) -> bool {
         true
     }
@@ -93,27 +97,94 @@ pub(crate) trait ServiceHost {
     fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
         Some(Vec::new())
     }
+    /// Мягкий перезапуск процесса с этой идентичностью: Apache перечитывает конфиг, не
+    /// закрывая порт. Где его нет — отказ.
+    fn graceful_reload(&self, _pid: u32, _started: Option<u64>) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+    /// Чем поднять права одного `webinst` управляемой публикации. `None` — права не нужны.
+    fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
+        Ok(None)
+    }
 }
 
-struct RealHost;
+/// Что раннер поднимает на системе (`INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS-AND-LINUX`).
+#[derive(Debug, Clone, Copy)]
+struct System {
+    /// `dbms`, `cluster` и `web`.
+    services: bool,
+    /// `standalone`: `ibsrv` замерен только на Windows.
+    standalone: bool,
+    /// `webinst` публикует только от root (замер #610).
+    webinst_needs_root: bool,
+    /// Работает ли раннер от root: службы стенда от root не запускаются.
+    privileged: fn() -> bool,
+}
+
+impl System {
+    const WINDOWS: Self = Self {
+        services: true,
+        standalone: true,
+        webinst_needs_root: false,
+        privileged: never_privileged,
+    };
+    const LINUX: Self = Self {
+        services: true,
+        standalone: false,
+        webinst_needs_root: true,
+        privileged: effective_root,
+    };
+    const OTHER: Self = Self {
+        services: false,
+        standalone: false,
+        webinst_needs_root: false,
+        privileged: never_privileged,
+    };
+}
+
+fn never_privileged() -> bool {
+    false
+}
+
+/// Единственный вопрос раннера к системе о своих правах.
+fn effective_root() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid takes no arguments, cannot fail and has no side effects.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Машина, на которой работает раннер.
+struct RealHost {
+    system: System,
+}
+
+impl RealHost {
+    const CURRENT: Self = Self {
+        system: if cfg!(windows) {
+            System::WINDOWS
+        } else if cfg!(target_os = "linux") {
+            System::LINUX
+        } else {
+            System::OTHER
+        },
+    };
+}
 
 impl ServiceHost for RealHost {
     fn supported(&self) -> bool {
-        cfg!(any(windows, target_os = "linux"))
+        self.system.services
     }
     fn standalone_supported(&self) -> bool {
-        cfg!(windows)
+        self.system.standalone
     }
     fn can_start_as_current_user(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: geteuid takes no pointers and has no side effects.
-            unsafe { libc::geteuid() != 0 }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            true
-        }
+        !(self.system.privileged)()
     }
     fn spawn(&self, request: &ServiceRequest, work: &WorkGiven) -> Result<u32, ServiceSpawnError> {
         ProcessExecutor.spawn_service(request, work)
@@ -180,6 +251,31 @@ impl ServiceHost for RealHost {
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+    fn graceful_reload(&self, pid: u32, started: Option<u64>) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            service::signal_owned_process(pid, started, libc::SIGUSR1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (pid, started);
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+    }
+    /// На Linux `webinst` публикует только от root (замер #610): права поднимает `sudo -n`, а
+    /// разрешает их правило sudoers для этой программы.
+    fn webinst_elevation(&self) -> Result<Option<PathBuf>, UseCaseError> {
+        if !self.system.webinst_needs_root {
+            return Ok(None);
+        }
+        service::system_program("sudo", &["/usr/bin", "/bin"])
+            .map(Some)
+            .ok_or_else(|| {
+                environment(
+                    "sudo was not found: on Linux webinst publishes only as root, and the runner elevates it alone with sudo -n",
+                )
+            })
     }
 }
 
@@ -360,18 +456,28 @@ fn occupant_name(pid: u32) -> String {
 fn port_offsets(root: &Path) -> impl Iterator<Item = u16> {
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
     let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    let dynamic = dynamic_ports();
-    let allowed: Vec<u16> = (PORT_BASE..PORT_BASE + PORT_SPAN)
-        .map(|port| port as u16)
-        .filter(|port| !(*port..=port.saturating_add(31)).any(|port| dynamic.contains(&port)))
-        .collect();
+    // На Linux динамический диапазон задаёт система и он пересекает стенды: годны только
+    // начала блоков, весь блок которых вне него. На Windows диапазон выше `PORT_SPAN`.
+    let allowed: Vec<u16> = if cfg!(target_os = "linux") {
+        let dynamic = dynamic_ports();
+        (PORT_BASE..PORT_BASE + PORT_SPAN)
+            .filter_map(|port| u16::try_from(port).ok())
+            .filter(|port| {
+                !(*port..=port.saturating_add(PORT_STEP as u16 - 1))
+                    .any(|port| dynamic.contains(&port))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     (0..PORT_TRIES).filter_map(move |attempt| {
+        let step = seed.wrapping_add(attempt.wrapping_mul(PORT_STEP));
         if cfg!(target_os = "linux") {
-            let index = seed.wrapping_add(attempt.wrapping_mul(32)) as usize;
-            allowed.get(index.checked_rem(allowed.len())?).copied()
+            allowed
+                .get((step as usize).checked_rem(allowed.len())?)
+                .copied()
         } else {
-            let offset = seed.wrapping_add(attempt.wrapping_mul(32)) % PORT_SPAN;
-            u16::try_from(PORT_BASE + offset).ok()
+            u16::try_from(PORT_BASE + step % PORT_SPAN).ok()
         }
     })
 }
@@ -1138,7 +1244,7 @@ pub(crate) fn create_standalone_base(
         binary,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1154,7 +1260,7 @@ pub fn execute_standalone(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
 }
@@ -1170,7 +1276,7 @@ pub fn standalone_status(
         ServiceCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
 }
@@ -1192,7 +1298,7 @@ pub fn execute_cluster(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate(config, crate::platform::locator::UtilityType::Ragent),
     )
 }
@@ -1208,7 +1314,7 @@ pub fn cluster_status(
         ClusterCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
         &|| locate(config, crate::platform::locator::UtilityType::Ragent),
     )
 }
@@ -1219,7 +1325,13 @@ pub(crate) fn cluster_base(
     config: &AppConfig,
     dry_run: bool,
 ) -> Result<ClusterBase, UseCaseError> {
-    cluster::cluster_base(context, config, dry_run, &ProcessExecutor, &RealHost)
+    cluster::cluster_base(
+        context,
+        config,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost::CURRENT,
+    )
 }
 
 /// Чужие живые сеансы серверной базы — признак «базу держат сеансы» у применения, когда
@@ -1235,7 +1347,7 @@ pub(crate) fn awake_server_sessions(
     context: &ExecutionContext,
     config: &AppConfig,
 ) -> Option<Vec<crate::domain::sessions::SessionEntry>> {
-    awake_server_sessions_with(context, config, &ProcessExecutor, &RealHost)
+    awake_server_sessions_with(context, config, &ProcessExecutor, &RealHost::CURRENT)
 }
 
 fn awake_server_sessions_with(
@@ -1328,7 +1440,7 @@ pub fn execute_dbms(
         command,
         dry_run,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1341,7 +1453,7 @@ pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseRes
         ServiceCommand::Status,
         false,
         &ProcessExecutor,
-        &RealHost,
+        &RealHost::CURRENT,
     )
 }
 
@@ -1434,7 +1546,7 @@ mod tests {
             tests: Default::default(),
         };
         let ask = |config: &crate::config::model::AppConfig| {
-            super::awake_server_sessions_with(&context, config, &Never, &super::RealHost)
+            super::awake_server_sessions_with(&context, config, &Never, &super::RealHost::CURRENT)
         };
         assert_eq!(ask(&config), None);
         config.infobase = crate::config::model::InfobaseConfig::file("Srvr=host;Ref=ib");

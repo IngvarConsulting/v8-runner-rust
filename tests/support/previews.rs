@@ -68,7 +68,7 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  apache:\n    path: test-httpd\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
             www.display(),
@@ -99,13 +99,8 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
 ",
     )
     .expect("write local config");
+    // Сборка Apache для превью `web`: её путь объявлен в `tools.apache.path` выше.
     fs::write(dir.join("test-httpd"), "").expect("fake Apache path");
-    let config = fs::read_to_string(&config_path).expect("read config");
-    fs::write(
-        &config_path,
-        config.replace("tools:\n", "tools:\n  apache:\n    path: test-httpd\n"),
-    )
-    .expect("fake Apache hint");
     config_path
 }
 

@@ -1247,7 +1247,7 @@ struct ApacheToolSchema {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct PostgresToolSchema {
     /// Directory of the build, or its `bin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
