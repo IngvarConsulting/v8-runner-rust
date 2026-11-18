@@ -14,6 +14,7 @@ check:
   - tests/cli_make_download_all.rs::make_without_a_set_preview_builds_nothing
   - tests/cli_make_download_all.rs::download_without_a_set_preview_reads_nothing
   - tests/cli_init.rs::a_cluster_preview_names_the_target_without_dispatching_the_designer
+  - tests/cli_init.rs::an_existing_cluster_base_refuses_in_preview_and_before_creation
 ---
 
 # Превью не запускает исполнителя
@@ -22,8 +23,8 @@ check:
 целей.
 
 Исключение одно: превью, чей отказ зависит от регистрации базы в кластере, читает её через
-`rac`, а без `infobase.cluster.ras` — через временный `ras` по правилу
-[временного RAS](../platform/command-ras-lifetime.md). Исполнителя работы — Конфигуратор,
+`rac` у RAS, выбранного по правилу [временного RAS](../platform/command-ras-lifetime.md),
+вплоть до временного `ras` этой команды. Исполнителя работы — Конфигуратор,
 `ibcmd`, агент — такое превью не запускает, целей и файлов состояния не создаёт.
 
 Там, где выбора исполнителя нет, превью говорит об этом закрытым признаком
