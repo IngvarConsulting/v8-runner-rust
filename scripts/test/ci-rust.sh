@@ -15,7 +15,7 @@ case "$CI_SCOPE" in
         echo "Windows contract scope runs native infobase export, external full-pull, init and help CLI tests, plus selected unit regressions."
         # Сборочная проверка сюда не входит: на Windows шаг Lint в ci.yml прогоняет
         # `cargo clippy --locked --bins`, а тестовые цели собирает сам `cargo test` ниже.
-        cargo test --locked --test cli_infobase_cross_platform
+        cargo test --locked --test cli_infobase_cross_platform --test cli_ibcmd_server_guard
         cargo test --locked --test cli_external_full_pull
         cargo test --locked --test cli_config_init --test cli_help
         cargo test --locked --bin v8-runner 'support::fs::tests::'

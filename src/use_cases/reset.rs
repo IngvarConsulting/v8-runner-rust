@@ -219,7 +219,10 @@ fn discard(
                     Ok(Some(token)) => Before::Token(token),
                     Ok(None) => Before::NoAnswer,
                     Err(error)
-                        if error.cancellation().is_some() || error.platform_release().is_some() =>
+                        if error.cancellation().is_some()
+                            || error.platform_release().is_some()
+                            || (executor.provider == Provider::Ibcmd
+                                && matches!(error, AppError::InfobaseBusy(_))) =>
                     {
                         return Err(error)
                     }
@@ -233,6 +236,14 @@ fn discard(
         }
         None => None,
     };
+    if executor.provider == Provider::Ibcmd {
+        if let Some(path) = config.v8_connection().file_path() {
+            crate::platform::ibcmd::refuse_file_base_served_by_ibsrv(
+                std::path::Path::new(path),
+                &context.cancellation(),
+            )?;
+        }
+    }
     // Пришедшая отмена останавливает до памяти: пустая память без отката заставила бы
     // следующую отправку грузить набор целиком зря.
     if let Some(error) = crate::use_cases::interruption::pending_interruption_error(

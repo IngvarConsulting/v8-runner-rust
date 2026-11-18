@@ -935,7 +935,10 @@ impl<'a> GenerationGate<'a> {
     /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
     pub(crate) fn after_failed_load(&self, set: &SourceSetContext, error: &AppError) {
         // A refused invocation has no partial load to reconcile.
-        if matches!(error, AppError::SourceLoadNotStarted(_)) {
+        if matches!(
+            error,
+            AppError::SourceLoadNotStarted(_) | AppError::InfobaseBusy(_)
+        ) {
             return;
         }
         let name = set.name();
