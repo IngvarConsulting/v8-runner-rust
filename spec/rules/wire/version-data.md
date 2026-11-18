@@ -18,6 +18,6 @@ check:
 ```json
 {
   "name": "v8-runner",
-  "version": "0.17.5"
+  "version": "0.18.0"
 }
 ```
