@@ -6818,6 +6818,62 @@ Apache в том же окружении сохранил PID, SHA-256 конф�
 были отдельные сессии. Остановка Apache в общей группе процессов прервала
 контрольный экземпляр, поэтому частные серверы запускаются в отдельных сессиях.
 
+### Публикация и откат через `sudo -n` (#768)
+
+На той же Ubuntu 24.04.4 и платформе 8.5.1.1343 повторён цикл
+`dbms start → cluster start → infobase create → sessions list → publish`
+после вливания #731 (раннер `b64340f1811e9fd56a2394ed8ea0ebc850f55020`).
+В PostgreSQL 18.3-5.1C создана отдельная пустая база. PostgreSQL, агент,
+RAS и частный Apache запущены обычным пользователем каждый в своей
+сессии. Под root `dbms start` и `cluster start` вернули код 2
+(`environment_unavailable`) до запуска служб. Трасса `sessions list`
+показала вызовы `rac` к RAS стенда и ни одного запуска `ras`.
+
+Без правила sudoers `publish` получил от `sudo -n` ответ
+`a password is required`. С правилом для полного вызова `webinst` из
+`publish --dry-run` частный Apache отдал HTTP 200, заголовок страницы
+`1C:Enterprise`. Для повторного вызова тому же `webinst` через
+`Cmnd_Alias` задали `rlimit_fsize=1` в sudoers. Утилита вернула 1,
+раннер — 4 (`platform_failure`). После отката SHA-256 `httpd.conf` и
+`default.vrd` совпали с исходными, страница снова вернула HTTP 200.
+`find <localPath> <workPath> -uid 0` был пуст после опубликования и отката.
+После `web stop → cluster stop → dbms stop` процессов стенда не осталось.
+PID системного Apache и SHA-256 `/etc/apache2/apache2.conf` совпали до и
+после цикла. Временное правило sudoers удалено.
+
+### Сервер отладки `dbgs` на Linux (#768)
+
+Ubuntu 24.04.4 LTS x86_64, ядро 6.8.0-149-generic, 1С 8.5.1.1343.
+Агент запущен обычным пользователем в отдельной сессии с пустым реестром:
+
+```sh
+ragent -port 27540 -regport 27541 -range 27560:27591 -d <реестр> \
+  -debug -http -debugServerPort 27550 -debugServerAddr 127.0.0.1
+```
+
+В двух прогонах `dbgs --addr=127.0.0.1 --port=27550` появился через
+2,5 и 3,8 с после запуска агента. Родитель `dbgs` — `ragent`.
+`ss -ltnp` показал слушатель `dbgs` на `127.0.0.1:27550`. POST с
+пустым телом, `Content-Type: application/xml` и `Accept: application/json`
+на `/e1crdbg/rdbg?cmd=getDbgTargets` вернул HTTP 400 и JSON с
+`exception.reason: 400`.
+
+Через пять секунд после `SIGTERM` только процессу `ragent` его
+`rmngr`, `rphost` и `dbgs` остались живы с PPID 1, в исходной группе.
+После `SIGTERM` этой группе живых процессов тестового сеанса не осталось.
+
+На той же платформе `attachDebugUI` с двумя полями из #768 вернул
+HTTP 400 (`Error transforming XML data`). С XML-декларацией,
+`options/foregroundAbility=false` и без заголовка `Accept` результат —
+HTTP 200 с `result=registered`. Обёртка `request` без пространства имён. Поля `infoBaseAlias`,
+`idOfDebuggerUI` и `options` находятся в
+`http://v8.1c.ru/8.3/debugger/debugRDBGRequestResponse`, вложенный
+`foregroundAbility` наследует это пространство имён. HTTP 200 получен
+для `DefAlias`, имени базы из `Ref` и обеих форм адреса базы.
+Регистрация без запущенных целей не показывает, какой из этих алиасов
+увидит `Server` и `ManagedClient`. Для отдельного управляемого кластера
+Конфигуратор сообщил `License not found on the 1C:Enterprise server`.
+
 ## Версии агента кластера и временного RAS (#213)
 
 Замер 16.11.2026 на Windows. Отдельный `ragent` 8.3.27.2074 запущен с `/agent /port 49951
