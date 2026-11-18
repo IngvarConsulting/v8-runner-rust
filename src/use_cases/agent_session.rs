@@ -826,6 +826,22 @@ pub(crate) fn live_target(
     let key = live_key(&salt_dir, config, v8)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
     let host_key = declared_launch_host_key(agent.host_key.clone())?;
+    let managed_sessions = config.infobase.cluster.as_ref().and_then(|cluster| {
+        let managed = cluster.managed.as_ref()?;
+        let name = config.infobase_name.as_ref()?;
+        config.infobase.connection_projected.then(|| {
+            let auth = crate::use_cases::cluster_admin::cluster_auth(config);
+            crate::platform::rac::ManagedSessionTarget {
+                local_path: config.local_path.clone(),
+                project: config.base_path.clone(),
+                name: name.clone(),
+                reference: managed.reference(name),
+                connection: config.infobase.connection.clone(),
+                cluster_user: auth.user.map(str::to_owned),
+                cluster_password: auth.user.and(auth.password).map(str::to_owned),
+            }
+        })
+    });
     let launch = KeeperLaunch {
         v8: v8.to_path_buf(),
         infobase_args: connection.infobase_args(),
@@ -834,6 +850,7 @@ pub(crate) fn live_target(
         startup_timeout_ms: agent.startup_timeout_ms.max(1),
         infobase: canonical_infobase(config),
         work_path: config.work_path.clone(),
+        managed_sessions,
     };
     let credentials = Credentials::new(
         connection.user.clone().unwrap_or_default(),
