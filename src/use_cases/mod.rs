@@ -13,6 +13,9 @@ mod build_progress;
 pub mod build_project;
 /// Syntax-check orchestration use case.
 pub mod check_syntax;
+
+pub(crate) mod cluster_admin;
+
 /// Which address a client opens the base by: one rule for `launch` and the test client.
 pub(crate) mod client_address;
 /// Client-side MCP HTTP readiness probes.
@@ -85,6 +88,7 @@ pub mod reset;
 pub mod result;
 /// Test orchestration use case.
 pub mod run_tests;
+pub(crate) mod sessions;
 pub(crate) mod set_walk;
 /// Где искать изменения набора: у git или чтением файлов.
 pub(crate) mod source_changes;

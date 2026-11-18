@@ -185,6 +185,7 @@ fn apply_with(
                     terminated: Some(Vec::new()),
                     lock: sessions::session_lock(config),
                     message_delivered: false,
+                    managed_ras: false,
                 });
             }
             return Ok(());
@@ -206,6 +207,7 @@ fn apply_with(
     // Сервер: сеансы завершает ключ исполнителя, и только когда признак говорит, что базу держат
     // сеансы. Без признака — список сервера не получен или пуст, отказ по другой причине —
     // ключ не отдаётся: отказ доходит до команды как есть.
+    let verified_holder = matches!(holder, Some(sessions::Holder::Sessions(_)));
     let terminated = match holder {
         Some(sessions::Holder::Sessions(list)) => list,
         Some(sessions::Holder::Listed(list)) => Some(list),
@@ -217,22 +219,48 @@ fn apply_with(
     if let Some(error) = interruption::interruption_before_safe_point(context, safe_point) {
         return Err(error);
     }
-    // Ключ отдан платформе: исход называет сеансы, которые она завершала, и при удаче, и при
-    // отказе второго запуска.
-    gate.note(SessionsOutcome {
-        terminated,
-        lock: sessions::session_lock(config),
-        message_delivered: matches!(applier, Applier::Ibcmd { .. }),
-    });
-    run(
+    let result = run(
         context,
         config,
         &mut applier,
         subject,
         deferrals,
         SessionTerminate::Force { message: &message },
-    )
-    .map_err(|refused| {
+    );
+    if let Err(refused) = &result {
+        if verified_holder
+            && config.target_kind() == crate::domain::capability::TargetKind::Cluster
+            && refused.agent_error == Some(AgentErrorType::CommandFormatError)
+        {
+            let (terminated, managed_ras, error) =
+                crate::use_cases::sessions::terminate_for_apply(context, config, &message)?;
+            gate.note(SessionsOutcome {
+                lock: sessions::session_lock(config),
+                message_delivered: !terminated.is_empty(),
+                terminated: Some(terminated),
+                managed_ras,
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            return run(
+                context,
+                config,
+                &mut applier,
+                subject,
+                deferrals,
+                SessionTerminate::Keep,
+            )
+            .map_err(|refused| refused.error);
+        }
+    }
+    gate.note(SessionsOutcome {
+        terminated,
+        lock: sessions::session_lock(config),
+        message_delivered: matches!(applier, Applier::Ibcmd { .. }),
+        managed_ras: false,
+    });
+    result.map_err(|refused| {
         if refused.error.cancellation().is_some() {
             return refused.error;
         }
@@ -647,6 +675,9 @@ mod tests {
             started: "2026-11-11T13:00:40".to_owned(),
             user: Some("DefUser".to_owned()),
             id: Some("a6c102fc-0000-0000-0000-000000000000".to_owned()),
+            number: None,
+            from_this_machine: false,
+            excluded: false,
         }
     }
 

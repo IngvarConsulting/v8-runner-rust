@@ -1,5 +1,6 @@
 use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -27,6 +28,9 @@ pub enum DesignerError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    #[error("the standalone direct gate is not ready: {0}")]
+    DirectGateNotReady(String),
 }
 
 const SYNTAX_ISSUES_EXIT_CODE: NonZeroI32 = NonZeroI32::new(101).unwrap();
@@ -458,7 +462,8 @@ impl<'a> DesignerDsl<'a> {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
-        let result = self.run(&args)?;
+        // Чтение поколения само проверяет вход в базу и не требует отдельной такой же пробы.
+        let result = self.run_once(&args, self.log_file.as_deref(), &self.execution_policy)?;
         if result.process.exit_code != 0 {
             return Ok(None);
         }
@@ -592,13 +597,17 @@ impl<'a> DesignerDsl<'a> {
     }
 
     fn base_args(&self) -> Vec<String> {
+        self.base_args_with_log(self.log_file.as_deref())
+    }
+
+    fn base_args_with_log(&self, log_file: Option<&Path>) -> Vec<String> {
         let mut args = vec![
             "DESIGNER".to_owned(),
             "/DisableStartupDialogs".to_owned(),
             "/DisableStartupMessages".to_owned(),
         ];
         args.extend(self.connection.args());
-        if let Some(log_file) = &self.log_file {
+        if let Some(log_file) = log_file {
             args.push("/Out".to_owned());
             args.push(log_file.display().to_string());
             args.push("-NoTruncate".to_owned());
@@ -626,13 +635,84 @@ impl<'a> DesignerDsl<'a> {
     }
 
     fn run_raw(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
-        if let Some(log_file) = &self.log_file {
+        if self.connection.direct_gate {
+            // Шлюз пробуется один раз на команду для этих Конфигуратора, адреса и реквизитов.
+            let key = self.gate_key();
+            let probes = &self.execution_policy.gate_probes;
+            if !probes.passed(key) {
+                self.probe_direct_gate()?;
+                probes.record(key);
+            }
+        }
+        self.run_once(args, self.log_file.as_deref(), &self.execution_policy)
+    }
+
+    /// Ключ пробы шлюза: Конфигуратор, адрес и реквизиты ИБ. Хранится только хеш.
+    fn gate_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.binary.hash(&mut hasher);
+        self.connection.args().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Проверяет протокол и вход в ИБ тем же Конфигуратором, который получит работу.
+    fn probe_direct_gate(&self) -> Result<(), DesignerError> {
+        // Исполняющие сценарии уже передают /Out из workPath. У превью, которое
+        // только собирает аргументы, журнала нет.
+        let root = self
+            .log_file
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|root| !root.as_os_str().is_empty())
+            .ok_or_else(|| {
+                DesignerError::DirectGateNotReady(
+                    "the probe requires a directory for the Designer log".to_owned(),
+                )
+            })?;
+        let scratch =
+            crate::support::temp::private_temp_dir(root, "direct-gate-").map_err(|error| {
+                DesignerError::DirectGateNotReady(format!("prepare probe log: {error}"))
+            })?;
+        let log_file = scratch.path().join("generation.log");
+        let mut args = self.base_args_with_log(Some(&log_file));
+        args.push("/GetConfigGenerationID".to_owned());
+        let mut policy = self.execution_policy.without_work().for_reading();
+        let limit = Duration::from_secs(60);
+        policy.timeout = Some(policy.timeout.map_or(limit, |timeout| timeout.min(limit)));
+        let result = self.run_once(&args, Some(&log_file), &policy)?;
+        if result.process.exit_code != 0 {
+            return Err(DesignerError::DirectGateNotReady(format!(
+                "/GetConfigGenerationID exited with code {}",
+                result.process.exit_code
+            )));
+        }
+        if result
+            .platform_log
+            .as_deref()
+            .and_then(crate::platform::generation::generation_token)
+            .is_none()
+        {
+            return Err(DesignerError::DirectGateNotReady(
+                "/GetConfigGenerationID did not return a generation identifier".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn run_once(
+        &self,
+        args: &[String],
+        log_file: Option<&Path>,
+        policy: &ProcessExecutionPolicy,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        if let Some(log_file) = log_file {
             match std::fs::remove_file(log_file) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(DesignerError::StaleLogCleanup {
-                        path: log_file.clone(),
+                        path: log_file.to_path_buf(),
                         source,
                     });
                 }
@@ -650,16 +730,16 @@ impl<'a> DesignerDsl<'a> {
                     startup_probe: None,
                     windows_verbatim_args: Vec::new(),
                 },
-                &self.execution_policy,
+                policy,
             )
             .map_err(DesignerError::Spawn)?;
 
         let (platform_log_path, platform_log, platform_log_read_error) =
-            if let Some(path) = &self.log_file {
+            if let Some(path) = log_file {
                 match crate::support::fs::read_platform_log(path) {
-                    Ok(contents) => (Some(path.clone()), Some(contents), None),
+                    Ok(contents) => (Some(path.to_path_buf()), Some(contents), None),
                     Err(error) => (
-                        Some(path.clone()),
+                        Some(path.to_path_buf()),
                         None,
                         Some(format!(
                             "failed to read designer /Out log '{}': {error}",
@@ -693,6 +773,148 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
+
+    struct DirectGateRunner {
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+        reply: &'static str,
+    }
+
+    impl ProcessRunner for DirectGateRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            policy.mark_started_for_test();
+            self.calls.borrow_mut().push(request.args.clone());
+            if request
+                .args
+                .iter()
+                .any(|arg| arg == "/GetConfigGenerationID")
+            {
+                let log = request
+                    .args
+                    .windows(2)
+                    .find(|pair| pair[0] == "/Out")
+                    .expect("probe needs a log");
+                fs::write(&log[1], self.reply).expect("probe reply");
+            }
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("direct-gate requests must run synchronously")
+        }
+    }
+
+    #[test]
+    fn only_a_ready_direct_gate_dispatches_the_designer_request() {
+        let config: crate::config::model::AppConfig = serde_yaml::from_str(
+            "basePath: .\ninfobase: { connection: 'Srvr=server:1541;Ref=demo', user: Admin, password: stub-password, standalone: {} }",
+        )
+        .expect("direct gate config");
+        for (reply, ready) in [
+            ("not a generation", false),
+            ("0123456789abcdef0123456789abcdef01234567", true),
+        ] {
+            let dir = tempdir().expect("temporary log directory");
+            let runner = DirectGateRunner {
+                calls: Default::default(),
+                reply,
+            };
+            let policy = ProcessExecutionPolicy::default();
+            let work = policy.work.clone().expect("work marker");
+            let dsl = DesignerDsl::new(
+                "1cv8.exe".into(),
+                config.v8_connection(),
+                &runner,
+                Some(dir.path().join("designer.log")),
+                policy,
+            );
+            let result = dsl.dump_cfg(&dir.path().join("result.cf"), None);
+            assert_eq!(result.is_ok(), ready, "{result:?}");
+            assert_eq!(work.given(), ready, "{reply}");
+
+            let calls = runner.calls.borrow();
+            assert_eq!(calls.len(), if ready { 2 } else { 1 }, "{calls:?}");
+            assert!(calls[0].iter().any(|arg| arg == "/GetConfigGenerationID"));
+            for args in calls.iter() {
+                for expected in [
+                    ["/S", "server:1541\\demo"],
+                    ["/N", "Admin"],
+                    ["/P", "stub-password"],
+                ] {
+                    assert!(args.windows(2).any(|pair| pair == expected), "{args:?}");
+                }
+            }
+            if ready {
+                assert!(calls[1].iter().any(|arg| arg == "/DumpCfg"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_direct_gate_is_probed_once_per_command() {
+        let config: crate::config::model::AppConfig = serde_yaml::from_str(
+            "basePath: .
+infobase: { connection: 'Srvr=server:1541;Ref=demo', user: Admin, password: stub-password, standalone: {} }",
+        )
+        .expect("direct gate config");
+        let probes = |calls: &[Vec<String>]| {
+            calls
+                .iter()
+                .filter(|args| args.iter().any(|arg| arg == "/GetConfigGenerationID"))
+                .count()
+        };
+        let dir = tempdir().expect("temporary log directory");
+        let dump = |runner: &DirectGateRunner, policy: &ProcessExecutionPolicy| {
+            DesignerDsl::new(
+                "1cv8.exe".into(),
+                config.v8_connection(),
+                runner,
+                Some(dir.path().join("designer.log")),
+                policy.clone(),
+            )
+            .dump_cfg(&dir.path().join("result.cf"), None)
+        };
+
+        // Два шага одной команды — две операции, одна проба.
+        let runner = DirectGateRunner {
+            calls: Default::default(),
+            reply: "0123456789abcdef0123456789abcdef01234567",
+        };
+        let command = ProcessExecutionPolicy::default();
+        dump(&runner, &command).expect("first step");
+        dump(&runner, &command).expect("second step");
+        assert_eq!(probes(&runner.calls.borrow()), 1, "{:?}", runner.calls);
+        assert_eq!(runner.calls.borrow().len(), 3);
+
+        // Следующая команда пробует снова.
+        dump(&runner, &ProcessExecutionPolicy::default()).expect("next command");
+        assert_eq!(probes(&runner.calls.borrow()), 2);
+
+        // Отказ пробы не запоминается: следующий шаг пробует снова.
+        let refusing = DirectGateRunner {
+            calls: Default::default(),
+            reply: "not a generation",
+        };
+        let command = ProcessExecutionPolicy::default();
+        assert!(dump(&refusing, &command).is_err());
+        assert!(dump(&refusing, &command).is_err());
+        assert_eq!(probes(&refusing.calls.borrow()), 2);
+        assert_eq!(refusing.calls.borrow().len(), 2);
+    }
 
     impl ProcessRunner for CapturingRunner {
         fn run_with_policy(

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 6
+version: 7
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -132,6 +132,8 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 `next` живёт здесь, а не в `CTR.WIRE.REFUSAL-DATA`: та форма описывает отказ до запуска
 команды, а отказать со следующим шагом может и команда, уже начавшая работу, — у неё в
 `data` лежит её собственный предмет.
+
+В версии 7 `error.sessions.list` делит строку сеанса с `sessions list`: UUID в `id`, номер в `number`, признаки `from_this_machine` и `excluded`.
 
 ## Пример
 

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.FULL-PULL-PUBLICATION
-version: 4
+version: 5
 artifact: docs/schemas/full-pull-publication.schema.json
 check:
   - src/cli/external_pull.rs::generated_publication_schema_is_current
@@ -41,6 +41,8 @@ check:
 неверный ответ или отмена до подтверждения дают `unknown` и `unchanged`.
 Подтверждённая публикация сохраняет `published`, в том числе при ошибке записи
 памяти. Состояние памяти называет результат её локального завершения.
+
+**Что изменила версия 5.** Терминальный кадр использует общий конверт версии 7, включая запись сеанса из `error.sessions.list`. Кадры протокола сохранили формат.
 
 **Что изменила версия 4.** Конверт в `result` — `CTR.WIRE.COMMAND-ENVELOPE` версии 6: у него
 необязательное поле `warning_details` с предупреждениями, у которых есть машинный код. На базе

@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "ApplicationCode": {
+      "description": "Устойчивый код приложения платформы.",
+      "oneOf": [
+        {
+          "const": "Designer",
+          "description": "Конфигуратор.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8C",
+          "description": "Тонкий клиент.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8",
+          "description": "Толстый клиент.",
+          "type": "string"
+        },
+        {
+          "const": "BackgroundJob",
+          "description": "Фоновое задание.",
+          "type": "string"
+        },
+        {
+          "const": "WebClient",
+          "description": "Веб-клиент.",
+          "type": "string"
+        },
+        {
+          "const": "COMConnection",
+          "description": "Внешнее соединение.",
+          "type": "string"
+        }
+      ]
+    },
+    "SessionEntry": {
+      "additionalProperties": false,
+      "description": "Один сеанс из списка платформы.",
+      "properties": {
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Устойчивый код приложения; `null` — название не из таблицы известных."
+        },
+        "application_title": {
+          "description": "Название приложения, как его написала платформа.",
+          "type": "string"
+        },
+        "computer": {
+          "description": "Компьютер сеанса.",
+          "type": "string"
+        },
+        "excluded": {
+          "description": "Сеанс не завершается через `sessions terminate --all`.",
+          "type": "boolean"
+        },
+        "from_this_machine": {
+          "type": "boolean"
+        },
+        "id": {
+          "description": "UUID сеанса, когда его сообщил сервер.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number": {
+          "description": "Номер сеанса у платформы.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "started": {
+          "description": "Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.",
+          "type": "string"
+        },
+        "user": {
+          "description": "Пользователь; текст платформы у файловой базы его не называет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "computer",
+        "application_title",
+        "started",
+        "from_this_machine",
+        "excluded"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/sessions-list.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "infobase": {
+      "type": "string"
+    },
+    "managed_ras": {
+      "type": "boolean"
+    },
+    "sessions": {
+      "items": {
+        "$ref": "#/$defs/SessionEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "infobase",
+    "managed_ras",
+    "sessions"
+  ],
+  "title": "SessionsListResult",
+  "type": "object"
+}

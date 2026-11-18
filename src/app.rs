@@ -314,6 +314,7 @@ pub fn run() -> i32 {
         | Command::Test(_)
         | Command::Dump(_)
         | Command::Convert(_)
+        | Command::Sessions(_)
         | Command::Artifacts(_)
         | Command::Syntax(_)
         | Command::Launch(_)
@@ -434,6 +435,8 @@ pub(crate) fn load_cli_config(
             &selector,
             cli.dry_run,
         )
+    } else if matches!(&cli.command, Command::Sessions(_)) {
+        crate::config::loader::load_config_for_sessions(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Dbms(_)) {

@@ -18,10 +18,13 @@ use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
 use crate::platform::locator::UtilityType;
+use crate::platform::process::ProcessExecutor;
+use crate::platform::rac;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::{AppError, CapabilityReason};
+use crate::use_cases::cluster_admin::ClusterAdmin;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory, EdtSourceMemory};
@@ -1099,12 +1102,12 @@ fn ensure_cluster_infobase(
         Err(error) => return StepOutcome::failed("infobase", "create", started, error),
     };
     if dry_run {
-        return match locate_infobase_creator(Provider::Designer, utilities) {
-            Ok(binary) => StepOutcome::planned(
+        return match cluster.preview(context, config, utilities) {
+            Ok(plan) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
-                format!("would create {}", cluster.plan(&binary)),
+                format!("would create {plan}"),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
         };
@@ -1115,13 +1118,13 @@ fn ensure_cluster_infobase(
         return outcome;
     }
     let settled = collecting_deferrals(|deferrals| {
-        cluster.create(context, config, utilities, deferrals)?;
+        let executor = cluster.create(context, config, utilities, deferrals)?;
         Ok(StepOutcome::ok(
             "infobase",
             "create",
             started,
             format!(
-                "{} created in the cluster with {}; the first push loads every source-set in full",
+                "{} created in the cluster with {} via {executor}; the first push loads every source-set in full",
                 cluster.target, cluster.database
             ),
         )
@@ -1158,17 +1161,22 @@ impl<'a> ClusterCreation<'a> {
         })
     }
 
-    /// Что создаст `CREATEINFOBASE` и чем это грозит. Есть ли база уже, без действия не
-    /// узнать: `CREATEINFOBASE` отвечает на это кодом, которым отвечает и на любой другой
-    /// отказ, а вопроса `rac` к кластеру ещё нет (#213).
-    fn plan(&self, binary: &Path) -> String {
-        format!(
-            "{} in the cluster with {} via {}; whether it already exists is not observable before the creation; {}",
+    fn preview(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        utilities: &mut PlatformUtilities,
+    ) -> Result<String, AppError> {
+        let admin = self.require_unregistered(context, config)?;
+        let binary = self.designer(utilities)?;
+        let binary = binary.as_deref().unwrap_or_else(|| admin.rac());
+        Ok(format!(
+            "{} in the cluster with {} via {}; the name is not registered; {}",
             self.target,
             self.database,
             binary.display(),
             self.risk()
-        )
+        ))
     }
 
     /// Предупреждение замера #181: существующая база данных с тем же именем берётся молча.
@@ -1187,6 +1195,117 @@ impl<'a> ClusterCreation<'a> {
         config: &AppConfig,
         utilities: &mut PlatformUtilities,
         deferrals: &mut Deferrals,
+    ) -> Result<String, AppError> {
+        let admin = self.require_unregistered(context, config)?;
+        let execution = match self.designer(utilities)? {
+            Some(binary) => {
+                self.create_with_designer(context, config, utilities, deferrals, binary)?;
+                "Designer"
+            }
+            None => {
+                self.create_with_rac(context, config, deferrals, &admin)?;
+                "rac"
+            }
+        };
+        let ras = if admin.managed_ras() {
+            " (RAS started by the runner for this command)"
+        } else {
+            ""
+        };
+        Ok(format!("{execution}{ras}"))
+    }
+
+    fn require_unregistered(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+    ) -> Result<ClusterAdmin, AppError> {
+        let admin = ClusterAdmin::connect(context, config, &ProcessExecutor)?;
+        let (_, name) = config.v8_connection().cluster_address().ok_or_else(|| {
+            AppError::Validation(
+                "infobase create requires a registered-name target (Srvr and Ref)".to_owned(),
+            )
+        })?;
+        if admin
+            .find_infobase(context, config, &ProcessExecutor, &name)?
+            .is_some()
+        {
+            return Err(AppError::Runtime(format!(
+                "{} is already registered in the cluster; use push to load your sources",
+                self.target,
+            )));
+        }
+        Ok(admin)
+    }
+
+    fn designer(&self, utilities: &mut PlatformUtilities) -> Result<Option<PathBuf>, AppError> {
+        use crate::platform::locator::LocatorError;
+        match utilities.locate(UtilityType::V8) {
+            Ok(found) => Ok(Some(found.path)),
+            Err(
+                LocatorError::NotFound { .. }
+                | LocatorError::StrictBoundaryNotFound { .. }
+                | LocatorError::MissingSibling { .. },
+            ) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn create_with_rac(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        deferrals: &mut Deferrals,
+        admin: &ClusterAdmin,
+    ) -> Result<(), AppError> {
+        use crate::platform::process::ProcessRunner;
+        let (_, name) = config
+            .v8_connection()
+            .cluster_address()
+            .ok_or_else(|| AppError::Validation("rac infobase create requires Ref".to_owned()))?;
+        let creation = &self.creation;
+        let registration = rac::Registration {
+            cluster: admin.cluster(),
+            name: &name,
+            kind: creation.dbms,
+            server: creation.database_server,
+            database: creation.database_name,
+            user: creation.database_user,
+            password: creation.database_password,
+            locale: Some(creation.locale),
+        };
+        let command = rac::create_infobase(
+            admin.rac(),
+            admin.address(),
+            &registration,
+            crate::use_cases::cluster_admin::cluster_auth(config),
+        );
+        let answer = ProcessExecutor.run_with_policy(
+            &command,
+            &context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        )?;
+        let result = answer.outcome();
+        deferrals.note_outcome(INFOBASE_CREATE, &result, answer.interruption);
+        if result.is_err() {
+            return Err(AppError::Platform(format!(
+                "rac infobase create exited with code {}: {}; {}",
+                answer.exit_code,
+                mask_text(answer.stderr.trim(), &creation.passwords()),
+                self.risk(),
+            )));
+        }
+        rac::created_infobase(&answer.stdout).map(|_| ()).ok_or_else(|| {
+            AppError::InvalidOutput("rac did not confirm the UUID of the created infobase; check registration and the DBMS before retrying".to_owned())
+        })
+    }
+
+    fn create_with_designer(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        utilities: &PlatformUtilities,
+        deferrals: &mut Deferrals,
+        binary: PathBuf,
     ) -> Result<(), AppError> {
         log_live_stage(
             ProgressPhase::Infobase,
@@ -1194,10 +1313,6 @@ impl<'a> ClusterCreation<'a> {
             "init: infobase create",
             "[Конфигуратор] creating the infobase in the cluster",
         );
-        let binary = utilities
-            .locate(UtilityType::V8)
-            .map_err(AppError::from)?
-            .path;
         let log_dir = crate::support::temp::private_temp_dir(&config.work_path, "cluster-create-")
             .map_err(|error| {
                 AppError::Runtime(format!(

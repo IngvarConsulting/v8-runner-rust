@@ -58,6 +58,26 @@ struct Leaf {
 
 const LEAVES: &[Leaf] = &[
     Leaf {
+        path: "sessions list",
+        preview: Preview::Absent("it queries the selected infobase directly"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "sessions terminate",
+        preview: Preview::Absent("it selects sessions from the current server list"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "sessions deny",
+        preview: Preview::Absent("it acts on the current maintenance lock"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "sessions allow",
+        preview: Preview::Absent("it acts on the current maintenance lock"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "version",
         preview: Preview::Absent("it prints the version and starts nothing"),
         base: Base::Ignores,
