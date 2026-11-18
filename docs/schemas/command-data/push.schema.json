@@ -492,10 +492,26 @@
           "description": "Компьютер сеанса.",
           "type": "string"
         },
+        "excluded": {
+          "description": "Сеанс не завершается через `sessions terminate --all`.",
+          "type": "boolean"
+        },
+        "from_this_machine": {
+          "type": "boolean"
+        },
         "id": {
-          "description": "Номер сеанса у платформы.",
+          "description": "UUID сеанса, когда его сообщил сервер.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "number": {
+          "description": "Номер сеанса у платформы.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -514,7 +530,9 @@
       "required": [
         "computer",
         "application_title",
-        "started"
+        "started",
+        "from_this_machine",
+        "excluded"
       ],
       "type": "object"
     },
@@ -590,6 +608,9 @@
         "lock": {
           "$ref": "#/$defs/SessionLock",
           "description": "Блокировка начала сеансов на время применения."
+        },
+        "managed_ras": {
+          "type": "boolean"
         },
         "message_delivered": {
           "description": "Передал ли раннер платформе сообщение завершаемым сеансам.",

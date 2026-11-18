@@ -77,7 +77,7 @@
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-sessions-terminate">sessions terminate --all|&lt;id&gt; [--message] <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner sessions terminate --all --message &quot;Обслуживание&quot;</code></pre>
-<p>завершает сеансы базы, с сообщением пользователю</p>
+<p>Завершает сеансы выбранной базы. <code>--all</code> включает обычные фоновые задания (<code>BackgroundJob</code>). Сеансы RAS, системные задания и сеансы Конфигуратора исключаются из массового завершения.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">

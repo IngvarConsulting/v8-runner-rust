@@ -62,6 +62,22 @@ const TEXT_PREDICATES: &[&str] = &[
 /// separated what was left — the labels below — from verdicts.
 const PROSE_DEBT: &[(&str, &str)] = &[];
 
+/// Exact authentication dialogue markers for ibcmd session list/terminate. They gate
+/// credential input and frame the structured output after exit, leaving the verdict
+/// to the exit code and output structure. See INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS.
+const IBCMD_SESSION_INPUT_MARKERS: &[(&str, &str)] = &[
+    (
+        "src/platform/ibsrv.rs",
+        "Authentication in the infobase is required to perform the operation",
+    ),
+    (
+        "src/platform/ibsrv.rs",
+        "Для выполнения операции требуется аутентификация в информационной базе",
+    ),
+    ("src/platform/ibsrv.rs", "User: Password:"),
+    ("src/platform/ibsrv.rs", "Имя пользователя: Пароль:"),
+];
+
 /// Prose that labels text the runner passes through, and never decides what it does.
 ///
 /// The distinction is DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER's, and it is narrow. A label is admitted only where all three
@@ -377,6 +393,7 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
     let found = prose_decisions();
     let declared = PROSE_DEBT
         .iter()
+        .chain(IBCMD_SESSION_INPUT_MARKERS)
         .map(|(file, literal)| ((*file).to_owned(), (*literal).to_owned()))
         .collect::<BTreeSet<_>>();
 
@@ -392,8 +409,8 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
     );
     assert!(
         stale.is_empty(),
-        "PROSE_DEBT names sites that no longer exist; remove them so the ledger keeps \
-         measuring real debt:\n{}",
+        "A declared prose site no longer exists; remove it from PROSE_DEBT or \
+         IBCMD_SESSION_INPUT_MARKERS:\n{}",
         render(&stale)
     );
 }

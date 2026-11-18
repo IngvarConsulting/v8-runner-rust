@@ -136,6 +136,7 @@ exit 0"#,
             fail_restore = root.join("fail-restore").display(),
         ),
     );
+    support::write_empty_cluster_rac(&bin.join("rac"));
     bin.join("1cv8")
 }
 
@@ -627,7 +628,7 @@ fn a_cluster_copy_is_created_by_the_designer_and_loaded_from_the_image() {
         &wt,
         &stand.platform,
         &format!(
-            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=wt'\n    dbms:\n      kind: PostgreSQL\n      server: db\n      name: wt_db\n      user: postgres\n      password: pg-s3cret\n      locale: ru\n  upstream:\n    connection: 'File={}'\n",
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=wt'\n    cluster:\n      ras: cluster:1545\n    dbms:\n      kind: PostgreSQL\n      server: db\n      name: wt_db\n      user: postgres\n      password: pg-s3cret\n      locale: ru\n  upstream:\n    connection: 'File={}'\n",
             neighbour_base.display()
         ),
     );
@@ -711,7 +712,7 @@ fn cluster_worktree(stand: &Stand, neighbour_base: &Path) -> PathBuf {
         &stand.root().join("wt"),
         &stand.platform,
         &format!(
-            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=wt'\n    user: Admin\n    password: ib-s3cret\n    dbms:\n      kind: PostgreSQL\n      server: db\n      name: wt_db\n      user: postgres\n      password: pg-s3cret\n      locale: ru\n  upstream:\n    connection: 'File={}'\n",
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=wt'\n    user: Admin\n    password: ib-s3cret\n    cluster:\n      ras: cluster:1545\n    dbms:\n      kind: PostgreSQL\n      server: db\n      name: wt_db\n      user: postgres\n      password: pg-s3cret\n      locale: ru\n  upstream:\n    connection: 'File={}'\n",
             neighbour_base.display()
         ),
     )

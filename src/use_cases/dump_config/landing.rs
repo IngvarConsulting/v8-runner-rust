@@ -8,7 +8,7 @@
 //! своей копией. Копия меняется последней: сбой раньше оставляет прежнюю, и следующая
 //! выгрузка по ней выгрузит больше, а не меньше.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 
 use super::*;
 use crate::use_cases::version_file::RunnerVersionFile;
@@ -51,12 +51,18 @@ pub(super) fn dump_over_directory<T>(
         ),
         OverDirectory::Whole(_) => None,
     };
+    let started = Instant::now();
     let stage = StagedPublication::prepare_dir_in(
         &resolved.stage_root,
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
         DUMP_STAGE_PREFIX,
     )?;
+    debug!(
+        source_set = %resolved.source_set_name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the dump overlay stage was prepared"
+    );
     let output = stage.staging_path().join(OUTPUT_DIR);
     let (dumped, before) = beside(
         "dump-description",
@@ -102,6 +108,7 @@ fn land(
         return Err(stage.cleanup_failure(error));
     }
     let description = output.join(VERSION_FILE_NAME);
+    let started = Instant::now();
     let removals = match (how, before) {
         (OverDirectory::Whole(_), _) => Removals::Known,
         (OverDirectory::ByVersionFile, None) => Removals::Unknown,
@@ -114,12 +121,24 @@ fn land(
             }
         }
     };
+    debug!(
+        source_set = %resolved.source_set_name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the dump checked and carried over removals"
+    );
+    let started = Instant::now();
     stage.lay_over_dir(
         context,
         "failed to lay the staged dump over the directory",
         output,
         VERSION_FILE_NAME,
     )?;
+    debug!(
+        target = %resolved.platform_target_path.display(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the staged dump was laid over the directory"
+    );
+    let started = Instant::now();
     let copy_warning = match version {
         // Какие элементы пропали, не узнать: новая опись копией не становится, иначе следующая
         // выгрузка уже не увидела бы их удаления. Прежняя копия старше дерева и безопасна.
@@ -139,18 +158,27 @@ fn land(
         )),
         None => None,
     };
+    let cleanup_warning = stage.discard();
     debug!(
-        target = %resolved.platform_target_path.display(),
-        "the staged dump was laid over the directory"
+        source_set = %resolved.source_set_name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the dump description was recorded and the stage removed"
     );
-    Ok(merge_optional_messages(copy_warning, stage.discard()))
+    Ok(merge_optional_messages(copy_warning, cleanup_warning))
 }
 
 /// Элементы описи `path` — прежней (`side` = `before`) или новой; `None`, если её нет или она
 /// не разобрана: по такой описи не сказать, что пропало. Удаления по ней не переносятся, а
 /// новая опись копией не становится.
 fn description_elements(path: &Path, side: &str) -> Option<HashSet<String>> {
-    crate::platform::dump_format::read_dump_elements(path)
+    let started = Instant::now();
+    let elements = crate::platform::dump_format::read_dump_elements(path);
+    debug!(
+        side,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the dump description was parsed"
+    );
+    elements
         .inspect_err(|error| {
             debug!(
                 path = %path.display(),

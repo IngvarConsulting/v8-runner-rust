@@ -103,16 +103,21 @@ fn parse_line(line: &str) -> Option<SessionEntry> {
         }
     }
     let application_title = title.filter(|title| !title.is_empty())?;
+    let computer = computer.filter(|computer| !computer.is_empty())?;
+    let application = APPLICATIONS
+        .iter()
+        .find(|(name, _)| *name == application_title)
+        .map(|(_, code)| *code);
     Some(SessionEntry {
-        computer: computer.filter(|computer| !computer.is_empty())?,
-        application: APPLICATIONS
-            .iter()
-            .find(|(name, _)| *name == application_title)
-            .map(|(_, code)| *code),
+        from_this_machine: crate::domain::sessions::from_this_machine(&computer),
+        computer,
+        application,
+        excluded: application == Some(ApplicationCode::Designer),
         application_title,
         started: started?,
         user: None,
-        id: id.filter(|id| !id.is_empty()),
+        id: None,
+        number: id.and_then(|id| id.parse().ok()),
     })
 }
 
@@ -178,7 +183,7 @@ pub(crate) mod tests {
         let list = parse_session_list(MEASURED_LIST_RU).expect("list");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].computer, "w11p-igor");
-        assert_eq!(list[0].id.as_deref(), Some("2"));
+        assert_eq!(list[0].number, Some(2));
         assert_eq!(list[0].started, "2026-11-11T02:49:42");
         assert_eq!(list[0].application, Some(ApplicationCode::ThinClient));
         assert_eq!(list[0].application_title, "Тонкий клиент");
@@ -230,7 +235,7 @@ pub(crate) mod tests {
         for text in [MEASURED_854_FILE, MEASURED_854_AGENT] {
             let list = parse_session_list(text).expect("8.5.4 list");
             assert_eq!(list.len(), 1, "{text}");
-            assert_eq!(list[0].id.as_deref(), Some("1"));
+            assert_eq!(list[0].number, Some(1));
             assert_eq!(list[0].application, Some(ApplicationCode::ThinClient));
         }
         for text in [MEASURED_CLUSTER_OUT, MEASURED_CLUSTER_AGENT] {
@@ -240,7 +245,7 @@ pub(crate) mod tests {
                 1,
                 "the repeated list is not counted twice: {text}"
             );
-            assert_eq!(list[0].id.as_deref(), Some("1"));
+            assert_eq!(list[0].number, Some(1));
             assert_eq!(list[0].started, "2026-11-11T13:00:40");
         }
         let standalone = parse_session_list(MEASURED_854_STANDALONE).expect("standalone list");

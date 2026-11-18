@@ -252,6 +252,37 @@ fn a_gate_that_presents_another_key_is_refused_by_name() {
     );
 }
 
+#[test]
+fn sessions_reject_a_substituted_gateway_key_before_dispatch() {
+    let expected = fingerprint_of(&random_host_key());
+    let key = random_host_key();
+    let presented = fingerprint_of(&key);
+    let harness = harness_with(Channel::Sftp, key, |_| Some(expected.clone()));
+
+    let (code, payload) = run(&harness, &["sessions", "list"]);
+
+    assert_ne!(code, 0, "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&expected), "{payload}");
+    assert!(message.contains(&presented), "{payload}");
+    assert!(commands(&harness).is_empty());
+}
+
+#[test]
+fn sessions_report_a_gateway_that_refuses_the_scop_subsystem() {
+    // Двойник принимает пароль и знает SFTP, но отклоняет запрос SCOP.
+    let harness = harness_with(Channel::Sftp, random_host_key(), |key| {
+        Some(fingerprint_of(key))
+    });
+    let (code, payload) = run(&harness, &["sessions", "list"]);
+    assert_ne!(code, 0, "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("did not accept the SCOP subsystem"),
+        "{payload}"
+    );
+}
+
 fn sftp_lines(harness: &Harness) -> Vec<String> {
     commands(harness)
         .into_iter()

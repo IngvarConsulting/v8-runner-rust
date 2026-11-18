@@ -37,6 +37,14 @@ for arg in "$@"; do
   case "$previous" in /DumpDBCfg|/DumpCfg|/DumpIB) file="$arg" ;; esac
   previous="$arg"
 done
+case "$*" in
+  */GetConfigGenerationID*)
+    if [ -f '{invalid_probe}' ]; then printf 'not a generation\n' > "$out"
+    else printf '0123456789abcdef0123456789abcdef01234567\n' > "$out"
+    fi
+    exit 0
+    ;;
+esac
 if [ -n "$target" ]; then
   mkdir -p "$target"
   printf '<Configuration/>\n' > "$target/Configuration.xml"
@@ -54,6 +62,7 @@ if [ -n "$out" ]; then
 fi
 exit 0"#,
         calls = root.join("calls.log").display(),
+        invalid_probe = root.join("invalid-probe").display(),
     )
 }
 
@@ -168,6 +177,46 @@ fn assert_every_call_goes_to_the_direct_gate(calls: &[String]) {
             "{call}"
         );
     }
+}
+
+#[test]
+fn direct_gate_is_probed_before_the_first_request() {
+    let project = Project::direct_gate_only();
+    let snapshot = project.root().join("base.dt");
+    succeeded(&project.run(&[
+        "infobase",
+        "dump",
+        "--output",
+        &snapshot.display().to_string(),
+    ]));
+    let calls = project.calls();
+    assert_every_call_goes_to_the_direct_gate(&calls);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0].contains("/GetConfigGenerationID"), "{calls:?}");
+    assert!(calls[1].contains("/DumpIB"), "{calls:?}");
+    assert!(!path_after(&calls[0], "/Out").exists(), "{calls:?}");
+}
+
+#[test]
+fn unready_direct_gate_refuses_before_dispatching_the_request() {
+    let project = Project::direct_gate_only();
+    fs::write(project.root().join("invalid-probe"), "").expect("invalid probe");
+    let snapshot = project.root().join("base.dt");
+    let output = project.run(&[
+        "infobase",
+        "dump",
+        "--output",
+        &snapshot.display().to_string(),
+    ]);
+    let payload = envelope(&output);
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["error"]["kind"], "environment", "{payload}");
+    assert_eq!(payload["data"]["published"], false, "{payload}");
+    let calls = project.calls();
+    assert_every_call_goes_to_the_direct_gate(&calls);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].contains("/GetConfigGenerationID"), "{calls:?}");
+    assert!(!snapshot.exists());
 }
 
 /// Лежит ли путь под каталогом — как он записан или в каноническом виде (под macOS

@@ -45,6 +45,7 @@ pub mod service_record;
 /// Список сеансов из текста отказа платформы.
 pub mod session_list;
 pub mod sftp;
+pub mod standalone_sessions;
 #[cfg(test)]
 pub(crate) mod test_git;
 pub mod utilities;

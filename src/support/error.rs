@@ -318,9 +318,9 @@ impl AppError {
             Self::PlatformDesigner(source) | Self::PlatformDesignerContext { source, .. } => {
                 match source {
                     DesignerError::Spawn(error) => process_cancellation(error),
-                    DesignerError::ConnectionForm(_) | DesignerError::StaleLogCleanup { .. } => {
-                        None
-                    }
+                    DesignerError::ConnectionForm(_)
+                    | DesignerError::StaleLogCleanup { .. }
+                    | DesignerError::DirectGateNotReady(_) => None,
                 }
             }
             Self::ValidationIbcmd(source) | Self::ValidationIbcmdContext { source, .. } => {
@@ -537,6 +537,7 @@ impl From<DesignerError> for AppError {
         match error {
             DesignerError::StaleLogCleanup { .. } => Self::PlatformDesigner(error),
             DesignerError::ConnectionForm(_) => Self::Validation(error.to_string()),
+            DesignerError::DirectGateNotReady(_) => Self::environment(error.to_string()),
             DesignerError::Spawn(error) => Self::PlatformProcess(error),
         }
     }

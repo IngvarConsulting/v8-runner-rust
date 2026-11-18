@@ -1,6 +1,9 @@
 ---
 id: INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS
-check: [tests/tool_output_contract.rs::tool_prose_never_decides_and_the_declared_debt_only_shrinks]
+check:
+  - tests/tool_output_contract.rs::tool_prose_never_decides_and_the_declared_debt_only_shrinks
+  - src/platform/process.rs::input_waits_for_a_matching_first_line_and_never_answers_host_confirmation
+  - src/platform/ibsrv.rs::a_prompt_is_removed_without_changing_the_session_list
 ---
 
 # Реестр решений по прозе может только сокращаться
@@ -22,3 +25,14 @@ check: [tests/tool_output_contract.rs::tool_prose_never_decides_and_the_declared
 4. Снять замер на настоящем инструменте и записать его версию рядом с правилом.
    Поддельный инструмент в тестах повторяет замер, а не собственную выдумку: образец —
    `src/platform/extension_inventory.rs::MEASURED_LIST`.
+
+Для `ibcmd session list` и `ibcmd session terminate` действуют точные английские
+и русские строки приглашения аутентификации ИБ из `src/platform/ibsrv.rs`. При SSH
+первая полная строка stdout должна совпасть с известным вступлением, прежде чем
+раннер однократно передаст реквизиты в stdin. Приглашение доверия ключу SSH и любая
+другая первая строка не разрешают передачу. После успешного кода выхода адаптер
+удаляет только известный префикс диалога перед разбором структурного ответа. Решение
+об успехе опирается на код выхода и структурный результат команды. Перечень
+`IBCMD_SESSION_INPUT_MARKERS` в проверке фиксирует границы этого исключения.
+Поведение диалога измерено на
+[8.3.27.2074](../../../references/1c/confirmed-runtime-measurements.md#автономный-сервер).
