@@ -29,7 +29,7 @@ v8-runner clone --connection "File=/path/to/ib" --platform-version 8.3.27
 ```
 
 `clone` creates config/local overlay/gitignore, dumps the main configuration to
-`src/configuration`, and stores credentials only in `v8project.local.yaml` when `--user` or
+`src/cf` by default, and stores credentials only in `v8project.local.yaml` when `--user` or
 `--password` is passed. It does not auto-discover extensions.
 
 Initialize generated runtime state only when the file infobase or EDT workspace needs to be created:
