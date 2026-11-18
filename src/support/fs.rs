@@ -21,6 +21,9 @@ pub fn is_known_tool_name(tool: &str) -> bool {
 
 #[cfg(test)]
 thread_local! {
+    /// Runs after moving the old directory and before publishing the stage.
+    pub(crate) static AFTER_DIR_BACKUP_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     static TEST_LOCK_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         std::cell::RefCell::new(None);
     /// Runs between opening the system lock file and locking it.
@@ -912,7 +915,19 @@ pub fn write_temp_dir_metadata(
     target_path: &Path,
     target_identity: &str,
 ) -> std::io::Result<()> {
-    let metadata = TempDirMetadata {
+    std::fs::write(
+        metadata_sidecar_path(dir),
+        encode_temp_dir_metadata(kind, run_id, target_path, target_identity)?,
+    )
+}
+
+fn encode_temp_dir_metadata(
+    kind: TempDirKind,
+    run_id: &str,
+    target_path: &Path,
+    target_identity: &str,
+) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&TempDirMetadata {
         tool: TOOL_NAME.to_owned(),
         kind,
         run_id: run_id.to_owned(),
@@ -920,13 +935,39 @@ pub fn write_temp_dir_metadata(
         target_identity: target_identity.to_owned(),
         created_at: Utc::now(),
         superseded: false,
-    };
+    })
+    .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
+}
 
-    std::fs::write(
-        metadata_sidecar_path(dir),
-        serde_json::to_vec_pretty(&metadata)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-    )
+fn reserve_directory_backup(
+    backup: &Path,
+    run_id: &str,
+    target: &Path,
+    target_identity: &str,
+) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(backup) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!("backup path '{}' already exists", backup.display()),
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let bytes = encode_temp_dir_metadata(TempDirKind::Backup, run_id, target, target_identity)?;
+    let sidecar = metadata_sidecar_path(backup);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&sidecar)?;
+    let written = file.write_all(&bytes);
+    drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&sidecar);
+        return Err(error);
+    }
+    Ok(sidecar)
 }
 
 fn mark_backup_superseded(backup: &Path) -> std::io::Result<()> {
@@ -1157,47 +1198,44 @@ pub fn swap_dir_atomically(
         });
     }
 
-    std::fs::rename(target_dir, &backup_dir)?;
+    // Leave a recoverable backup even if the process stops at the first rename.
+    let backup_marker = reserve_directory_backup(&backup_dir, run_id, target_dir, target_identity)?;
+    if let Err(error) = std::fs::rename(target_dir, &backup_dir) {
+        let _ = std::fs::remove_file(&backup_marker);
+        return Err(error);
+    }
+    #[cfg(test)]
+    AFTER_DIR_BACKUP_TEST_HOOK.with(|cell| {
+        if let Some(hook) = cell.borrow_mut().take() {
+            hook();
+        }
+    });
+
+    let restore_previous_tree = || {
+        std::fs::rename(&backup_dir, target_dir)?;
+        best_effort_fsync_dir(parent)?;
+        let _ = std::fs::remove_file(&backup_marker);
+        Ok(())
+    };
     if let Err(error) = best_effort_fsync_dir(parent) {
-        let rollback_result =
-            std::fs::rename(&backup_dir, target_dir).and_then(|()| best_effort_fsync_dir(parent));
         return Err(with_rollback_context(
             error,
-            rollback_result.err(),
+            restore_previous_tree().err(),
             "failed to fsync parent after moving target to backup",
         ));
     }
 
-    if let Err(error) = write_temp_dir_metadata(
-        &backup_dir,
-        TempDirKind::Backup,
-        run_id,
-        target_dir,
-        target_identity,
-    ) {
-        let rollback_result =
-            std::fs::rename(&backup_dir, target_dir).and_then(|()| best_effort_fsync_dir(parent));
-        return Err(with_rollback_context(
-            error,
-            rollback_result.err(),
-            "failed to write backup metadata",
-        ));
-    }
-
     if let Err(error) = std::fs::rename(staging_dir, target_dir) {
-        let rollback_result =
-            std::fs::rename(&backup_dir, target_dir).and_then(|()| best_effort_fsync_dir(parent));
         return Err(with_rollback_context(
             error,
-            rollback_result.err(),
+            restore_previous_tree().err(),
             "failed to publish staged dump",
         ));
     }
 
     if let Err(error) = best_effort_fsync_dir(parent) {
-        let rollback_result = std::fs::rename(target_dir, staging_dir)
-            .and_then(|()| std::fs::rename(&backup_dir, target_dir))
-            .and_then(|()| best_effort_fsync_dir(parent));
+        let rollback_result =
+            std::fs::rename(target_dir, staging_dir).and_then(|()| restore_previous_tree());
         return Err(with_rollback_context(
             error,
             rollback_result.err(),
@@ -2277,6 +2315,53 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(fs::read_to_string(&destination).expect("dest"), "new");
+    }
+
+    #[test]
+    fn a_backup_metadata_collision_leaves_the_old_and_staged_trees() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let stage = dir.path().join(".stage-run");
+        fs::create_dir(&target).expect("target");
+        fs::create_dir(&stage).expect("stage");
+        fs::write(target.join("old.txt"), "old").expect("old");
+        fs::write(stage.join("new.txt"), "new").expect("new");
+        let marker = super::metadata_sidecar_path(&dir.path().join(".backup-run"));
+        fs::write(&marker, "existing marker").expect("marker");
+
+        let error = super::swap_dir_atomically(&stage, &target, "run", "identity", ".backup")
+            .expect_err("existing marker");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&marker).expect("marker"),
+            "existing marker"
+        );
+        assert!(target.join("old.txt").is_file());
+        assert!(stage.join("new.txt").is_file());
+    }
+
+    #[test]
+    fn a_failed_stage_rename_restores_the_whole_previous_directory() {
+        let dir = tempdir().expect("tempdir");
+        let staging_dir = dir.path().join(".stage-missing");
+        let target_dir = dir.path().join("target");
+        fs::create_dir_all(target_dir.join("nested")).expect("target");
+        fs::write(target_dir.join("Configuration.xml"), "old config").expect("old config");
+        fs::write(target_dir.join("nested/Module.bsl"), "old module").expect("old module");
+
+        let error =
+            super::swap_dir_atomically(&staging_dir, &target_dir, "run", "identity", ".backup")
+                .expect_err("the stage has disappeared");
+        assert!(error.to_string().contains("failed to publish staged dump"));
+        assert_eq!(
+            fs::read_to_string(target_dir.join("Configuration.xml")).expect("restored config"),
+            "old config"
+        );
+        assert_eq!(
+            fs::read_to_string(target_dir.join("nested/Module.bsl")).expect("restored module"),
+            "old module"
+        );
+        assert!(!dir.path().join(".backup-run").exists());
     }
 
     /// Подмена оставляет прежнее дерево помеченным `superseded` рядом с целью, а фоновое
