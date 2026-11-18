@@ -7,18 +7,18 @@
 //! трогает.
 //!
 //! Команды не берут замок `workPath`: `stop` отвечает и пока идёт другая команда
-//! (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`). Гонку двух команд одного сеанса решает
+//! (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`). Гонку команд одного сеанса решает
 //! запись: её `starting` при живом запускающем — отказ «запускается».
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use sha2::{Digest, Sha256};
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::TargetKind;
 use crate::domain::dbms::ServiceAction;
-use crate::domain::debug_server::{DebugServerOwner, DebugServerResult};
+use crate::domain::debug_server::{DebugServerOwner, DebugServerResult, DebugSession};
 use crate::domain::launch::PlatformResolution;
 use crate::platform::dbgs::{self, DebugPort};
 use crate::platform::process::ProcessRunner;
@@ -31,7 +31,7 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-use super::{await_gone, occupant_name, occupant_of, ServiceHost, POLL};
+use super::{await_gone, occupant_name, occupant_of, write_record, ServiceHost, POLL};
 
 /// Каталог сеансов под `workPath`.
 const SESSIONS: &str = "debug-server";
@@ -39,16 +39,23 @@ const SESSIONS: &str = "debug-server";
 const NOTIFY: &str = "notify";
 /// Метка сеанса, который называет сервер отладки кластера: процесса раннера у него нет.
 const CLUSTER_SESSION: &str = "cluster.json";
-/// Сколько ждать, пока `dbgs` назовёт адрес и ответит по `rdbg`; сервер кластера поднимается
-/// лениво, вместе с первым рабочим процессом (замер «Сервер отладки `dbgs`»).
+/// Журнал неудачной попытки: каталог сеанса снят, а причина отказа остаётся читаемой.
+const FAILED_LOG_PREFIX: &str = "failed-";
+/// Сколько ждать, пока `dbgs` назовёт адрес и ответит по `rdbg`.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Каталог без записи моложе этого — его, возможно, прямо сейчас заводит другой `start`.
+const FRESH: Duration = Duration::from_secs(60);
+/// Сколько хранить журналы неудачных попыток и метки сеансов кластера, которые никто не
+/// остановил.
+const KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Полоса портов сервера отладки: ниже полосы закреплённых портов стенда (20000 и выше), выше
 /// портов сервера 1С по умолчанию (1540–1591) и вне динамического диапазона Windows.
-const PORT_BASE: u32 = 10_000;
-const PORT_WINDOW: u32 = 32;
-const PORT_WINDOWS: u32 = 312;
-const PORT_TRIES: u32 = 64;
+const PORT_BASE: u16 = 10_000;
+const PORT_WINDOW: u16 = 32;
+const PORT_WINDOWS: u16 = 312;
+const PORT_TRIES: u16 = 64;
+const _: () = assert!(PORT_BASE as u32 + PORT_WINDOWS as u32 * PORT_WINDOW as u32 <= 20_000);
 
 /// Что попросили у `debug-server start`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,18 +87,16 @@ fn server_of(config: &AppConfig) -> Result<Server, UseCaseError> {
             Ok(Server::Cluster)
         }
         TargetKind::Cluster => Err(refuse(
-            CapabilityReason::Target,
             "the infobase is on a cluster the runner did not start: the address of its debug server is known only to its administrator; a file infobase or cluster.managed is needed",
         )),
         TargetKind::Standalone => Err(refuse(
-            CapabilityReason::Target,
             "debugging an infobase on a standalone server is not supported yet: the runner starts ibsrv without a debug server",
         )),
     }
 }
 
-fn refuse(reason: CapabilityReason, message: &str) -> UseCaseError {
-    UseCaseError::from(AppError::capability_for(reason, message))
+fn refuse(message: &str) -> UseCaseError {
+    UseCaseError::from(AppError::capability_for(CapabilityReason::Target, message))
 }
 
 /// Каталог сеансов этой рабочей копии.
@@ -99,31 +104,28 @@ fn sessions_root(config: &AppConfig) -> PathBuf {
     config.work_path.join(SESSIONS)
 }
 
-/// Сеанс — 32 шестнадцатеричных знака: он становится именем каталога, поэтому иное — отказ, а
-/// не путь.
-fn is_session(session: &str) -> bool {
-    session.len() == 32 && session.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn new_session() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
-}
-
-fn session_paths(config: &AppConfig, session: &str) -> ServicePaths {
-    ServicePaths::under(&sessions_root(config), session)
+fn session_paths(config: &AppConfig, session: DebugSession) -> ServicePaths {
+    ServicePaths::under(&sessions_root(config), &session.to_string())
 }
 
 /// Окна портов копии: первое выводится из пути `workPath`, следующие идут за ним по кругу
 /// полосы.
 fn port_windows(work_path: &Path) -> impl Iterator<Item = (u16, u16)> {
     let digest = Sha256::digest(work_path.to_string_lossy().as_bytes());
-    let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let seed = u16::from_le_bytes([digest[0], digest[1]]);
     (0..PORT_TRIES).map(move |attempt| {
         let window = seed.wrapping_add(attempt) % PORT_WINDOWS;
         let first = PORT_BASE + window * PORT_WINDOW;
-        let first = u16::try_from(first).expect("the band stays below 20000");
-        (first, first + (PORT_WINDOW as u16) - 1)
+        (first, first + PORT_WINDOW - 1)
     })
+}
+
+/// Сколько прошло с последней правки файла или каталога; `None` — система не сказала.
+fn age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()?;
+    SystemTime::now().duration_since(modified).ok()
 }
 
 /// Сценарий команд над записью сеанса и системой.
@@ -145,21 +147,31 @@ impl DebugServer<'_> {
         dry_run: bool,
     ) -> Result<DebugServerResult, UseCaseError> {
         let started = Instant::now();
-        let server = server_of(self.config)?;
-        if let Some(owner) = request.owner_pid {
-            if self.host.facts(owner).is_none() {
-                return Err(UseCaseError::new(
-                    UseCaseErrorKind::Validation,
-                    format!("--owner-pid {owner}: there is no such process"),
-                ));
-            }
-        }
-        let mut result = match server {
+        let mut result = match server_of(self.config)? {
             Server::Cluster => self.cluster(request, dry_run)?,
             Server::Runner => self.runner_server(request, dry_run)?,
         };
         result.duration_ms = elapsed_ms(started);
         Ok(result)
+    }
+
+    /// Владелец должен быть живым процессом и не самим раннером: иначе `dbgs` вышел бы сразу
+    /// после ответа.
+    fn check_owner(&self, owner: Option<u32>) -> Result<(), UseCaseError> {
+        let Some(owner) = owner else {
+            return Ok(());
+        };
+        let why = if owner == std::process::id() {
+            "it is this runner, which ends as soon as it answers"
+        } else if self.host.facts(owner).is_none() {
+            "there is no such process"
+        } else {
+            return Ok(());
+        };
+        Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!("--owner-pid {owner}: {why}"),
+        ))
     }
 
     /// Сервер отладки кластера: процесса раннера нет, сеанс — метка с портом.
@@ -185,8 +197,8 @@ impl DebugServer<'_> {
         }
         let port = (self.cluster_port)()?;
         self.sweep();
-        let session = new_session();
-        let paths = session_paths(self.config, &session);
+        let session = DebugSession::new();
+        let paths = session_paths(self.config, session);
         write_json(
             &paths.root().join(CLUSTER_SESSION),
             &ClusterSession { port },
@@ -204,6 +216,7 @@ impl DebugServer<'_> {
         request: DebugServerStart,
         dry_run: bool,
     ) -> Result<DebugServerResult, UseCaseError> {
+        self.check_owner(request.owner_pid)?;
         let client = (self.locate_client)()?;
         let program = dbgs::beside(&client.path);
         if !program.is_file() {
@@ -225,10 +238,11 @@ impl DebugServer<'_> {
         let mut result = empty(ServiceAction::Planned);
         result.owner = Some(DebugServerOwner::Runner);
         result.owner_pid = request.owner_pid;
-        result.platform_resolution = Some(resolution);
         if let DebugPort::Exact(port) = port {
             result.port = Some(port);
         }
+        let version = resolution.version.clone();
+        result.platform_resolution = Some(resolution);
         if dry_run {
             return Ok(result);
         }
@@ -238,8 +252,8 @@ impl DebugServer<'_> {
             )));
         };
         self.sweep();
-        let session = new_session();
-        let paths = session_paths(self.config, &session);
+        let session = DebugSession::new();
+        let paths = session_paths(self.config, session);
         let notify = paths.root().join(NOTIFY);
         let starter = {
             let pid = std::process::id();
@@ -259,43 +273,38 @@ impl DebugServer<'_> {
             port: first,
             explicit,
             bin: program.clone(),
-            version: result
-                .platform_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.version.clone()),
+            version,
             agent: None,
             location: None,
         };
-        self.write_record(&paths, &record)?;
+        write_record(&paths, &record)?;
         let spawn = dbgs::start_request(&program, port, &notify, request.owner_pid, &paths.log());
         let pid = match self.host.spawn(&spawn, self.context.work()) {
             Ok(pid) => pid,
             Err(error) => {
-                forget(&paths);
+                let log = self.abandon(&paths);
                 return Err(UseCaseError::new(
                     UseCaseErrorKind::Platform,
-                    format!("dbgs did not start: {error}"),
+                    format!("dbgs did not start: {error}; log: {}", log.display()),
                 ));
             }
         };
         let Some(facts) = self.host.facts(pid) else {
-            forget(&paths);
-            return Err(self.exited(&paths, port, "dbgs exited as soon as it started"));
+            let log = self.abandon(&paths);
+            return Err(self.exited(&log, port, "dbgs exited as soon as it started"));
         };
         record.pid = Some(pid);
         record.started = Some(facts.started);
         record.image = Some(facts.image);
-        if let Err(error) = self.write_record(&paths, &record) {
-            self.stop_process(&paths, &record);
-            return Err(error);
+        if let Err(error) = write_record(&paths, &record) {
+            return Err(self.give_up(&paths, &record, session, error));
         }
-        let actual = self.await_ready(&paths, &record, &notify, port)?;
+        let actual = self.await_ready(&paths, &record, pid, session, &notify, port)?;
         record.port = actual;
         record.state = RecordState::Running;
         record.starter = None;
-        if let Err(error) = self.write_record(&paths, &record) {
-            self.stop_process(&paths, &record);
-            return Err(error);
+        if let Err(error) = write_record(&paths, &record) {
+            return Err(self.give_up(&paths, &record, session, error));
         }
         result.action = ServiceAction::Started;
         result.session = Some(session);
@@ -327,26 +336,28 @@ impl DebugServer<'_> {
             })
     }
 
-    /// Готов — назвал адрес и ответил по `rdbg`. Вышел, отмена или срок — процесс попытки
-    /// гасится, запись снимается.
+    /// Готов — назвал адрес, по нему ответил `rdbg`, и порт слушает этот процесс, а не чужой.
+    /// Вышел, отмена или срок — процесс попытки гасится, запись снимается, журнал остаётся.
     fn await_ready(
         &self,
         paths: &ServicePaths,
         record: &ServiceRecord,
+        pid: u32,
+        session: DebugSession,
         notify: &Path,
         port: DebugPort,
     ) -> Result<u16, UseCaseError> {
         let deadline = Instant::now() + self.host.patience(READY_TIMEOUT);
-        let pid = record.pid.expect("a started server has a pid");
         loop {
             if let Some(error) =
                 interruption_before_safe_point(self.context, "waiting for the debug server")
             {
-                self.stop_process(paths, record);
-                return Err(error.into());
+                return Err(self.give_up(paths, record, session, error.into()));
             }
             if let Some(actual) = dbgs::notified_port(notify) {
-                if self.host.rdbg_answers(actual) {
+                let listener = self.host.listening_pid(actual);
+                let ours = listener.is_none_or(|listener| listener == pid);
+                if ours && self.host.rdbg_answers(actual) {
                     return Ok(actual);
                 }
             }
@@ -355,50 +366,87 @@ impl DebugServer<'_> {
                 .facts(pid)
                 .is_none_or(|facts| Some(facts.started) != record.started);
             if gone {
-                forget(paths);
+                let log = self.abandon(paths);
                 return Err(self.exited(
-                    paths,
+                    &log,
                     port,
                     "dbgs exited before it answered as a debug server",
                 ));
             }
             if Instant::now() >= deadline {
-                self.stop_process(paths, record);
-                return Err(UseCaseError::new(
+                let timeout = UseCaseError::new(
                     UseCaseErrorKind::TimedOut,
                     format!(
-                        "dbgs did not answer as a debug server in {} s; log: {}",
-                        READY_TIMEOUT.as_secs(),
-                        paths.log().display()
+                        "dbgs did not answer as a debug server in {} s",
+                        READY_TIMEOUT.as_secs()
                     ),
-                ));
+                );
+                return Err(self.give_up(paths, record, session, timeout));
             }
             self.host.sleep(POLL);
         }
     }
 
+    /// Попытка не удалась после запуска: процесс гасится, журнал остаётся под своим именем.
+    /// Не погас — ошибка говорит это и называет сеанс: его запись остаётся, и `stop` или
+    /// следующий `start` снимут процесс.
+    fn give_up(
+        &self,
+        paths: &ServicePaths,
+        record: &ServiceRecord,
+        session: DebugSession,
+        error: UseCaseError,
+    ) -> UseCaseError {
+        let log = paths.log();
+        let kept = self.keep_log(paths);
+        if self.stop_process(paths, record) {
+            return error.followed_by(format!("log: {}", kept.unwrap_or(log).display()));
+        }
+        error.followed_by(format!(
+            "dbgs pid {} did not stop: run `debug-server stop {session}`; log: {}",
+            record.pid.unwrap_or_default(),
+            log.display()
+        ))
+    }
+
+    /// Снимает сеанс попытки, оставив журнал; возвращает, где журнал теперь.
+    fn abandon(&self, paths: &ServicePaths) -> PathBuf {
+        let log = self.keep_log(paths).unwrap_or_else(|| paths.log());
+        forget(paths);
+        log
+    }
+
+    /// Копия журнала попытки рядом с каталогами сеансов: каталог сеанса снимается, а причину
+    /// отказа должно быть где прочесть.
+    fn keep_log(&self, paths: &ServicePaths) -> Option<PathBuf> {
+        let name = paths.root().file_name()?.to_string_lossy().into_owned();
+        let kept = sessions_root(self.config).join(format!("{FAILED_LOG_PREFIX}{name}.log"));
+        std::fs::copy(paths.log(), &kept).ok().map(|_| kept)
+    }
+
     /// `dbgs` вышел до готовности. Явный порт заняли между проверкой и запуском — он теперь
     /// отвечает: это отказ о занятом порте, а не сбой. Текст журнала не разбирается.
-    fn exited(&self, paths: &ServicePaths, port: DebugPort, why: &str) -> UseCaseError {
+    fn exited(&self, log: &Path, port: DebugPort, why: &str) -> UseCaseError {
         if let DebugPort::Exact(port) = port {
             if let Some(occupant) = occupant_of(self.host, port) {
                 return port_taken(port, occupant);
             }
         }
-        not_ready(paths, why)
+        UseCaseError::new(
+            UseCaseErrorKind::Platform,
+            format!("{why}; log: {}", log.display()),
+        )
     }
 
-    pub fn stop(&self, session: &str, dry_run: bool) -> Result<DebugServerResult, UseCaseError> {
+    pub fn stop(
+        &self,
+        session: DebugSession,
+        dry_run: bool,
+    ) -> Result<DebugServerResult, UseCaseError> {
         let started = Instant::now();
-        if !is_session(session) {
-            return Err(UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                format!("'{session}' is not a debug server session: it is the 32 hex digits `debug-server start` answered"),
-            ));
-        }
         let paths = session_paths(self.config, session);
         let mut result = self.stop_session(&paths, dry_run)?;
-        result.session = Some(session.to_owned());
+        result.session = Some(session);
         result.duration_ms = elapsed_ms(started);
         Ok(result)
     }
@@ -429,9 +477,17 @@ impl DebugServer<'_> {
             return Ok(result);
         }
         result.owner = Some(DebugServerOwner::Runner);
-        let record =
+        let (record, pid) =
             match self.observe(paths) {
-                Observed::Own(record) => record,
+                Observed::Own(record) => match record.pid {
+                    Some(pid) => (record, pid),
+                    None => {
+                        if !dry_run {
+                            forget(paths);
+                        }
+                        return Ok(result);
+                    }
+                },
                 Observed::Starting(_) => return Err(UseCaseError::new(
                     UseCaseErrorKind::WorkspaceBusy,
                     "the debug server of this session is being started by another running command",
@@ -450,7 +506,7 @@ impl DebugServer<'_> {
                     return Ok(result);
                 }
             };
-        result.pid = record.pid;
+        result.pid = Some(pid);
         result.port = Some(record.port);
         result.url = Some(dbgs::url(record.port));
         if dry_run {
@@ -459,14 +515,11 @@ impl DebugServer<'_> {
         if !self.stop_process(paths, &record) {
             return Err(UseCaseError::new(
                 UseCaseErrorKind::Platform,
-                format!(
-                    "dbgs pid {} did not stop; repeat debug-server stop",
-                    record.pid.unwrap_or_default()
-                ),
+                format!("dbgs pid {pid} did not stop; repeat debug-server stop"),
             ));
         }
         result.action = ServiceAction::Stopped;
-        result.stopped_pid = record.pid;
+        result.stopped_pid = Some(pid);
         result.pid = None;
         Ok(result)
     }
@@ -479,23 +532,48 @@ impl DebugServer<'_> {
         })
     }
 
-    /// Убирает сеансы, чей сервер уже вышел: с концом владельца `dbgs` выходит сам, а каталог
-    /// остаётся. Живые и запускаемые сеансы не трогает.
+    /// Уборка перед новым сеансом:
+    /// - сеанс, чей сервер вышел сам (с концом владельца), — каталог снимается;
+    /// - сеанс оборванного `start` (запись `starting`, запускавший раннер мёртв) — его `dbgs`
+    ///   никто не получил и не остановит, поэтому он гасится здесь;
+    /// - каталог без записи моложе [`FRESH`] не трогается: его, возможно, заводит другой
+    ///   `start`;
+    /// - метки сеансов кластера и журналы неудачных попыток старше [`KEPT`] снимаются.
     fn sweep(&self) {
-        let Ok(entries) = std::fs::read_dir(sessions_root(self.config)) else {
+        let root = sessions_root(self.config);
+        let Ok(entries) = std::fs::read_dir(&root) else {
             return;
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(session) = name.to_str().filter(|name| is_session(name)) else {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(FAILED_LOG_PREFIX) {
+                if age(&path).is_some_and(|age| age > KEPT) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            let Ok(session) = name.parse::<DebugSession>() else {
                 continue;
             };
             let paths = session_paths(self.config, session);
             if paths.root().join(CLUSTER_SESSION).is_file() {
+                if age(paths.root()).is_some_and(|age| age > KEPT) {
+                    forget(&paths);
+                }
                 continue;
             }
-            if matches!(self.observe(&paths), Observed::Stale | Observed::Nothing) {
-                forget(&paths);
+            let interrupted = read_json::<ServiceRecord>(&paths.record())
+                .is_some_and(|record| record.state == RecordState::Starting);
+            match self.observe(&paths) {
+                Observed::Own(record) if interrupted => {
+                    self.stop_process(&paths, &record);
+                }
+                Observed::Stale => forget(&paths),
+                Observed::Nothing if age(paths.root()).is_some_and(|age| age > FRESH) => {
+                    forget(&paths);
+                }
+                Observed::Own(_) | Observed::Starting(_) | Observed::Nothing => {}
             }
         }
     }
@@ -518,14 +596,6 @@ impl DebugServer<'_> {
             forget(paths);
         }
         gone
-    }
-
-    fn write_record(
-        &self,
-        paths: &ServicePaths,
-        record: &ServiceRecord,
-    ) -> Result<(), UseCaseError> {
-        super::write_record(paths, record)
     }
 }
 
@@ -565,13 +635,6 @@ fn port_taken(port: u16, pid: u32) -> UseCaseError {
         "port {port} is taken by {}: the debug server did not start; pass another --port or none",
         occupant_name(pid)
     )))
-}
-
-fn not_ready(paths: &ServicePaths, why: &str) -> UseCaseError {
-    UseCaseError::new(
-        UseCaseErrorKind::Platform,
-        format!("{why}; log: {}", paths.log().display()),
-    )
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -629,6 +692,8 @@ mod tests {
         exits_before_ready: Cell<bool>,
         /// Назвал адрес, но не отвечает по `rdbg`.
         never_answers: Cell<bool>,
+        /// Порт из файла адреса слушает чужой процесс.
+        foreign_listener: Cell<bool>,
         /// Порт, который захватывает чужой процесс между проверкой и запуском.
         stolen: Cell<Option<u16>>,
         cancel_on_spawn: RefCell<Option<tokio_util::sync::CancellationToken>>,
@@ -669,6 +734,8 @@ mod tests {
         ) -> Result<u32, ServiceSpawnError> {
             self.spawned.set(self.spawned.get() + 1);
             self.last_args.replace(request.args.clone());
+            std::fs::create_dir_all(request.log_path.parent().unwrap()).unwrap();
+            std::fs::write(&request.log_path, "dbgs log").unwrap();
             if let Some(token) = self.cancel_on_spawn.borrow().as_ref() {
                 token.cancel();
             }
@@ -705,7 +772,12 @@ mod tests {
                 }
                 (None, None) => panic!("no port in {:?}", request.args),
             };
-            self.listeners.borrow_mut().insert(port, PID);
+            let listener = if self.foreign_listener.get() {
+                4343
+            } else {
+                PID
+            };
+            self.listeners.borrow_mut().insert(port, listener);
             let notify = PathBuf::from(arg(&request.args, "--notify=").unwrap());
             std::fs::create_dir_all(notify.parent().unwrap()).unwrap();
             std::fs::write(&notify, format!("127.0.0.1:{port}")).unwrap();
@@ -744,7 +816,7 @@ mod tests {
             Duration::ZERO
         }
         fn rdbg_answers(&self, port: u16) -> bool {
-            !self.never_answers.get() && self.listeners.borrow().get(&port) == Some(&PID)
+            !self.never_answers.get() && self.listeners.borrow().contains_key(&port)
         }
     }
 
@@ -851,18 +923,24 @@ mod tests {
             self.start_in(&context(), request, host)
         }
 
-        fn stop(&self, session: &str, host: &Host) -> Result<DebugServerResult, UseCaseError> {
+        fn stop(
+            &self,
+            session: DebugSession,
+            host: &Host,
+        ) -> Result<DebugServerResult, UseCaseError> {
             let locate = || Ok(self.resolution());
             let cluster_port = || unreachable!("stop does not ask the cluster");
             self.server(&context(), host, &locate, &cluster_port)
                 .stop(session, false)
         }
 
+        /// Каталоги сеансов, без журналов неудачных попыток.
         fn sessions(&self) -> Vec<String> {
             std::fs::read_dir(sessions_root(&self.config))
                 .map(|entries| {
                     entries
                         .flatten()
+                        .filter(|entry| entry.path().is_dir())
                         .map(|entry| entry.file_name().to_string_lossy().into_owned())
                         .collect()
                 })
@@ -905,7 +983,7 @@ mod tests {
         assert!(args.contains(&format!("--ownerPID={OWNER}")), "{args:?}");
         // Сервер пережил команду: процесс жив, сеанс записан.
         assert!(host.alive(PID));
-        assert_eq!(setup.sessions(), [started.session.unwrap()]);
+        assert_eq!(setup.sessions(), [started.session.unwrap().to_string()]);
     }
 
     /// Приёмка 1: нет `dbgs` в установке клиента — отказ окружения с версией и местом, без
@@ -974,22 +1052,109 @@ mod tests {
         assert!(setup.sessions().is_empty());
     }
 
-    /// Приёмка 1: процесс вышел до готовности — сбой платформы со ссылкой на журнал, без сеанса.
+    /// Журнал, который называет отказ, существует: каталог сеанса снят, а журнал остался.
+    fn assert_names_a_kept_log(error: &UseCaseError) {
+        let message = error.to_string();
+        let log = message
+            .rsplit("log: ")
+            .next()
+            .map(str::trim)
+            .unwrap_or_default();
+        assert!(Path::new(log).is_file(), "{message}");
+    }
+
+    fn assert_an_exit_leaves_no_session(host: &Host) {
+        let setup = setup();
+        let error = setup.start(DebugServerStart::default(), host).unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform, "{error}");
+        assert_names_a_kept_log(&error);
+        assert!(setup.sessions().is_empty());
+        assert!(!host.alive(PID));
+    }
+
+    /// Приёмка 1: процесс вышел сразу после запуска — сбой платформы с журналом, без сеанса.
+    #[test]
+    fn an_exit_at_once_leaves_no_session() {
+        let host = Host::default();
+        host.exits_at_once.set(true);
+        assert_an_exit_leaves_no_session(&host);
+    }
+
+    /// Приёмка 1: процесс вышел до готовности — сбой платформы с журналом, без сеанса.
     #[test]
     fn an_exit_before_readiness_leaves_no_session() {
-        for exit in [Host::default(), Host::default()].iter().enumerate() {
-            let (index, host) = exit;
-            if index == 0 {
-                host.exits_at_once.set(true);
-            } else {
-                host.exits_before_ready.set(true);
-            }
-            let setup = setup();
-            let error = setup.start(DebugServerStart::default(), host).unwrap_err();
-            assert_eq!(error.kind(), UseCaseErrorKind::Platform, "{error}");
-            assert!(setup.sessions().is_empty());
-            assert!(!host.alive(PID));
-        }
+        let host = Host::default();
+        host.exits_before_ready.set(true);
+        assert_an_exit_leaves_no_session(&host);
+    }
+
+    /// Порт из файла адреса слушает чужой процесс: это не готовность этого `dbgs`.
+    #[test]
+    fn an_answer_from_another_process_is_not_readiness() {
+        let setup = setup();
+        let host = Host::default();
+        host.foreign_listener.set(true);
+        let error = setup.start(DebugServerStart::default(), &host).unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::TimedOut, "{error}");
+        assert!(!host.alive(PID));
+    }
+
+    /// Сеанс оборванного `start` — запускавший раннер убит, его `dbgs` никто не получил —
+    /// гасит следующий `start`.
+    #[test]
+    fn start_stops_the_server_of_an_interrupted_start() {
+        let setup = setup();
+        let host = Host::default();
+        let orphan = DebugSession::new();
+        let paths = session_paths(&setup.config, orphan);
+        host.processes.borrow_mut().insert(
+            7777,
+            ProcessFacts {
+                started: 3,
+                image: dbgs::executable_name().to_owned(),
+            },
+        );
+        write_json(
+            &paths.record(),
+            &ServiceRecord {
+                state: RecordState::Starting,
+                pid: Some(7777),
+                started: Some(3),
+                image: Some(dbgs::executable_name().to_owned()),
+                machine: Some(MACHINE.to_owned()),
+                // Раннер, которого больше нет.
+                starter: Some((6666, 1)),
+                port: 10_000,
+                explicit: false,
+                bin: PathBuf::from("dbgs"),
+                version: None,
+                agent: None,
+                location: None,
+            },
+        )
+        .unwrap();
+        setup.start(DebugServerStart::default(), &host).unwrap();
+        assert!(host.soft_stops.borrow().contains(&7777));
+        assert!(!host.alive(7777));
+        assert!(!setup.sessions().contains(&orphan.to_string()));
+    }
+
+    /// Владелец — сам раннер: `dbgs` вышел бы сразу после ответа. Отказ до запуска.
+    #[test]
+    fn the_runner_itself_is_no_owner() {
+        let setup = setup();
+        let host = Host::default();
+        let error = setup
+            .start(
+                DebugServerStart {
+                    port: None,
+                    owner_pid: Some(std::process::id()),
+                },
+                &host,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
+        assert_eq!(host.spawned.get(), 0);
     }
 
     /// Приёмка 1: срок готовности вышел — процесс попытки снят, сеанса нет.
@@ -1000,6 +1165,7 @@ mod tests {
         host.never_answers.set(true);
         let error = setup.start(DebugServerStart::default(), &host).unwrap_err();
         assert_eq!(error.kind(), UseCaseErrorKind::TimedOut);
+        assert_names_a_kept_log(&error);
         assert!(host.soft_stops.borrow().contains(&PID));
         assert!(!host.alive(PID));
         assert!(setup.sessions().is_empty());
@@ -1056,13 +1222,13 @@ mod tests {
             .session
             .unwrap();
         assert!(host.alive(PID));
-        let stopped = setup.stop(&session, &host).unwrap();
+        let stopped = setup.stop(session, &host).unwrap();
         assert_eq!(stopped.action, ServiceAction::Stopped);
         assert_eq!(stopped.stopped_pid, Some(PID));
         assert_eq!(stopped.known_session, Some(true));
         assert!(!host.alive(PID));
         assert!(setup.sessions().is_empty());
-        let again = setup.stop(&session, &host).unwrap();
+        let again = setup.stop(session, &host).unwrap();
         assert_eq!(again.action, ServiceAction::NothingToStop);
         assert_eq!(again.known_session, Some(false));
     }
@@ -1074,14 +1240,25 @@ mod tests {
         let host = Host::default();
         setup.start(DebugServerStart::default(), &host).unwrap();
         let other = setup
-            .stop("0123456789abcdef0123456789abcdef", &host)
+            .stop("0123456789abcdef0123456789abcdef".parse().unwrap(), &host)
             .unwrap();
         assert_eq!(other.action, ServiceAction::NothingToStop);
         assert_eq!(other.known_session, Some(false));
         assert!(host.alive(PID));
-        let error = setup.stop("../../etc", &host).unwrap_err();
-        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
-        assert!(host.alive(PID));
+    }
+
+    /// Сеанс — имя каталога: иное, чем 32 шестнадцатеричных знака, не разбирается; верхний
+    /// регистр — тот же сеанс, что нижний.
+    #[test]
+    fn a_session_is_32_hex_digits_in_any_case() {
+        assert!("../../etc".parse::<DebugSession>().is_err());
+        assert!("0123456789abcdef0123456789abcde"
+            .parse::<DebugSession>()
+            .is_err());
+        let lower: DebugSession = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let upper: DebugSession = "0123456789ABCDEF0123456789ABCDEF".parse().unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(upper.to_string(), "0123456789abcdef0123456789abcdef");
     }
 
     /// Приёмка 2: устаревший сеанс — pid занят другим процессом — не трогает этот процесс.
@@ -1102,7 +1279,7 @@ mod tests {
                 image: "notepad.exe".to_owned(),
             },
         );
-        let stopped = setup.stop(&session, &host).unwrap();
+        let stopped = setup.stop(session, &host).unwrap();
         assert_eq!(stopped.action, ServiceAction::NothingToStop);
         assert!(stopped.stale_record);
         assert!(host.soft_stops.borrow().is_empty());
@@ -1129,7 +1306,7 @@ mod tests {
             .session
             .unwrap();
         assert_ne!(first, second);
-        assert_eq!(setup.sessions(), [second]);
+        assert_eq!(setup.sessions(), [second.to_string()]);
     }
 
     /// Предварительный просмотр ничего не запускает и не пишет.
@@ -1161,7 +1338,7 @@ mod tests {
         assert_eq!(started.url.as_deref(), Some("http://127.0.0.1:24018"));
         assert_eq!(started.pid, None);
         assert_eq!(host.spawned.get(), 0);
-        let stopped = setup.stop(&started.session.unwrap(), &host).unwrap();
+        let stopped = setup.stop(started.session.unwrap(), &host).unwrap();
         assert_eq!(stopped.action, ServiceAction::NothingToStop);
         assert_eq!(stopped.owner, Some(DebugServerOwner::Cluster));
         assert!(host.soft_stops.borrow().is_empty());
@@ -1189,9 +1366,8 @@ mod tests {
         for root in ["/w/a", "C:/work", "/home/u/проект/work"] {
             for (first, last) in port_windows(Path::new(root)) {
                 assert!(first >= 10_000 && last < 20_000, "{first}..{last}");
-                assert_eq!(last - first + 1, PORT_WINDOW as u16);
+                assert_eq!(last - first + 1, PORT_WINDOW);
             }
         }
-        let _ = setup().root;
     }
 }

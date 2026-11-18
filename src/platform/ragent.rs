@@ -43,13 +43,12 @@ impl ClusterPorts {
         self.range_end().saturating_add(1)
     }
 
-    /// Все порты блока, с портом сервера отладки: его не должен держать чужой процесс, даже
-    /// если кластер сейчас без отладки.
+    /// Все порты блока. Порта сервера отладки здесь нет: занятость порта, который кластер без
+    /// отладки не слушает, не должна переносить его реестр. Его проверяет запуск с отладкой.
     pub fn all(self) -> impl Iterator<Item = u16> {
         [self.agent, self.regport]
             .into_iter()
             .chain(self.range_start..=self.range_end())
-            .chain(std::iter::once(self.debug()))
     }
 
     /// Блоки делят хотя бы один порт.
@@ -188,7 +187,8 @@ mod tests {
     fn the_debug_port_follows_the_worker_range_inside_the_block() {
         let ports = ClusterPorts::from_first(24000);
         assert_eq!(ports.debug(), 24018);
-        assert!(ports.all().any(|port| port == 24018));
+        assert!(!ports.all().any(|port| port == 24018));
+        assert!(ports.debug() < 24000 + 32, "inside the step of the block");
         let agent = start_agent(
             Path::new("ragent.exe"),
             Path::new("w/data"),

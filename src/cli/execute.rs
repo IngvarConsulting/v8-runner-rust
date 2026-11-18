@@ -1687,7 +1687,7 @@ fn execute_debug_server(
             DebugServerStart { port, owner_pid },
             dry_run,
         ),
-        Action::Stop { session } => debug_server_stop(&context, config, session.as_str(), dry_run),
+        Action::Stop { session } => debug_server_stop(&context, config, session, dry_run),
     };
     match outcome {
         Ok(mut result) => {
@@ -1733,7 +1733,7 @@ fn debug_server_text(
 
     let owner = match result.owner {
         Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
-        _ => "the debug server",
+        Some(DebugServerOwner::Runner) | None => "the debug server",
     };
     let mut lines = vec![match result.action {
         ServiceAction::Started => format!(
@@ -1747,11 +1747,14 @@ fn debug_server_text(
             result.stopped_pid.unwrap_or_default()
         ),
         ServiceAction::Planned => format!("{}: planned, nothing started or stopped", name.as_str()),
-        _ if result.known_session == Some(false) => format!(
+        ServiceAction::NothingToStop if result.known_session == Some(false) => format!(
             "{}: this working copy knows no such session; nothing to stop",
             name.as_str()
         ),
-        _ => format!("{}: nothing to stop", name.as_str()),
+        ServiceAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
+        ServiceAction::AlreadyRunning | ServiceAction::Reported => {
+            unreachable!("debug-server neither reports nor finds a running server")
+        }
     }];
     if let (ServiceAction::Started, Some(session)) = (result.action, &result.session) {
         lines.push(format!("session: {session}"));

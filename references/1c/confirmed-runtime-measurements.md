@@ -6498,6 +6498,10 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
   | `POST` на чужой путь `/e1crdbg/nope` | 404 |
   | `GET /` | 200, HTML в UTF-16 |
 
+  Тот же запрос без заголовка `Accept` (так шлёт `reqwest`) получает тот же 400, но телом
+  XML: `<exception xmlns="http://v8.1c.ru/8.2/virtual-resource-system" xsi:type="Exception"
+  reason="400">`; с `Accept: */*` или `application/json` — JSON. Первый живой прогон
+  `debug-server start` ждал только JSON и не дождался готовности.
   Ответ 400 с `reason: 400` приходит от обработчика rdbg без регистрации отладчика и без
   побочных эффектов. `attachDebugUI` регистрирует отладчик и для проверки не годится.
 - Кластер: `ragent /agent /port 27540 /regport 27541 /range 27560:27591 /d <каталог>
@@ -6514,5 +6518,9 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
 .txt`) работает.
 - `taskkill /PID` без `/F` останавливает `dbgs`, запущенный со скрытым окном: через 3 с
   процесса нет.
+- Тонкий клиент 8.3.27.2342, запущенный `1cv8c ENTERPRISE /F <база> /DEBUG -http -attach
+  /DEBUGGERURL http://127.0.0.1:<порт>` к `dbgs`, который поднял `debug-server start`,
+  регистрирует на нём две цели файловой базы: `getDbgTargets` отвечает JSON со списком `id`,
+  где `targetType` — `ManagedClient` и `ServerEmulation`, `infoBaseAlias` — `DefAlias`.
 - Не мерено: `dbgs` на Linux и macOS (наличие в установке, `--notify`, `--ownerPID`),
   `ibsrv --debug=http`.

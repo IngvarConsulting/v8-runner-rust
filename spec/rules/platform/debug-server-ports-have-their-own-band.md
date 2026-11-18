@@ -5,6 +5,7 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::a_taken_explicit_port_is_refused_before_anything_starts
   - src/use_cases/managed_stand/debug_server.rs::a_port_taken_during_the_start_is_named_as_taken
   - src/platform/ragent.rs::the_debug_port_follows_the_worker_range_inside_the_block
+  - src/use_cases/managed_stand/cluster.rs::a_taken_debug_port_moves_no_registry
 ---
 
 # У портов сервера отладки своя полоса

@@ -373,42 +373,15 @@ pub enum DebugServerCommandArgs {
         #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
         port: Option<u16>,
         /// The debugger process: the debug server ends by itself when this process ends
-        #[arg(long, value_name = "PID")]
+        #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
         owner_pid: Option<u32>,
     },
     /// Stop the debug server of this session; a repeated or unknown session stops nothing
     Stop {
         /// The session `debug-server start` answered
         #[arg(value_name = "SESSION")]
-        session: Copy32,
+        session: crate::domain::debug_server::DebugSession,
     },
-}
-
-/// Сеанс `debug-server` в разборе ключей: 32 шестнадцатеричных знака. Тип `Copy`, чтобы команда
-/// оставалась `Copy`, как у остальных служб.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Copy32(pub [u8; 32]);
-
-impl Copy32 {
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.0).unwrap_or_default()
-    }
-}
-
-impl std::str::FromStr for Copy32 {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let bytes: [u8; 32] = value
-            .as_bytes()
-            .try_into()
-            .ok()
-            .filter(|bytes: &[u8; 32]| bytes.iter().all(u8::is_ascii_hexdigit))
-            .ok_or_else(|| {
-                "a session is the 32 hex digits `debug-server start` answered".to_owned()
-            })?;
-        Ok(Self(bytes))
-    }
 }
 
 /// Сервер отладки кластера: включить, снять или оставить как закреплено.

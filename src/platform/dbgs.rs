@@ -92,11 +92,20 @@ fn parse_notify(bytes: &[u8]) -> Option<u16> {
 /// (404) или запрос без `Content-Type: application/xml` (406) готовности не подтверждают.
 /// Прокси окружения не участвует: адрес — петля.
 pub fn rdbg_answers(port: u16) -> bool {
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(2))
-        .build()
+    // Один клиент на процесс: ожидание опрашивает сервер каждые 200 мс, а клиент `blocking`
+    // держит свой поток с рантаймом.
+    static CLIENT: std::sync::OnceLock<Option<reqwest::blocking::Client>> =
+        std::sync::OnceLock::new();
+    let Some(client) = CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(2))
+                .build()
+                .ok()
+        })
+        .as_ref()
     else {
         return false;
     };
@@ -107,6 +116,7 @@ pub fn rdbg_answers(port: u16) -> bool {
     let Ok(response) = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/xml")
+        .header(reqwest::header::ACCEPT, "application/json")
         .body(Vec::new())
         .send()
     else {
@@ -118,8 +128,10 @@ pub fn rdbg_answers(port: u16) -> bool {
     response.text().is_ok_and(|body| is_rdbg_refusal(&body))
 }
 
+/// Отказ обработчика `rdbg`: исключение `virtual-resource-system`. С `Accept: application/json`
+/// оно приходит в JSON, без `Accept` — в XML; признак один и тот же.
 fn is_rdbg_refusal(body: &str) -> bool {
-    body.contains("\"#exception\"") && body.contains("virtual-resource-system")
+    body.contains("virtual-resource-system") && body.contains("Exception")
 }
 
 /// Адрес сервера отладки для клиента (`/DEBUGGERURL`) и отладчика.
@@ -184,6 +196,8 @@ mod tests {
     fn only_the_rdbg_refusal_counts_as_an_answer() {
         let refusal = "\u{feff}{\"#exception\":\"{http://v8.1c.ru/8.2/virtual-resource-system}Exception\",\"exception\":{\"reason\":400}}";
         assert!(is_rdbg_refusal(refusal));
+        let xml = "\u{feff}<?xml version=\"1.0\"?><exception xmlns=\"http://v8.1c.ru/8.2/virtual-resource-system\" xsi:type=\"Exception\" reason=\"400\"/>";
+        assert!(is_rdbg_refusal(xml));
         assert!(!is_rdbg_refusal("<html>bad request</html>"));
     }
 

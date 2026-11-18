@@ -1089,38 +1089,35 @@ pub fn debug_server_start(
     request: DebugServerStart,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
-    let locate = || locate_client(config);
-    let cluster_port = || cluster::debug_port(context, config, &RealHost);
-    debug_server::DebugServer {
-        context,
-        config,
-        runner: &ProcessExecutor,
-        host: &RealHost,
-        locate_client: &locate,
-        cluster_port: &cluster_port,
-    }
-    .start(request, dry_run)
-    .map_err(UseCaseFailure::without_payload)
+    with_debug_server(context, config, |server| server.start(request, dry_run))
 }
 
 /// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.
 pub fn debug_server_stop(
     context: &ExecutionContext,
     config: &AppConfig,
-    session: &str,
+    session: crate::domain::debug_server::DebugSession,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
+    with_debug_server(context, config, |server| server.stop(session, dry_run))
+}
+
+/// Сценарий `debug-server` над настоящей системой.
+fn with_debug_server<T>(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
+) -> UseCaseResult<T> {
     let locate = || locate_client(config);
     let cluster_port = || cluster::debug_port(context, config, &RealHost);
-    debug_server::DebugServer {
+    run(&debug_server::DebugServer {
         context,
         config,
         runner: &ProcessExecutor,
         host: &RealHost,
         locate_client: &locate,
         cluster_port: &cluster_port,
-    }
-    .stop(session, dry_run)
+    })
     .map_err(UseCaseFailure::without_payload)
 }
 

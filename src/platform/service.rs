@@ -989,9 +989,17 @@ mod imp {
             return;
         }
         let signal = if hard { libc::SIGKILL } else { libc::SIGTERM };
-        // SAFETY: `kill` с числовыми аргументами; отсутствующая группа отвечает `ESRCH`.
-        unsafe {
-            libc::kill(-group, signal);
+        // SAFETY: `kill` с числовыми аргументами; отсутствующая группа отвечает `ESRCH`. Тот ли
+        // это процесс, вызывающий сверил по записи (pid и время старта) перед остановкой: пока
+        // жива группа, её номер система другому процессу не отдаёт.
+        let sent = unsafe { libc::kill(-group, signal) };
+        if sent == -1 {
+            // Процесс не лидер своей группы — например, pid PostgreSQL из `postmaster.pid`, а не
+            // из `spawn_hidden`: сигнал идёт ему самому.
+            // SAFETY: то же.
+            unsafe {
+                libc::kill(group, signal);
+            }
         }
     }
 
@@ -1179,6 +1187,26 @@ mod imp {
             assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "clean");
             assert_eq!(session, pid);
             assert_eq!(group, pid);
+        }
+
+        /// Мягкая остановка доходит до всей группы службы: её потомки не переживают её.
+        #[test]
+        fn a_signal_to_the_service_group_ends_its_children_too() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            let pid = spawn_hidden(&shell("sleep 30 & echo started; wait", &log, None)).unwrap();
+            assert!(wait_for(&log, "started"), "the service did not start");
+            super::super::signal_service_group(pid, false);
+            let group = libc::pid_t::try_from(pid).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            // SAFETY: сигнал 0 только спрашивает, есть ли ещё процессы группы.
+            while unsafe { libc::kill(-group, 0) } == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the group outlived SIGTERM"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
 
         #[test]

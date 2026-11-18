@@ -1079,6 +1079,16 @@ impl Cluster<'_> {
 
     /// Агент, затем `ras`, затем ответ `rac`. Неудача снимает всё поднятое здесь.
     fn raise(&self, pins: &ClusterPins, machine: &str) -> Result<ServiceRecord, UseCaseError> {
+        if pins.debug {
+            let port = pins.ports.debug();
+            if let Some(pid) = super::occupant_of(self.host, port) {
+                return Err(environment(format!(
+                    "the debug port {port} of the cluster of '{}' is taken by {}: stop it, or start the cluster with --no-debug",
+                    self.declared.infobase,
+                    super::occupant_name(pid)
+                )));
+            }
+        }
         let ragent_bin = (self.locate)()?;
         let registry = self.registry(pins);
         std::fs::create_dir_all(&registry)
@@ -1348,6 +1358,11 @@ pub(super) fn debug_port(
         &no_locate,
     )?;
     let infobase = &cluster.declared.infobase;
+    if !host.supported() {
+        return Err(environment(format!(
+            "the infobase '{infobase}' is on the managed cluster, and the managed cluster runs on Windows only: on this system there is no debug server of the cluster"
+        )));
+    }
     let pins = cluster.pins();
     let Observed::Own(_) = cluster.observe(&cluster.agent) else {
         return Err(environment(format!(
@@ -2440,6 +2455,28 @@ mod tests {
         let again = setup.command(debug_start(None), &host).unwrap();
         assert_eq!(again.action, ServiceAction::AlreadyRunning);
         assert_eq!(again.debug_url, None);
+    }
+
+    /// Чужой процесс на порту отладки не переносит реестр кластера без отладки; запуск с
+    /// отладкой — отказ, называющий порт.
+    #[test]
+    fn a_taken_debug_port_moves_no_registry() {
+        let setup = setup();
+        let host = Host::default();
+        setup.command(debug_start(None), &host).unwrap();
+        setup.command(ClusterCommand::Stop, &host).unwrap();
+        let pins = setup.pins();
+        host.listeners.borrow_mut().insert(pins.ports.debug(), 9999);
+        let started = setup.command(debug_start(None), &host).unwrap();
+        assert_eq!(started.previous_regport, None);
+        assert_eq!(setup.pins().registry, pins.registry);
+        setup.command(ClusterCommand::Stop, &host).unwrap();
+        let error = setup.command(debug_start(Some(true)), &host).unwrap_err();
+        assert!(
+            error.to_string().contains(&pins.ports.debug().to_string()),
+            "{error}"
+        );
+        assert_eq!(setup.pins().registry, pins.registry);
     }
 
     /// Закреплённое прежних версий, без признака, читается: кластер без отладки, реестр тот же.

@@ -1,5 +1,5 @@
 //! Команды `debug-server` со стороны командной строки. Сценарий с подделкой системы — в
-//! `src/use_cases/managed_stand/debug_server/tests.rs`; здесь то, что видно снаружи: замок,
+//! модуле `src/use_cases/managed_stand/debug_server.rs`; здесь то, что видно снаружи: замок,
 //! разбор ключей и конверт.
 
 mod support;

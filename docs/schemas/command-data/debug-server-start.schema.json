@@ -15,6 +15,11 @@
         }
       ]
     },
+    "DebugSession": {
+      "description": "Сеанс сервера отладки: его передают в `debug-server stop`.",
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
     "PlatformResolution": {
       "additionalProperties": false,
       "description": "Canonical platform installation metadata exposed by `launch` JSON results.",
@@ -157,11 +162,15 @@
       ]
     },
     "session": {
-      "description": "Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DebugSession"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет."
     },
     "stale_record": {
       "description": "Запись была, но процесса из неё уже нет: сервер вышел сам, например с концом владельца.",
