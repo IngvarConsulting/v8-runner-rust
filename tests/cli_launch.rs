@@ -996,6 +996,27 @@ fn launch_dry_run_json_names_the_program_and_the_arguments_it_would_run() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn launch_interactive_thin_client_uses_bundle_from_selected_installation() {
+    let (_dir, config_path, install_dir, _work_path) = setup_project();
+    let executable = install_dir.join("1cv8c.app/Contents/MacOS/1cv8c");
+    write_script(&executable);
+    let executable = executable.canonicalize().expect("bundle executable path");
+
+    let preview = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+    assert_eq!(
+        preview["data"]["plan"]["program"],
+        executable.to_str().unwrap()
+    );
+    assert_eq!(preview["data"]["provider_dispatched"], false);
+    assert!(preview["data"]["pid"].is_null());
+
+    let launched = launch_json(&config_path, &["launch", "thin"]);
+    assert_eq!(launched["data"]["binary"], executable.to_str().unwrap());
+    assert!(launched["data"]["pid"].as_u64().is_some_and(|pid| pid > 0));
+}
+
 #[test]
 fn launch_text_includes_binary_pid_and_cleans_platform_logs() {
     let (_dir, config_path, install_dir, work_path) = setup_project();
