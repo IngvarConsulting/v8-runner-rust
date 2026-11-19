@@ -826,6 +826,8 @@ mod tests {
             })
             .args;
 
+        // Клиент тестов ждёт раннер: окну при старте отвечать некому (#784).
+        assert!(args.iter().any(|arg| arg == "/DisableStartupDialogs"));
         assert!(args.ends_with(&[
             "/Out".to_owned(),
             dir.path().join("platform.log").display().to_string()
