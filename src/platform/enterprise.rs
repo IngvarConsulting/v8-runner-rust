@@ -17,6 +17,18 @@ pub enum EnterpriseError {
     Spawn(ProcessError),
 }
 
+/// Может ли клиент показывать окна при старте. Пакетный запуск их запрещает
+/// (`/DisableStartupDialogs`): ждать ответа человека некому. Интерактивный клиент показывает их,
+/// иначе тонкий клиент на комьюнити-лицензии выходит с кодом 1 сразу после входа — ему нужно
+/// окно лицензии (#784).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupDialogs {
+    /// `/DisableStartupDialogs`: окно при старте — отказ клиента.
+    Suppressed,
+    /// Окна при старте разрешены: лицензия, окно входа при неверном пароле.
+    Shown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchClientMode {
     Designer,
@@ -102,6 +114,7 @@ impl<'a> EnterpriseDsl<'a> {
             &self.connection,
             &self.additional_launch_keys,
             &launch,
+            StartupDialogs::Suppressed,
         )
     }
 }
@@ -187,7 +200,15 @@ pub fn build_launch_args(
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
-    build_launch_command(mode, address, connection, additional_launch_keys, launch).args
+    build_launch_command(
+        mode,
+        address,
+        connection,
+        additional_launch_keys,
+        launch,
+        StartupDialogs::Suppressed,
+    )
+    .args
 }
 
 pub fn build_launch_command(
@@ -196,6 +217,7 @@ pub fn build_launch_command(
     connection: &V8Connection,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
+    dialogs: StartupDialogs,
 ) -> LaunchCommand {
     let mut args = vec![match mode {
         LaunchClientMode::Designer => "DESIGNER",
@@ -204,7 +226,9 @@ pub fn build_launch_command(
         }
     }
     .to_owned()];
-    args.push("/DisableStartupDialogs".to_owned());
+    if dialogs == StartupDialogs::Suppressed {
+        args.push("/DisableStartupDialogs".to_owned());
+    }
     args.extend(address.args(connection));
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
@@ -331,6 +355,7 @@ mod tests {
     use super::{
         build_launch_args, build_launch_command, encode_launch_parameter,
         normalize_launch_payload_path, ClientAddress, EnterpriseDsl, LaunchClientMode,
+        StartupDialogs,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -512,6 +537,7 @@ mod tests {
                     raw_args: vec!["/custom=\"unchanged\"".to_owned()],
                     ..Default::default()
                 },
+                StartupDialogs::Suppressed,
             );
             let args = &command.args;
             let position = args
@@ -536,6 +562,7 @@ mod tests {
             &V8Connection::from_connection_string("File=/tmp/ib"),
             &[],
             &LaunchOptions::default(),
+            StartupDialogs::Suppressed,
         );
         assert!(!omitted.args.iter().any(|arg| arg == "/C"));
         assert!(omitted.verbatim_args.is_empty());
@@ -557,6 +584,7 @@ mod tests {
                 c: Some("x\" /Execute \"evil.epf".to_owned()),
                 ..Default::default()
             },
+            StartupDialogs::Suppressed,
         );
 
         assert_eq!(command.verbatim_args.len(), 1);
@@ -798,6 +826,8 @@ mod tests {
             })
             .args;
 
+        // Клиент тестов ждёт раннер: окну при старте отвечать некому (#784).
+        assert!(args.iter().any(|arg| arg == "/DisableStartupDialogs"));
         assert!(args.ends_with(&[
             "/Out".to_owned(),
             dir.path().join("platform.log").display().to_string()
