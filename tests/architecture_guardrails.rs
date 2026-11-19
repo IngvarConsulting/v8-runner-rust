@@ -106,9 +106,9 @@ fn a_platform_spawn_leaves_the_runner_process_group() {
         ("src/platform/git.rs", 1, None),
         // Интерактивные сеансы EDT.
         ("src/platform/interactive.rs", 1, None),
-        // Опрос процессов через `powershell`; служба на Unix — в своём сеансе (`setsid`), а на
-        // Windows — `CreateProcessW` со своей консолью (`CREATE_NEW_CONSOLE`).
-        ("src/platform/service.rs", 2, None),
+        // Опрос процессов через `powershell` и мягкий `taskkill`; служба на Unix — в своём
+        // сеансе (`setsid`), а на Windows — `CreateProcessW` со своей консолью (`CREATE_NEW_CONSOLE`).
+        ("src/platform/service.rs", 3, None),
         (
             "src/platform/browser.rs",
             1,
