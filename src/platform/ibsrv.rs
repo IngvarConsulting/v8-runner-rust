@@ -94,22 +94,64 @@ pub fn file_base_keys(db_path: &Path) -> Vec<String> {
     vec![format!("--db-path={}", db_path.display())]
 }
 
-/// A local ibsrv which names this physical file base in its launch arguments.
-pub(super) fn file_server_pid(base: &Path, cancelled: impl Fn() -> bool) -> Option<u32> {
-    use crate::platform::file_base_hold::DATABASE_FILE;
-    use crate::support::path::filesystem_object_identity;
+#[derive(Debug, thiserror::Error)]
+pub(super) enum FileServerCheckError {
+    #[error("could not identify the target directory: {0}")]
+    Target(#[source] std::io::Error),
+    #[error(transparent)]
+    Process(#[from] super::service::ProcessInspectionError),
+}
 
-    let directory = filesystem_object_identity(base).ok()?;
-    let data = filesystem_object_identity(&base.join(DATABASE_FILE)).ok();
-    crate::platform::service::first_process_with_arguments("ibsrv", cancelled, |arguments| {
-        explicit_file_base(arguments).is_some_and(|path| {
-            filesystem_object_identity(path).is_ok_and(|server_dir| server_dir == directory)
-                || data.as_ref().is_some_and(|data| {
-                    filesystem_object_identity(&path.join(DATABASE_FILE))
-                        .is_ok_and(|server_data| &server_data == data)
-                })
-        })
-    })
+/// A local ibsrv which names this physical file base in its launch arguments.
+pub(super) fn file_server_pid(
+    base: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<Option<u32>, FileServerCheckError> {
+    use crate::platform::file_base_hold::DATABASE_FILE;
+
+    if !cfg!(any(windows, target_os = "linux")) {
+        return Ok(None);
+    }
+    let Some(directory) = identity_if_present(base).map_err(FileServerCheckError::Target)? else {
+        return Ok(None);
+    };
+    let data = identity_if_present(&base.join(DATABASE_FILE));
+    super::service::first_process_with_arguments(
+        "ibsrv",
+        || cancellation.is_cancelled(),
+        |arguments| {
+            let Some(path) = explicit_file_base(arguments) else {
+                return Some(false);
+            };
+            let server_directory = identity_if_present(path);
+            if server_directory
+                .as_ref()
+                .is_ok_and(|id| id.as_ref() == Some(&directory))
+            {
+                return Some(true);
+            }
+
+            // A different directory can still name the same data file through a hard link.
+            if let Some(data) = data.as_ref().ok()?.as_ref() {
+                let server_data = identity_if_present(&path.join(DATABASE_FILE)).ok()?;
+                if server_data.as_ref() == Some(data) {
+                    return Some(true);
+                }
+            }
+            server_directory.ok().map(|_| false)
+        },
+    )
+    .map_err(Into::into)
+}
+
+fn identity_if_present(
+    path: &Path,
+) -> std::io::Result<Option<crate::support::path::FilesystemObjectIdentity>> {
+    match crate::support::path::filesystem_object_identity(path) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn explicit_file_base<'a>(argv: &[&'a OsStr]) -> Option<&'a Path> {

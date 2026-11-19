@@ -393,6 +393,9 @@ missing evidence.
   process list, `File=`, a `dbms` section, the utility name and a previous successful run are
   insufficient. Check operation support, platform version, permissions and any exclusive-access
   requirement separately, including for file bases.
+- On Windows and Linux, direct file access through the runner can return
+  `environment_unavailable` before invoking `ibcmd` when the process inventory or a detected
+  `ibsrv` cannot be inspected. Resolve process visibility or use a supported server route.
 - For a supported `ibcmd --pid` or `--remote` operation, verify the running `ibsrv` instance,
   the physical base it serves, operation support and its access requirements. Keep the server
   running for this route and verify that no step opens the same base directly. If the channel

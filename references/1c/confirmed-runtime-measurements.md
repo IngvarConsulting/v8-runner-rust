@@ -4869,6 +4869,23 @@ ibsrv --data=<каталог> --db-path=<db-path> --name=<имя> --http-port=<h
 - `ibcmd server config init` не вызывался: `ibsrv` работает над файловой базой без него, код 0 у `push`, `upload`, `extensions` и `test`.
 - `--ssh-host-key` принимает ключ ED25519 в формате OpenSSH: `extensions list` по шлюзу код 0, отпечаток закреплён на этом ключе. Раньше замерялся только RSA 2048.
 
+### Linux: видимость `ibsrv` другого пользователя (#780)
+
+18.11.2026, Ubuntu 24.04.4, ядро 6.8.0-149-generic, 1С 8.5.1.1343.
+На отдельной файловой базе в закрытом сетевом пространстве запустили:
+
+```text
+runuser -u usr1cv8 -- ibsrv --data=<data> --db-path=<base> --name=issue780 --http-address=127.0.0.1 --http-port=28331 --direct-regport=28332 --direct-range=28340:28355
+runuser -u victor -- strace -f -e execve,readlink,readlinkat v8-runner --config v8project.yaml --json-message download main --output probe.cf
+```
+
+Процесс `ibsrv` с PID 25284 слушал порт 28332. Обычный пользователь видел имя процесса
+в `/proc/25284/comm`, чтение `/proc/25284/exe` возвращало `EACCES`. Раннер ответил кодом 2
+(`environment_unavailable`) с PID процесса. В трассе отсутствовал `execve` для `ibcmd`,
+сервер продолжал работать. Превью завершилось кодом 0, `provider_dispatched: false`.
+После остановки сервера та же команда завершилась кодом 0, запустила `ibcmd`
+и опубликовала CF размером 4973 байта.
+
 ## Общий токен поколения у агента, Конфигуратора и ibcmd (#559)
 
 Замер 08.11.2026. Задача: [#559](https://github.com/IngvarConsulting/v8-runner-rust/issues/559)
