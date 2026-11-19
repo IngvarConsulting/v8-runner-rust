@@ -2269,6 +2269,11 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
   userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
+- `thin`, `thick` и `ordinary` без `--wait-for-exit` запускаются без `/DisableStartupDialogs`:
+  клиент показывает окна при старте — окно лицензии (без него тонкий клиент на комьюнити-лицензии
+  выходил с кодом 1 сразу после входа, #784) и окно входа, если имя или пароль не подошли.
+  `designer`, `mcp`, ожидаемый `thin --wait-for-exit` и клиент `test` идут с этим ключом
+  ([правило](../spec/rules/cli/an-interactive-client-may-show-startup-dialogs.md)).
 - `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
 - `launch mcp --mode thick` использует `1cv8`; `launch mcp --mode ordinary` использует `1cv8`

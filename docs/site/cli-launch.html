@@ -131,7 +131,7 @@ binary: /opt/1cv8/bin/1cv8c
 debug: http://127.0.0.1:12961
 provider dispatched: false
 planned program: /opt/1cv8/bin/1cv8c
-planned args: ENTERPRISE /DisableStartupDialogs /IBConnectionString File=/home/user/ib /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961</code></pre>
+planned args: ENTERPRISE /IBConnectionString File=/home/user/ib /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961</code></pre>
 <h4 id="launch-debug-refused">Отладка не подходит запуску</h4>
 <p>Отказ до запуска: <code>invalid_argument</code>, выход CLI 2. Так же отвечают <code>launch web --debug</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code> (путь, параметры, фрагмент, учётные данные, нет порта или порт 0) и <code>/DEBUG</code> или <code>/DEBUGGERURL</code> в <code>--raw-key</code> или в <code>tools.enterprise.additional-launch-keys</code> рядом с <code>--debug</code>. Отказ не повторяет введённый адрес.</p>
 <pre data-output-example="launch-debug-refused" data-output-schema="refusal"><code>ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger</code></pre>
@@ -275,7 +275,6 @@ provider dispatched: false</code></pre>
         "program": "/opt/1cv8/bin/1cv8c",
         "args": [
           "ENTERPRISE",
-          "/DisableStartupDialogs",
           "/IBConnectionString",
           "File=build/ib",
           "/DEBUG",

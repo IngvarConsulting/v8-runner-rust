@@ -907,7 +907,8 @@ fn launch_dry_run_json_returns_a_plan_without_dispatching_the_client() {
         .map(|arg| arg.as_str().expect("arg"))
         .collect();
     assert_eq!(planned.first(), Some(&"ENTERPRISE"));
-    assert!(planned.contains(&"/DisableStartupDialogs"));
+    // Интерактивный клиент может показать окно лицензии или входа (#784).
+    assert!(!planned.contains(&"/DisableStartupDialogs"));
     assert!(
         !wait_for_file(&args_log, Duration::from_millis(500)),
         "preview must not dispatch the client process"
@@ -1303,7 +1304,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(output.status.success());
     let args = read_args_log(&args_log);
     assert!(args.contains("ENTERPRISE"));
-    assert!(args.contains("/DisableStartupDialogs"));
+    assert!(!args.contains("/DisableStartupDialogs"));
     assert_eq!(args.matches("/RunModeOrdinaryApplication").count(), 1);
     assert!(args.contains("/UsePrivilegedMode"));
     assert!(args.contains("/Execute"));
