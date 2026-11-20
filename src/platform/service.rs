@@ -128,6 +128,8 @@ pub struct ProcessFacts {
     pub image: String,
 }
 
+#[cfg(windows)]
+pub(crate) use imp::soft_stop_windows_service;
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
 /// Unix: сигнал группе службы. `spawn_hidden` уводит службу в свой сеанс (`setsid`), поэтому её
@@ -687,11 +689,13 @@ mod imp {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
+    use std::process::{Child, Command, ExitStatus, Stdio};
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, ERROR_NO_MORE_FILES, FALSE,
         FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -1129,9 +1133,99 @@ mod imp {
         }
     }
 
+    // Срок самой утилиты, отдельно от ожидания конца службы после запроса остановки.
+    const SOFT_STOP_HELPER_TIMEOUT_MS: u32 = 5_000;
+
+    pub(crate) fn soft_stop_windows_service(
+        pid: u32,
+        started: Option<u64>,
+        work: &crate::platform::process::WorkGiven,
+    ) {
+        super::with_process_identity(pid, started, || {
+            let mut command = Command::new("taskkill");
+            command.args(["/PID", &pid.to_string()]);
+            tracing::debug!(
+                pid,
+                timeout_ms = SOFT_STOP_HELPER_TIMEOUT_MS,
+                "starting soft taskkill"
+            );
+            match spawn_soft_stop_helper(command, work).and_then(|mut child| {
+                await_soft_stop_helper(&mut child, SOFT_STOP_HELPER_TIMEOUT_MS)
+            }) {
+                Ok(status) => tracing::debug!(pid, ?status, "soft taskkill exited"),
+                Err(error) => tracing::debug!(pid, %error, "soft taskkill failed"),
+            }
+        });
+    }
+
+    fn spawn_soft_stop_helper(
+        mut command: Command,
+        work: &crate::platform::process::WorkGiven,
+    ) -> io::Result<Child> {
+        crate::platform::process::outside_the_runner_process_group(&mut command);
+        let child = command
+            .env_remove("V8_RUNNER_CLIENT_OWNER")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        work.mark_work_given();
+        Ok(child)
+    }
+
+    fn await_soft_stop_helper(child: &mut Child, timeout_ms: u32) -> io::Result<ExitStatus> {
+        let failure = match wait_for_soft_stop_helper(child, timeout_ms) {
+            Ok(true) => return child.wait(),
+            Ok(false) => io::Error::new(
+                io::ErrorKind::TimedOut,
+                "soft taskkill exceeded its timeout",
+            ),
+            Err(error) => error,
+        };
+        // CreateProcess даёт дескриптор с PROCESS_TERMINATE. Успешный TerminateProcess
+        // останавливает потоки утилиты сразу, а сигнал дескриптора может ждать отмены её I/O.
+        let termination = child.kill();
+        if wait_for_soft_stop_helper(child, SOFT_STOP_HELPER_TIMEOUT_MS)? {
+            return Err(failure);
+        }
+        termination?;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "soft taskkill did not exit after termination",
+        ))
+    }
+
+    fn wait_for_soft_stop_helper(child: &Child, timeout_ms: u32) -> io::Result<bool> {
+        // SAFETY: child owns the live process handle for the duration of the wait.
+        match unsafe { WaitForSingleObject(child.as_raw_handle(), timeout_ms) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_stalled_soft_stop_helper_is_terminated_at_its_deadline() {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ]);
+            let work = crate::platform::process::WorkGiven::for_command();
+            let mut helper = spawn_soft_stop_helper(command, &work).unwrap();
+
+            let result = await_soft_stop_helper(&mut helper, 100);
+
+            assert!(work.given());
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(helper.try_wait().unwrap().is_some(), "helper still running");
+        }
 
         #[test]
         fn a_job_that_kills_on_close_and_forbids_leaving_refuses_the_service() {
