@@ -4937,6 +4937,22 @@ cluster start → test → cluster restart → test → cluster stop` прохо
 `--create-database` над прежней БД. После этого `test yaxunit all` проходит, а прежний каталог реестра удалён.
 Перезагрузка машины не проверялась.
 
+## Восстановление сохранённого подключения по снимку RAC (#649)
+
+18.11.2026, Windows, 1С 8.3.27.2342, серверная копия БСП 3.1 в управляемом
+кластере раннера с PostgreSQL для 1С 17.11. После `cluster start` выполнили
+`agent hold --ttl 600` и завершили его сеанс через
+`rac session terminate --cluster=<uuid> --session=<uuid>`. Успешный
+`rac session list --cluster=<uuid> --infobase=<uuid>` дал полный список без
+сеансов Designer. Затем `pull --force` с `providers.pull: agent` взял тот же
+живой агент (`endpoint.live.reused: true`). Сторож переподключился и записал один
+повтор `config generation-id`. Команда завершила полную выгрузку за 70,9 с.
+
+Во втором прогоне после завершения сеанса сторожа в той же базе подключили другой
+Designer. Список RAC содержал его UUID. `pull --force` вернул прежний
+`UnknownError` без переподключения и повтора. Второй Designer продолжил успешно
+отвечать на `config generation-id`.
+
 ## Процесс агента между командами (#577)
 
 Замер 09.11.2026, 8.3.27.2342, Windows 11, файловые базы: копия AccountingKZ с пользователем

@@ -474,6 +474,9 @@ pub enum ProcessError {
     #[error("failed to observe process startup '{cmd}': {source}")]
     StartupCheckFailed { cmd: String, source: std::io::Error },
 
+    #[error("failed to read process output '{cmd}': {source}")]
+    OutputReadFailed { cmd: String, source: std::io::Error },
+
     /// Процесс снимали по отмене или пределу, но его конец так и не подтвердился: ожидание
     /// отказало и после жёсткого снятия. Это не отмена и не истёкший предел — прерывания,
     /// которого не видели, ответ не называет.
@@ -1590,8 +1593,19 @@ fn wait_for_output(
             // это время не наблюдается: цикл уже вышел. Группу снимают только пути
             // прерывания выше — `Interruptible` и `GracefulThenKill`, — а обычный выход её
             // не трогает.
-            let stdout = stdout_reader.join().unwrap_or_default();
-            let stderr = stderr_reader.join().unwrap_or_default();
+            let stdout = stdout_reader.join();
+            let stderr = stderr_reader.join();
+            let checked =
+                |stream: std::thread::Result<std::io::Result<capture::CapturedStream>>| {
+                    stream
+                        .unwrap_or_else(|_| {
+                            Err(std::io::Error::other("process output reader panicked"))
+                        })
+                        .map_err(|source| ProcessError::OutputReadFailed {
+                            cmd: rendered_command.to_owned(),
+                            source,
+                        })
+                };
             return match observed_interruption {
                 Some(ProcessInterruptionReason::Cancelled)
                     if policy.safety != ProcessInterruptionSafety::CriticalNonAbortable =>
@@ -1609,17 +1623,11 @@ fn wait_for_output(
                         timeout_ms: policy.timeout.unwrap_or_default().as_millis() as u64,
                     })
                 }
-                Some(reason) => Ok(ObservedOutput {
+                reason => Ok(ObservedOutput {
                     status,
-                    stdout,
-                    stderr,
-                    interruption: Some(ProcessInterruption::deferred(reason)),
-                }),
-                None => Ok(ObservedOutput {
-                    status,
-                    stdout,
-                    stderr,
-                    interruption: None,
+                    stdout: checked(stdout)?,
+                    stderr: checked(stderr)?,
+                    interruption: reason.map(ProcessInterruption::deferred),
                 }),
             };
         }
