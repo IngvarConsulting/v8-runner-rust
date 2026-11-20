@@ -40,6 +40,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "sessions terminate",
     "sessions deny",
     "sessions allow",
+    "infobase check",
     "agent keeper",
     "remove-backup",
 ];
@@ -77,7 +78,6 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "upload",
     "pull",
     "download",
-    "infobase check",
     "infobase create",
     "infobase configuration export",
     "infobase dump",

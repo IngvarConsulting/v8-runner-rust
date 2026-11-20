@@ -68,6 +68,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["sessions", "terminate", "--all"], "sessions terminate"),
     (&["sessions", "deny"], "sessions deny"),
     (&["sessions", "allow"], "sessions allow"),
+    (&["infobase", "check"], "infobase check"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
     (&["agent", "hold", "--ttl", "60"], "agent hold"),
