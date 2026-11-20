@@ -696,6 +696,7 @@ async fn mcp_stdio_exposes_expected_tools_and_capabilities() {
         names,
         vec![
             "build_project",
+            "check_infobase",
             "check_syntax_designer_config",
             "check_syntax_designer_modules",
             "check_syntax_edt",
@@ -979,7 +980,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
 async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
     // Живую проверку EDT проект Конфигуратора не поднимет; её форму держит
     // `mcp_stdio_the_live_edt_check_answers_in_the_form_of_check`.
-    const CHECKED_ELSEWHERE: &[&str] = &["check_syntax_edt"];
+    const CHECKED_ELSEWHERE: &[&str] = &["check_syntax_edt", "check_infobase"];
     let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
         setup_designer_suite_project();
     let client = serve_stdio(&config_path).await;
@@ -2248,4 +2249,69 @@ async fn mcp_stdio_standard_tools_do_not_inherit_edt_running_timeout() {
     assert_eq!(payload["data"]["status"], "clean");
 
     client.cancel().await.expect("cancel client");
+}
+
+#[tokio::test]
+async fn mcp_check_infobase_confirms_login_and_reports_a_missing_file() {
+    let (dir, config) = setup_project();
+    let platform = dir.path().join("8.3.27.2074");
+    let document = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        document.replace(
+            &dir.path().join("platform").display().to_string(),
+            &platform.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let (transport, _stderr) = TokioChildProcess::builder(
+        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
+            cmd.arg("--config")
+                .arg(config)
+                .args(["mcp", "serve", "stdio"]);
+        }),
+    )
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn stdio transport");
+    let client = ().serve(transport).await.expect("connect rmcp client");
+    let response = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("check_infobase"))
+        .await
+        .expect("check tool");
+    assert_eq!(response.is_error, Some(true));
+    let envelope = response.structured_content.expect("structured refusal");
+    assert_envelope_business_failure(&envelope, "infobase.check");
+    assert_eq!(envelope["error"]["code"], "infobase_not_found");
+    assert!(!dir.path().join("ib").exists());
+    assert!(!dir.path().join("work/temp").exists());
+
+    fs::create_dir(dir.path().join("ib")).unwrap();
+    fs::write(dir.path().join("ib/1Cv8.1CD"), "db").unwrap();
+    write_script(
+        &platform.join("bin/1cv8"),
+        r#"
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = /Out ]; then out="$argument"; fi
+  previous="$argument"
+done
+printf '%s\n' 76cf68b0126837418abc9e878db8df1300000000 > "$out"
+"#,
+    );
+    let response = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("check_infobase"))
+        .await
+        .expect("check tool after creating a base");
+    let envelope = response.structured_content.expect("structured success");
+    assert_envelope_success(&envelope, "infobase.check");
+    assert_eq!(envelope["data"]["platform_version"], "8.3.27.2074");
+    assert_data_matches_its_command_form(&envelope, "check_infobase");
+    assert_eq!(
+        fs::read_dir(dir.path().join("work/temp")).unwrap().count(),
+        0
+    );
+    client.cancel().await.expect("close server");
 }

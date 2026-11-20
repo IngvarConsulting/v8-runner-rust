@@ -496,6 +496,11 @@ Interruption policy:
 - critical publish/apply phases не hard-kill by default; запись в базу, и `/RestoreIB` тоже,
   дорабатывает до конца.
 
+`infobase check` и MCP `check_infobase` запускают Конфигуратор один раз для
+`/GetConfigGenerationID`. Код выхода и токен подтверждают вход. Для журнала и
+текущего каталога процесса используется приватный каталог в `workPath/temp`.
+Выгрузка, замок рабочего каталога и журнал действия для пробы не нужны.
+
 ## MCP runtime semantics
 
 MCP deliberately narrower than CLI.

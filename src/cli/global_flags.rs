@@ -291,6 +291,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "infobase check",
+        preview: Preview::Absent("it opens the selected infobase"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "infobase create",
         preview: Preview::Runs,
         base: Base::Resolves,

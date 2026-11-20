@@ -2471,3 +2471,136 @@ fn a_taken_port_of_the_managed_agent_is_named() {
     assert!(launches[0].contains("/AgentMode"), "{argv}");
     drop(holder);
 }
+
+#[test]
+fn infobase_check_needs_native_login_evidence_and_leaves_no_files() {
+    let dir = temp_workspace();
+    let root = dir.path();
+    let config = root.join("v8project.yaml");
+    let platform = root.join("8.3.27.2074");
+    fs::create_dir(&platform).unwrap();
+    let binary = platform.join("1cv8");
+    fs::create_dir(root.join("file base")).unwrap();
+    fs::write(root.join("file base/1Cv8.1CD"), "db").unwrap();
+    fs::write(
+        &config,
+        "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: 'File=file base'\n  user: Admin\n  password: ''\ntools:\n  platform:\n    path: 8.3.27.2074\n",
+    ).unwrap();
+    let run = || {
+        let output = v8_runner_command()
+            .current_dir(root)
+            .args([
+                "--config",
+                "v8project.yaml",
+                "--json-message",
+                "infobase",
+                "check",
+            ])
+            .output()
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {:?}", output));
+        assert_eq!(reply["command"], "infobase.check");
+        assert_eq!(output.status.success(), reply["ok"] == true);
+        let work = root.join("work");
+        assert!(!work.join("logs").exists());
+        if work.join("temp").exists() {
+            assert_eq!(fs::read_dir(work.join("temp")).unwrap().count(), 0);
+        }
+        assert!(!root.join("1cv8u.pfl").exists());
+        reply
+    };
+
+    write_shell_script(
+        &binary,
+        r#"
+[ "$1" = DESIGNER ] || exit 20
+case "$*" in *"/GetConfigGenerationID"*) ;; *) exit 21 ;; esac
+previous=''
+for argument in "$@"; do
+  [ "$argument" != /P ] || exit 22
+  case "$previous" in /Out) out="$argument" ;; /IBConnectionString) address="$argument" ;; esac
+  previous="$argument"
+done
+case "$address" in 'File='/*'file base') ;; *) exit 23 ;; esac
+touch 1cv8u.pfl
+printf '%s\n' 76cf68b0126837418abc9e878db8df1300000000 > "$out"
+"#,
+    );
+    let success = run();
+    assert_eq!(success["data"]["platform_version"], "8.3.27.2074");
+    support::command_data::assert_data_matches_its_command_form(&success, "infobase check success");
+
+    write_shell_script(&binary, "touch 1cv8u.pfl\nexit 1");
+    let refusal = run();
+    assert_eq!(refusal["error"]["code"], "connection_failed");
+    assert_eq!(refusal["data"], serde_json::json!({}));
+
+    write_shell_script(&binary, "touch 1cv8u.pfl\nexit 0");
+    assert_eq!(run()["error"]["code"], "invalid_output");
+
+    let file_config = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        file_config.replace("File=file base", "/F \"file base\" /DumpIB extra.dt"),
+    )
+    .unwrap();
+    write_shell_script(&binary, "touch extra.dt\nexit 1");
+    assert_eq!(run()["error"]["code"], "invalid_argument");
+
+    fs::write(
+        &config,
+        file_config.replace("File=file base", "Srvr=cluster:1541;Ref=probe"),
+    )
+    .unwrap();
+    write_shell_script(
+        &binary,
+        r#"
+[ "$4" = /S ] && [ "$5" = 'cluster:1541\probe' ] || exit 25
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = /Out ]; then out="$argument"; fi
+  previous="$argument"
+done
+printf '%s\n' 76cf68b0126837418abc9e878db8df1300000000 > "$out"
+"#,
+    );
+    assert_eq!(run()["data"]["platform_version"], "8.3.27.2074");
+
+    let started = root.join("probe-started");
+    write_shell_script(&binary, "touch 1cv8u.pfl \"$PROBE_STARTED\"\nexec sleep 20");
+    let child = v8_runner_command()
+        .current_dir(root)
+        .env("PROBE_STARTED", &started)
+        .args([
+            "--config",
+            "v8project.yaml",
+            "--json-message",
+            "infobase",
+            "check",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !started.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let dispatched = started.is_file();
+    let signal = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .output()
+        .unwrap();
+    let cancelled = child.wait_with_output().unwrap();
+    assert!(dispatched, "expected the fake Designer to start");
+    assert!(signal.status.success());
+    let cancelled: Value = serde_json::from_slice(&cancelled.stdout).unwrap();
+    assert_eq!(cancelled["error"]["code"], "cancelled");
+    assert_eq!(cancelled["data"], serde_json::json!({}));
+    assert_eq!(fs::read_dir(root.join("work/temp")).unwrap().count(), 0);
+
+    fs::write(config, file_config).unwrap();
+    fs::remove_file(root.join("file base/1Cv8.1CD")).unwrap();
+    fs::remove_file(binary).unwrap();
+    assert_eq!(run()["error"]["code"], "infobase_not_found");
+}

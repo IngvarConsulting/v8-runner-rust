@@ -745,6 +745,36 @@ fn test_adapter_business_error(
     ))
 }
 
+pub(crate) fn check_infobase(
+    config: &AppConfig,
+    call: McpCallContext,
+) -> McpServiceResult<McpCommandEnvelope> {
+    let command = CommandName::InfobaseCheck;
+    let context = execution_context(call, command).map_err(McpServiceError::Internal)?;
+    let started = Instant::now();
+    match crate::use_cases::infobase_check::check(&context, config) {
+        Ok(result) => ok_envelope(command, crate::support::time::elapsed_ms(started), result)
+            .map_err(McpServiceError::Internal),
+        Err(error) => {
+            let business_error = McpBusinessError::from_use_case(&error);
+            let mut response = if context.work().given() {
+                let data = crate::use_cases::infobase_check::ConnectionChecked::default();
+                err_envelope(command, 0, data)
+                    .map_err(McpServiceError::Internal)?
+                    .with_error(envelope_error(&business_error))
+            } else {
+                let data = McpRefusalData::new("check_infobase", error.message());
+                adapter_error_envelope(command, data, business_error.clone())
+            };
+            response.duration_ms = crate::support::time::elapsed_ms(started);
+            Err(McpServiceError::Business(McpBusinessFailure::new(
+                business_error,
+                response,
+            )))
+        }
+    }
+}
+
 pub(crate) fn execution_context(
     call_context: McpCallContext,
     command: CommandName,
