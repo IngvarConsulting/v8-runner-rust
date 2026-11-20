@@ -5,8 +5,8 @@ use serde::Serialize;
 use tracing::{debug, error};
 
 use crate::cli::args::{
-    BootstrapArgs, Cli, Command, ConfigCommand, ConfigInitArgs, McpCommand, McpServeTransport,
-    ToolsCommand, ToolsDownloadCommand,
+    BootstrapArgs, Cli, Command, ConfigCommand, ConfigInitArgs, InfobaseArgs, InfobaseCommand,
+    McpCommand, McpServeTransport, ToolsCommand, ToolsDownloadCommand,
 };
 use crate::cli::execute;
 use crate::cli::global_flags;
@@ -177,6 +177,25 @@ pub fn run() -> i32 {
         }
     }
 
+    let checking_infobase = matches!(
+        &cli.command,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Check
+        })
+    );
+    if checking_infobase && cli.clean_before_execution {
+        let error = UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "--clean-before-execution is unavailable for infobase check",
+        );
+        print_command_error(
+            &presenter,
+            command_name(&cli.command),
+            &error,
+            error.message(),
+        );
+        return error.exit_code();
+    }
     let config = match load_cli_config(&cli) {
         Ok(loaded) => {
             presenter.note_leading_warnings(
@@ -212,6 +231,10 @@ pub fn run() -> i32 {
             return error.exit_code();
         }
     };
+    if checking_infobase {
+        return execute::execute_infobase_check(&config, &presenter)
+            .map_or_else(|error| error.exit_code(), |()| 0);
+    }
     // `download` без набора обходит пакеты проекта и отвечает своей формой: его ведёт общий
     // путь команд, а не подготовка одной выгрузки.
     let download_all = match &cli.command {
@@ -437,8 +460,14 @@ pub(crate) fn load_cli_config(
             &selector,
             cli.dry_run,
         )
-    } else if matches!(&cli.command, Command::Sessions(_)) {
-        crate::config::loader::load_config_for_sessions(config_path, workdir, &selector)
+    } else if matches!(
+        &cli.command,
+        Command::Sessions(_)
+            | Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Check
+            })
+    ) {
+        crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Dbms(_)) {

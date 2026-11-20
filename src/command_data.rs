@@ -96,6 +96,7 @@ command_data_forms! {
     "download", "download"
         => crate::domain::infobase_export::ExportConfigurationPackageResult;
     "download", "download-all" => crate::domain::infobase_export::DownloadAllResult;
+    "infobase.check", "infobase-check" => crate::use_cases::infobase_check::ConnectionChecked;
     "infobase.dump", "infobase-dump"
         => crate::domain::infobase_export::ExportInfobaseSnapshotResult;
     "infobase.restore", "infobase-restore"

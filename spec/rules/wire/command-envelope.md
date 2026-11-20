@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 7
+version: 8
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -164,3 +164,5 @@ generated_envelope_schema_is_current`. Руками её не правят — �
   }
 }
 ```
+
+**Что изменила версия 8.** Добавлены коды `infobase_not_found` и `connection_failed` для [проверки подключения](infobase-check-data.md).

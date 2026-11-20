@@ -982,6 +982,8 @@ pub struct InfobaseArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum InfobaseCommand {
+    /// Verify a real login and report the version of the 1C client
+    Check,
     /// Create the infobase and the EDT workspace declared by the project
     Create(InfobaseCreateArgs),
     /// Previous spelling of `download`; hidden for one release cycle

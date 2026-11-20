@@ -25,6 +25,10 @@
       "title": "McpBuildProjectRequest",
       "type": "object"
     },
+    "check_infobase": {
+      "properties": {},
+      "type": "object"
+    },
     "check_syntax_designer_config": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "MCP request for `check_syntax_designer_config`.",

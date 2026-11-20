@@ -16,6 +16,7 @@ const EXPECTED_MCP_TOOLS: &[&str] = &[
     "run_module_tests",
     "build_project",
     "dump_config",
+    "check_infobase",
     "launch_app",
     "check_syntax_edt",
     "check_syntax_designer_config",
@@ -530,6 +531,10 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 /// Сценарии, которые по правилу идут без замка `workPath`, с причиной. Запись, которой
 /// больше никто не пользуется, валит проверку.
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
+    (
+        "crate::use_cases::infobase_check::check",
+        "проверка входа работает только в приватном временном каталоге, общего состояния под workPath не меняет (CTR.WIRE.INFOBASE-CHECK-DATA)",
+    ),
     (
         "crate::use_cases::managed_stand::dbms_status",
         "читает запись без замка, чтобы отвечать и пока идёт другая команда",
