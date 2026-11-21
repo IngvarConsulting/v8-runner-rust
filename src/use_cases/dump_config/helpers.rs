@@ -404,11 +404,10 @@ fn remove_stale_temp_dirs(
             continue;
         }
 
-        let removed = remove_tree_in_parallel(&path).or_else(already_gone);
         if metadata.is_superseded_backup() {
             // Прежнее дерево ни для чего не нужно: не удалось сейчас — удалится в следующий раз,
             // а выгрузку это не останавливает. Его может удалять и фоновый процесс.
-            match removed.and_then(|()| remove_path_if_exists(&metadata_sidecar_path(&path))) {
+            match crate::support::fs::remove_superseded_backup(&path).or_else(already_gone) {
                 Ok(()) => {}
                 Err(error) => tracing::warn!(
                     path = %path.display(),
@@ -418,12 +417,14 @@ fn remove_stale_temp_dirs(
             }
             continue;
         }
-        removed.map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to remove stale temp dir '{}': {error}",
-                path.display()
-            ))
-        })?;
+        remove_tree_in_parallel(&path)
+            .or_else(already_gone)
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to remove stale temp dir '{}': {error}",
+                    path.display()
+                ))
+            })?;
         remove_path_if_exists(&metadata_sidecar_path(&path)).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to remove stale temp metadata '{}': {error}",
