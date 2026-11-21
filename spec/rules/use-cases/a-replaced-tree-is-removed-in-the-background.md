@@ -12,6 +12,7 @@ check:
   - src/use_cases/staged_publication.rs::an_ignore_link_in_a_replaced_directory_does_not_change_its_referent
   - src/support/fs.rs::a_swap_leaves_a_superseded_backup_that_only_the_marked_removal_takes
   - src/support/fs.rs::a_failed_stage_rename_restores_the_whole_previous_directory
+  - src/support/fs.rs::a_locked_child_reports_the_failed_target_rename_and_leaves_both_trees
   - src/support/fs.rs::a_backup_metadata_collision_leaves_the_old_and_staged_trees
   - src/use_cases/dump_config.rs::an_interruption_after_the_first_rename_leaves_a_recoverable_tree
   - src/use_cases/dump_config.rs::an_interrupted_link_replacement_waits_for_the_original_lock_and_restores_the_link
