@@ -222,7 +222,7 @@ fn discard(
                         if error.cancellation().is_some()
                             || error.platform_release().is_some()
                             || (executor.provider == Provider::Ibcmd
-                                && matches!(error, AppError::InfobaseBusy(_))) =>
+                                && error.file_access_was_refused()) =>
                     {
                         return Err(error)
                     }

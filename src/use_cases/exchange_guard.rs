@@ -935,10 +935,7 @@ impl<'a> GenerationGate<'a> {
     /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
     pub(crate) fn after_failed_load(&self, set: &SourceSetContext, error: &AppError) {
         // A refused invocation has no partial load to reconcile.
-        if matches!(
-            error,
-            AppError::SourceLoadNotStarted(_) | AppError::InfobaseBusy(_)
-        ) {
+        if matches!(error, AppError::SourceLoadNotStarted(_)) || error.file_access_was_refused() {
             return;
         }
         let name = set.name();
@@ -1424,6 +1421,14 @@ mod tests {
             (
                 Provider::Agent,
                 AppError::SourceLoadNotStarted("missing staged dependency".to_owned()),
+            ),
+            (
+                Provider::Ibcmd,
+                AppError::from(crate::platform::ibcmd::IbcmdError::FileServerUnverified {
+                    path: root.path().join("base"),
+                    reason: "process inventory unavailable".to_owned(),
+                })
+                .with_context("configuration load"),
             ),
         ];
 

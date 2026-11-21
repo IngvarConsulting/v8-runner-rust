@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::model::{InfobaseConfig, MissingDbmsField};
 use crate::domain::infobase_export::RestoreTargetMode;
@@ -11,6 +12,8 @@ use crate::platform::process::{
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::session_list::SessionTerminate;
 
+use super::ibsrv::{file_server_pid, FileServerCheckError};
+
 // Разбор пакета (`export --file`) в несколько потоков отказывает на годных пакетах (#476),
 // поэтому он идёт в один поток. Выгрузка из базы ключа не несёт и идёт в потоках платформы:
 // `INV.PLATFORM.AN-IBCMD-EXPORT-FROM-A-BASE-KEEPS-PLATFORM-THREADS`.
@@ -20,6 +23,9 @@ const PACKAGE_EXPORT_THREADS_ARG: &str = "--threads=1";
 pub enum IbcmdError {
     #[error("file infobase '{}' is served by ibsrv pid {pid}; refusing direct ibcmd access", path.display())]
     FileServedByIbsrv { path: PathBuf, pid: u32 },
+
+    #[error("cannot verify local ibsrv processes for file infobase '{}': {reason}; refusing direct ibcmd access", path.display())]
+    FileServerUnverified { path: PathBuf, reason: String },
 
     #[cfg_attr(
         not(unix),
@@ -71,18 +77,35 @@ pub enum IbcmdError {
 /// The same check protects callers which prepare a destructive step before invoking IBCMD.
 pub(crate) fn refuse_file_base_served_by_ibsrv(
     path: &Path,
-    cancellation: &tokio_util::sync::CancellationToken,
+    cancellation: &CancellationToken,
+) -> Result<(), IbcmdError> {
+    check_file_server(path, cancellation, file_server_pid)
+}
+
+type FileServerProbe = fn(&Path, &CancellationToken) -> Result<Option<u32>, FileServerCheckError>;
+
+fn check_file_server(
+    path: &Path,
+    cancellation: &CancellationToken,
+    inspect: FileServerProbe,
 ) -> Result<(), IbcmdError> {
     if cancellation.is_cancelled() {
         return Ok(());
     }
-    let server = crate::platform::ibsrv::file_server_pid(path, || cancellation.is_cancelled());
-    match server.filter(|_| !cancellation.is_cancelled()) {
-        Some(pid) => Err(IbcmdError::FileServedByIbsrv {
+    let server = inspect(path, cancellation);
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    match server {
+        Ok(Some(pid)) => Err(IbcmdError::FileServedByIbsrv {
             path: path.to_path_buf(),
             pid,
         }),
-        None => Ok(()),
+        Ok(None) => Ok(()),
+        Err(error) => Err(IbcmdError::FileServerUnverified {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        }),
     }
 }
 
@@ -786,12 +809,21 @@ impl<'a> IbcmdDsl<'a> {
         args: &[String],
         policy: &ProcessExecutionPolicy,
     ) -> Result<PlatformCommandResult, IbcmdError> {
+        self.run_with_file_server_probe(args, policy, file_server_pid)
+    }
+
+    fn run_with_file_server_probe(
+        &self,
+        args: &[String],
+        policy: &ProcessExecutionPolicy,
+        inspect: FileServerProbe,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
         // Единственная точка запуска ibcmd: запрет стоит здесь, а не у методов выгрузки.
         if wipes_the_export_directory(args) {
             return Err(IbcmdError::DirectoryWipingExport);
         }
         if let IbcmdConnection::File { database_path, .. } = &self.connection {
-            refuse_file_base_served_by_ibsrv(database_path, &policy.cancellation)?;
+            check_file_server(database_path, &policy.cancellation, inspect)?;
         }
         let mut args_with_data = args.to_vec();
         if let Some(data_path) = &self.data_path {
@@ -1362,6 +1394,44 @@ mod tests {
             Err(IbcmdError::SnapshotProbe { .. })
         ));
         assert!(runner.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn unavailable_ibsrv_inspection_never_dispatches_ibcmd() {
+        use super::FileServerProbe;
+        use crate::platform::service::ProcessInspectionError;
+
+        let runner = CapturingRunner::default();
+        let policy = ProcessExecutionPolicy::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            IbcmdConnection::File {
+                database_path: PathBuf::from("base"),
+                user: None,
+                password: None,
+            },
+            &runner,
+            policy.clone(),
+        );
+
+        let cases: [(FileServerProbe, &str); 2] = [
+            (
+                |_, _| Err(ProcessInspectionError::Inventory.into()),
+                "process inventory unavailable",
+            ),
+            (
+                |_, _| Err(ProcessInspectionError::Process(42).into()),
+                "could not inspect ibsrv pid 42",
+            ),
+        ];
+        for (inspect, expected) in cases {
+            let result = dsl.run_with_file_server_probe(&["infobase".to_owned()], &policy, inspect);
+            assert!(matches!(
+                result,
+                Err(IbcmdError::FileServerUnverified { reason, .. }) if reason == expected
+            ));
+            assert!(runner.requests.borrow().is_empty());
+        }
     }
 
     impl ProcessRunner for CapturingRunner {

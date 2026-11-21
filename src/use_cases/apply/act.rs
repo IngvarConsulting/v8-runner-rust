@@ -192,8 +192,7 @@ fn apply_with(
         }
         Err(refused) => refused,
     };
-    if matches!(refused.error, AppError::InfobaseBusy(_)) || refused.error.cancellation().is_some()
-    {
+    if refused.error.file_access_was_refused() || refused.error.cancellation().is_some() {
         return Err(refused.error);
     }
     let holder = sessions::holder(
@@ -229,7 +228,7 @@ fn apply_with(
         SessionTerminate::Force { message: &message },
     );
     let result = match result {
-        Err(refused) if matches!(refused.error, AppError::InfobaseBusy(_)) => {
+        Err(refused) if refused.error.file_access_was_refused() => {
             return Err(refused.error);
         }
         other => other,
