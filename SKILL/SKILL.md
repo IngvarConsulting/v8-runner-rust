@@ -149,7 +149,8 @@ v8-runner infobase create
 - In a git working tree a DESIGNER set takes its changes from git: `git config core.untrackedCache true` speeds it up; on Windows `core.fsmonitor true` made it slower in measurements, because the runner asks git for untracked files too. The runner never sets either itself. After upgrading to a runner with git-based change detection, run `pull <SET> --force` once per set: older hash memory is not memory (`push` refuses `untracked_base`, `status` says `unreadable`). A `.gitignore` rule that hides a file the platform writes into a set refuses `status`/`push`/`pull`/`make` with `source_set_ignored_by_git`: anchor the rule (`/build/`, not `build/`) or remove it.
 - Need a CF/CFE package of the state currently stored in the infobase: use
   `v8-runner download <SET> [--state db] --output <file.cf|file.cfe>` (without `--state` the working configuration, `db` the database one),
-  or `--extension <name>` with a `.cfe`. Without a set and `--extension`, `--output` is a directory: every configuration/extension set
+  or `--extension <name>` with a `.cfe`. Both selectors support dotted extension names such as `Demo.Document`.
+  Without a set and `--extension`, `--output` is a directory: every configuration/extension set
   goes to `<dir>/<SET>.cf|.cfe`, extension sets missing from the infobase are skipped and listed in `data.not_installed`
   (`make --output <dir>` likewise builds every set, external ones into `<dir>/<SET>/`). A file path without a set is refused
   (`error.next` names `<command> <main set> --output <file>.cf`) — except `download` in an infobase-only project

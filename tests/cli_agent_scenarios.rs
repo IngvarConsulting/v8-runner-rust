@@ -333,6 +333,34 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
     );
 }
 
+#[test]
+fn working_extension_export_through_the_agent_uses_a_fixed_staging_name() {
+    let harness = harness();
+    let output = harness.dir.path().join("out").join("addon.cfe");
+
+    let (code, payload) = run(
+        &harness,
+        &[
+            "download",
+            "--extension",
+            "NUL.Demo",
+            "--output",
+            &output.display().to_string(),
+        ],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(fs::read_to_string(output).expect("CFE"), "CFE:NUL.Demo");
+    let commands = commands(&harness);
+    assert!(
+        commands.iter().any(|line| {
+            line.starts_with("config dump-cfg --file=export/")
+                && line.ends_with("/extension.cfe --extension=NUL.Demo")
+        }),
+        "{commands:?}"
+    );
+}
+
 /// Выгрузка базы — `dump-ib` в каталог агента и перенос в цель.
 #[test]
 fn infobase_dump_through_the_agent_publishes_the_dt() {
