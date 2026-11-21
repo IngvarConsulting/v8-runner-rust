@@ -953,19 +953,42 @@ fn reserve_directory_backup(
             ));
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to inspect backup path '{}': {error}",
+                    backup.display()
+                ),
+            ));
+        }
     }
     let bytes = encode_temp_dir_metadata(TempDirKind::Backup, run_id, target, target_identity)?;
     let sidecar = metadata_sidecar_path(backup);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&sidecar)?;
+        .open(&sidecar)
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to create backup marker '{}': {error}",
+                    sidecar.display()
+                ),
+            )
+        })?;
     let written = file.write_all(&bytes);
     drop(file);
     if let Err(error) = written {
         let _ = std::fs::remove_file(&sidecar);
-        return Err(error);
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to write backup marker '{}': {error}",
+                sidecar.display()
+            ),
+        ));
     }
     Ok(sidecar)
 }
@@ -1188,7 +1211,7 @@ pub fn swap_dir_atomically(
     let stage_metadata_path = metadata_sidecar_path(staging_dir);
 
     if !target_dir.exists() {
-        std::fs::rename(staging_dir, target_dir)?;
+        rename_directory(staging_dir, target_dir)?;
         let fsync_result = best_effort_fsync_dir(parent);
         let _ = remove_path_if_exists(&stage_metadata_path);
         fsync_result?;
@@ -1200,7 +1223,7 @@ pub fn swap_dir_atomically(
 
     // Leave a recoverable backup even if the process stops at the first rename.
     let backup_marker = reserve_directory_backup(&backup_dir, run_id, target_dir, target_identity)?;
-    if let Err(error) = std::fs::rename(target_dir, &backup_dir) {
+    if let Err(error) = rename_directory(target_dir, &backup_dir) {
         let _ = std::fs::remove_file(&backup_marker);
         return Err(error);
     }
@@ -1212,7 +1235,7 @@ pub fn swap_dir_atomically(
     });
 
     let restore_previous_tree = || {
-        std::fs::rename(&backup_dir, target_dir)?;
+        rename_directory(&backup_dir, target_dir)?;
         best_effort_fsync_dir(parent)?;
         let _ = std::fs::remove_file(&backup_marker);
         Ok(())
@@ -1225,17 +1248,17 @@ pub fn swap_dir_atomically(
         ));
     }
 
-    if let Err(error) = std::fs::rename(staging_dir, target_dir) {
+    if let Err(error) = rename_directory(staging_dir, target_dir) {
         return Err(with_rollback_context(
             error,
             restore_previous_tree().err(),
-            "failed to publish staged dump",
+            "failed to install staged directory",
         ));
     }
 
     if let Err(error) = best_effort_fsync_dir(parent) {
         let rollback_result =
-            std::fs::rename(target_dir, staging_dir).and_then(|()| restore_previous_tree());
+            rename_directory(target_dir, staging_dir).and_then(|()| restore_previous_tree());
         return Err(with_rollback_context(
             error,
             rollback_result.err(),
@@ -1262,6 +1285,19 @@ pub fn swap_dir_atomically(
     Ok(SwappedDir {
         backup: Some(SupersededBackup { dir: backup_dir }),
         cleanup_warning: None,
+    })
+}
+
+fn rename_directory(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to rename '{}' to '{}': {error}",
+                from.display(),
+                to.display()
+            ),
+        )
     })
 }
 
@@ -2332,6 +2368,13 @@ mod tests {
         let error = super::swap_dir_atomically(&stage, &target, "run", "identity", ".backup")
             .expect_err("existing marker");
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to create backup marker '{}'",
+                marker.display()
+            )),
+            "{error}"
+        );
         assert_eq!(
             fs::read_to_string(&marker).expect("marker"),
             "existing marker"
@@ -2352,7 +2395,19 @@ mod tests {
         let error =
             super::swap_dir_atomically(&staging_dir, &target_dir, "run", "identity", ".backup")
                 .expect_err("the stage has disappeared");
-        assert!(error.to_string().contains("failed to publish staged dump"));
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to install staged directory"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "failed to rename '{}' to '{}'",
+                staging_dir.display(),
+                target_dir.display()
+            )),
+            "{message}"
+        );
         assert_eq!(
             fs::read_to_string(target_dir.join("Configuration.xml")).expect("restored config"),
             "old config"
@@ -2410,6 +2465,49 @@ mod tests {
         super::remove_superseded_backup(&path).expect("removed");
         assert!(!path.exists());
         assert!(!super::metadata_sidecar_path(&path).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_child_reports_the_failed_target_rename_and_leaves_both_trees() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let stage = dir.path().join(".stage-run");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&target).expect("target");
+        fs::create_dir(&stage).expect("stage");
+        let old_file = target.join("old.txt");
+        let new_file = stage.join("new.txt");
+        fs::write(&old_file, "old").expect("old file");
+        fs::write(&new_file, "new").expect("new file");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&old_file)
+            .expect("open child without delete sharing");
+
+        let error = super::swap_dir_atomically(&stage, &target, "run", "identity", ".backup")
+            .expect_err("the open child blocks the target rename");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&old_file).expect("old file"), "old");
+        assert_eq!(fs::read_to_string(&new_file).expect("staged file"), "new");
+        assert!(!backup.exists());
+        assert!(!super::metadata_sidecar_path(&backup).exists());
+        drop(held);
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "failed to rename '{}' to '{}'",
+                target.display(),
+                backup.display()
+            )),
+            "{message}"
+        );
+        assert!(message.contains("(os error 5)"), "{message}");
     }
 
     #[cfg(windows)]
