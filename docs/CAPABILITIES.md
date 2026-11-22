@@ -675,7 +675,16 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 
 ```bash
 v8-runner infobase create [--from <INFOBASE>] [--recreate] [--dry-run]
+v8-runner infobase create --empty [--dry-run]
+v8-runner infobase create --input <FILE> [--dry-run]
 ```
+
+- `--empty` создаёт пустую файловую ИБ. `--input <файл.cf>` создаёт ИБ с применённой
+  конфигурацией, а `--input <файл.dt>` восстанавливает снимок с данными. Наборы,
+  XML/BSL и рабочая область EDT для этих режимов не нужны. Для новой файловой цели
+  выберите один режим. Сочетания с `--from` и `--recreate` отклоняются. После загрузки
+  файла объявите набор и выполните `pull <SET> --force`, чтобы получить исходники.
+  При частичном сбое файлы новой ИБ остаются, и ответ называет каталог.
 
 - `--recreate` заменяет существующую базу этой копии; без базы просто создаёт её, и
   `data.removed` пуст. Через MCP ключа нет. Порядок: замок `workPath`, замок базы (другая

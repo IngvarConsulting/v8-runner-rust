@@ -191,7 +191,7 @@ fn acquire(
     };
     // Память базы пишет только команда, которая пишет базу; чтение замка не берёт
     // (`INV.CLI.THE-MEMORY-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
-    let memory_lock = if base == BaseAccess::Writes {
+    let memory_lock = if matches!(base, BaseAccess::Writes | BaseAccess::Creates) {
         acquire_memory_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::WorkspaceLock,
             error: error.into(),
@@ -239,16 +239,33 @@ fn acquire(
         })
         .into_iter()
         .collect();
-    let owner_notes = check_infobase_owner(config, command.as_str(), base, OwnerCheck::Run)
-        .map_err(|error| BoundaryRefusal {
-            phase: InfobaseTransferPhase::InfobaseOwner,
-            error,
+    let owner_check = if base == BaseAccess::Creates {
+        OwnerCheck::Preview
+    } else {
+        OwnerCheck::Run
+    };
+    let owner_notes =
+        check_infobase_owner(config, command.as_str(), base, owner_check).map_err(|error| {
+            BoundaryRefusal {
+                phase: InfobaseTransferPhase::InfobaseOwner,
+                error,
+            }
         })?;
     notes.extend(owner_notes.into_iter().map(|warning| BoundaryNote {
         phase: InfobaseTransferPhase::InfobaseOwner,
         warning,
     }));
     Ok((workspace_lock, infobase_lock, notes))
+}
+
+/// Finish ownership admission after creating a file base, while its writer locks still live.
+pub(crate) fn record_created_file_owner(config: &AppConfig) -> Result<Vec<Warning>, UseCaseError> {
+    check_infobase_owner(
+        config,
+        CommandName::Init.as_str(),
+        BaseAccess::Writes,
+        OwnerCheck::Run,
+    )
 }
 
 /// Что команда на границе делает с простаивающими живыми агентами своей базы (#644):

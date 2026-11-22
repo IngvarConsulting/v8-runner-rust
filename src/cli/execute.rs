@@ -77,7 +77,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::infobase_lock::BaseAccess;
-use crate::use_cases::init_project;
+use crate::use_cases::init_project::{self, InitRequest};
 use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
@@ -87,9 +87,8 @@ use crate::use_cases::request::{
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DownloadAllRequest,
     DumpModeRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut,
-    InitRequest, LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode, SyntaxExtensionScope,
+    SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -1277,17 +1276,34 @@ fn execute_init(
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    let context = cli_context(config, CommandName::Init, cancellation);
+    let file_creation = if args.seeds_a_new_file_base() {
+        let creation = init_project::file_seed::FileCreation::prepare(
+            config,
+            args.input.as_deref(),
+            clean_before_execution,
+        )
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Init, error))?;
+        Some(creation)
+    } else {
+        None
+    };
+    let access = if file_creation.is_some() {
+        BaseAccess::Creates
+    } else {
+        BaseAccess::Writes
+    };
     let request = InitRequest {
         dry_run,
         from: args.from.clone(),
         recreate: args.recreate,
+        file_creation,
     };
-    let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Init,
-        BaseAccess::Writes,
+        access,
         clean_before_execution,
         dry_run,
         || {

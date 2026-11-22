@@ -17,11 +17,18 @@ check:
   - src/use_cases/init_project.rs::a_cancellation_deferred_by_the_creation_leaves_an_empty_remembered_base
   - tests/cli_infobase_recreate.rs::create_refuses_an_existing_base_with_the_recreate_advice_and_recreate_creates_a_missing_one
   - tests/cli_infobase_recreate.rs::a_recreate_preview_names_what_it_would_remove_and_touches_nothing
+  - tests/cli_infobase_recreate.rs::a_file_base_can_be_created_empty_without_source_sets
+  - tests/cli_infobase_recreate.rs::a_cf_creates_a_file_base_without_source_sets
+  - tests/cli_infobase_recreate.rs::a_dt_creates_a_file_base_without_source_sets
+  - tests/cli_infobase_recreate.rs::new_file_base_modes_refuse_an_existing_base_and_keep_its_owner
+  - tests/cli_infobase_recreate.rs::invalid_new_file_base_arguments_are_refused_before_platform
+  - tests/cli_infobase_recreate.rs::file_creation_refuses_a_target_in_its_own_memory_before_platform
+  - tests/cli_infobase_recreate.rs::partial_file_creation_clears_old_memory_without_claiming_ownership
 ---
 
 # Базу создаёт `infobase create`, и делает это по виду цели
 
-Без `--from` файловую базу `ibcmd` создаёт сразу с основной конфигурацией из исходников (`infobase create --import --apply --force`); запасной
+Без `--from`, `--empty` и `--input` файловую базу `ibcmd` создаёт сразу с основной конфигурацией из исходников (`infobase create --import --apply --force`); запасной
 исполнитель — Конфигуратор: `CREATEINFOBASE`, затем загрузка основной конфигурации и
 обновление базы данных. В кластере Конфигуратор одной командой `CREATEINFOBASE` с
 клиент-серверной строкой регистрирует базу и создаёт базу данных в СУБД, всегда с запретом
@@ -51,6 +58,15 @@ check:
 всё же появился, называет оставленный каталог и выходы: удалить его и создать базу заново или
 загрузить исходники поверх `push --force`. Копию другой базы делает `--from`
 (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
+
+`infobase create --empty` создаёт пустую файловую ИБ, `--input <файл.cf>` — файловую
+ИБ с применённой конфигурацией, `--input <файл.dt>` — файловую ИБ из снимка с данными.
+Команда не требует наборов исходников и не импортирует рабочую область EDT.
+Эти режимы взаимоисключаются друг с другом, с `--from` и с `--recreate`.
+Входной файл остаётся неизменным. Отсутствие цели повторно проверяется под замком,
+прежде чем запустить платформу или изменить метку владельца. После создания из CF
+или DT память об исходниках прежней базы не используется. Если исполнитель оставил
+частично созданную ИБ, ответ называет её, а прежняя память очищается.
 
 Исходники проекта EDT сперва переводятся в XML
 (`INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`). Чего правило не

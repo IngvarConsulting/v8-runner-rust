@@ -196,7 +196,7 @@ fn check_as(
     let writes = match access {
         BaseAccess::Untouched => return Ok(Vec::new()),
         BaseAccess::Reads => false,
-        BaseAccess::Writes => true,
+        BaseAccess::Writes | BaseAccess::Creates => true,
     };
     let Some(base_dir) = file_infobase_dir(config) else {
         return Ok(Vec::new());
