@@ -1510,6 +1510,7 @@ mod stand_tests {
     }
 
     #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     fn web_debug_preparation_edits_only_the_descriptor_and_reuses_it_on_repeat() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
