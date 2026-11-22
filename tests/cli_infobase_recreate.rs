@@ -68,6 +68,52 @@ impl Stand {
         Self { root, config, base }
     }
 
+    fn without_source_sets() -> Self {
+        let root = tempdir().expect("tempdir");
+        let platform = compile_fake_creator(&root.path().join("platform"));
+        let work = root.path().join("work");
+        let base = root.path().join("ib");
+        let config = root.path().join("v8project.yaml");
+        fs::write(
+            &config,
+            format!(
+                "workPath: '{}'\nformat: DESIGNER\nproviders:\n  infobase.create: designer\n  infobase.restore: designer\ntools:\n  platform:\n    path: '{}'\n",
+                work.display(),
+                platform.display(),
+            ),
+        )
+        .expect("config without source sets");
+        fs::write(
+            root.path().join("v8project.local.yaml"),
+            format!(
+                "infobases:\n  origin:\n    connection: 'File={}'\n",
+                base.display()
+            ),
+        )
+        .expect("named file base");
+        Self { root, config, base }
+    }
+
+    fn owner_marker(&self) -> PathBuf {
+        self.root.path().join(".ib.v8-runner.owners.json")
+    }
+
+    fn assert_creation_preview_is_read_only(&self, args: &[&str]) {
+        let mut preview_args = args.to_vec();
+        preview_args.push("--dry-run");
+        let output = self.run(&preview_args, false);
+        let plan = envelope(&output);
+        assert!(output.status.success(), "{plan}");
+        assert_eq!(plan["command"], "infobase create");
+        assert_eq!(plan["data"]["provider_dispatched"], false);
+        assert_eq!(plan["data"]["steps"][0]["status"], "planned");
+        assert!(!self.calls().exists(), "preview starts no platform");
+        assert!(!self.root.path().join("work").exists());
+        assert!(!self.root.path().join(".local").exists());
+        assert!(!self.base.exists());
+        assert!(!self.owner_marker().exists());
+    }
+
     fn calls(&self) -> PathBuf {
         self.root.path().join("calls.log")
     }
@@ -103,6 +149,198 @@ fn envelope(output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+#[test]
+fn a_file_base_can_be_created_empty_without_source_sets() {
+    let stand = Stand::without_source_sets();
+    stand.assert_creation_preview_is_read_only(&["--empty"]);
+
+    let output = stand.run(&["--empty"], false);
+    let result = envelope(&output);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["command"], "infobase create");
+    assert_eq!(result["data"]["provider_dispatched"], true);
+    assert_eq!(stand.read("1Cv8.1CD"), "new");
+    assert!(stand.owner_marker().is_file());
+    let calls = fs::read_to_string(stand.calls()).expect("platform calls");
+    assert!(calls.contains("\"CREATEINFOBASE\""), "{calls}");
+    assert!(
+        !calls.contains("/UseTemplate") && !calls.contains("/RestoreIB"),
+        "{calls}"
+    );
+    assert!(!calls.contains("/LoadConfigFromFiles"), "{calls}");
+}
+
+#[test]
+fn a_cf_creates_a_file_base_without_source_sets() {
+    let stand = Stand::without_source_sets();
+    let input = stand.root.path().join("configuration input.cf");
+    fs::write(&input, b"configuration package").unwrap();
+    let args = ["--input", input.to_str().unwrap()];
+    stand.assert_creation_preview_is_read_only(&args);
+
+    let output = stand.run(&args, false);
+    let result = envelope(&output);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["command"], "infobase create");
+    assert_eq!(stand.read("1Cv8.1CD"), "configuration package");
+    assert_eq!(fs::read(input).unwrap(), b"configuration package");
+    let calls = fs::read_to_string(stand.calls()).expect("platform calls");
+    assert!(
+        calls.contains("\"CREATEINFOBASE\"") && calls.contains("\"/UseTemplate\""),
+        "{calls}"
+    );
+    assert!(!calls.contains("/LoadConfigFromFiles"), "{calls}");
+}
+
+#[test]
+fn a_dt_creates_a_file_base_without_source_sets() {
+    let stand = Stand::without_source_sets();
+    let input = stand.root.path().join("snapshot input.dt");
+    fs::write(&input, b"database image").unwrap();
+    let args = ["--input", input.to_str().unwrap()];
+    stand.assert_creation_preview_is_read_only(&args);
+
+    let output = stand.run(&args, false);
+    let result = envelope(&output);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["command"], "infobase create");
+    assert_eq!(stand.read("1Cv8.1CD"), "database image");
+    assert_eq!(fs::read(input).unwrap(), b"database image");
+    let calls = fs::read_to_string(stand.calls()).expect("platform calls");
+    assert!(calls.contains("\"/RestoreIB\""), "{calls}");
+    assert!(!calls.contains("/LoadConfigFromFiles"), "{calls}");
+}
+
+#[test]
+fn new_file_base_modes_refuse_an_existing_base_and_keep_its_owner() {
+    let stand = Stand::without_source_sets();
+    fs::create_dir(&stand.base).unwrap();
+    fs::write(stand.base.join("1Cv8.1CD"), b"existing base").unwrap();
+    let owner = serde_json::json!({
+        "version": 2,
+        "owners": [{
+            "machine": "0".repeat(64),
+            "host": "elsewhere",
+            "project": stand.root.path().join("another working copy"),
+            "since": "2026-01-01T00:00:00Z",
+        }],
+    });
+    let owner = serde_json::to_vec_pretty(&owner).unwrap();
+    fs::write(stand.owner_marker(), &owner).unwrap();
+    let input = stand.root.path().join("configuration.cf");
+    fs::write(&input, b"configuration package").unwrap();
+    let input_args = ["--input", input.to_str().unwrap()];
+
+    for args in [&["--empty"][..], &input_args] {
+        let output = stand.run(args, false);
+        let result = envelope(&output);
+        assert!(!output.status.success(), "{result}");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already exists"),
+            "{result}"
+        );
+        assert_eq!(stand.read("1Cv8.1CD"), "existing base");
+        assert_eq!(fs::read(stand.owner_marker()).unwrap(), owner);
+        assert!(!stand.calls().exists(), "refusal starts no platform");
+    }
+}
+
+#[test]
+fn invalid_new_file_base_arguments_are_refused_before_platform() {
+    let stand = Stand::without_source_sets();
+    let missing = stand.root.path().join("missing.cf");
+    let directory = stand.root.path().join("directory.cf");
+    let unsupported = stand.root.path().join("configuration.cfe");
+    let input = stand.root.path().join("configuration.cf");
+    fs::create_dir(&directory).unwrap();
+    fs::write(&unsupported, b"extension package").unwrap();
+    fs::write(&input, b"configuration package").unwrap();
+    let input = input.to_str().unwrap();
+
+    for args in [
+        &["--input", missing.to_str().unwrap()][..],
+        &["--input", directory.to_str().unwrap()],
+        &["--input", unsupported.to_str().unwrap()],
+        &["--empty", "--input", input],
+        &["--empty", "--from", "other"],
+        &["--empty", "--recreate"],
+        &["--input", input, "--from", "other"],
+        &["--input", input, "--recreate"],
+    ] {
+        let output = stand.run(args, false);
+        assert!(
+            !output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!stand.calls().exists(), "{args:?} started the platform");
+        assert!(!stand.base.exists(), "{args:?} created a base");
+        assert!(!stand.owner_marker().exists(), "{args:?} changed ownership");
+    }
+}
+
+#[test]
+fn file_creation_refuses_a_target_in_its_own_memory_before_platform() {
+    let stand = Stand::without_source_sets();
+    let memory = stand.root.path().join(".local/infobases/origin");
+    let target = memory.join("hashes/ib");
+    fs::write(
+        stand.root.path().join("v8project.local.yaml"),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File={}'\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+    let output = stand.run(&["--empty"], false);
+    let result = envelope(&output);
+    assert!(!output.status.success(), "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overlaps runner state"),
+        "{result}"
+    );
+    assert!(!target.exists());
+    assert!(!stand.calls().exists());
+}
+
+#[test]
+fn partial_file_creation_clears_old_memory_without_claiming_ownership() {
+    let stand = Stand::without_source_sets();
+    let hashes = stand.root.path().join(".local/infobases/origin/hashes");
+    let generation = stand
+        .root
+        .path()
+        .join(".local/infobases/origin/generation.json");
+    fs::create_dir_all(&hashes).unwrap();
+    fs::write(hashes.join("main.redb"), b"stale baseline").unwrap();
+    fs::write(&generation, b"stale generation").unwrap();
+    let input = stand.root.path().join("package.cf");
+    fs::write(&input, b"package").unwrap();
+
+    let output = stand.run(&["--input", input.to_str().unwrap()], true);
+    let result = envelope(&output);
+    assert!(!output.status.success(), "{result}");
+    assert_eq!(result["error"]["code"], "platform_failure", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete creation"),
+        "{result}"
+    );
+    assert_eq!(stand.read("1Cv8.1CD"), "partial");
+    assert!(!hashes.exists());
+    assert!(!generation.exists());
+    assert!(!stand.owner_marker().exists());
+    assert_eq!(fs::read(input).unwrap(), b"package");
 }
 
 fn removed(envelope: &Value) -> Vec<(String, String)> {

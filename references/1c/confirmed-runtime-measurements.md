@@ -7232,3 +7232,27 @@ ibcmd infobase --data=<scratch>/ibcmd-data --db-path=<copy> config extension lis
 базе (29,964 и 2,740 с), в том числе с неверным пользователем (26,133 с).
 У отсутствующей регистрации прервали ожидание после 45 с, подтверждённого итога
 от Конфигуратора не получено. Успешный вход в кластер на этом стенде не подтверждён.
+
+## Файловая ИБ из CF или DT через CREATEINFOBASE (Windows, 8.3.27.2342)
+
+23.11.2026, Windows x64, клиент и `ibcmd` 1С 8.3.27.2342. Каждая цель — отдельный
+новый каталог временного стенда. CF собран из репозиторного тестового набора Designer.
+DT получен командой `infobase dump --output template.dt` из временной ИБ после применения
+этого CF. Вызовы:
+
+```text
+1cv8 CREATEINFOBASE "File='<target>';" /DisableStartupDialogs /DisableStartupMessages /Out <log>
+1cv8 CREATEINFOBASE "File='<target>';" /UseTemplate <input.cf> /DisableStartupDialogs /DisableStartupMessages /Out <log>
+1cv8 CREATEINFOBASE "File='<target>';" /UseTemplate <template.dt> /DisableStartupDialogs /DisableStartupMessages /Out <log>
+ibcmd infobase create --db-path=<target> --load=<input.cf> --apply --force
+```
+
+Все четыре вызова завершились с кодом 0. `CREATEINFOBASE` создал `1Cv8.1CD` в каждом
+случае. Для CF журнал Конфигуратора дошёл до принятия изменений. Для CF и DT проверочная
+выгрузка `DESIGNER /DumpConfigToFiles` вернула 0 и дала по два BSL-файла.
+`ibcmd` с `--force` сообщил об успешном обновлении конфигурации базы данных. Без
+`--force` тот же вызов запросил подтверждение и завершился с кодом 102 при закрытом stdin.
+SHA-256 входов до и после прогона совпал:
+
+- CF: `9bd3b172f4fefd7199fdb49bd0f4ccb4b589fee6e2e98b71cf1742a80513c63e`.
+- DT: `11937932ffaf0c1b888f9736cb052ad47a82b9890ddd81bb79f631ffdac2d133`.

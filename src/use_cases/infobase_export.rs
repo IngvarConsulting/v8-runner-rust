@@ -494,16 +494,20 @@ pub(crate) fn validate_restore_request(
     request: &RestoreInfobaseSnapshotRequest,
 ) -> Result<(), AppError> {
     validate_output_suffix(&request.input, "dt")?;
-    let metadata = std::fs::symlink_metadata(&request.input).map_err(|error| {
+    validate_transfer_input(&request.input)
+}
+
+pub(crate) fn validate_transfer_input(input: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(input).map_err(|error| {
         AppError::Validation(format!(
             "--input '{}' is not readable: {error}",
-            request.input.display()
+            input.display()
         ))
     })?;
     if !metadata.file_type().is_file() || metadata.len() == 0 {
         return Err(AppError::Validation(format!(
             "--input '{}' is not a non-empty regular file",
-            request.input.display()
+            input.display()
         )));
     }
     Ok(())
