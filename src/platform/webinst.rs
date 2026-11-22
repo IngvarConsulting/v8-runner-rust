@@ -14,6 +14,9 @@ use crate::domain::publish::PublishAction;
 use super::process::{ProcessError, ProcessResult};
 use super::secrets::{mask_known_secrets, mask_text};
 
+mod descriptor;
+pub(crate) use descriptor::publication_debug_edit;
+
 /// Аргументы `webinst` для объявленной публикации.
 pub fn webinst_args(
     action: PublishAction,
@@ -117,6 +120,7 @@ mod tests {
             conf: None,
             os_auth: false,
             url: None,
+            debugger_url: None,
         };
         let args = webinst_args(
             PublishAction::Publish,
@@ -152,6 +156,7 @@ mod tests {
             conf: Some(PathBuf::from("C:/conf/httpd.conf")),
             os_auth: true,
             url: None,
+            debugger_url: None,
         };
         let args = webinst_args(
             PublishAction::Delete,

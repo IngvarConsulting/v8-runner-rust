@@ -623,7 +623,36 @@ fn execute_web(
     config: &AppConfig,
     args: &LaunchArgs,
 ) -> UseCaseResult<LaunchResult> {
-    let url = client_address::web_address(config).map_err(UseCaseFailure::without_payload)?;
+    let debugger = args.launch.debugger_url.as_ref();
+    let managed_url = if debugger.is_some() {
+        crate::use_cases::managed_stand::managed_publication_url(context, config)
+            .map_err(UseCaseFailure::without_payload)?
+    } else {
+        None
+    };
+    let address = match managed_url {
+        Some(url) => url,
+        None if debugger.is_some()
+            && crate::use_cases::managed_stand::standalone_publishes_its_own_web_client(config) =>
+        {
+            let status = crate::use_cases::managed_stand::standalone_web_status(context, config)
+                .map_err(UseCaseFailure::without_payload)?;
+            let computed = status.http.filter(|_| status.ready && status.debug_url.is_some()).ok_or_else(|| {
+                UseCaseFailure::without_payload(AppError::environment("the standalone web client is not ready for debugging: run `standalone start --debug` or `standalone restart --debug`"))
+            })?;
+            client_address::web_address(config)
+                .map(str::to_owned)
+                .unwrap_or(computed)
+        }
+        None => client_address::web_address(config)
+            .map_err(UseCaseFailure::without_payload)?
+            .to_owned(),
+    };
+    let url = match debugger {
+        Some(debugger) => crate::platform::browser::with_http_debug(&address, debugger)
+            .map_err(UseCaseFailure::without_payload)?,
+        None => address,
+    };
     if args.client_mcp.is_some() || args.launch.external_epf_wait.is_some() {
         return Err(UseCaseFailure::without_payload(AppError::Validation(
             "launch web opens a browser and takes no client launch options".to_owned(),
@@ -649,7 +678,7 @@ fn execute_web(
     plan_args.push(url.to_owned());
     // Браузеру идёт настоящий адрес, в отчёт — замаскированный. Считаем один раз:
     // четыре независимых места маскировки разъехались бы.
-    let reported_url = mask_url_userinfo(url);
+    let reported_url = mask_url_userinfo(&url);
     if args.dry_run {
         let plan_args: Vec<String> = plan_args.iter().map(|arg| mask_url_userinfo(arg)).collect();
         log_live_stage(
@@ -677,7 +706,7 @@ fn execute_web(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
-            debug: None,
+            debug: launch_debug(&args.launch),
         });
     }
 
@@ -687,7 +716,7 @@ fn execute_web(
         "launch: web",
         "[Launch] opening the published infobase",
     );
-    let pid = crate::platform::browser::open_url(&program, &leading, url, context.work())
+    let pid = crate::platform::browser::open_url(&program, &leading, &url, context.work())
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     Ok(LaunchResult {
         ok: true,
@@ -703,7 +732,7 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
-        debug: None,
+        debug: launch_debug(&args.launch),
     })
 }
 

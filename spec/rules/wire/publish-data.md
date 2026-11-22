@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PUBLISH-DATA
-version: 7
+version: 8
 artifact: docs/schemas/command-data/publish.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -8,6 +8,8 @@ check:
   - tests/cli_publish.rs::publish_preview_never_echoes_the_password_of_the_connection_string
   - src/use_cases/managed_stand/web.rs::publish_runs_the_located_webinst_on_the_private_config_and_reloads_apache
   - src/use_cases/managed_stand/web.rs::only_webinst_is_elevated_and_a_refusing_sudo_names_the_sudoers_rule
+  - tests/cli_launch_debug.rs::external_web_debug_checks_the_descriptor_and_rdbg_without_republishing
+  - src/use_cases/managed_stand/web.rs::web_debug_preparation_edits_only_the_descriptor_and_reuses_it_on_repeat
 ---
 
 # `data` команды `publish`
@@ -27,6 +29,15 @@ loopback-адрес его порта. Ответ называет вычисл�
 **Что изменила версия 7.** Ответ управляемой публикации называет вычисленные сервер,
 каталог и адрес. На Linux её план называет `sudo` с ключами `-n --` перед путём `webinst`:
 права поднимаются только у него ([правило](../platform/a-managed-apache-is-private.md)).
+
+**Что изменила версия 8.** У `publish --prepare-debug <IDE_URL>` поле `debug` называет
+`state`, адрес для IDE `ide_url`, адрес для дескриптора и параметра веб-клиента `debugger_url`
+и факт изменения дескриптора `publication_changed`. `url` содержит адрес страницы для браузера.
+`planned` — превью, `ready` — подготовлена управляемая публикация или проверена встроенная
+публикация управляемого `ibsrv`, `external_route_verified` — дескриптор внешней публикации
+согласован и `rdbg` ответил с хоста вызова. Активация внешней публикации остаётся у её владельца.
+`route_unavailable` даёт IDE отдельную причину и инструкцию владельцу. Подготовка не открывает
+браузер; `provider_dispatched` относится к работе исполнителя, включая активацию Apache.
 
 **Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 

@@ -1985,7 +1985,7 @@ pub(super) mod tests {
                         .unwrap_or_default();
                     std::fs::write(
                         value("-dir").join("default.vrd"),
-                        format!("<point base=\"/demo\" ib=\"{connection}\"/>"),
+                        format!("<point xmlns=\"http://v8.1c.ru/8.2/virtual-resource-system\" base=\"/demo\" ib=\"{connection}\"/>"),
                     )
                     .unwrap();
                     let web = conf.parent().unwrap();
@@ -4077,7 +4077,7 @@ pub(super) mod tests {
         let publication = super::super::web::publication_with(
             &context,
             &stand.config,
-            crate::domain::publish::PublishAction::Publish,
+            Some(crate::domain::publish::PublishAction::Publish),
             false,
             &runner,
             &root,

@@ -638,6 +638,12 @@ fn execute_publish(
         } else {
             PublishAction::Publish
         },
+        prepare_debug: args
+            .prepare_debug
+            .as_deref()
+            .map(|url| parse_debugger_url(url, "--prepare-debug"))
+            .transpose()
+            .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Publish, error))?,
         dry_run,
     };
     let context = cli_context(config, CommandName::Publish, cancellation);
@@ -733,9 +739,10 @@ fn render_publish_text(
     succeeded: bool,
     requested: Requested,
 ) {
-    let verb = match result.action {
-        crate::domain::publish::PublishAction::Publish => "Publication",
-        crate::domain::publish::PublishAction::Delete => "Publication removal",
+    let verb = match (result.action, result.debug.is_some()) {
+        (_, true) => "Web debug preparation",
+        (crate::domain::publish::PublishAction::Publish, false) => "Publication",
+        (crate::domain::publish::PublishAction::Delete, false) => "Publication removal",
     };
     // «Запланировано» — не стандартный исход, у него своя подпись. Превью называет запрос:
     // `provider_dispatched` говорит о работе исполнителя, а не о превью.
@@ -748,6 +755,12 @@ fn render_publish_text(
     ];
     if let Some(url) = result.url.as_deref() {
         details.push(format!("url: {url}"));
+    }
+    if let Some(debug) = &result.debug {
+        details.push(format!("IDE debugger: {}", debug.ide_url));
+        if let Some(url) = &debug.debugger_url {
+            details.push(format!("publication debugger: {url}"));
+        }
     }
     if !result.provider_dispatched {
         details.push("provider dispatched: false".to_owned());
@@ -5142,7 +5155,17 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         None
     };
     let mut launch = map_direct_launch_options(target, &args.launch, client_mcp.is_some())?;
-    launch.debugger_url = map_launch_debug(target, args.debug.as_deref())?;
+    launch.debugger_url = if let Some(url) = args.web_debug.as_deref() {
+        if target != crate::use_cases::request::LaunchTargetRequest::Web {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--web-debug is supported only for `launch web`",
+            ));
+        }
+        Some(parse_debugger_url(url, "--web-debug")?)
+    } else {
+        map_launch_debug(target, args.debug.as_deref())?
+    };
     Ok(LaunchRequest {
         target,
         launch,
@@ -5181,13 +5204,20 @@ fn map_launch_debug(
         }
         LaunchTargetRequest::Enterprise(_) => {}
     }
-    match crate::domain::launch::DebuggerUrl::parse(url) {
-        Some(parsed) => Ok(Some(parsed)),
+    parse_debugger_url(url, "--debug").map(Some)
+}
+
+fn parse_debugger_url(
+    url: &str,
+    option: &str,
+) -> Result<crate::domain::launch::DebuggerUrl, UseCaseError> {
+    crate::domain::launch::DebuggerUrl::parse(url).ok_or_else(|| {
         // Введённое не повторяется: в нём могут быть учётные данные.
-        None => refuse(
-            "--debug: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it".to_owned(),
-        ),
-    }
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!("{option}: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it"),
+        )
+    })
 }
 
 fn map_direct_launch_options(
@@ -6975,6 +7005,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -7017,6 +7048,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "ordinary".to_owned(),
                     mcp_scenario: None,
@@ -7036,6 +7068,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -7055,6 +7088,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
@@ -7153,6 +7187,7 @@ mod tests {
         let launch_error = map_launch_request(
             &LaunchArgs {
                 debug: None,
+                web_debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
@@ -7585,6 +7620,7 @@ mod tests {
             &config,
             &Command::Launch(LaunchArgs {
                 debug: None,
+                web_debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,

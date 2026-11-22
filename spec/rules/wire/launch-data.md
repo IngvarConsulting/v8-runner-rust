@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 7
+version: 8
 artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_launch_debug.rs::a_debug_launch_preview_attaches_the_client_to_the_debug_server
+  - tests/cli_launch_debug.rs::a_web_debug_preview_preserves_the_publication_url_and_replaces_old_debug_keys
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_launch.rs::an_epf_wait_interrupted_after_the_client_started_answers_in_its_form
   - tests/cli_launch.rs::thin_application_parameter_wait_preserves_values_without_execute
@@ -58,6 +59,11 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 **Что изменила версия 7.** Появилось `debug` — `{url}` сервера отладки, к которому клиент
 подключён ключом `launch --debug <url>` (`INV.CLI.A-DEBUG-LAUNCH-ATTACHES-THE-ENTERPRISE-CLIENT`).
 Без ключа поля нет.
+
+**Что изменила версия 8.** `launch web --web-debug <URL>` отдаёт в `url` адрес веб-клиента
+с параметрами отладки, а в `debug.url` — адрес сервера отладки для веб-клиента. У запуска
+`provider_dispatched` означает передачу адреса системному обработчику. Регистрацию `WEBClient`
+и срабатывание точки останова подтверждает подключённый отладчик.
 
 ## Наблюдение MCP
 

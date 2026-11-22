@@ -11,8 +11,11 @@ use tracing::debug;
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::launch::DebuggerUrl;
 use crate::domain::progress::ProgressPhase;
-use crate::domain::publish::{PublishAction, PublishPlan, PublishResult};
+use crate::domain::publish::{
+    PublishAction, PublishPlan, PublishResult, WebDebugPreparation, WebDebugState,
+};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRequest;
 use crate::platform::secrets::mask_preview_args;
@@ -21,13 +24,14 @@ use crate::platform::webinst::{webinst_args, write_diagnostics};
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::managed_stand::{ManagedPublication, Reload};
+use crate::use_cases::managed_stand::ManagedPublication;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishRequest {
     pub action: PublishAction,
+    pub prepare_debug: Option<DebuggerUrl>,
     pub dry_run: bool,
 }
 
@@ -45,10 +49,24 @@ fn run_publish(
     config: &AppConfig,
     request: &PublishRequest,
 ) -> UseCaseResult<PublishResult> {
+    if let Some(ide_url) = request.prepare_debug.as_ref().filter(|_| {
+        crate::use_cases::managed_stand::standalone_publishes_its_own_web_client(config)
+    }) {
+        let status = crate::use_cases::managed_stand::standalone_web_status(context, config)
+            .map_err(UseCaseFailure::without_payload)?;
+        let mut web = config.infobase.web.clone().unwrap_or_default();
+        web.url = web.url.or(status.http.filter(|_| status.ready));
+        web.debugger_url = status
+            .debug_url
+            .as_deref()
+            .filter(|_| status.ready)
+            .and_then(DebuggerUrl::parse);
+        return prepare_web_debug(context, &web, None, true, ide_url, request.dry_run);
+    }
     let managed = crate::use_cases::managed_stand::publication(
         context,
         config,
-        request.action,
+        request.prepare_debug.is_none().then_some(request.action),
         request.dry_run,
     )
     .map_err(UseCaseFailure::without_payload)?;
@@ -96,6 +114,21 @@ fn publish_with(
                     .to_owned(),
             ))
         })?;
+    if let Some(ide_url) = &request.prepare_debug {
+        return prepare_web_debug(
+            context,
+            web,
+            managed.as_ref(),
+            false,
+            ide_url,
+            request.dry_run,
+        );
+    }
+    if managed.is_none() && web.debugger_url.is_some() && request.action == PublishAction::Publish {
+        return Err(UseCaseFailure::without_payload(AppError::Validation(
+            "publish would replace the external default.vrd and remove HTTP debugging; ask the external publication owner to use webinst with a -descriptor template that preserves the debug settings".to_owned(),
+        )));
+    }
     let server = web.server.ok_or_else(|| {
         UseCaseFailure::without_payload(AppError::Validation(
             "infobase.web.server is not declared: iis, apache2, apache22 or apache24".to_owned(),
@@ -110,7 +143,12 @@ fn publish_with(
         let receipt = config
             .provider_plan(Operation::Publish)
             .receipt_for(Provider::Webinst, Vec::new());
-        (receipt, publication.webinst.clone())
+        let program = publication.webinst.clone().ok_or_else(|| {
+            UseCaseFailure::without_payload(AppError::Runtime(
+                "missing managed webinst program".to_owned(),
+            ))
+        })?;
+        (receipt, program)
     } else {
         let selected = crate::use_cases::provider_selection::select(
             config,
@@ -144,7 +182,7 @@ fn publish_with(
     );
     // На Linux управляемая публикация поднимает права только у `webinst`.
     let (program, args) = match &managed {
-        Some(publication) => publication.command(args),
+        Some(publication) => publication.command(program, args),
         None => (program, args),
     };
     let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
@@ -157,6 +195,7 @@ fn publish_with(
         wsdir: wsdir.clone(),
         dir: dir.clone(),
         url: web.url.clone(),
+        debug: None,
         plan,
         platform_log_path: None,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -273,26 +312,16 @@ fn publish_with(
             if let Some(publication) = &managed {
                 // Сначала файлы `webinst` возвращаются пользователю раннера, затем Apache
                 // перечитывает конфиг.
-                let reclaimed = publication.reclaim_files();
-                let reclaim_failed = reclaimed.is_err();
-                if let Err(mut error) =
-                    reclaimed.and_then(|()| publication.reload(Reload::Activate))
-                {
-                    if let Some(snapshot) = snapshot {
-                        // Файлы `webinst` забираются и тогда, когда откат конфига не удался;
-                        // отказ забрать их, уже названный выше, не повторяется.
-                        let restored = snapshot
-                            .restore()
-                            .and_then(|()| publication.reload(Reload::Recover));
-                        let reclaimed = if reclaim_failed {
-                            None
-                        } else {
-                            publication.reclaim_files().err()
-                        };
-                        for rollback in [restored.err(), reclaimed].into_iter().flatten() {
-                            error = error.followed_by(rollback.to_string());
-                        }
-                    }
+                let debugger = web
+                    .debugger_url
+                    .as_ref()
+                    .filter(|_| request.action == PublishAction::Publish);
+                let activated = snapshot
+                    .ok_or_else(|| {
+                        AppError::Runtime("missing managed publication snapshot".to_owned()).into()
+                    })
+                    .and_then(|snapshot| publication.activate_publish(snapshot, debugger));
+                if let Err(error) = activated {
                     done.ok = false;
                     done.message = Some(error.to_string());
                     return Err(UseCaseFailure::with_payload(error, done));
@@ -331,5 +360,131 @@ fn publish_with(
             }
             Err(UseCaseFailure::with_payload(error, done))
         }
+    }
+}
+
+fn prepare_web_debug(
+    context: &ExecutionContext,
+    web: &crate::config::model::InfobaseWebConfig,
+    managed: Option<&ManagedPublication<'_>>,
+    standalone: bool,
+    ide_url: &DebuggerUrl,
+    dry_run: bool,
+) -> UseCaseResult<PublishResult> {
+    let started = Instant::now();
+    let result = |state, publication_changed, message: String| PublishResult {
+        provider: None,
+        ok: state != WebDebugState::RouteUnavailable,
+        provider_dispatched: false,
+        action: PublishAction::Publish,
+        server: web
+            .server
+            .map_or(if standalone { "ibsrv" } else { "external" }, |server| {
+                server.as_str()
+            })
+            .to_owned(),
+        wsdir: web.wsdir.clone().unwrap_or_default(),
+        dir: web.dir.clone().unwrap_or_default(),
+        url: web
+            .url
+            .as_deref()
+            .map(crate::platform::secrets::mask_url_userinfo),
+        debug: Some(WebDebugPreparation {
+            state,
+            ide_url: ide_url.clone(),
+            debugger_url: web.debugger_url.clone(),
+            publication_changed,
+        }),
+        plan: None,
+        platform_log_path: None,
+        duration_ms: started.elapsed().as_millis() as u64,
+        message: Some(message),
+    };
+    let unavailable = |message: String| {
+        let error = AppError::environment(message.clone());
+        UseCaseFailure::with_payload(
+            error,
+            result(WebDebugState::RouteUnavailable, false, message),
+        )
+    };
+    let debugger = web.debugger_url.as_ref().ok_or_else(|| unavailable(if standalone {
+        "start the standalone server with `standalone start --debug` or enable debugging with `standalone restart --debug`".to_owned()
+    } else {
+        "declare infobase.web.debugger-url as the direct HTTP debugger address reachable from the publication host".to_owned()
+    }))?;
+    if web
+        .url
+        .as_deref()
+        .is_none_or(|url| crate::platform::browser::with_http_debug(url, debugger).is_err())
+    {
+        return Err(unavailable(
+            "declare infobase.web.url for the browser".to_owned(),
+        ));
+    }
+    if dry_run {
+        return Ok(result(
+            WebDebugState::Planned,
+            false,
+            "preview: would check the publication's HTTP debug route".to_owned(),
+        ));
+    }
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
+    }
+    if managed.is_none() && !standalone {
+        let descriptor = web.dir.as_ref().map(|dir| dir.join("default.vrd")).ok_or_else(|| unavailable(
+            "run publication preparation on the external web server host and declare infobase.web.dir for its active default.vrd".to_owned(),
+        ))?;
+        let contents = std::fs::read(&descriptor).map_err(|error| unavailable(format!(
+            "cannot read '{}': {error}; point infobase.web.dir at the active publication on the web server host", descriptor.display(),
+        )))?;
+        let edit = crate::platform::webinst::publication_debug_edit(&contents, debugger).map_err(
+            |error| {
+                unavailable(format!(
+                    "cannot read publication debug settings in '{}': {error}",
+                    descriptor.display()
+                ))
+            },
+        )?;
+        if edit.is_some() {
+            return Err(unavailable(format!(
+                "ask the external publication owner to enable HTTP debugging in '{}' with debugger URL {debugger} and reload the publication",
+                descriptor.display(),
+            )));
+        }
+    }
+    let route_answers = crate::platform::dbgs::probe_rdbg(&debugger.to_string());
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
+    }
+    if !route_answers {
+        return Err(unavailable(format!(
+            "rdbg did not answer at {debugger} from this host; start the debugger server and ask the publication owner to make infobase.web.debugger-url reachable from the web server",
+        )));
+    }
+    if let Some(publication) = managed {
+        let changed = publication.prepare_debug(debugger).map_err(|error| {
+            let message = error.to_string();
+            UseCaseFailure::with_payload(
+                error,
+                result(WebDebugState::RouteUnavailable, false, message),
+            )
+        })?;
+        return Ok(result(
+            WebDebugState::Ready,
+            changed,
+            "publication HTTP debugging is ready; connect the IDE debugger before opening the browser".to_owned(),
+        ));
+    }
+    if standalone {
+        Ok(result(WebDebugState::Ready, false, "standalone HTTP debugging is ready; connect the IDE debugger before opening the browser".to_owned()))
+    } else {
+        Ok(result(WebDebugState::ExternalRouteVerified, false, "the descriptor and debugger route are verified from this host; the external publication owner must activate descriptor changes".to_owned()))
     }
 }

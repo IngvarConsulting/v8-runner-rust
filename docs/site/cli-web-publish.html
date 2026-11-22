@@ -108,6 +108,7 @@ ERROR: platform error: webinst failed with exit code 1</code></pre>
 <h2 class="command-variant" id="publish-preview">web publish --dry-run</h2>
 <pre data-output-command><code>v8-runner web publish --dry-run</code></pre>
 <p>Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без <code>--dry-run</code> выполняется указанная операция. Требуются параметры управления <code>web.server</code>, <code>wsdir</code> и <code>dir</code>; одного <code>web.url</code> недостаточно. <code>--delete</code> удаляет публикацию.</p>
+<p><code>publish --prepare-debug &lt;IDE_URL&gt;</code> готовит HTTP-отладку управляемой публикации или проверяет дескриптор и маршрут на хосте внешней. Ответ сообщает адрес для IDE и адрес для веб-клиента. Подключите отладчик перед <a href="cli-launch.html#launch-variant-2">открытием браузера</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="publish-example-outcome">План публикации подготовлен</h4>
 <p>Успех превью подтверждает подготовку плана, а не выполнение операции. Фрагмент текстового ответа:</p>

@@ -3,6 +3,27 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::launch::DebuggerUrl;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebDebugState {
+    Planned,
+    Ready,
+    ExternalRouteVerified,
+    RouteUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct WebDebugPreparation {
+    pub state: WebDebugState,
+    /// Address to hand to the IDE debugger, independently of the browser and web server.
+    pub ide_url: DebuggerUrl,
+    /// Address in default.vrd and in the web client's DebuggerURL startup parameter.
+    pub debugger_url: Option<DebuggerUrl>,
+    pub publication_changed: bool,
+}
+
 /// Что просили у `webinst`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -35,9 +56,8 @@ pub struct PublishResult {
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
     pub ok: bool,
-    /// Whether `webinst` was started for this command. `false` in a preview. A refusal before
-    /// the start answers the shared refusal form, without this field; a failure after the
-    /// start answers this form with `ok: false` and `true`.
+    /// The executor received work, such as running `webinst` or activating Apache. `false`
+    /// in a preview and for an external route check.
     pub provider_dispatched: bool,
     pub action: PublishAction,
     /// Web server named in `infobase.web.server`; `apache24` for `infobase.web.managed`.
@@ -50,6 +70,8 @@ pub struct PublishResult {
     /// address of the private Apache for `infobase.web.managed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<WebDebugPreparation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<PublishPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
