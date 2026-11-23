@@ -301,7 +301,7 @@ pub(crate) fn read_with_record_tool(
         // Вопрос `ibcmd` о пользователе базы — не «нет ответа»: иначе сверка поколения назвала
         // бы его расхождением и спрятала причину.
         Err(error)
-            if matches!(error, AppError::InfobaseBusy(_))
+            if error.file_access_was_refused()
                 || error.cancellation().is_some()
                 || error.environment_layer() == Some(EnvironmentLayer::InfobaseUser) =>
         {
