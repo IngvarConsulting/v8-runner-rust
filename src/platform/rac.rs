@@ -1,10 +1,15 @@
 //! `rac` — клиент администрирования кластера через `ras`: вопросы, которые нужны кластеру под
 //! управлением раннера. Ответ `rac` — блоки строк `ключ : значение`, разделённые пустой строкой.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::platform::process::{
-    ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
+    ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionSafety,
+    ProcessRequest, ProcessResult, ProcessRunner,
 };
 use uuid::Uuid;
 
@@ -367,6 +372,124 @@ fn infobase_name(block: &str) -> Option<String> {
     Some(field(block, "name")?.trim_matches('"').to_lowercase())
 }
 
+/// Адрес базы, выведенный из записи управляемого стенда для запуска агента.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ManagedSessionTarget {
+    pub local_path: PathBuf,
+    pub project: PathBuf,
+    pub name: String,
+    pub reference: String,
+    pub connection: String,
+    pub cluster_user: Option<String>,
+    pub cluster_password: Option<String>,
+}
+
+impl std::fmt::Debug for ManagedSessionTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedSessionTarget")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ManagedSessionTarget {
+    /// Сессия агента исчезла, если в полном снимке этой базы нет сеансов Designer.
+    pub(crate) fn designer_is_absent(&self, cancellation: &CancellationToken) -> bool {
+        self.snapshot_excludes_designer(cancellation)
+            .unwrap_or(false)
+    }
+
+    fn snapshot_excludes_designer(&self, cancellation: &CancellationToken) -> Option<bool> {
+        use crate::platform::locator::UtilityType;
+        use crate::platform::ragent::ras_address;
+        use crate::platform::service_record::{running_cluster, running_ras};
+        use crate::support::local_dir::LocalDir;
+
+        let local = LocalDir::new(&self.local_path, &self.project);
+        let pins = running_cluster(&local, &self.name)?;
+        if !pins.registered || pins.ports.connection(&self.reference) != self.connection {
+            return None;
+        }
+        let ras = running_ras(&local, &self.name)?;
+        let address = ras_address(ras.port);
+        let program = ras.bin.with_file_name(UtilityType::Rac.executable_name());
+        let policy = ProcessExecutionPolicy::platform_step(
+            Some(Duration::from_secs(3)),
+            cancellation.clone(),
+            ProcessInterruptionSafety::GracefulThenKill,
+        );
+        let run = |request| -> Option<ProcessResult> {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            let answer = ProcessExecutor.run_with_policy(&request, &policy).ok()?;
+            complete_response(&answer).then_some(answer)
+        };
+        let answer = run(cluster_list(&program, &address))?;
+        let [cluster]: [Cluster; 1] = clusters(&answer.stdout).try_into().ok()?;
+        if !unique_keys(&answer.stdout, &["cluster", "host", "port"]) {
+            return None;
+        }
+        if cluster.port != pins.ports.regport {
+            return None;
+        }
+        let auth = Credentials {
+            user: self.cluster_user.as_deref(),
+            password: self.cluster_password.as_deref(),
+        };
+        let answer = run(with_cluster_auth(
+            infobase_list(&program, &address, &cluster.id),
+            auth,
+        ))?;
+        if !unique_keys(&answer.stdout, &["infobase", "name"]) {
+            return None;
+        }
+        let infobase = checked_infobase_id(&answer.stdout, &self.reference)??;
+        let answer = run(with_cluster_auth(
+            session_list(&program, &address, &cluster.id, &infobase.to_string()),
+            auth,
+        ))?;
+        let still_running = running_ras(&local, &self.name)?;
+        if still_running.pid != ras.pid
+            || still_running.started != ras.started
+            || still_running.port != ras.port
+            || running_cluster(&local, &self.name)? != pins
+        {
+            return None;
+        }
+        Some(!cancellation.is_cancelled() && designer_absent(&answer, infobase))
+    }
+}
+
+fn unique_keys(answer: &str, keys: &[&str]) -> bool {
+    blocks(answer).all(|block| keys.iter().all(|key| values(&block, key).count() == 1))
+}
+
+fn complete_response(answer: &ProcessResult) -> bool {
+    answer.outcome().is_ok()
+        && answer.interruption.is_none()
+        && answer.stderr.trim().is_empty()
+        && answer.stdout.lines().all(|line| {
+            line.trim().is_empty()
+                || record_field(line).is_some_and(|(key, _)| {
+                    let key = key.trim();
+                    !key.is_empty()
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+        })
+}
+
+fn designer_absent(answer: &ProcessResult, infobase: Uuid) -> bool {
+    complete_response(answer)
+        && checked_sessions_in(&answer.stdout, Some(infobase)).is_some_and(|sessions| {
+            !sessions
+                .iter()
+                .any(|session| session.application.eq_ignore_ascii_case("Designer"))
+        })
+}
+
 /// Один сеанс из ответа `session list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -425,12 +548,21 @@ pub fn sessions(answer: &str) -> Vec<Session> {
 
 /// The entire session snapshot is needed before a selected UUID can be terminated.
 pub fn checked_sessions(answer: &str) -> Option<Vec<Session>> {
+    checked_sessions_in(answer, None)
+}
+
+fn checked_sessions_in(answer: &str, scope: Option<Uuid>) -> Option<Vec<Session>> {
     let mut ids = std::collections::HashSet::new();
     blocks(answer)
         .map(|block| {
             let id = uuid_field(&block, "session")?;
             let mut session = Session::parse(&block)?;
             if values(&block, "session").count() != 1
+                || scope.is_some_and(|base| {
+                    uuid_field(&block, "infobase") != Some(base)
+                        || values(&block, "infobase").count() != 1
+                        || values(&block, "app-id").count() != 1
+                })
                 || session.application.is_empty()
                 || field(&block, "session-id").is_some() && session.number.is_none()
                 || field(&block, "hibernate").is_some_and(|value| !matches!(value, "yes" | "no"))
@@ -469,10 +601,15 @@ fn field<'a>(block: &'a str, key: &'a str) -> Option<&'a str> {
 /// Значения ключа во всех блоках ответа. `rac` пишет строку `ключ<пробелы> : значение`, и делит её
 /// именно ` : `: двоеточие внутри значения — например, `host:port` — строку не режет.
 pub fn values<'a>(answer: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-    answer.lines().filter_map(move |line| {
-        let (name, value) = line.split_once(" : ")?;
-        (name.trim() == key).then(|| value.trim())
-    })
+    answer
+        .lines()
+        .filter_map(record_field)
+        .filter_map(move |(name, value)| (name == key).then_some(value))
+}
+
+fn record_field(line: &str) -> Option<(&str, &str)> {
+    let (name, value) = line.split_once(" : ")?;
+    Some((name.trim(), value.trim()))
 }
 
 /// Идентификатор первого кластера из ответа `cluster list`.
@@ -492,6 +629,42 @@ pub fn lists_infobase(answer: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_complete_snapshot_of_the_expected_base_can_exclude_designer() {
+        use crate::platform::process::ProcessResult;
+
+        let base = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let row = format!("session : 22222222-2222-2222-2222-222222222222\ninfobase : {base}\n");
+        let scope = |exit_code, stdout: String, stderr: &str| ProcessResult {
+            exit_code,
+            stdout,
+            stderr: stderr.to_owned(),
+            interruption: None,
+        };
+        assert!(designer_absent(&scope(0, String::new(), ""), base));
+        assert!(designer_absent(
+            &scope(0, format!("{row}app-id : 1CV8C\n"), ""),
+            base
+        ));
+        for stdout in [
+            format!("{row}app-id : Designer\nhibernate : yes\n"),
+            format!("{row}app-id : 1CV8C\napp-id : Designer\n"),
+            format!("{row}app-id : 1CV8C\napp-id :Designer\n"),
+            format!("{row}app-id : 1CV8C\n[v8-runner: 100 bytes of output omitted]\n"),
+            row.clone(),
+            format!("{row}app-id : 1CV8C\ninfobase : {base}\n"),
+            format!(
+                "{}app-id : 1CV8C\n",
+                row.replace(&base.to_string(), "wrong")
+            ),
+        ] {
+            assert!(!designer_absent(&scope(0, stdout, ""), base));
+        }
+        assert!(!designer_absent(&scope(1, String::new(), ""), base));
+        assert!(!designer_absent(&scope(0, String::new(), "error"), base));
+    }
+
     use super::*;
 
     #[test]

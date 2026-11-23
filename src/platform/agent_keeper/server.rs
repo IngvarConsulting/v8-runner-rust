@@ -35,8 +35,8 @@ use super::protocol::{
 };
 use super::{idle_limit, KeeperHome};
 use crate::platform::agent::{
-    AgentError, AgentErrorType, AgentLaunch, AgentMessage, AtOpen, HostKeyExpectation,
-    ManagedAgent, WaitPolicy,
+    AgentError, AgentErrorType, AgentLaunch, AgentMessage, AgentMessageType, AtOpen,
+    HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::live_registry::Registry;
 use crate::platform::process::ProcessExecutor;
@@ -382,6 +382,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
     let infobase = start.launch.infobase.clone();
     let work_path = Some(start.launch.work_path.display().to_string());
     let at_open = start.at_open;
+    let managed_sessions = start.launch.managed_sessions.clone();
     let mut agent = match launch(&shared.home, start) {
         Ok(launched) => launched,
         Err(error) => {
@@ -473,7 +474,9 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
                     cancel,
                     started,
                 };
-                if let Some(frame) = run_command(shared, &mut agent, job, &frames) {
+                if let Some(frame) =
+                    run_command(shared, &mut agent, managed_sessions.as_ref(), job, &frames)
+                {
                     let _ = frames.send(frame);
                 }
             }
@@ -680,6 +683,7 @@ struct RunJob {
 fn run_command(
     shared: &Shared,
     agent: &mut ManagedAgent,
+    managed_sessions: Option<&crate::platform::rac::ManagedSessionTarget>,
     job: RunJob,
     frames: &mpsc::UnboundedSender<Frame>,
 ) -> Option<Frame> {
@@ -717,7 +721,7 @@ fn run_command(
         first_on_kept
     };
     debug!(%command, critical, "running a command for a client");
-    let policy = WaitPolicy::for_keeper(cancel, critical);
+    let policy = WaitPolicy::for_keeper(cancel.clone(), critical);
     let forward = |batch: &[AgentMessage]| {
         let _ = frames.send(Frame::Batch {
             messages: batch.to_vec(),
@@ -742,51 +746,58 @@ fn run_command(
             forwarded = true;
             forward(batch);
         });
-    let stale = matches!(
-        &result,
-        Ok(reply) if matches!(
-            reply.outcome(),
-            Err(AgentError::Command {
-                error_type: AgentErrorType::DesignerNotConnectedToInfoBase,
-                ..
-            })
-        )
-    );
+    let failure = result.as_ref().ok().and_then(|reply| {
+        reply
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.is_terminal())
+            .filter(|message| message.kind == AgentMessageType::Error)
+            .and_then(|message| message.error_type.as_ref())
+    });
+    let running = || {
+        let state = shared.lock();
+        !cancel.is_cancelled() && !state.close_requested && !state.stop_requested
+    };
+    let stale = first_on_kept
+        && running()
+        && match failure {
+            Some(AgentErrorType::DesignerNotConnectedToInfoBase) => true,
+            Some(AgentErrorType::UnknownError) => {
+                managed_sessions.is_some_and(|target| target.designer_is_absent(&cancel))
+            }
+            _ => false,
+        };
+    let stale = stale && running();
     if heal && !forwarded && stale {
         warn!(%command, "the first command on the kept connection failed: the agent reconnects to the infobase and repeats it once");
         drop_connection(shared, agent);
-        let closing = {
-            let state = shared.lock();
-            state.close_requested || state.stop_requested
-        };
-        // Сторож уже решил снять агента: его сессию не переподключают.
-        let reconnected = if closing {
-            Err(KeeperError::Closing)
-        } else {
-            connect(shared, agent).map(drop)
-        };
-        result = match reconnected {
-            Ok(()) => agent
-                .session()
-                .run_streaming(&command, &policy, &mut |batch| forward(batch)),
-            Err(error) => {
-                let mut state = shared.lock();
-                state.busy = None;
-                state.current = None;
-                return Some(Frame::Error { error });
+        if running() {
+            match connect(shared, agent) {
+                Ok(_) if running() => {
+                    held = None;
+                    result = agent
+                        .session()
+                        .run_streaming(&command, &policy, &mut |batch| forward(batch));
+                }
+                Err(error) if running() => {
+                    let mut state = shared.lock();
+                    state.busy = None;
+                    state.current = None;
+                    return Some(Frame::Error { error });
+                }
+                _ => {}
             }
-        };
-    } else {
-        if let Some(held) = held.take() {
-            forward(&held);
         }
+    } else if stale {
         // Критическую команду не повторяют, некритическую с ответом из нескольких массивов —
         // тоже (часть ответа уже у команды); если такая первой упала на старом подключении,
         // следующая сессия подключается заново.
-        if first_on_kept && stale {
-            warn!(%command, "the first command on the kept connection failed: the next session reconnects to the infobase");
-            shared.lock().reconnect = true;
-        }
+        warn!(%command, "the first command on the kept connection failed: the next session reconnects to the infobase");
+        shared.lock().reconnect = true;
+    }
+    if let Some(held) = held {
+        forward(&held);
     }
     let frame = match result {
         Ok(_) => Frame::Done,
