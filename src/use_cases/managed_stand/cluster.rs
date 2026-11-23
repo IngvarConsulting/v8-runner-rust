@@ -174,7 +174,7 @@ impl Cluster<'_> {
     fn wanted_debug(&self, pins: Option<&ClusterPins>) -> bool {
         self.debug
             .requested()
-            .unwrap_or_else(|| pins.is_some_and(|pins| pins.debug))
+            .unwrap_or_else(|| pins.map_or(DEBUG_CLUSTER_SUPPORTED, |pins| pins.debug))
     }
 
     fn registry(&self, pins: &ClusterPins) -> PathBuf {
@@ -633,6 +633,21 @@ impl Cluster<'_> {
         if dry_run {
             return Ok(self.plan());
         }
+        self.start_with(new_regport, || {
+            if super::web::declared(self.config) {
+                super::web::Web::new(self.config, self.context, self.runner, self.host)?
+                    .start(super::web::Ownership::ClusterStep)?;
+            }
+            Ok(())
+        })
+        .map(|(cluster, ())| cluster)
+    }
+
+    fn start_with<T>(
+        &self,
+        new_regport: bool,
+        finish: impl FnOnce() -> Result<T, UseCaseError>,
+    ) -> Result<(ClusterResult, T), UseCaseError> {
         if !self.host.supported() || !self.host.can_start_as_current_user() {
             return Err(environment(
                 "managed clusters run on Windows or as an unprivileged user on Linux",
@@ -694,11 +709,8 @@ impl Cluster<'_> {
                     ServiceAction::AlreadyRunning,
                 );
                 result.ready = self.probe(&record.bin, ras.port).is_some();
-                if super::web::declared(self.config) {
-                    super::web::Web::new(self.config, self.context, self.runner, self.host)?
-                        .start(super::web::Ownership::ClusterStep)?;
-                }
-                return Ok(self.describe(result, Some(&record)));
+                let completed = finish()?;
+                return Ok((self.describe(result, Some(&record)), completed));
             }
             Observed::Starting(_) => {
                 return Err(being_started("the cluster", &self.declared.infobase))
@@ -752,24 +764,17 @@ impl Cluster<'_> {
             ),
             (pins, _) => self.start_on_pins(&machine, stand.as_ref(), pins),
         };
-        let outcome = outcome.and_then(|result| {
-            if super::web::declared(self.config) {
-                let web = super::web::Web::new(self.config, self.context, self.runner, self.host)?;
-                if let Err(error) = web.start(super::web::Ownership::ClusterStep) {
-                    return match self.stop_cluster(false) {
-                        Ok(_) => Err(error),
-                        Err(stop) => {
-                            Err(error.followed_by(format!("cluster cleanup failed: {stop}")))
-                        }
-                    };
-                }
-            }
-            Ok(result)
+        let outcome = outcome.and_then(|result| match finish() {
+            Ok(completed) => Ok((result, completed)),
+            Err(error) => match self.stop_cluster(false) {
+                Ok(_) => Err(error),
+                Err(stop) => Err(error.followed_by(format!("cluster cleanup failed: {stop}"))),
+            },
         });
         match outcome {
-            Ok(mut result) => {
+            Ok((mut result, completed)) => {
                 result.stale_record |= stale;
-                Ok(result)
+                Ok((result, completed))
             }
             Err(error) => match stand.as_ref().filter(|_| raised).map(Stand::stop_if_step) {
                 Some(Err(stop)) => Err(error.followed_by(format!(
@@ -947,7 +952,7 @@ impl Cluster<'_> {
                 pins
             }
             // Новые порты закрепляются до запуска: прерванный запуск оставит реестр, где база.
-            // Признак отладки — нет, он закрепляется ниже, после успешного подъёма.
+            // До успешного подъёма записывается умолчание, чтобы отказ не закрепил запрошенное исключение.
             None => {
                 let ports = self.choose_ports(stand, None)?;
                 let pins = ClusterPins {
@@ -955,7 +960,7 @@ impl Cluster<'_> {
                     registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
                     registered: false,
                     previous: None,
-                    debug: false,
+                    debug: DEBUG_CLUSTER_SUPPORTED,
                 };
                 self.write_pins(&pins)?;
                 pins
@@ -1015,7 +1020,8 @@ impl Cluster<'_> {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
-            debug: self.wanted_debug(Some(&old)),
+            // A recovered move returns to the previous registry and its saved debug mode.
+            debug: old.debug,
         };
         for paths in [&self.agent, &self.ras] {
             paths
@@ -1045,7 +1051,11 @@ impl Cluster<'_> {
             let _ = std::fs::remove_dir_all(&new_registry);
             error
         };
-        let agent = match self.raise(&moving, machine) {
+        let requested = ClusterPins {
+            debug: self.wanted_debug(Some(&old)),
+            ..moving
+        };
+        let agent = match self.raise(&requested, machine) {
             Ok(agent) => agent,
             Err(error) => return Err(roll_back(error, None)),
         };
@@ -1056,7 +1066,7 @@ impl Cluster<'_> {
         let pins = ClusterPins {
             registered: existed,
             previous: None,
-            ..moving
+            ..requested
         };
         if let Err(error) = registered.and_then(|()| self.write_pins(&pins)) {
             return Err(roll_back(error, Some(&agent)));
@@ -1421,45 +1431,80 @@ pub(super) fn debug_port(
         host,
         &no_locate,
     )?;
-    let infobase = &cluster.declared.infobase;
-    if !host.supported() || !DEBUG_CLUSTER_SUPPORTED {
-        return Err(environment(format!(
-            "the infobase '{infobase}' is on the managed cluster, and its debug server runs on Windows and Linux only: on this system there is none"
-        )));
-    }
-    let pins = cluster.pins();
-    let Observed::Own(_) = cluster.observe(&cluster.agent) else {
-        return Err(environment(format!(
-            "the cluster of '{infobase}' is not running: run `cluster start --debug`"
-        )));
-    };
-    let Some(pins) = pins.filter(|pins| pins.debug) else {
-        return Err(environment(format!(
-            "the cluster of '{infobase}' runs without a debug server: run `cluster restart --debug`"
-        )));
-    };
-    let port = pins.ports.debug();
-    let agent_alive = || matches!(cluster.observe(&cluster.agent), Observed::Own(_));
-    match super::await_rdbg(
-        host,
-        context,
-        "waiting for the debug server of the cluster",
-        &|| Some(port),
-        &agent_alive,
-    ) {
-        super::RdbgWait::Ready(port) => Ok(port),
-        super::RdbgWait::Interrupted(error) => Err(error),
-        super::RdbgWait::Gone => Err(environment(format!(
-            "the cluster of '{infobase}' stopped while its debug server was awaited: run `cluster start --debug`"
-        ))),
-        super::RdbgWait::TimedOut => Err(UseCaseError::new(
-            UseCaseErrorKind::TimedOut,
-            format!(
-                "the debug server of the cluster of '{infobase}' did not answer on port {port} in {} s; log: {}",
-                super::DEBUG_READY_TIMEOUT.as_secs(),
-                cluster.agent.log().display()
-            ),
-        )),
+    cluster.ready_debug_port()
+}
+
+pub(super) fn start_for_web(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+    start_apache: impl FnOnce(
+        &dyn Fn() -> Result<(), UseCaseError>,
+    ) -> Result<crate::domain::web::WebResult, UseCaseError>,
+) -> Result<crate::domain::web::WebResult, UseCaseError> {
+    let locate = || super::locate(config, crate::platform::locator::UtilityType::Ragent);
+    let cluster = cluster(config, context, runner, host, &locate)?.asking_for(DebugChoice::On);
+    cluster
+        .start_with(false, || {
+            let port = cluster.ready_debug_port()?;
+            start_apache(&|| {
+                if matches!(cluster.observe(&cluster.agent), Observed::Own(_))
+                    && cluster.host.rdbg_answers(port)
+                {
+                    Ok(())
+                } else {
+                    Err(environment(
+                        "the cluster's HTTP debug server became unavailable while starting Apache",
+                    ))
+                }
+            })
+        })
+        .map(|(_, web)| web)
+}
+
+impl Cluster<'_> {
+    fn ready_debug_port(&self) -> Result<u16, UseCaseError> {
+        let infobase = &self.declared.infobase;
+        if !self.host.supported() || !DEBUG_CLUSTER_SUPPORTED {
+            return Err(environment(format!(
+                "the infobase '{infobase}' is on the managed cluster, and its debug server runs on Windows and Linux only: on this system there is none"
+            )));
+        }
+        let pins = self.pins();
+        let Observed::Own(_) = self.observe(&self.agent) else {
+            return Err(environment(format!(
+                "the cluster of '{infobase}' is not running: run `cluster start --debug`"
+            )));
+        };
+        let Some(pins) = pins.filter(|pins| pins.debug) else {
+            return Err(environment(format!(
+                "the cluster of '{infobase}' runs without a debug server: run `cluster restart --debug`"
+            )));
+        };
+        let port = pins.ports.debug();
+        let agent_alive = || matches!(self.observe(&self.agent), Observed::Own(_));
+        match super::await_rdbg(
+            self.host,
+            self.context,
+            "waiting for the debug server of the cluster",
+            &|| Some(port),
+            &agent_alive,
+        ) {
+            super::RdbgWait::Ready(port) => Ok(port),
+            super::RdbgWait::Interrupted(error) => Err(error),
+            super::RdbgWait::Gone => Err(environment(format!(
+                "the cluster of '{infobase}' stopped while its debug server was awaited: run `cluster start --debug`"
+            ))),
+            super::RdbgWait::TimedOut => Err(UseCaseError::new(
+                UseCaseErrorKind::TimedOut,
+                format!(
+                    "the debug server of the cluster of '{infobase}' did not answer on port {port} in {} s; log: {}",
+                    super::DEBUG_READY_TIMEOUT.as_secs(),
+                    self.agent.log().display()
+                ),
+            )),
+        }
     }
 }
 
@@ -2121,7 +2166,8 @@ pub(super) mod tests {
         agent_args: RefCell<Vec<String>>,
         agent_exits_at_once: Cell<bool>,
         /// Сервер отладки агента отвечает по `rdbg`.
-        rdbg: Cell<bool>,
+        pub(crate) rdbg: Cell<bool>,
+        pub(crate) drop_rdbg_on_apache_start: Cell<bool>,
         cluster_silent: Cell<bool>,
         hard_stops: RefCell<HashSet<u32>>,
         /// Процессы, которых не снять.
@@ -2254,7 +2300,10 @@ pub(super) mod tests {
                         token.cancel();
                     }
                     if !self.agent_exits_at_once.get() {
-                        self.live(AGENT_PID, "ragent.exe");
+                        self.live(
+                            AGENT_PID,
+                            &crate::platform::service::image_name(&request.program),
+                        );
                         let port = |key: &str| -> u16 {
                             let at = request
                                 .args
@@ -2276,6 +2325,9 @@ pub(super) mod tests {
                     Ok(AGENT_PID)
                 }
                 "httpd" => {
+                    if self.drop_rdbg_on_apache_start.get() {
+                        self.rdbg.set(false);
+                    }
                     let path = request.args.last().unwrap();
                     let conf = std::fs::read_to_string(path).unwrap();
                     let root = PathBuf::from(path).parent().unwrap().to_path_buf();
@@ -2472,6 +2524,7 @@ pub(super) mod tests {
         executable(&apache);
         let bin = release_bin(&stand.config);
         executable(&bin.join(format!("webinst{}", std::env::consts::EXE_SUFFIX)));
+        executable(&bin.join(format!("ragent{}", std::env::consts::EXE_SUFFIX)));
         std::fs::write(
             crate::platform::apache::platform_module(&bin.join("ragent.exe")),
             "",
@@ -2536,7 +2589,7 @@ pub(super) mod tests {
             };
             self.command_in(context, command, host)
         }
-        fn command(
+        pub(crate) fn command(
             &self,
             command: ClusterCommand,
             host: &Host,
@@ -2778,6 +2831,49 @@ pub(super) mod tests {
         assert_eq!(started.debug_url, Some(format!("http://127.0.0.1:{port}")));
     }
 
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_new_cluster_starts_with_debugging_unless_explicitly_disabled() {
+        let setup = setup();
+        let host = Host::default();
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(started.debug_url.is_some());
+        assert!(setup.pins().debug);
+        let disabled = setup
+            .command(
+                ClusterCommand::Restart {
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(disabled.debug_url.is_none());
+        setup.command(ClusterCommand::Stop, &host).unwrap();
+        let still_disabled = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(still_disabled.debug_url.is_none());
+        assert!(!setup.pins().debug);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_failed_first_no_debug_start_does_not_override_the_default() {
+        let setup = setup();
+        let host = Host::default();
+        host.agent_exits_at_once.set(true);
+        setup
+            .command(debug_start(DebugChoice::Off), &host)
+            .unwrap_err();
+        host.agent_exits_at_once.set(false);
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(started.debug_url.is_some());
+    }
+
     /// Признак переживает `restart` без ключа; `--no-debug` его снимает.
     #[test]
     #[cfg(any(windows, target_os = "linux"))]
@@ -2813,9 +2909,7 @@ pub(super) mod tests {
     fn a_debug_start_on_a_cluster_running_without_it_is_refused() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         let error = setup
             .command(debug_start(DebugChoice::On), &host)
             .unwrap_err();
@@ -2839,9 +2933,7 @@ pub(super) mod tests {
     fn a_taken_debug_port_moves_no_registry() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         setup.command(ClusterCommand::Stop, &host).unwrap();
         let pins = setup.pins();
         host.listeners.borrow_mut().insert(pins.ports.debug(), 9999);
@@ -2868,9 +2960,7 @@ pub(super) mod tests {
     fn a_refused_debug_start_pins_no_debug() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         setup.command(ClusterCommand::Stop, &host).unwrap();
         let pins = setup.pins();
         assert!(!pins.debug);
@@ -2928,9 +3018,7 @@ pub(super) mod tests {
             error.to_string().contains("cluster start --debug"),
             "{error}"
         );
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         let error = debug_port(&context, &setup.config, &host).unwrap_err();
         assert!(
             error.to_string().contains("cluster restart --debug"),
@@ -3243,7 +3331,7 @@ pub(super) mod tests {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
-            debug: false,
+            debug: old.debug,
         };
         std::fs::create_dir_all(setup.agent().root().join(&moving.registry)).unwrap();
         write_json(&setup.agent().pins(), &moving).unwrap();
@@ -4208,11 +4296,22 @@ pub(super) mod tests {
         host.registration_fails.set(true);
         host.immortal.borrow_mut().insert(AGENT_PID);
         let refused = setup
-            .run_with(ServiceCommand::Start, true, &host)
+            .command(
+                ClusterCommand::Start {
+                    new_regport: true,
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
             .unwrap_err();
         assert!(refused.to_string().contains("roll back"), "{refused}");
         let moving = setup.pins();
         assert!(moving.previous.is_some(), "the move is still recorded");
+        assert_eq!(
+            moving.debug, old.debug,
+            "the pending move keeps the saved mode"
+        );
+        assert!(!host.agent_args.borrow().iter().any(|arg| arg == "-debug"));
         assert!(setup.agent().root().join(&moving.registry).is_dir());
         // `infobase create` такой кластер работающим не считает.
         assert!(setup.base(&host).is_err());

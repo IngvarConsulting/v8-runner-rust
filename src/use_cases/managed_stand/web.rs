@@ -313,7 +313,29 @@ impl<'a> Web<'a> {
         }
     }
 
+    fn start_with_debug(&self) -> Result<WebResult, UseCaseError> {
+        self.refuse_undeclared()?;
+        if !matches!(self.observe(), Observed::Own(_)) {
+            self.program()?;
+        }
+        super::cluster::start_for_web(
+            self.context,
+            self.config,
+            self.runner,
+            self.host,
+            |check_debug| self.start_checked(Ownership::Explicit, check_debug),
+        )
+    }
+
     pub(super) fn start(&self, ownership: Ownership) -> Result<WebResult, UseCaseError> {
+        self.start_checked(ownership, || Ok(()))
+    }
+
+    fn start_checked(
+        &self,
+        ownership: Ownership,
+        check_ready: impl FnOnce() -> Result<(), UseCaseError>,
+    ) -> Result<WebResult, UseCaseError> {
         self.refuse_undeclared()?;
         let observed = self.observe();
         if !self.host.supported() || !self.host.can_start_as_current_user() {
@@ -325,11 +347,21 @@ impl<'a> Web<'a> {
             if let Some(cluster) = self.paths.sibling(StandService::Cluster).own_record() {
                 self.check_module(&cluster.bin)?;
             }
-            if ownership == Ownership::Explicit && !record.explicit {
-                record.explicit = true;
-                write_record(&self.paths, &record)?;
+            check_ready()?;
+            let mut result = self.result(ServiceAction::AlreadyRunning);
+            if ownership == Ownership::Explicit {
+                if !result.ready {
+                    return Err(environment(
+                        "the managed Apache is not listening on its pinned port",
+                    ));
+                }
+                if !record.explicit {
+                    record.explicit = true;
+                    write_record(&self.paths, &record)?;
+                    result.explicit = Some(true);
+                }
             }
-            return Ok(self.result(ServiceAction::AlreadyRunning));
+            return Ok(result);
         }
         if matches!(observed, Observed::Starting(_)) {
             return Err(being_started("Apache", self.infobase));
@@ -447,7 +479,7 @@ impl<'a> Web<'a> {
             {
                 record.state = RecordState::Running;
                 record.starter = None;
-                break write_record(&self.paths, &record);
+                break check_ready().and_then(|()| write_record(&self.paths, &record));
             }
             if Instant::now() >= deadline {
                 break Err(environment(format!(
@@ -457,28 +489,37 @@ impl<'a> Web<'a> {
             }
             self.host.sleep(POLL);
         };
-        if let Err(error) = outcome {
-            if record.started.is_some() {
-                self.host
-                    .hard_stop(self.runner, pid, record.started, self.context);
-                if !await_gone(
-                    self.host,
-                    pid,
-                    record.started,
-                    self.host.patience(IDENTIFY_TIMEOUT),
-                ) {
-                    record.state = RecordState::Running;
-                    record.starter = None;
-                    write_record(&self.paths, &record)?;
-                    return Err(error.followed_by(format!("Apache PID {pid} did not stop")));
-                }
+        match outcome.and_then(|()| {
+            let mut result = self.result(ServiceAction::Started);
+            if ownership == Ownership::Explicit && !result.ready {
+                return Err(environment(
+                    "the managed Apache stopped listening during startup",
+                ));
             }
-            forget_record(&self.paths);
-            return Err(error);
+            result.previous_port = previous_port.filter(|previous| *previous != port);
+            Ok(result)
+        }) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if record.started.is_some() {
+                    self.host
+                        .hard_stop(self.runner, pid, record.started, self.context);
+                    if !await_gone(
+                        self.host,
+                        pid,
+                        record.started,
+                        self.host.patience(IDENTIFY_TIMEOUT),
+                    ) {
+                        record.state = RecordState::Running;
+                        record.starter = None;
+                        write_record(&self.paths, &record)?;
+                        return Err(error.followed_by(format!("Apache PID {pid} did not stop")));
+                    }
+                }
+                forget_record(&self.paths);
+                Err(error)
+            }
         }
-        let mut result = self.result(ServiceAction::Started);
-        result.previous_port = previous_port.filter(|previous| *previous != port);
-        Ok(result)
     }
 
     fn replace_config(&self, path: &Path, contents: &str) -> Result<(), UseCaseError> {
@@ -628,7 +669,7 @@ fn run_web(
     let outcome = match (command, dry_run) {
         (WebCommand::Start | WebCommand::Restart, true) => web.plan_start(),
         (WebCommand::Stop, true) => Ok(web.plan_stop()),
-        (WebCommand::Start, false) => web.start(Ownership::Explicit),
+        (WebCommand::Start, false) => web.start_with_debug(),
         (WebCommand::Stop, false) => web.stop(StopScope::Any),
         (WebCommand::Restart, false) => web.restart(),
     };
@@ -1271,6 +1312,27 @@ mod stand_tests {
         (stand, host)
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
+    fn running_with_debug() -> (Setup, Host) {
+        use super::super::{ClusterCommand, DebugChoice};
+
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        host.rdbg.set(true);
+        stand
+            .command(
+                ClusterCommand::Start {
+                    new_regport: false,
+                    debug: DebugChoice::On,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(host.alive(WEB_PID));
+        (stand, host)
+    }
+
     fn context(command: CommandName) -> ExecutionContext {
         ExecutionContext::cli(command)
     }
@@ -1375,8 +1437,87 @@ mod stand_tests {
     }
 
     #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_start_raises_a_stopped_cluster_with_debugging_then_apache() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        let plan = web(&stand, WebCommand::Start, true, &host).unwrap();
+        assert_eq!(plan.action, ServiceAction::Planned);
+        assert!(host.spawned.borrow().is_empty());
+        assert!(!paths(&stand).root().exists());
+
+        host.rdbg.set(true);
+        let started = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert!(started.ready);
+        assert_eq!(started.action, ServiceAction::Started);
+        assert_eq!(started.explicit, Some(true));
+        assert!(stand.pins().debug);
+        assert!(host.alive(WEB_PID));
+        let spawned = host.spawned.borrow().len();
+
+        let repeated = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert_eq!(repeated.action, ServiceAction::AlreadyRunning);
+        assert_eq!(repeated.pid, started.pid);
+        assert_eq!(host.spawned.borrow().len(), spawned);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_start_with_unresponsive_debugger_rolls_back_the_new_cluster_before_apache() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+
+        let refused = web(&stand, WebCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.error.kind(), UseCaseErrorKind::TimedOut);
+        assert!(!host.alive(WEB_PID));
+        assert!(!paths(&stand).root().exists());
+        assert!(stand.agent().own_record().is_none());
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_start_rolls_back_when_debugging_disappears_during_apache_start() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        host.rdbg.set(true);
+        host.drop_rdbg_on_apache_start.set(true);
+
+        let refused = web(&stand, WebCommand::Start, false, &host).unwrap_err();
+        assert!(refused.error.message().contains("became unavailable"));
+        assert!(!host.alive(WEB_PID));
+        assert!(stand.agent().own_record().is_none());
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_start_waits_for_cluster_http_debugging_before_declaring_apache_ready() {
+        use super::super::{ClusterCommand, DebugChoice};
+
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        stand
+            .command(
+                ClusterCommand::Start {
+                    new_regport: false,
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(host.alive(WEB_PID));
+        let result = web(&stand, WebCommand::Start, false, &host).unwrap_err();
+        assert!(result.error.message().contains("cluster restart --debug"));
+        assert_eq!(status(&stand, &host).explicit, Some(false));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     fn web_answers_take_the_forms_of_their_commands() {
-        let (stand, host) = running();
+        let (stand, host) = running_with_debug();
         let step = status(&stand, &host);
         let value = assert_form("web-status", &step);
         assert_eq!(value["state"], "started_by_this_copy");
@@ -1425,8 +1566,9 @@ mod stand_tests {
     /// Порт сервера отладки кластера в его блок не входит, но Apache его не занимает: иначе
     /// `cluster start --debug` отказал бы из-за своего же Apache.
     #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     fn apache_never_takes_the_debug_port_of_the_cluster() {
-        let (stand, host) = running();
+        let (stand, host) = running_with_debug();
         web(&stand, WebCommand::Stop, false, &host).unwrap();
         let debug = stand.pins().ports.debug();
         write_json(
@@ -1439,8 +1581,9 @@ mod stand_tests {
     }
 
     #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     fn a_taken_port_moves_apache_and_the_answer_names_the_previous_one() {
-        let (stand, host) = running();
+        let (stand, host) = running_with_debug();
         let first = port_of(&status(&stand, &host));
         web(&stand, WebCommand::Stop, false, &host).unwrap();
         host.listeners.borrow_mut().insert(first, 9001);
@@ -1463,8 +1606,9 @@ mod stand_tests {
     }
 
     #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     fn an_apache_holding_the_private_config_is_refused_with_its_pid() {
-        let (stand, host) = running();
+        let (stand, host) = running_with_debug();
         web(&stand, WebCommand::Stop, false, &host).unwrap();
         host.live(9002, &httpd());
         host.web_rows.borrow_mut().push(ProcessRow {
