@@ -393,8 +393,7 @@ PostgreSQL раннера — `MoveCause::Postgres`; порт занят — `Mo
 
 Частный Apache (`managed_stand::web`) — служба стенда рядом с PostgreSQL: запись, закреплённый порт и
 идентичность процесса под `localPath/infobases/<база>/managed/web/`. `cluster start` поднимает его шагом
-(`Ownership::ClusterStep`), `web start` — явно после готовности HTTP-отладки кластера. Остановленный
-кластер явный запуск поднимает с отладкой и проверяет ответ `rdbg` до запуска Apache. `cluster stop` гасит только шаг. Упавший между запуском
+(`Ownership::ClusterStep`), `web start` — явно; `cluster stop` гасит только шаг. Упавший между запуском
 Apache и записью PID раннер не оставляет сироту: `observe` узнаёт процесс по `httpd.pid`, образу, порту
 записи и ключу `-f` своего конфига.
 
