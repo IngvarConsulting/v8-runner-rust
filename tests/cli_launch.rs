@@ -907,7 +907,8 @@ fn launch_dry_run_json_returns_a_plan_without_dispatching_the_client() {
         .map(|arg| arg.as_str().expect("arg"))
         .collect();
     assert_eq!(planned.first(), Some(&"ENTERPRISE"));
-    assert!(planned.contains(&"/DisableStartupDialogs"));
+    // Интерактивный клиент может показать окно лицензии или входа (#784).
+    assert!(!planned.contains(&"/DisableStartupDialogs"));
     assert!(
         !wait_for_file(&args_log, Duration::from_millis(500)),
         "preview must not dispatch the client process"
@@ -994,6 +995,27 @@ fn launch_dry_run_json_names_the_program_and_the_arguments_it_would_run() {
         !args.is_empty(),
         "preview must name the arguments it would pass"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launch_interactive_thin_client_uses_bundle_from_selected_installation() {
+    let (_dir, config_path, install_dir, _work_path) = setup_project();
+    let executable = install_dir.join("1cv8c.app/Contents/MacOS/1cv8c");
+    write_script(&executable);
+    let executable = executable.canonicalize().expect("bundle executable path");
+
+    let preview = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+    assert_eq!(
+        preview["data"]["plan"]["program"],
+        executable.to_str().unwrap()
+    );
+    assert_eq!(preview["data"]["provider_dispatched"], false);
+    assert!(preview["data"]["pid"].is_null());
+
+    let launched = launch_json(&config_path, &["launch", "thin"]);
+    assert_eq!(launched["data"]["binary"], executable.to_str().unwrap());
+    assert!(launched["data"]["pid"].as_u64().is_some_and(|pid| pid > 0));
 }
 
 #[test]
@@ -1282,7 +1304,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(output.status.success());
     let args = read_args_log(&args_log);
     assert!(args.contains("ENTERPRISE"));
-    assert!(args.contains("/DisableStartupDialogs"));
+    assert!(!args.contains("/DisableStartupDialogs"));
     assert_eq!(args.matches("/RunModeOrdinaryApplication").count(), 1);
     assert!(args.contains("/UsePrivilegedMode"));
     assert!(args.contains("/Execute"));

@@ -18,6 +18,9 @@ const PACKAGE_EXPORT_THREADS_ARG: &str = "--threads=1";
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
+    #[error("file infobase '{}' is served by ibsrv pid {pid}; refusing direct ibcmd access", path.display())]
+    FileServedByIbsrv { path: PathBuf, pid: u32 },
+
     #[cfg_attr(
         not(unix),
         allow(
@@ -63,6 +66,24 @@ pub enum IbcmdError {
         "refusing to run 'ibcmd config export --sync --force': on a full fallback it deletes everything in the target directory, '.git' included"
     )]
     DirectoryWipingExport,
+}
+
+/// The same check protects callers which prepare a destructive step before invoking IBCMD.
+pub(crate) fn refuse_file_base_served_by_ibsrv(
+    path: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<(), IbcmdError> {
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    let server = crate::platform::ibsrv::file_server_pid(path, || cancellation.is_cancelled());
+    match server.filter(|_| !cancellation.is_cancelled()) {
+        Some(pid) => Err(IbcmdError::FileServedByIbsrv {
+            path: path.to_path_buf(),
+            pid,
+        }),
+        None => Ok(()),
+    }
 }
 
 fn lock_holder(pid: Option<i32>) -> String {
@@ -458,9 +479,23 @@ impl<'a> IbcmdDsl<'a> {
         &self,
         import: Option<&Path>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
+        self.create_with_configuration(import.map(|path| ("--import", path)))
+    }
+
+    pub fn infobase_create_from_cf(
+        &self,
+        input: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        self.create_with_configuration(Some(("--load", input)))
+    }
+
+    fn create_with_configuration(
+        &self,
+        configuration: Option<(&str, &Path)>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.create_infobase_args();
-        if let Some(import) = import {
-            args.push(format!("--import={}", import.display()));
+        if let Some((flag, path)) = configuration {
+            args.push(format!("{flag}={}", path.display()));
             args.push("--apply".to_owned());
             args.push("--force".to_owned());
         }
@@ -768,6 +803,9 @@ impl<'a> IbcmdDsl<'a> {
         // Единственная точка запуска ibcmd: запрет стоит здесь, а не у методов выгрузки.
         if wipes_the_export_directory(args) {
             return Err(IbcmdError::DirectoryWipingExport);
+        }
+        if let IbcmdConnection::File { database_path, .. } = &self.connection {
+            refuse_file_base_served_by_ibsrv(database_path, &policy.cancellation)?;
         }
         let mut args_with_data = args.to_vec();
         if let Some(data_path) = &self.data_path {

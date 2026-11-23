@@ -51,6 +51,118 @@ pub struct LaunchResult {
     /// Bounded thin-client wait without an external EPF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_wait: Option<Box<ClientWaitResult>>,
+    /// Сервер отладки, к которому подключён клиент (`launch --debug`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<Box<LaunchDebug>>,
+}
+
+/// Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`. Объект, а не
+/// строка: так поле закреплено формой `launch` (`CTR.WIRE.LAUNCH-DATA`, версия 7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LaunchDebug {
+    /// Адрес сервера отладки, как его получил клиент.
+    pub url: DebuggerUrl,
+}
+
+/// Адрес сервера отладки `http://<хост>:<порт>` — единственный вид, который принимает
+/// `/DEBUGGERURL` и отвечает `debug-server start`. Строится только разбором: без схемы
+/// `http`, без порта, с портом 0, путём, параметрами, фрагментом или учётными данными адреса
+/// нет. Хост и порт читает единственный владелец этого вопроса, `support::authority`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebuggerUrl {
+    host: String,
+    port: u16,
+}
+
+impl DebuggerUrl {
+    /// Разбор адреса, как его ввели; `None` — это не адрес сервера отладки.
+    pub fn parse(value: &str) -> Option<Self> {
+        let (scheme, rest) = value.split_once("://")?;
+        if !scheme.eq_ignore_ascii_case("http") {
+            return None;
+        }
+        let authority = rest.strip_suffix('/').unwrap_or(rest);
+        let (host, port) = crate::support::authority::host_and_port_of_authority(authority)?;
+        Some(Self {
+            host: host.to_string(),
+            port: port?,
+        })
+    }
+}
+
+impl std::fmt::Display for DebuggerUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // IPv6 в адресе — только в скобках.
+        if self.host.contains(':') {
+            write!(f, "http://[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "http://{}:{}", self.host, self.port)
+        }
+    }
+}
+
+impl Serialize for DebuggerUrl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for DebuggerUrl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom("the address of a debug server is http://<host>:<port>")
+        })
+    }
+}
+
+impl schemars::JsonSchema for DebuggerUrl {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DebuggerUrl".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^http://.+:[0-9]+$",
+            "description": "Адрес сервера отладки: http://<хост>:<порт>."
+        })
+    }
+}
+
+#[cfg(test)]
+mod debugger_url_tests {
+    use super::DebuggerUrl;
+
+    /// Адрес сервера отладки — только `http://<хост>:<порт>`; разбор хоста и порта — у
+    /// `support::authority`.
+    #[test]
+    fn a_debugger_url_is_http_host_and_port_only() {
+        let accepted = [
+            ("http://127.0.0.1:12961", "http://127.0.0.1:12961"),
+            ("HTTP://127.0.0.1:12961/", "http://127.0.0.1:12961"),
+            ("http://localhost:80", "http://localhost:80"),
+            ("http://[::1]:1561", "http://[::1]:1561"),
+        ];
+        for (input, shown) in accepted {
+            let url = DebuggerUrl::parse(input).unwrap_or_else(|| panic!("{input}"));
+            assert_eq!(url.to_string(), shown, "{input}");
+        }
+        for refused in [
+            "127.0.0.1:12961",
+            "https://127.0.0.1:12961",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:12961/e1crdbg",
+            "http://127.0.0.1:12961?x",
+            "http://127.0.0.1:12961#x",
+            "http://user@127.0.0.1:12961",
+            "http://:secret@127.0.0.1:12961",
+            "http://127.0.0.1:",
+        ] {
+            assert!(DebuggerUrl::parse(refused).is_none(), "{refused}");
+        }
+    }
 }
 
 /// Which of the target's two addresses opens the base.

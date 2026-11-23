@@ -63,6 +63,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-debug-server.html#op-debug-server-start">debug-server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -85,6 +86,7 @@
 <tbody><tr data-response-class="success"><td>Клиент или браузер запущен</td><td>PID при наличии относится к созданному процессу. Открытие браузера не проверяет доступность публикации.</td></tr>
 <tr data-response-class="preview"><td>Запуск запланирован</td><td><code>provider_dispatched: false</code>, PID не получен; plan содержит будущую программу и аргументы.</td></tr>
 <tr data-response-class="refusal"><td>Клиент не запущен</td><td>Неподходящая цель/ключи, отсутствующий веб-адрес, утилита не найдена или процесс не создан.</td></tr>
+<tr data-response-class="refusal"><td>Отладка не подходит запуску</td><td><code>--debug</code> у <code>designer</code> или <code>web</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code>, ключи <code>/DEBUG</code> или <code>/DEBUGGERURL</code> в <code>--raw-key</code> рядом с <code>--debug</code>: <code>invalid_argument</code>, выход CLI 2, клиент не запущен. <a href="#launch-debug-refused">Пример</a></td></tr>
 <tr data-response-class="readiness"><td>Готовность MCP-клиента подтверждена или не наступила</td><td>Для <code>launch mcp --wait-ready</code> проверяйте <code>mcp_readiness.ok</code>. Созданный процесс сам по себе не подтверждает готовность.</td></tr>
 <tr data-response-class="bounded"><td>Ожидание внешней EPF завершено</td><td>При запуске EPF с ожиданием <code>external_epf_wait</code> содержит exit_code, timed_out и пути журналов; отличается от простого получения PID. Завершение в срок не означает, что exit_code равен нулю.</td></tr>
 <tr data-response-class="interruption"><td>Запуск или ожидание прерваны</td><td>Отмена либо истёк срок ожидания. Процесс мог уже быть создан.</td></tr></tbody>
@@ -112,6 +114,27 @@ ERROR: runtime error: MCP endpoint did not become ready</code></pre>
 <p>Фрагмент успешного текстового ответа:</p>
 <pre data-output-example="launch-variant-2" data-output-schema="launch"><code>mode: web
 url: https://web.example/demo</code></pre>
+<h2 class="command-variant" id="launch-debug">launch thin --debug</h2>
+<pre data-output-command><code>v8-runner launch thin --debug http://127.0.0.1:12961</code></pre>
+<p>запускает клиент предприятия (<code>thin</code>, <code>thick</code>, <code>ordinary</code>, <code>mcp</code>) подключённым к серверу отладки: раннер добавляет клиенту ключи <code>/DEBUG -http -attach /DEBUGGERURL &lt;url&gt;</code> перед ключами <code>--raw-key</code>, и отладчик сам подключает предметы отладки клиента <span class="ref">(<a href="platform.html#t112">112</a>)</span>. Адрес — тот, что ответил <a href="cli-debug-server.html#op-debug-server-start"><code>debug-server start</code></a>: <code>http://&lt;хост&gt;:&lt;порт&gt;</code>, без пути, параметров и учётных данных. Перед запуском раннер сервер не проверяет: если сервера уже нет, клиент работает без отладки. Ответ называет адрес в <code>debug.url</code>. Конфигуратор отлаживается своим отладчиком, веб-клиент ключей запуска не получает: с ними <code>--debug</code> — отказ. Порядок работы — на странице <a href="cli-debug-server.html#client">debug-server</a>.</p>
+<h3>Варианты ответа</h3>
+<h4 id="launch-debug-outcome">Клиент запущен под отладкой</h4>
+<p>Фрагмент успешного текстового ответа:</p>
+<pre data-output-example="launch-debug" data-output-schema="launch"><code>mode: thin
+binary: /opt/1cv8/bin/1cv8c
+pid: 12345
+debug: http://127.0.0.1:12961</code></pre>
+<h4 id="launch-debug-plan">План запуска под отладкой</h4>
+<p>С <code>--dry-run</code> клиент не запускается; ключи отладки видны в <code>plan.args</code>. Фрагмент текстового ответа:</p>
+<pre data-output-example="launch-debug-example" data-output-schema="launch"><code>mode: thin
+binary: /opt/1cv8/bin/1cv8c
+debug: http://127.0.0.1:12961
+provider dispatched: false
+planned program: /opt/1cv8/bin/1cv8c
+planned args: ENTERPRISE /IBConnectionString File=/home/user/ib /DEBUG -http -attach /DEBUGGERURL http://127.0.0.1:12961</code></pre>
+<h4 id="launch-debug-refused">Отладка не подходит запуску</h4>
+<p>Отказ до запуска: <code>invalid_argument</code>, выход CLI 2. Так же отвечают <code>launch web --debug</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code> (путь, параметры, фрагмент, учётные данные, нет порта или порт 0) и <code>/DEBUG</code> или <code>/DEBUGGERURL</code> в <code>--raw-key</code> или в <code>tools.enterprise.additional-launch-keys</code> рядом с <code>--debug</code>. Отказ не повторяет введённый адрес.</p>
+<pre data-output-example="launch-debug-refused" data-output-schema="refusal"><code>ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger</code></pre>
 <h2 class="command-variant" id="launch-preview">launch designer --dry-run <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner launch designer --dry-run</code></pre>
 <p>Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без <code>--dry-run</code> выполняется указанная операция.</p>
@@ -205,6 +228,84 @@ provider dispatched: false</code></pre>
     },
     "warnings": [],
     "steps": []
+  },
+  "launch-debug": {
+    "ok": true,
+    "command": "launch",
+    "duration_ms": 0,
+    "data": {
+      "ok": true,
+      "mode": "thin",
+      "pid": 12345,
+      "binary": "/opt/1cv8/bin/1cv8c",
+      "via": "connection",
+      "platform_resolution": {
+        "path": "/opt/1cv8/bin/1cv8c",
+        "version": null,
+        "source": "explicit",
+        "installation_root": "/opt/1cv8"
+      },
+      "provider_dispatched": true,
+      "debug": {
+        "url": "http://127.0.0.1:12961"
+      },
+      "message": "Launched тонкий клиент via /opt/1cv8/bin/1cv8c (pid 12345)"
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "launch-debug-example": {
+    "ok": true,
+    "command": "launch",
+    "duration_ms": 0,
+    "data": {
+      "ok": true,
+      "mode": "thin",
+      "pid": null,
+      "binary": "/opt/1cv8/bin/1cv8c",
+      "via": "connection",
+      "platform_resolution": {
+        "path": "/opt/1cv8/bin/1cv8c",
+        "version": null,
+        "source": "explicit",
+        "installation_root": "/opt/1cv8"
+      },
+      "provider_dispatched": false,
+      "plan": {
+        "program": "/opt/1cv8/bin/1cv8c",
+        "args": [
+          "ENTERPRISE",
+          "/IBConnectionString",
+          "File=build/ib",
+          "/DEBUG",
+          "-http",
+          "-attach",
+          "/DEBUGGERURL",
+          "http://127.0.0.1:12961"
+        ]
+      },
+      "debug": {
+        "url": "http://127.0.0.1:12961"
+      },
+      "message": "Previewed тонкий клиент via /opt/1cv8/bin/1cv8c; client process not dispatched"
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "launch-debug-refused": {
+    "ok": false,
+    "command": "launch",
+    "duration_ms": 0,
+    "data": {
+      "message": "--debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "invalid_argument",
+      "kind": "validation",
+      "message": "--debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
+    }
   },
   "launch-refused": {
     "ok": false,

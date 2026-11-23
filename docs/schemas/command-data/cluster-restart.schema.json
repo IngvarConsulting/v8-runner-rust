@@ -52,6 +52,13 @@
         "null"
       ]
     },
+    "debug_url": {
+      "description": "Адрес сервера отладки кластера, поднятого с `--debug`: `http://127.0.0.1:<порт>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,

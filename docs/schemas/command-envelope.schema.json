@@ -267,6 +267,8 @@
           "enum": [
             "capability_unavailable",
             "environment_unavailable",
+            "infobase_not_found",
+            "connection_failed",
             "workspace_busy",
             "invalid_output",
             "cancelled",

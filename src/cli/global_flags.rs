@@ -240,6 +240,16 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "debug-server start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "debug-server stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "diff",
         preview: Preview::Absent("it reads the selected infobase to obtain the answer"),
         base: Base::Resolves,
@@ -278,6 +288,11 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Absent(
             "the run prepares its own directory and files, and its preview is not written yet",
         ),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "infobase check",
+        preview: Preview::Absent("it opens the selected infobase"),
         base: Base::Resolves,
     },
     Leaf {

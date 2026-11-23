@@ -1,6 +1,6 @@
 ---
 id: CTR.MCP.PUBLISHED-TOOL-SURFACE
-version: 2
+version: 3
 artifact: docs/schemas/mcp-tools.json
 check: [tests/mcp_http.rs::mcp_http_initialize_reuses_session_and_lists_tools]
 ---
@@ -12,12 +12,13 @@ check: [tests/mcp_http.rs::mcp_http_initialize_reuses_session_and_lists_tools]
 добавленное обязательное поле ломает её при неизменном имени. Артефакт порождается
 командой `UPDATE_MCP_SURFACE=1 cargo test --test mcp_http`, а не правится руками.
 
-Опубликованы восемь инструментов:
+Опубликованы девять инструментов:
 
 - `run_all_tests`
 - `run_module_tests`
 - `build_project`
 - `dump_config`
+- `check_infobase`
 - `launch_app`
 - `check_syntax_edt`
 - `check_syntax_designer_config`

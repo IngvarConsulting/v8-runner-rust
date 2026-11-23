@@ -55,7 +55,7 @@ pub(crate) fn collect_set<T>(
 
 /// Удачный конец обхода: длительность.
 pub(crate) fn finish<R: WalkReport>(mut result: R, started: Instant) -> R {
-    result.close(elapsed_ms(started), None);
+    result.close(crate::support::time::elapsed_ms(started), None);
     result
 }
 
@@ -66,7 +66,10 @@ pub(crate) fn fail<R: WalkReport>(
     started: Instant,
 ) -> UseCaseFailure<R> {
     let error = error.into();
-    result.close(elapsed_ms(started), Some(error.to_string()));
+    result.close(
+        crate::support::time::elapsed_ms(started),
+        Some(error.to_string()),
+    );
     UseCaseFailure::with_payload(error, result)
 }
 
@@ -81,13 +84,9 @@ pub(crate) fn fail_after_possible_work<R: WalkReport>(
     let error = error.into();
     let message = error.to_string();
     UseCaseFailure::after_possible_work(error, work, move || {
-        result.close(elapsed_ms(started), Some(message));
+        result.close(crate::support::time::elapsed_ms(started), Some(message));
         result
     })
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

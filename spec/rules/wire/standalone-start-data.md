@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STANDALONE-START-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/standalone-start.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -20,6 +20,8 @@ check:
 
 Адрес сервера живёт только в состоянии стенда: `v8project*.yaml` раннер не правит, адрес у `origin` не пишет. Берите его
 из ответа `start` или `status` и не кешируйте.
+
+**Что изменила версия 3.** Появились `debug_url` — адрес своего `dbgs` сервера, поднятого с `--debug`, и `stopped_debug_pid` — `dbgs`, погашенный `restart` вместе с сервером.
 
 ## Пример
 

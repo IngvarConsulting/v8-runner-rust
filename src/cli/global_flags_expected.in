@@ -40,6 +40,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "sessions terminate",
     "sessions deny",
     "sessions allow",
+    "infobase check",
     "agent keeper",
     "remove-backup",
 ];
@@ -63,6 +64,8 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "web start",
     "web stop",
     "web restart",
+    "debug-server start",
+    "debug-server stop",
     "extensions",
     "extensions list",
     "extensions info",

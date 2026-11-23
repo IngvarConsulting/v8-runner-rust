@@ -1595,7 +1595,7 @@ fn validate_web_publication(config: &AppConfig) -> Result<(), ConfigValidationEr
 ///
 /// Ключи `providers.*` названных операций против матрицы цели выбранной базы. Ключи
 /// других операций команда не читает и здесь не проверяет.
-fn validate_providers(
+pub(crate) fn validate_providers(
     config: &AppConfig,
     operations: &[Operation],
 ) -> Result<(), ConfigValidationError> {

@@ -313,6 +313,21 @@ impl<'a> DesignerDsl<'a> {
 
     /// `CREATEINFOBASE <connection-string>`
     pub fn create_infobase(&self) -> Result<PlatformCommandResult, DesignerError> {
+        self.create_file_infobase(None)
+    }
+
+    /// Create a file infobase and apply the configuration from a CF template.
+    pub fn create_infobase_from_cf(
+        &self,
+        input: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        self.create_file_infobase(Some(input))
+    }
+
+    fn create_file_infobase(
+        &self,
+        template: Option<&Path>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = vec!["CREATEINFOBASE".to_owned()];
         let connection =
             self.connection
@@ -321,6 +336,17 @@ impl<'a> DesignerDsl<'a> {
                     "a file-based connection File=…",
                 ))?;
         args.push(connection);
+        if let Some(template) = template {
+            args.extend([
+                "/UseTemplate".to_owned(),
+                template.display().to_string(),
+                "/DisableStartupDialogs".to_owned(),
+                "/DisableStartupMessages".to_owned(),
+            ]);
+            if let Some(log) = &self.log_file {
+                args.extend(["/Out".to_owned(), log.display().to_string()]);
+            }
+        }
         self.run_raw(&args)
     }
 
@@ -456,21 +482,52 @@ impl<'a> DesignerDsl<'a> {
         if self.log_file.is_none() {
             return Ok(None);
         }
-        let mut args = self.base_args();
+        // Чтение поколения само проверяет вход в базу и не требует отдельной такой же пробы.
+        let result = self.run_generation(
+            extension,
+            self.log_file.as_deref(),
+            &self.execution_policy,
+            None,
+        )?;
+        Ok(Self::generation(&result))
+    }
+
+    /// A generation token proves that this invocation opened the configured base.
+    pub(crate) fn generation(result: &PlatformCommandResult) -> Option<String> {
+        result.process.outcome().ok()?;
+        result
+            .platform_log
+            .as_deref()
+            .and_then(crate::platform::generation::generation_token)
+    }
+
+    pub(crate) fn probe_infobase(
+        &self,
+        scratch: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let log = scratch.join("login.log");
+        self.run_generation(
+            None,
+            Some(&log),
+            &self.execution_policy.for_reading(),
+            Some(scratch),
+        )
+    }
+
+    fn run_generation(
+        &self,
+        extension: Option<&str>,
+        log: Option<&Path>,
+        policy: &ProcessExecutionPolicy,
+        workdir: Option<&Path>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args_with_log(log);
         args.push("/GetConfigGenerationID".to_owned());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
-        // Чтение поколения само проверяет вход в базу и не требует отдельной такой же пробы.
-        let result = self.run_once(&args, self.log_file.as_deref(), &self.execution_policy)?;
-        if result.process.exit_code != 0 {
-            return Ok(None);
-        }
-        Ok(result
-            .platform_log
-            .as_deref()
-            .and_then(crate::platform::generation::generation_token))
+        self.run_once(&args, log, policy, workdir)
     }
 
     /// `/DumpCfg <file> [-Extension <name>]`
@@ -644,7 +701,7 @@ impl<'a> DesignerDsl<'a> {
                 probes.record(key);
             }
         }
-        self.run_once(args, self.log_file.as_deref(), &self.execution_policy)
+        self.run_once(args, self.log_file.as_deref(), &self.execution_policy, None)
     }
 
     /// Ключ пробы шлюза: Конфигуратор, адрес и реквизиты ИБ. Хранится только хеш.
@@ -675,24 +732,17 @@ impl<'a> DesignerDsl<'a> {
                 DesignerError::DirectGateNotReady(format!("prepare probe log: {error}"))
             })?;
         let log_file = scratch.path().join("generation.log");
-        let mut args = self.base_args_with_log(Some(&log_file));
-        args.push("/GetConfigGenerationID".to_owned());
         let mut policy = self.execution_policy.without_work().for_reading();
         let limit = Duration::from_secs(60);
         policy.timeout = Some(policy.timeout.map_or(limit, |timeout| timeout.min(limit)));
-        let result = self.run_once(&args, Some(&log_file), &policy)?;
+        let result = self.run_generation(None, Some(&log_file), &policy, None)?;
         if result.process.exit_code != 0 {
             return Err(DesignerError::DirectGateNotReady(format!(
                 "/GetConfigGenerationID exited with code {}",
                 result.process.exit_code
             )));
         }
-        if result
-            .platform_log
-            .as_deref()
-            .and_then(crate::platform::generation::generation_token)
-            .is_none()
-        {
+        if Self::generation(&result).is_none() {
             return Err(DesignerError::DirectGateNotReady(
                 "/GetConfigGenerationID did not return a generation identifier".to_owned(),
             ));
@@ -705,6 +755,7 @@ impl<'a> DesignerDsl<'a> {
         args: &[String],
         log_file: Option<&Path>,
         policy: &ProcessExecutionPolicy,
+        workdir: Option<&Path>,
     ) -> Result<PlatformCommandResult, DesignerError> {
         if let Some(log_file) = log_file {
             match std::fs::remove_file(log_file) {
@@ -724,7 +775,7 @@ impl<'a> DesignerDsl<'a> {
                 &ProcessRequest {
                     program: self.binary.clone(),
                     args: args.to_vec(),
-                    workdir: None,
+                    workdir: workdir.map(Path::to_path_buf),
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,

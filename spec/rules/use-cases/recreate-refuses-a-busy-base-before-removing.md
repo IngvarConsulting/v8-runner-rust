@@ -3,6 +3,7 @@ id: INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING
 check:
   - tests/cli_infobase_recreate.rs::a_recreate_of_a_held_base_is_refused_with_its_sessions_and_removes_nothing
   - tests/cli_infobase_recreate.rs::a_recreate_of_a_base_held_by_another_command_is_refused_as_busy
+  - tests/cli_ibcmd_server_guard.rs::a_running_ibsrv_blocks_direct_download_and_extension_inventory
   - src/use_cases/managed_stand/cluster.rs::a_managed_recreate_with_sessions_in_the_cluster_is_refused_before_any_change
   - src/use_cases/managed_stand/cluster.rs::a_connected_database_refuses_the_recreate_and_keeps_the_registration
 ---
@@ -17,7 +18,9 @@ check:
 2. Проверки: вид цели (`INV.USE-CASES.A-MANAGED-RECREATE-DROPS-ONLY-ITS-OWN-DATABASE`),
    остаток прошлого пересоздания (`INV.USE-CASES.RECREATE-ROLLS-BACK-A-FAILED-CREATION`),
    работающий свой автономный сервер (`INV.USE-CASES.A-BASE-IS-NOT-CREATED-UNDER-ITS-RUNNING-SERVER`),
-   превью создания и сеансы базы.
+   превью создания и сеансы базы. Перед снятием агентов обнаруженный локальный `ibsrv`
+   над той же файловой базой даёт `infobase_busy`
+   (`INV.PLATFORM.DIRECT-IBCMD-REFUSES-A-FILE-BASE-SERVED-BY-IBSRV`).
 3. Снятие простаивающих живых агентов этой базы.
 4. Точка невозврата: база откладывается, затем стирается память о ней.
 

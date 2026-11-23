@@ -4,25 +4,30 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::debug_server::StandDebugServer;
 use super::{
-    await_gone, being_started, block_conflict, cluster_over, environment, first_taken,
-    forget_record, io_failure, owned_by_a_cluster, port_offsets, validation, write_record,
-    Database, DbmsAccess, MoveCause, ServiceCommand, ServiceHost, Stand,
+    await_gone, await_rdbg, being_started, block_conflict, cluster_over, environment, first_taken,
+    forget_record, io_failure, owned_by_a_cluster, port_offsets, spawn_debugger, stop_confirmed,
+    validation, write_record, Database, DbmsAccess, DebugChoice, DebuggerLaunch, DebuggerSpawn,
+    MoveCause, RdbgWait, ServiceHost, SpawnedDebugger, Stand, DEBUG_READY_TIMEOUT,
 };
 use crate::config::model::AppConfig;
 use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
 use crate::domain::dbms::{ServiceAction, ServiceState};
 use crate::domain::standalone::StandaloneResult;
 use crate::platform::agent::write_service_host_key;
+use crate::platform::dbgs::{self, DebugPort};
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
 use crate::platform::ibsrv::{self, DbmsTarget, ServerPorts, ServerStorage};
 use crate::platform::postgres;
 use crate::platform::process::ProcessRunner;
 use crate::platform::service::{ProcessRow, ServiceSpawnError};
+use crate::platform::service_record::StandalonePins;
 use crate::platform::service_record::{
     adopt_recorded_pid, observe_service, read_json, write_json, Observed, RecordState,
     ServicePaths, ServiceRecord, StandService,
 };
+use crate::support::error::{AppError, EnvironmentLayer};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::context::InterruptionSafetyClass;
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -33,6 +38,15 @@ const IBSRV_IMAGE: &str = "ibsrv.exe";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SOFT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(200);
+
+/// Команда автономного сервера. Ключ сервера отладки есть у запуска и перезапуска.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandaloneCommand {
+    Start { debug: DebugChoice },
+    Status,
+    Stop,
+    Restart { debug: DebugChoice },
+}
 
 /// Где лежит база сервера.
 enum Storage {
@@ -100,7 +114,14 @@ struct Server<'a> {
     locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
     declared: Declared,
     paths: ServicePaths,
+    /// Свой `dbgs` сервера, поднятого с `--debug`.
+    debugger: ServicePaths,
     started_at: Instant,
+    /// Запрошенный сервер отладки: `--debug`, `--no-debug` или как закреплено.
+    debug: DebugChoice,
+    /// Поднимать ли сервер с отладкой: как попросили, иначе как закреплено. Решается один раз
+    /// на команду, при сборке сценария.
+    debug_on: bool,
 }
 
 impl Server<'_> {
@@ -162,8 +183,45 @@ impl Server<'_> {
         .map(Stand::server_step)
     }
 
-    fn pins(&self) -> Option<ServerPorts> {
+    fn pinned(&self) -> Option<StandalonePins> {
         read_json(&self.paths.pins())
+    }
+
+    fn pins(&self) -> Option<ServerPorts> {
+        self.pinned().map(|pinned| pinned.ports)
+    }
+
+    /// Поднимать ли сервер с отладкой.
+    fn wanted_debug(&self) -> bool {
+        self.debug_on
+    }
+
+    /// Pid своего работающего `dbgs`: он гаснет вместе с `ibsrv`, и ответ называет его.
+    fn running_debugger(&self) -> Option<u32> {
+        match self.observe_debugger() {
+            Observed::Own(record) => record.pid,
+            _ => None,
+        }
+    }
+
+    /// Свой `dbgs` сервера по его записи.
+    fn observe_debugger(&self) -> Observed {
+        let host = self.host;
+        let machine = host.machine();
+        observe_service(
+            &self.debugger,
+            machine.as_deref(),
+            &|pid| host.facts(pid),
+            &|record| adopt_recorded_pid(record, &|pid| host.facts(pid), machine.as_deref()),
+        )
+    }
+
+    /// Адрес своего работающего `dbgs`.
+    fn debug_url(&self) -> Option<String> {
+        match self.observe_debugger() {
+            Observed::Own(record) => Some(dbgs::url(record.port)),
+            _ => None,
+        }
     }
 
     fn result(&self, state: ServiceState, action: ServiceAction) -> StandaloneResult {
@@ -184,7 +242,9 @@ impl Server<'_> {
             stopped_pid: None,
             stopped_dbms_pid: None,
             previous_port: None,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            debug_url: None,
+            stopped_debug_pid: None,
+            duration_ms: crate::support::time::elapsed_ms(self.started_at),
             warnings: Vec::new(),
         }
     }
@@ -198,16 +258,24 @@ impl Server<'_> {
         }
         result.data_dir = Some(self.paths.data());
         result.log_path = Some(self.paths.log());
+        if pid.is_some() {
+            result.debug_url = self.debug_url();
+        }
         result
     }
 
     fn occupant(&self, ports: ServerPorts) -> Option<u32> {
-        first_taken(self.host, ports.all()).map(|taken| taken.pid)
+        first_taken(self.host, ports.used(self.wanted_debug())).map(|taken| taken.pid)
     }
 
-    /// Закрепить блок, на котором сервер поднялся.
+    /// Закрепить блок, на котором сервер поднялся, вместе с признаком отладки и именем базы.
     fn pin(&self, ports: ServerPorts) -> Result<(), UseCaseError> {
-        write_json(&self.paths.pins(), &ports)
+        let pinned = StandalonePins {
+            ports,
+            debug: self.wanted_debug(),
+            name: Some(self.declared.name.clone()),
+        };
+        write_json(&self.paths.pins(), &pinned)
             .map_err(|error| io_failure("cannot write", &self.paths.pins(), &error))
     }
 
@@ -223,7 +291,9 @@ impl Server<'_> {
             .map(ServerPorts::from_first)
             .find(|ports| {
                 except.is_none_or(|old| !old.overlaps(*ports))
-                    && ports.all().all(|port| Some(port) != dbms)
+                    && ports
+                        .used(self.wanted_debug())
+                        .all(|port| Some(port) != dbms)
                     && self.occupant(*ports).is_none()
             })
             .ok_or_else(|| environment("no free ports for ibsrv"))
@@ -237,7 +307,7 @@ impl Server<'_> {
         let Some(previous) = self.pins() else {
             return Ok(None);
         };
-        let taken = match block_conflict(self.host, previous.all(), dbms) {
+        let taken = match block_conflict(self.host, previous.used(self.wanted_debug()), dbms) {
             None => return Ok(None),
             Some(MoveCause::Taken(taken)) => taken,
             Some(cause @ MoveCause::Postgres(_)) => return Ok(Some(Moved { previous, cause })),
@@ -282,6 +352,7 @@ impl Server<'_> {
         };
         let stale = match self.observe() {
             Observed::Own(record) => {
+                self.refuse_another_debug()?;
                 // Запись упавшего раннера становится рабочей: её читают остальные команды.
                 self.write_record(&record)?;
                 let mut result = self.result(
@@ -297,6 +368,9 @@ impl Server<'_> {
             Observed::Stale => true,
             Observed::Nothing => false,
         };
+        // `dbgs` упавшего сервера гаснет с ним сам, но не сразу: его порт не должен выглядеть
+        // занятым чужим процессом.
+        self.stop_debugger()?;
         if let Some(pid) = self.foreign_server() {
             return Err(self.served_by(pid));
         }
@@ -312,6 +386,10 @@ impl Server<'_> {
                     db_path.display()
                 )));
             }
+        }
+        if self.debug_on {
+            // Нет `dbgs` рядом с `ibsrv` — отказ до PostgreSQL шага и до `ibsrv`.
+            self.debugger_program(&(self.locate)()?)?;
         }
         let stand = self.stand();
         let moved = self.taken_block(stand.as_ref().and_then(Stand::pinned_port))?;
@@ -416,12 +494,15 @@ impl Server<'_> {
             location: self.paths.location(),
         };
         self.write_record(&record)?;
+        let debug = self.wanted_debug();
+        let debugger_url = debug.then(|| dbgs::url(ports.debug()));
         let request = ibsrv::start_server(
             &ibsrv,
             &self.paths.data(),
             &storage.view(),
             &self.declared.name,
             ports,
+            debugger_url.as_deref(),
             &key,
             &self.paths.log(),
         );
@@ -451,15 +532,24 @@ impl Server<'_> {
             return Err(error);
         }
         self.await_ready(&record, ports)?;
+        if debug {
+            if let Some(error) =
+                interruption_before_safe_point(self.context, "starting the debug server of ibsrv")
+            {
+                self.stop_process(&record);
+                return Err(error.into());
+            }
+            if let Err(error) = self.raise_debugger(&ibsrv, pid, ports.debug()) {
+                return Err(self.abandon_launch(&record, error));
+            }
+        }
         if let Err(error) = self.pin(ports) {
-            self.stop_process(&record);
-            return Err(error);
+            return Err(self.abandon_launch(&record, error));
         }
         record.state = RecordState::Running;
         record.starter = None;
         if let Err(error) = self.write_record(&record) {
-            self.stop_process(&record);
-            return Err(error);
+            return Err(self.abandon_launch(&record, error));
         }
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
@@ -563,8 +653,15 @@ impl Server<'_> {
     }
 
     fn stop(&self, dry_run: bool) -> Result<StandaloneResult, UseCaseError> {
+        let debugger = self.running_debugger();
         let mut result = self.stop_server(dry_run)?;
         if !dry_run {
+            // `dbgs` гаснет с `ibsrv` сам; раннер дожидается его конца и снимает запись, в том
+            // числе если сервер упал раньше.
+            result.stopped_debug_pid = self
+                .stop_debugger()
+                .map_err(|error| self.after_server_stopped(error, result.stopped_pid))?
+                .or(debugger);
             // Сервер гаснет первым: СУБД нужна ему до конца. Шаг сервера гаснет вместе с ним, в том
             // числе если сам сервер уже упал.
             if let Some(stand) = self.stand() {
@@ -643,14 +740,213 @@ impl Server<'_> {
         if dry_run {
             return Ok(self.plan());
         }
-        // СУБД не трогает: перезапускается только сервер.
+        // СУБД не трогает: перезапускаются только сервер и его `dbgs`.
+        let debugger = self.running_debugger();
         let stopped = self.stop_server(false)?;
+        let stopped_debug_pid = self
+            .stop_debugger()
+            .map_err(|error| self.after_server_stopped(error, stopped.stopped_pid))?
+            .or(debugger);
         if let Some(error) = interruption_before_safe_point(self.context, "starting ibsrv again") {
             return Err(error.into());
         }
         let mut started = self.start(false)?;
         started.stopped_pid = stopped.stopped_pid;
+        started.stopped_debug_pid = stopped_debug_pid;
         Ok(started)
+    }
+
+    /// Работающий сервер поднят с другим сервером отладки, чем просят, или его `dbgs` уже нет:
+    /// `start` его не перезапускает — это делает `restart` с нужным ключом.
+    fn refuse_another_debug(&self) -> Result<(), UseCaseError> {
+        let running = self.pinned().is_some_and(|pinned| pinned.debug);
+        let infobase = &self.declared.infobase;
+        if let Some(wanted) = self.debug.requested().filter(|wanted| *wanted != running) {
+            let flag = if wanted { "--debug" } else { "--no-debug" };
+            return Err(validation(format!(
+                "the standalone server of '{infobase}' is running {} a debug server: run `standalone restart {flag}`",
+                if running { "with" } else { "without" },
+            )));
+        }
+        if running && !matches!(self.observe_debugger(), Observed::Own(_)) {
+            return Err(environment(format!(
+                "the debug server of the standalone server of '{infobase}' is gone: run `standalone restart`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// `dbgs` рядом с `ibsrv` той же установки; нет его — отказ окружения слоя платформы.
+    fn debugger_program(&self, ibsrv: &std::path::Path) -> Result<PathBuf, UseCaseError> {
+        let program = dbgs::beside(ibsrv);
+        if program.is_file() {
+            return Ok(program);
+        }
+        Err(UseCaseError::from(AppError::environment_at(
+            EnvironmentLayer::Platform,
+            format!(
+                "there is no {} next to {}: the debug server comes with the server it debugs",
+                dbgs::executable_name(),
+                ibsrv.display()
+            ),
+        )))
+    }
+
+    /// Свой `dbgs` слушает порт отладки блока и выходит вместе с `ibsrv` (`--ownerPID`). Готов —
+    /// ответил по `rdbg` и порт держит он сам; иначе гасится, запись снимается.
+    fn raise_debugger(
+        &self,
+        ibsrv: &std::path::Path,
+        owner: u32,
+        port: u16,
+    ) -> Result<(), UseCaseError> {
+        let program = self.debugger_program(ibsrv)?;
+        self.debugger
+            .prepare()
+            .map_err(|error| io_failure("cannot prepare", self.debugger.root(), &error))?;
+        let Some(machine) = self.host.machine() else {
+            return Err(environment(
+                "this system gives no machine id: the runner could not tell its debug server from a foreign one",
+            ));
+        };
+        let notify = self.debugger.root().join("notify");
+        let launch = DebuggerLaunch {
+            paths: &self.debugger,
+            program: &program,
+            port: DebugPort::Exact(port),
+            notify: &notify,
+            owner: Some(owner),
+            machine,
+            version: None,
+        };
+        let SpawnedDebugger { mut record, pid } =
+            match spawn_debugger(self.host, self.runner, self.context, launch) {
+                DebuggerSpawn::Spawned(spawned) => *spawned,
+                DebuggerSpawn::ExitedAtOnce => {
+                    return Err(self.debugger_not_ready("dbgs exited as soon as it started"))
+                }
+                DebuggerSpawn::Failed(error) => return Err(error),
+            };
+        let alive = || {
+            self.host
+                .facts(pid)
+                .is_some_and(|facts| Some(facts.started) == record.started)
+        };
+        // Порт держит этот `dbgs`, а не чужой процесс (на Unix слушающего система не называет).
+        let ours = || {
+            Some(port).filter(|port| {
+                self.host
+                    .listening_pid(*port)
+                    .is_none_or(|listener| listener == pid)
+            })
+        };
+        let failure = match await_rdbg(
+            self.host,
+            self.context,
+            "waiting for the debug server of ibsrv",
+            &ours,
+            &alive,
+        ) {
+            RdbgWait::Ready(_) => {
+                record.state = RecordState::Running;
+                record.starter = None;
+                match write_record(&self.debugger, &record) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => error,
+                }
+            }
+            RdbgWait::Gone => {
+                forget_record(&self.debugger);
+                return Err(
+                    self.debugger_not_ready("dbgs exited before it answered as a debug server")
+                );
+            }
+            RdbgWait::TimedOut => self.debugger_not_ready(&format!(
+                "dbgs did not answer as a debug server in {} s",
+                DEBUG_READY_TIMEOUT.as_secs()
+            )),
+            RdbgWait::Interrupted(error) => error,
+        };
+        // Срок, отмена или запись не легла: свой `dbgs` гасится здесь же, а не ждёт `ibsrv`.
+        if stop_confirmed(
+            self.host,
+            self.runner,
+            self.context,
+            pid,
+            record.started,
+            Duration::ZERO,
+        ) {
+            forget_record(&self.debugger);
+            Err(failure)
+        } else {
+            Err(failure.followed_by(format!("dbgs pid {pid} did not stop")))
+        }
+    }
+
+    fn debugger_not_ready(&self, why: &str) -> UseCaseError {
+        UseCaseError::new(
+            UseCaseErrorKind::Platform,
+            format!("{why}; log: {}", self.debugger.log().display()),
+        )
+    }
+
+    /// Запуск не удался после старта `ibsrv`: гасится он, а с ним и его `dbgs` (`--ownerPID`),
+    /// которого раннер дожидается. Не погас — ошибка это называет.
+    fn abandon_launch(&self, record: &ServiceRecord, error: UseCaseError) -> UseCaseError {
+        let pid = record.pid.unwrap_or_default();
+        if !self.stop_process(record) {
+            return error.followed_by(format!(
+                "ibsrv pid {pid} did not stop; repeat standalone stop"
+            ));
+        }
+        match self.stop_debugger() {
+            Ok(_) => error,
+            Err(stop) => error.followed_by(stop.to_string()),
+        }
+    }
+
+    /// `ibsrv` уже погашен, а его `dbgs` — нет: ответ называет и то, и другое.
+    fn after_server_stopped(&self, error: UseCaseError, server: Option<u32>) -> UseCaseError {
+        match server {
+            Some(pid) => error.followed_by(format!("ibsrv pid {pid} is stopped")),
+            None => error,
+        }
+    }
+
+    /// Гасит свой `dbgs` по записи и дожидается его конца: сначала он может выйти сам вместе с
+    /// `ibsrv`, затем мягко, затем принудительно. Чужой процесс на месте записи не трогается,
+    /// запись снимается. Возвращает pid погашенного.
+    fn stop_debugger(&self) -> Result<Option<u32>, UseCaseError> {
+        let record = match self.observe_debugger() {
+            Observed::Own(record) => record,
+            Observed::Starting(_) => {
+                return Err(being_started("the debug server", &self.declared.infobase))
+            }
+            Observed::Stale => {
+                forget_record(&self.debugger);
+                return Ok(None);
+            }
+            Observed::Nothing => return Ok(None),
+        };
+        let Some(pid) = record.pid else {
+            forget_record(&self.debugger);
+            return Ok(None);
+        };
+        if !stop_confirmed(
+            self.host,
+            self.runner,
+            self.context,
+            pid,
+            record.started,
+            SOFT_STOP_TIMEOUT,
+        ) {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("dbgs pid {pid} did not stop; repeat standalone stop"),
+            ));
+        }
+        forget_record(&self.debugger);
+        Ok(Some(pid))
     }
 
     fn failed(&self) -> StandaloneResult {
@@ -664,20 +960,47 @@ impl Server<'_> {
 pub(super) fn run_standalone(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: StandaloneCommand,
     dry_run: bool,
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<StandaloneResult> {
     super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
-    let declared = declared(config).map_err(UseCaseFailure::without_payload)?;
+    let debug = match command {
+        StandaloneCommand::Start { debug } | StandaloneCommand::Restart { debug } => debug,
+        StandaloneCommand::Status | StandaloneCommand::Stop => DebugChoice::AsPinned,
+    };
+    let server = server(config, context, runner, host, locate, debug)
+        .map_err(UseCaseFailure::without_payload)?;
+    let outcome = match command {
+        StandaloneCommand::Start { .. } => server.start(dry_run),
+        StandaloneCommand::Status => Ok(server.status()),
+        StandaloneCommand::Stop => server.stop(dry_run),
+        StandaloneCommand::Restart { .. } => server.restart(dry_run),
+    };
+    outcome.map_err(|error| UseCaseFailure::with_payload(error, server.failed()))
+}
+
+fn server<'a>(
+    config: &'a AppConfig,
+    context: &'a ExecutionContext,
+    runner: &'a dyn ProcessRunner,
+    host: &'a dyn ServiceHost,
+    locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
+    debug: DebugChoice,
+) -> Result<Server<'a>, UseCaseError> {
+    let declared = declared(config)?;
     let paths = ServicePaths::new(
         &config.local_dir(),
         &declared.infobase,
         StandService::Standalone,
     );
-    let server = Server {
+    let debugger = paths.sibling(StandService::StandaloneDebug);
+    let pinned_debug =
+        read_json::<StandalonePins>(&paths.pins()).is_some_and(|pinned| pinned.debug);
+    let debug_on = debug.requested().unwrap_or(pinned_debug);
+    Ok(Server {
         config,
         context,
         runner,
@@ -685,15 +1008,94 @@ pub(super) fn run_standalone(
         locate,
         declared,
         paths,
+        debugger,
         started_at: Instant::now(),
+        debug,
+        debug_on,
+    })
+}
+
+/// Сервер отладки автономного сервера этой базы для `debug-server start`: порт его `dbgs`,
+/// когда тот отвечает по `rdbg`, и имя базы, под которым отладчик видит её цели. Сервер не
+/// работает, поднят без отладки или его `dbgs` уже нет — отказ сразу, с командой, которая это
+/// исправит.
+pub(super) fn debug_server(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<StandDebugServer, UseCaseError> {
+    let no_locate = || Err(validation("a running server names its own utilities"));
+    let server = server(
+        config,
+        context,
+        runner,
+        host,
+        &no_locate,
+        DebugChoice::AsPinned,
+    )?;
+    let infobase = &server.declared.infobase;
+    if !host.standalone_supported() {
+        return Err(environment(format!(
+            "the infobase '{infobase}' is on the managed standalone server, and it runs on Windows only"
+        )));
+    }
+    match server.observe() {
+        Observed::Own(_) => {}
+        Observed::Starting(_) => return Err(being_started("the server", infobase)),
+        Observed::Stale | Observed::Nothing => {
+            return Err(environment(format!(
+            "the standalone server of '{infobase}' is not running: run `standalone start --debug`"
+        )))
+        }
+    }
+    let Some(pinned) = server.pinned().filter(|pinned| pinned.debug) else {
+        return Err(environment(format!(
+            "the standalone server of '{infobase}' runs without a debug server: run `standalone restart --debug`"
+        )));
     };
-    let outcome = match command {
-        ServiceCommand::Start => server.start(dry_run),
-        ServiceCommand::Status => Ok(server.status()),
-        ServiceCommand::Stop => server.stop(dry_run),
-        ServiceCommand::Restart => server.restart(dry_run),
+    let debugger = match server.observe_debugger() {
+        Observed::Own(debugger) => debugger,
+        Observed::Starting(_) => return Err(being_started("the debug server", infobase)),
+        Observed::Stale | Observed::Nothing => {
+            return Err(environment(format!(
+                "the debug server of the standalone server of '{infobase}' is gone: run `standalone restart`"
+            )))
+        }
     };
-    outcome.map_err(|error| UseCaseFailure::with_payload(error, server.failed()))
+    let port = debugger.port;
+    let ours = || {
+        Some(port).filter(|port| {
+            host.listening_pid(*port)
+                .is_none_or(|listener| Some(listener) == debugger.pid)
+        })
+    };
+    let alive = || matches!(server.observe_debugger(), Observed::Own(_));
+    let wait = await_rdbg(
+        host,
+        context,
+        "waiting for the debug server of the standalone server",
+        &ours,
+        &alive,
+    );
+    let infobase_alias = Some(pinned.name.unwrap_or_else(|| server.declared.name.clone()));
+    match wait {
+        RdbgWait::Ready(port) => Ok(StandDebugServer {
+            port,
+            infobase_alias,
+        }),
+        RdbgWait::Interrupted(error) => Err(error),
+        RdbgWait::Gone => Err(environment(format!(
+            "the debug server of the standalone server of '{infobase}' stopped while it was awaited: run `standalone restart`"
+        ))),
+        RdbgWait::TimedOut => Err(UseCaseError::new(
+            UseCaseErrorKind::TimedOut,
+            format!(
+                "the debug server of the standalone server of '{infobase}' did not answer on port {port} in {} s",
+                DEBUG_READY_TIMEOUT.as_secs()
+            ),
+        )),
+    }
 }
 
 /// Сколько ждать ответа `ibcmd session list`: на замере он отвечает за 0,1–0,2 с.
@@ -708,23 +1110,16 @@ pub(super) fn session_target<'a>(
 ) -> Option<(PathBuf, ibsrv::SessionSource<'a>)> {
     let standalone = config.infobase.standalone.as_ref()?;
     if standalone.managed.is_some() {
-        let declared = declared(config).ok()?;
-        let paths = ServicePaths::new(
-            &config.local_dir(),
-            &declared.infobase,
-            StandService::Standalone,
-        );
         let no_locate = || Err(validation("a running server names its own utilities"));
-        let server = Server {
+        let server = server(
             config,
             context,
             runner,
             host,
-            locate: &no_locate,
-            declared,
-            paths,
-            started_at: Instant::now(),
-        };
+            &no_locate,
+            DebugChoice::AsPinned,
+        )
+        .ok()?;
         let Observed::Own(record) = server.observe() else {
             return None;
         };
@@ -926,6 +1321,8 @@ fn image() -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+
+    use crate::use_cases::managed_stand::ServiceCommand;
     use std::collections::{HashMap, HashSet};
 
     use super::*;
@@ -938,6 +1335,7 @@ mod tests {
     use crate::use_cases::result::EnvironmentReason;
 
     const PID: u32 = 7001;
+    const DBGS_PID: u32 = 7003;
     const PG_PID: u32 = 7002;
     const STARTED: u64 = 11;
     const MACHINE: &str = "machine";
@@ -1020,6 +1418,29 @@ mod tests {
         last_stdin: RefCell<Option<String>>,
         /// Перечень процессов не отвечает.
         unlisted: Cell<bool>,
+        debugger_args: RefCell<Vec<String>>,
+        /// `dbgs` выходит сразу после запуска.
+        debugger_exits: Cell<bool>,
+        /// `dbgs` не кончается вместе с `ibsrv`.
+        debugger_outlives: Cell<bool>,
+        /// `dbgs` работает, но по `rdbg` не отвечает.
+        debugger_silent: Cell<bool>,
+        /// Отмена команды, наступающая, как только поднят `dbgs`.
+        cancel_on_debugger: RefCell<Option<tokio_util::sync::CancellationToken>>,
+    }
+
+    impl Host {
+        /// Процесс кончился; с `ibsrv` кончается и `dbgs`, запущенный с `--ownerPID` его pid.
+        fn end(&self, pid: u32) {
+            let mut ended = vec![pid];
+            if pid == PID && !self.debugger_outlives.get() {
+                ended.push(DBGS_PID);
+            }
+            for pid in ended {
+                self.processes.borrow_mut().remove(&pid);
+                self.listeners.borrow_mut().retain(|_, held| *held != pid);
+            }
+        }
     }
 
     impl ServiceHost for Host {
@@ -1052,6 +1473,30 @@ mod tests {
                     .borrow_mut()
                     .insert(port.parse().unwrap(), PG_PID);
                 return Ok(7);
+            }
+            if request.program.to_string_lossy().contains("dbgs") {
+                self.debugger_args.replace(request.args.clone());
+                if let Some(token) = self.cancel_on_debugger.borrow().as_ref() {
+                    token.cancel();
+                }
+                if self.debugger_exits.get() {
+                    return Ok(DBGS_PID);
+                }
+                self.processes.borrow_mut().insert(
+                    DBGS_PID,
+                    ProcessFacts {
+                        started: STARTED,
+                        image: "dbgs.exe".to_owned(),
+                    },
+                );
+                let port = request
+                    .args
+                    .iter()
+                    .find_map(|arg| arg.strip_prefix("--port="))
+                    .and_then(|port| port.parse().ok())
+                    .expect("the debug port");
+                self.listeners.borrow_mut().insert(port, DBGS_PID);
+                return Ok(DBGS_PID);
             }
             self.spawned.set(self.spawned.get() + 1);
             if let Some(token) = self.cancel_on_server.borrow().as_ref() {
@@ -1100,9 +1545,11 @@ mod tests {
         ) {
             self.soft_stops.borrow_mut().insert(pid);
             if !self.ignores_soft_stop.get() {
-                self.processes.borrow_mut().remove(&pid);
-                self.listeners.borrow_mut().retain(|_, held| *held != pid);
+                self.end(pid);
             }
+        }
+        fn rdbg_answers(&self, port: u16) -> bool {
+            !self.debugger_silent.get() && self.listeners.borrow().get(&port) == Some(&DBGS_PID)
         }
         fn hard_stop(
             &self,
@@ -1115,8 +1562,7 @@ mod tests {
             if pid == PID && self.immortal.get() {
                 return;
             }
-            self.processes.borrow_mut().remove(&pid);
-            self.listeners.borrow_mut().retain(|_, held| *held != pid);
+            self.end(pid);
         }
         fn sleep(&self, _duration: Duration) {}
         fn patience(&self, _default: Duration) -> Duration {
@@ -1144,6 +1590,8 @@ mod tests {
     struct Setup {
         _root: tempfile::TempDir,
         config: AppConfig,
+        /// `ibsrv` установки, рядом с которым лежит `dbgs`.
+        ibsrv: PathBuf,
     }
 
     fn setup() -> Setup {
@@ -1178,9 +1626,15 @@ mod tests {
             mcp: Default::default(),
             tests: Default::default(),
         };
+        let bin = root.path().join("platform").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ibsrv = bin.join(image());
+        std::fs::write(&ibsrv, "").unwrap();
+        std::fs::write(bin.join(crate::platform::dbgs::executable_name()), "").unwrap();
         Setup {
             _root: root,
             config,
+            ibsrv,
         }
     }
 
@@ -1208,7 +1662,38 @@ mod tests {
             dry_run: bool,
             host: &Host,
         ) -> Result<StandaloneResult, UseCaseError> {
-            let locate = || Ok(PathBuf::from("ibsrv.exe"));
+            let command = match command {
+                ServiceCommand::Start => StandaloneCommand::Start {
+                    debug: DebugChoice::AsPinned,
+                },
+                ServiceCommand::Status => StandaloneCommand::Status,
+                ServiceCommand::Stop => StandaloneCommand::Stop,
+                ServiceCommand::Restart => StandaloneCommand::Restart {
+                    debug: DebugChoice::AsPinned,
+                },
+            };
+            self.command_in(context, command, dry_run, host)
+        }
+        fn command(
+            &self,
+            command: StandaloneCommand,
+            host: &Host,
+        ) -> Result<StandaloneResult, UseCaseError> {
+            self.command_in(
+                &ExecutionContext::cli(CommandName::StandaloneStart),
+                command,
+                false,
+                host,
+            )
+        }
+        fn command_in(
+            &self,
+            context: &ExecutionContext,
+            command: StandaloneCommand,
+            dry_run: bool,
+            host: &Host,
+        ) -> Result<StandaloneResult, UseCaseError> {
+            let locate = || Ok(self.ibsrv.clone());
             run_standalone(
                 context,
                 &self.config,
@@ -1220,6 +1705,277 @@ mod tests {
             )
             .map_err(|failure| failure.error)
         }
+    }
+
+    fn debug_start(debug: DebugChoice) -> StandaloneCommand {
+        StandaloneCommand::Start { debug }
+    }
+
+    fn pinned_debug(setup: &Setup) -> StandalonePins {
+        read_json(&setup.paths().pins()).expect("pinned")
+    }
+
+    /// `standalone start --debug`: `ibsrv` регистрирует цели на своём `dbgs`, который поднят
+    /// после него на порту блока и гаснет вместе с ним; признак и имя базы закреплены.
+    #[test]
+    fn a_debug_start_raises_the_server_with_its_debug_server() {
+        let setup = setup();
+        let host = Host::default();
+        let started = setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        let pinned = pinned_debug(&setup);
+        assert!(pinned.debug);
+        assert_eq!(pinned.name.as_deref(), Some("demo"));
+        let port = pinned.ports.debug();
+        let url = format!("http://127.0.0.1:{port}");
+        assert!(host
+            .last_args
+            .borrow()
+            .contains(&format!("--debug-server-url={url}")));
+        let debugger = host.debugger_args.borrow().clone();
+        assert!(debugger.contains(&format!("--port={port}")), "{debugger:?}");
+        assert!(
+            debugger.contains(&format!("--ownerPID={PID}")),
+            "{debugger:?}"
+        );
+        assert_eq!(started.debug_url.as_deref(), Some(url.as_str()));
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_pid, Some(PID));
+        assert_eq!(stopped.stopped_debug_pid, Some(DBGS_PID));
+        assert!(host.facts(DBGS_PID).is_none());
+    }
+
+    /// Признак держится до `--no-debug`; `start` с другим признаком при работающем сервере —
+    /// отказ с `restart`, в обе стороны; `restart` применяет свой ключ.
+    #[test]
+    fn the_debug_server_of_the_standalone_server_stays_on_until_no_debug() {
+        let setup = setup();
+        let host = Host::default();
+        setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        let error = setup
+            .command(debug_start(DebugChoice::Off), &host)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("standalone restart --no-debug"),
+            "{error}"
+        );
+        let again = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert_eq!(again.action, ServiceAction::AlreadyRunning);
+        assert!(again.debug_url.is_some());
+        let restarted = setup
+            .command(
+                StandaloneCommand::Restart {
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
+            .unwrap();
+        assert_eq!(restarted.stopped_debug_pid, Some(DBGS_PID));
+        assert!(restarted.debug_url.is_none());
+        assert!(!pinned_debug(&setup).debug);
+        assert!(!host
+            .last_args
+            .borrow()
+            .iter()
+            .any(|arg| arg.starts_with("--debug")));
+        let error = setup
+            .command(debug_start(DebugChoice::On), &host)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("standalone restart --debug"),
+            "{error}"
+        );
+    }
+
+    /// `dbgs` не поднялся — сервер гасится, закреплённое не меняется, процессов не остаётся.
+    #[test]
+    fn a_debug_server_that_does_not_start_stops_the_server() {
+        let setup = setup();
+        let host = Host::default();
+        host.debugger_exits.set(true);
+        let error = setup
+            .command(debug_start(DebugChoice::On), &host)
+            .unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform, "{error}");
+        assert!(host.facts(PID).is_none());
+        assert!(host.facts(DBGS_PID).is_none());
+        assert!(read_json::<StandalonePins>(&setup.paths().pins()).is_none());
+    }
+
+    /// Чужой процесс на порту отладки при включённой отладке переносит блок целиком; без
+    /// отладки блок остаётся.
+    #[test]
+    fn a_taken_debug_port_moves_the_block_only_with_the_debug_server() {
+        let setup = setup();
+        let host = Host::default();
+        setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let pinned = pinned(&setup);
+        host.listeners.borrow_mut().insert(pinned.debug(), 9999);
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert_eq!(started.previous_port, None);
+        assert_eq!(pinned_debug(&setup).ports, pinned);
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let started = setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        assert_eq!(started.previous_port, Some(pinned.direct));
+        assert_ne!(pinned_debug(&setup).ports, pinned);
+    }
+
+    /// `dbgs` упавшего сервера ещё жив: следующий запуск дожидается его конца и не считает порт
+    /// занятым чужим процессом.
+    #[test]
+    fn a_debug_server_left_by_a_fallen_server_is_stopped_before_the_start() {
+        let setup = setup();
+        let host = Host::default();
+        host.debugger_outlives.set(true);
+        setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        let pinned = pinned_debug(&setup);
+        // `ibsrv` упал, его `dbgs` ещё работает.
+        host.processes.borrow_mut().remove(&PID);
+        host.listeners.borrow_mut().retain(|_, held| *held != PID);
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert_eq!(started.previous_port, None);
+        assert_eq!(pinned_debug(&setup).ports, pinned.ports);
+        assert!(host.soft_stops.borrow().contains(&DBGS_PID));
+    }
+
+    fn debugger_paths(setup: &Setup) -> ServicePaths {
+        setup.paths().sibling(StandService::StandaloneDebug)
+    }
+
+    /// `dbgs` работает, но по `rdbg` не отвечает: по сроку гасятся и он, и сервер, записи
+    /// снимаются.
+    #[test]
+    fn a_silent_debug_server_is_stopped_with_the_server() {
+        let setup = setup();
+        let host = Host::default();
+        host.debugger_silent.set(true);
+        host.debugger_outlives.set(true);
+        let error = setup
+            .command(debug_start(DebugChoice::On), &host)
+            .unwrap_err();
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform, "{error}");
+        assert!(host.soft_stops.borrow().contains(&DBGS_PID));
+        assert!(host.facts(DBGS_PID).is_none());
+        assert!(host.facts(PID).is_none());
+        assert!(!debugger_paths(&setup).record().exists());
+        assert!(!setup.paths().record().exists());
+    }
+
+    /// Отмена во время ожидания `dbgs` гасит и его, и сервер (`INV.USE-CASES.OPERATIONS-
+    /// DECLARE-AN-INTERRUPTION-CLASS`).
+    #[test]
+    fn a_cancellation_while_the_debug_server_starts_stops_both() {
+        let setup = setup();
+        let host = Host::default();
+        host.debugger_silent.set(true);
+        host.debugger_outlives.set(true);
+        let token = tokio_util::sync::CancellationToken::new();
+        host.cancel_on_debugger.replace(Some(token.clone()));
+        let context = ExecutionContext::cli(CommandName::StandaloneStart).with_cancellation(token);
+        let error = setup
+            .command_in(&context, debug_start(DebugChoice::On), false, &host)
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{error}"
+        );
+        assert!(host.facts(DBGS_PID).is_none());
+        assert!(host.facts(PID).is_none());
+        assert!(!debugger_paths(&setup).record().exists());
+    }
+
+    /// Нет `dbgs` рядом с `ibsrv` — отказ до запуска `ibsrv`.
+    #[test]
+    fn a_missing_debug_server_is_refused_before_the_server_starts() {
+        let setup = setup();
+        std::fs::remove_file(
+            setup
+                .ibsrv
+                .with_file_name(crate::platform::dbgs::executable_name()),
+        )
+        .unwrap();
+        let host = Host::default();
+        let error = setup
+            .command(debug_start(DebugChoice::On), &host)
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{error}"
+        );
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    /// `dbgs` пропал под работающим сервером: `start` отказывает с `restart`, `restart`
+    /// поднимает оба заново.
+    #[test]
+    fn a_running_server_whose_debug_server_is_gone_needs_a_restart() {
+        let setup = setup();
+        let host = Host::default();
+        setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        host.processes.borrow_mut().remove(&DBGS_PID);
+        host.listeners
+            .borrow_mut()
+            .retain(|_, held| *held != DBGS_PID);
+        let error = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap_err();
+        assert!(error.to_string().contains("standalone restart"), "{error}");
+        let restarted = setup
+            .command(
+                StandaloneCommand::Restart {
+                    debug: DebugChoice::AsPinned,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(restarted.debug_url.is_some());
+        assert!(host.facts(DBGS_PID).is_some());
+    }
+
+    /// `debug-server start` у базы на автономном сервере: адрес его `dbgs` и имя базы в сервере;
+    /// не работает, без отладки, без `dbgs` — отказ с командой, которая это исправит.
+    #[test]
+    fn the_debug_server_of_the_standalone_server_needs_a_debug_start() {
+        let setup = setup();
+        let host = Host::default();
+        let context = ExecutionContext::cli(CommandName::DebugServerStart);
+        let ask = || debug_server(&context, &setup.config, &Runner { host: &host }, &host);
+        let error = ask().err().unwrap();
+        assert!(
+            error.to_string().contains("standalone start --debug"),
+            "{error}"
+        );
+        setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        let error = ask().err().unwrap();
+        assert!(
+            error.to_string().contains("standalone restart --debug"),
+            "{error}"
+        );
+        setup
+            .command(
+                StandaloneCommand::Restart {
+                    debug: DebugChoice::On,
+                },
+                &host,
+            )
+            .unwrap();
+        let server = ask().unwrap();
+        assert_eq!(server.port, pinned_debug(&setup).ports.debug());
+        assert_eq!(server.infobase_alias.as_deref(), Some("demo"));
+        host.processes.borrow_mut().remove(&DBGS_PID);
+        let error = ask().err().unwrap();
+        assert!(error.to_string().contains("standalone restart`"), "{error}");
     }
 
     #[test]
@@ -1668,7 +2424,14 @@ mod tests {
             },
         };
         let locate = || Ok(PathBuf::from("ibsrv.exe"));
-        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+        for command in [
+            StandaloneCommand::Start {
+                debug: DebugChoice::AsPinned,
+            },
+            StandaloneCommand::Restart {
+                debug: DebugChoice::AsPinned,
+            },
+        ] {
             let refused = run_standalone(
                 &ExecutionContext::cli(CommandName::StandaloneStart),
                 &setup.config,
@@ -1689,6 +2452,36 @@ mod tests {
         assert_eq!(witness.spawned.get(), 0);
         assert!(witness.calls.borrow().is_empty());
         assert!(!setup.paths().root().exists());
+    }
+
+    /// `debug-server start` у базы автономного сервера на Linux — тот же отказ «только Windows»,
+    /// что у `standalone start`, без обращения к процессам.
+    #[test]
+    fn linux_refuses_the_debug_server_of_the_standalone_server() {
+        let setup = setup();
+        let witness = Host::default();
+        let linux = super::super::RealHost {
+            system: super::super::System {
+                privileged: || false,
+                ..super::super::System::LINUX
+            },
+        };
+        let refused = debug_server(
+            &ExecutionContext::cli(CommandName::DebugServerStart),
+            &setup.config,
+            &Runner { host: &witness },
+            &linux,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("Windows only"), "{refused}");
+        assert_eq!(witness.spawned.get(), 0);
+        assert!(witness.calls.borrow().is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 7
+version: 8
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -40,7 +40,7 @@ check:
 `platforms`, — и `installations`, опись установок, по которой решён отказ. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
 `workspace_busy` (рабочий каталог держит другая команда), `infobase_busy` (файловую базу
-держит другая команда), `infobase_sessions` (обновлению конфигурации базы данных нужен
+держит другая команда или она обслуживается обнаруженным локальным `ibsrv`), `infobase_sessions` (обновлению конфигурации базы данных нужен
 монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (файловую базу
 держит чужой Конфигуратор). Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
 завершить, блокировку начала сеансов, источник признака (`evidence`) и, если признак — список
@@ -164,3 +164,5 @@ generated_envelope_schema_is_current`. Руками её не правят — �
   }
 }
 ```
+
+**Что изменила версия 8.** Добавлены коды `infobase_not_found` и `connection_failed` для [проверки подключения](infobase-check-data.md).

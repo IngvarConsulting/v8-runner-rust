@@ -66,6 +66,9 @@ pub struct ClusterResult {
     /// потому что закреплённый порт занят чужим процессом.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_regport: Option<u16>,
+    /// Адрес сервера отладки кластера, поднятого с `--debug`: `http://127.0.0.1:<порт>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_url: Option<String>,
     pub duration_ms: u64,
     /// Предупреждения идут только в `warnings` конверта: форма `data` их не несёт.
     #[serde(skip)]

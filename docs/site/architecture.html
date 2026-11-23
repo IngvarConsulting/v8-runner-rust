@@ -59,6 +59,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-debug-server.html#op-debug-server-start">debug-server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -340,7 +341,7 @@
 <h3>Процессы</h3>
 <!-- diagram:processes -->
 <div class="diagram" role="img" aria-label="Процессы, которые запускает раннер">
-<svg viewBox="52.0 18.0 855.5 504.0" xmlns="http://www.w3.org/2000/svg" style="max-width:855px">
+<svg viewBox="52.0 18.0 871.5 504.0" xmlns="http://www.w3.org/2000/svg" style="max-width:871px">
 <defs><marker id="arr-processes" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 <path marker-end="url(#arr-processes)" class="e" d="M450.0,241.0 C450.0,164.9 450.0,148.1 450.0,72.0"/>
 <path marker-end="url(#arr-processes)" class="e" d="M389.2,241.0 C389.2,199.6 306.0,190.4 306.0,149.0"/>
@@ -350,6 +351,7 @@
 <path marker-end="url(#arr-processes)" class="e" d="M389.2,299.0 C389.2,343.6 293.6,353.4 293.6,398.0"/>
 <path marker-end="url(#arr-processes)" class="e" d="M510.8,299.0 C510.8,343.6 606.4,353.4 606.4,398.0"/>
 <path marker-end="url(#arr-processes)" class="e" d="M450.0,299.0 C450.0,375.1 450.0,391.9 450.0,468.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M530.0,287.4 C656.0,287.4 810.0,325.0 810.0,451.0"/>
 <g class="n n-run"><rect x="370.0" y="241.0" width="160.0" height="58.0" rx="8"/><text><tspan x="450.0" y="261.0">раннер</tspan><tspan x="450.0" y="279.0">CLI</tspan></text></g>
 <g class="n n-sw"><rect x="387.0" y="28.0" width="126.0" height="44.0" rx="8"/><text><tspan x="450.0" y="50.0">1cv8 DESIGNER</tspan></text></g>
 <g class="n n-svc"><rect x="85.0" y="91.0" width="260.0" height="58.0" rx="29.0"/><text><tspan x="215.0" y="111.0">ras cluster</tspan><tspan x="215.0" y="129.0">если cluster.ras не объявлен</tspan></text></g>
@@ -359,6 +361,7 @@
 <g class="n n-sw"><rect x="212.0" y="398.0" width="96.0" height="44.0" rx="8"/><text><tspan x="260.0" y="420.0">webinst</tspan></text></g>
 <g class="n n-sw"><rect x="592.0" y="398.0" width="96.0" height="44.0" rx="8"/><text><tspan x="640.0" y="420.0">1cedtcli</tspan></text></g>
 <g class="n n-sw"><rect x="402.0" y="468.0" width="96.0" height="44.0" rx="8"/><text><tspan x="450.0" y="490.0">клиент 1С</tspan></text></g>
+<g class="n n-svc"><rect x="706.5" y="451.0" width="207.0" height="58.0" rx="29.0"/><text><tspan x="810.0" y="471.0">dbgs</tspan><tspan x="810.0" y="489.0">файловой базы и ibsrv</tspan></text></g>
 <g class="lbl"><rect x="379.5" y="144.5" width="141" height="24" rx="4"/><text><tspan x="450.0" y="156.5">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="253.6" y="183.0" width="188" height="24" rx="4"/><text><tspan x="347.6" y="195.0">поднимает на время команды</tspan></text></g>
 <g class="lbl"><rect x="480.5" y="179.5" width="141" height="24" rx="4"/><text><tspan x="551.0" y="191.5">процесс на операцию</tspan></text></g>
@@ -367,6 +370,7 @@
 <g class="lbl"><rect x="270.9" y="336.5" width="141" height="24" rx="4"/><text><tspan x="341.4" y="348.5">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="495.1" y="336.5" width="127" height="24" rx="4"/><text><tspan x="558.6" y="348.5">одна живая сессия</tspan></text></g>
 <g class="lbl"><rect x="386.5" y="371.5" width="127" height="24" rx="4"/><text><tspan x="450.0" y="383.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="677.2" y="327.0" width="141" height="24" rx="4"/><text><tspan x="747.7" y="339.0">живёт после команды</tspan></text></g>
 </svg>
 </div>
 <!-- /diagram:processes -->
@@ -387,6 +391,7 @@
 <tr><td class="k">Designer, ibcmd, webinst</td><td>отдельный процесс</td><td>одна операция</td><td>1 одновременно</td></tr>
 <tr><td class="k">автономный сервер</td><td>ваш процесс или <code>ibsrv</code>, поднятый <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a></td><td>ваш — раннер не поднимает и не перезапускает; поднятый <code>standalone start</code> живёт до <code>standalone stop</code>, его данные и запись — в <code>localPath/infobases/&lt;база&gt;/managed/standalone</code></td><td>1 на базу</td></tr>
 <tr><td class="k">клиент 1С</td><td>процесс</td><td>время теста или запуска</td><td>1</td></tr>
+<tr><td class="k">сервер отладки <code>dbgs</code></td><td>процесс на машине раннера, слушает <code>127.0.0.1</code>; запись сеанса, адрес и журнал — <code>workPath/debug-server/&lt;сеанс&gt;/</code>; перед удалением <code>workPath</code> — <code>debug-server stop</code></td><td>переживает команду: поднятый <a href="cli-debug-server.html#op-debug-server-start"><code>debug-server start</code></a> живёт до <code>debug-server stop</code> или до конца процесса из <code>--owner-pid</code>; сеансы вышедших серверов убирает следующий <code>debug-server start</code>. Сервер отладки кластера, запущенного с <code>--debug</code>, живёт с кластером; <code>dbgs</code> автономного сервера, поднятого <code>standalone start --debug</code>, — с его <code>ibsrv</code>, запись — в <code>localPath/infobases/&lt;база&gt;/managed/standalone-debug</code></td><td>1 на сеанс; каждый <code>start</code> — новый сеанс</td></tr>
 </tbody></table></div>
 
 <h2>Что из этого следует</h2>

@@ -1071,6 +1071,72 @@ fn rejecting_the_ready_tree_keeps_every_baseline_and_the_existing_sources() {
 }
 
 #[test]
+fn a_rejected_ready_tree_stays_in_the_stage_untouched() {
+    const LEFT_DESCRIPTION: &str = "left in the sources by an earlier runner";
+    for executor in ["designer", "ibcmd", "attached agent"] {
+        for extension in [false, true] {
+            for left in [None, Some(LEFT_DESCRIPTION)] {
+                let case = format!("{executor} extension={extension} left={}", left.is_some());
+                let provider = if executor == "ibcmd" {
+                    "ibcmd"
+                } else {
+                    "designer"
+                };
+                let project = Project::new(provider, extension);
+                project.seed_baseline();
+                let agent = (executor == "attached agent")
+                    .then(|| AttachedAgent::configure(&project, HoldReply::Normal, true));
+                if let Some(agent) = &agent {
+                    // Отказ отпускает агента сразу: удержание его отключения тест не проверяет.
+                    fs::write(&agent.disconnect_release, "release at once").unwrap();
+                }
+                if let Some(left) = left {
+                    fs::write(project.sources.join("ConfigDumpInfo.xml"), left).unwrap();
+                }
+                let mut session = project.start();
+                let ready = match &agent {
+                    Some(agent) => agent.ready(&project, &mut session),
+                    None => project.ready(&mut session),
+                };
+                let prepared = snapshot(&project.stage);
+                assert!(
+                    prepared.contains_key(Path::new("Configuration.xml")),
+                    "{case}: {:?}",
+                    prepared.keys()
+                );
+                // Опись платформы уходит в копию раннера; опись, оставленная в каталоге
+                // набора, переходит в дерево как была и только в корень.
+                assert!(
+                    prepared.keys().all(|path| {
+                        path.file_name() != Some("ConfigDumpInfo.xml".as_ref())
+                            || path == Path::new("ConfigDumpInfo.xml")
+                    }),
+                    "{case}: {:?}",
+                    prepared.keys()
+                );
+                assert_eq!(
+                    prepared
+                        .get(Path::new("ConfigDumpInfo.xml"))
+                        .map(Vec::as_slice),
+                    left.map(str::as_bytes),
+                    "{case}"
+                );
+                session.decide(&ready, "rejected");
+                let (status, terminal) = session.finish();
+                assert!(!status.success(), "{case}: {terminal}");
+                assert_eq!(terminal["publication"], "not_published", "{case}");
+                assert_eq!(terminal["memory"], "unchanged", "{case}");
+                assert_eq!(
+                    snapshot(&project.stage),
+                    prepared,
+                    "{case}: the runner changed the stage after ready"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push() {
     for provider in ["designer", "ibcmd"] {
         for extension in [false, true] {

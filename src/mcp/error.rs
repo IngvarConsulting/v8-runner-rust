@@ -14,6 +14,8 @@ pub enum McpErrorCode {
     UnsupportedValue,
     RuntimeFailure,
     PlatformFailure,
+    InfobaseNotFound,
+    ConnectionFailed,
     Internal,
 }
 
@@ -31,6 +33,7 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
         match value {
             UseCaseErrorKind::Capability(_) => Self::Runtime,
             UseCaseErrorKind::Environment(_)
+            | UseCaseErrorKind::InfobaseNotFound
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::InfobaseSessions
@@ -47,7 +50,9 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             | UseCaseErrorKind::SourceSetIgnoredByGit
             | UseCaseErrorKind::WorkPathOnAnotherVolume => Self::Validation,
             UseCaseErrorKind::Runtime => Self::Runtime,
-            UseCaseErrorKind::Platform | UseCaseErrorKind::AgentCommandAbandoned => Self::Platform,
+            UseCaseErrorKind::Platform
+            | UseCaseErrorKind::ConnectionFailed
+            | UseCaseErrorKind::AgentCommandAbandoned => Self::Platform,
         }
     }
 }
@@ -78,6 +83,8 @@ impl McpBusinessError {
         let kind = error.kind();
         let code = match kind {
             UseCaseErrorKind::Capability(_) => McpErrorCode::RuntimeFailure,
+            UseCaseErrorKind::InfobaseNotFound => McpErrorCode::InfobaseNotFound,
+            UseCaseErrorKind::ConnectionFailed => McpErrorCode::ConnectionFailed,
             UseCaseErrorKind::Environment(_)
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
@@ -161,6 +168,8 @@ impl From<McpErrorCode> for crate::command_envelope::ErrorCode {
             McpErrorCode::UnsupportedValue => Self::UnsupportedValue,
             McpErrorCode::RuntimeFailure => Self::RuntimeFailure,
             McpErrorCode::PlatformFailure => Self::PlatformFailure,
+            McpErrorCode::InfobaseNotFound => Self::InfobaseNotFound,
+            McpErrorCode::ConnectionFailed => Self::ConnectionFailed,
             // До конверта этот код не доходит: внутренняя ошибка отвечает не ответом
             // команды, а ошибкой протокола. Ветка есть ради полноты перевода.
             McpErrorCode::Internal => Self::RuntimeFailure,

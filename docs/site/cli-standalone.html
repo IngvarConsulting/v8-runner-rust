@@ -63,6 +63,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start" aria-current="page">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-debug-server.html#op-debug-server-start">debug-server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -81,24 +82,32 @@
 <p>Если закреплённый порт занял другой процесс, команда берёт новый свободный блок портов и закрепляет его; чужой процесс остаётся работать. Ответ называет новые адреса, прямой порт прежнего блока и предупреждает, кто занял порт. Ключ хоста SSH-шлюза и его отпечаток не меняются. <code>v8project*.yaml</code> раннер не правит: адрес сервера берите из ответа <code>standalone start</code> или <code>standalone status</code> и не кешируйте. Если перечня процессов нет и не сказать, кто держит порт, команда отказывает.</p>
 <pre data-output-command><code>v8-runner standalone start --dry-run</code></pre>
 <p>Показывает каталог данных, журнал и закреплённые адреса, если сервер уже запускался. Ничего не запускает. Такое же превью есть у <code>standalone stop</code> и <code>standalone restart</code>. Команды <code>standalone</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
+<pre data-output-command id="op-standalone-debug"><code>v8-runner standalone start --debug</code></pre>
+<p>Поднимает <code>ibsrv</code> с отладкой по HTTP и рядом с ним свой сервер отладки <a href="glossary.html#tool-dbgs"><code>dbgs</code></a> из той же установки, что <code>ibsrv</code>. Сервер получает ключи <code>--debug=http --debug-server-url=http://127.0.0.1:&lt;порт&gt;</code>, затем раннер запускает <code>dbgs --addr=127.0.0.1 --port=&lt;порт&gt; --ownerPID=&lt;pid ibsrv&gt;</code>: сервер и подключённые к нему клиенты регистрируют предметы отладки на этом <code>dbgs</code>, а с концом <code>ibsrv</code> он выходит сам. Ответ приходит, когда прямой шлюз принял соединение и <code>dbgs</code> ответил по протоколу <code>rdbg</code>. Собственный сервер отладки <code>ibsrv</code> (<code>--debug-port</code>) раннер не использует: внешнему отладчику протокола <code>rdbg</code> он отвечает 406 <span class="ref">(<a href="platform.html#t112">112</a>)</span>.</p>
+<p>Порт сервера отладки — первый после диапазона прямых соединений внутри закреплённого блока портов. Его занятость проверяется только при запуске с отладкой: если он занят, весь блок переезжает, как при занятом порте шлюза. Признак закрепляется вместе с портами и именем базы в сервере: следующие <code>standalone start</code> и <code>standalone restart</code> без ключа поднимают сервер так же, пока <code>--no-debug</code> его не снимет. Пока сервер с отладкой работает, ответы <code>standalone start</code>, <code>standalone restart</code> и <code>standalone status</code> называют адрес <code>dbgs</code> в поле <code>debug_url</code>; тот же адрес отдаёт <a href="cli-debug-server.html#op-debug-server-start"><code>debug-server start</code></a> для этой базы. Если сервер уже работает с другим признаком, <code>standalone start</code> его не перезапускает и отказывает <code>invalid_argument</code>, называя <code>standalone restart</code> с нужным ключом. Если сервер с отладкой работает, а его <code>dbgs</code> уже нет, отказ <code>environment_unavailable</code> называет <code>standalone restart</code>: новый <code>dbgs</code> под работающим <code>ibsrv</code> его предметов отладки не получает. Закреплённое без признака — сервер без отладки.</p>
+<pre data-output-command id="op-standalone-no-debug"><code>v8-runner standalone restart --no-debug</code></pre>
+<p>Перезапускает сервер без сервера отладки и снимает закреплённый признак. Те же ключи <code>--debug</code> и <code>--no-debug</code> принимают <code>standalone start</code> и <code>standalone restart</code>; без ключа действует закреплённое.</p>
 <h2 class="command-variant" id="op-standalone-status">standalone status</h2>
 <pre data-output-command><code>v8-runner standalone status</code></pre>
-<p>Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, адреса прямого шлюза, SSH-шлюза и HTTP и отвечает ли прямой шлюз. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
+<p>Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, адреса прямого шлюза, SSH-шлюза и HTTP, адрес сервера отладки в <code>debug_url</code>, если сервер поднят с <code>--debug</code>, и отвечает ли прямой шлюз. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
 <h2 class="command-variant" id="op-standalone-stop">standalone stop</h2>
 <pre data-output-command><code>v8-runner standalone stop</code></pre>
-<p>Останавливает сервер, который поднял раннер этой копии, и ждёт завершения его процесса. PostgreSQL, поднятый шагом <code>standalone start</code>, гасит следом, а поднятый <code>dbms start</code> не трогает (<a href="cli-dbms.html#dbms-ownership">таблица владения</a>). Сервер, поднятый не раннером, не останавливает: ответ называет его и говорит, что он не наш. Если сервера нет и гасить нечего, команда успешна.</p>
+<p>Останавливает сервер, который поднял раннер этой копии, и ждёт завершения его процесса. <code>dbgs</code> сервера с отладкой выходит вместе с <code>ibsrv</code>: раннер дожидается его конца, если нужно — гасит сам, и называет его PID в <code>stopped_debug_pid</code>. PostgreSQL, поднятый шагом <code>standalone start</code>, гасит следом, а поднятый <code>dbms start</code> не трогает (<a href="cli-dbms.html#dbms-ownership">таблица владения</a>). Сервер, поднятый не раннером, не останавливает: ответ называет его и говорит, что он не наш. Если сервера нет и гасить нечего, команда успешна.</p>
 <h2 class="command-variant" id="op-standalone-restart">standalone restart</h2>
 <pre data-output-command><code>v8-runner standalone restart</code></pre>
-<p>То же, что <code>standalone stop</code> и затем <code>standalone start</code>, для своего сервера. Чужой сервер не перезапускает, PostgreSQL не трогает.</p>
+<p>То же, что <code>standalone stop</code> и затем <code>standalone start</code>, для своего сервера вместе с его <code>dbgs</code>. Чужой сервер не перезапускает, PostgreSQL не трогает.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
 <tbody><tr data-response-class="outcome"><td>Сервер поднят</td><td><code>standalone start</code> поднял <code>ibsrv</code>, проба прямого шлюза прошла. <a href="#standalone-started">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Сервер с отладкой</td><td><code>standalone start --debug</code>: <code>ibsrv</code> поднят со своим <code>dbgs</code>, тот ответил по <code>rdbg</code>, его адрес — в <code>debug_url</code>. <a href="#standalone-started-debug">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Уже поднят этой копией</td><td>Свой сервер работает: новый не запускается. <a href="#standalone-already">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Состояние</td><td><code>standalone status</code> различает: не поднят, поднят раннером, поднят не раннером. <a href="#standalone-status-own">Пример</a></td></tr>
-<tr data-response-class="outcome"><td>Сервер остановлен</td><td><code>standalone stop</code> завершил свой процесс. <a href="#standalone-stopped">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Сервер остановлен</td><td><code>standalone stop</code> завершил свой процесс; у сервера с отладкой — и его <code>dbgs</code>, PID в <code>stopped_debug_pid</code>. <a href="#standalone-stopped">Пример</a>, <a href="#standalone-stopped-debug">с отладкой</a></td></tr>
 <tr data-response-class="outcome"><td>Порт занят — новый блок</td><td>Закреплённый порт держит другой процесс: сервер поднят на новых портах, в ответе <code>previous_port</code>, в предупреждении — кто занял порт. <a href="#standalone-ports-moved">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Чужой сервер не тронут</td><td>Базу держит <code>ibsrv</code>, поднятый не раннером: <code>standalone start</code> отказывает, <code>standalone stop</code> его не останавливает. <a href="#standalone-foreign">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Другой признак отладки</td><td>Работающий сервер поднят не с тем признаком, что просит <code>standalone start --debug</code> или <code>--no-debug</code>: <code>invalid_argument</code>, выход CLI 2; сервер не тронут, отказ называет <code>standalone restart</code> с нужным ключом. <a href="#standalone-debug-mismatch">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Сервера отладки уже нет</td><td>Сервер с отладкой работает, его <code>dbgs</code> вышел: <code>standalone start</code> отказывает <code>environment_unavailable</code>, выход CLI 2, и называет <code>standalone restart</code>. <a href="#standalone-debug-gone">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Сервер не стал готов</td><td>Процесс завершился или проба не прошла за отведённое время: <code>platform_failure</code>, выход CLI 4, в ответе — журнал <code>ibsrv</code>. <a href="#standalone-not-ready">Пример</a></td></tr>
 </tbody>
 </table></div>
@@ -109,6 +118,14 @@
   direct gate  Srvr=127.0.0.1:24641;Ref=demo
   ssh gate  127.0.0.1:24642
   http  http://127.0.0.1:24643/demo
+  data  .local/infobases/origin/managed/standalone/data
+  log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
+<h4 id="standalone-started-debug">Сервер с отладкой</h4>
+<pre data-output-example="standalone-started-debug" data-output-schema="standalone-start"><code>standalone start: started ibsrv, pid 48213
+  direct gate  Srvr=127.0.0.1:24641;Ref=demo
+  ssh gate  127.0.0.1:24642
+  http  http://127.0.0.1:24643/demo
+  debug server  http://127.0.0.1:24660
   data  .local/infobases/origin/managed/standalone/data
   log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 <h4 id="standalone-ports-moved">Порт занят — новый блок</h4>
@@ -136,8 +153,15 @@ warning: port 24641 of the server of 'origin' is taken by process 9008, which th
   log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 <h4 id="standalone-stopped">Сервер остановлен</h4>
 <pre data-output-example="standalone-stopped" data-output-schema="standalone-stop"><code>standalone stop: ibsrv pid 48213 stopped</code></pre>
+<h4 id="standalone-stopped-debug">Сервер с отладкой остановлен</h4>
+<pre data-output-example="standalone-stopped-debug" data-output-schema="standalone-stop"><code>standalone stop: ibsrv pid 48213 stopped
+  debug server stopped  pid 51020</code></pre>
 <h4 id="standalone-foreign">Чужой сервер не тронут</h4>
 <pre data-output-example="standalone-foreign" data-output-schema="standalone-start"><code>ERROR: workspace busy: the infobase of 'origin' is served by ibsrv pid 30117, which this runner did not start; it is left running</code></pre>
+<h4 id="standalone-debug-mismatch">Другой признак отладки</h4>
+<pre data-output-example="standalone-debug-mismatch" data-output-schema="standalone-start"><code>ERROR: validation error: the standalone server of 'origin' is running with a debug server: run `standalone restart --no-debug`</code></pre>
+<h4 id="standalone-debug-gone">Сервера отладки уже нет</h4>
+<pre data-output-example="standalone-debug-gone" data-output-schema="standalone-start"><code>ERROR: environment unavailable: the debug server of the standalone server of 'origin' is gone: run `standalone restart`</code></pre>
 <h4 id="standalone-not-ready">Сервер не стал готов</h4>
 <pre data-output-example="standalone-not-ready" data-output-schema="standalone-start"><code>ERROR: platform error: ibsrv exited before its direct gate accepted a connection; log: .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 </main>
@@ -159,6 +183,28 @@ warning: port 24641 of the server of 'origin' is taken by process 9008, which th
       "ready": true,
       "action": "started",
       "duration_ms": 14210
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "standalone-started-debug": {
+    "ok": true,
+    "command": "standalone start",
+    "duration_ms": 15840,
+    "data": {
+      "ok": true,
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "pid": 48213,
+      "connection": "Srvr=127.0.0.1:24641;Ref=demo",
+      "gate": "127.0.0.1:24642",
+      "http": "http://127.0.0.1:24643/demo",
+      "debug_url": "http://127.0.0.1:24660",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
+      "ready": true,
+      "action": "started",
+      "duration_ms": 15840
     },
     "warnings": [],
     "steps": []
@@ -244,6 +290,76 @@ warning: port 24641 of the server of 'origin' is taken by process 9008, which th
     },
     "warnings": [],
     "steps": []
+  },
+  "standalone-stopped-debug": {
+    "ok": true,
+    "command": "standalone stop",
+    "duration_ms": 5160,
+    "data": {
+      "ok": true,
+      "infobase": "origin",
+      "state": "not_running",
+      "action": "stopped",
+      "ready": false,
+      "stopped_pid": 48213,
+      "stopped_debug_pid": 51020,
+      "duration_ms": 5160
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "standalone-debug-mismatch": {
+    "ok": false,
+    "command": "standalone start",
+    "duration_ms": 60,
+    "data": {
+      "ok": false,
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "action": "reported",
+      "pid": 48213,
+      "connection": "Srvr=127.0.0.1:24641;Ref=demo",
+      "gate": "127.0.0.1:24642",
+      "http": "http://127.0.0.1:24643/demo",
+      "debug_url": "http://127.0.0.1:24660",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
+      "ready": true,
+      "duration_ms": 60
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "kind": "validation",
+      "code": "invalid_argument",
+      "message": "the standalone server of 'origin' is running with a debug server: run `standalone restart --no-debug`"
+    }
+  },
+  "standalone-debug-gone": {
+    "ok": false,
+    "command": "standalone start",
+    "duration_ms": 60,
+    "data": {
+      "ok": false,
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "action": "reported",
+      "pid": 48213,
+      "connection": "Srvr=127.0.0.1:24641;Ref=demo",
+      "gate": "127.0.0.1:24642",
+      "http": "http://127.0.0.1:24643/demo",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
+      "ready": true,
+      "duration_ms": 60
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "kind": "environment",
+      "code": "environment_unavailable",
+      "message": "the debug server of the standalone server of 'origin' is gone: run `standalone restart`"
+    }
   },
   "standalone-foreign": {
     "ok": false,

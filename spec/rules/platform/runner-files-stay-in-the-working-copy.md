@@ -1,6 +1,7 @@
 ---
 id: INV.PLATFORM.RUNNER-FILES-STAY-IN-THE-WORKING-COPY
 check:
+  - tests/cli_infobase.rs::infobase_check_needs_native_login_evidence_and_leaves_no_files
   - tests/architecture_guardrails.rs::the_runner_creates_nothing_outside_the_working_copy
   - tests/architecture_guardrails.rs::the_working_copy_guard_sees_every_spelling
   - tests/cli_live_agent_portable.rs::the_live_agent_lives_in_the_working_copy_and_comes_back_when_its_home_is_gone
@@ -35,7 +36,9 @@ check:
   прежде: относительные пути команды считаются от него, а файлов в нём эти процессы не оставляют
   (пакетный Конфигуратор после `CREATEINFOBASE`, `/DumpConfigToFiles`, `/LoadConfigFromFiles` и
   `/UpdateDBCfg` из пустого каталога ничего в нём не оставил). Текущий каталог такого процесса —
-  не место, где раннер создаёт файлы.
+  не место, где раннер создаёт файлы. Исключение — `infobase check`: текущий
+  каталог процесса и его журнал находятся в приватном каталоге `workPath/temp`,
+  который команда удаляет перед ответом. Это удерживает служебные файлы платформы.
 
 Сторож живого агента держит своим текущим каталогом `workPath/agent/live`, а запущен он из
 копии раннера в `bin/`. Поэтому на Windows, пока агент жив, рабочую копию не удалить, и на любой

@@ -328,6 +328,7 @@ impl AppError {
                     IbcmdError::Spawn(error) => process_cancellation(error),
                     IbcmdError::MissingServerDbmsField(_)
                     | IbcmdError::DirectoryWipingExport
+                    | IbcmdError::FileServedByIbsrv { .. }
                     | IbcmdError::SnapshotBusy { .. }
                     | IbcmdError::SnapshotProbe { .. }
                     | IbcmdError::SnapshotUnsupported
@@ -513,7 +514,9 @@ fn session_cancellation(error: &EdtSessionError) -> Option<CancelledAt> {
 impl From<IbcmdError> for AppError {
     fn from(error: IbcmdError) -> Self {
         match error {
-            IbcmdError::SnapshotBusy { .. } => Self::InfobaseBusy(error.to_string()),
+            IbcmdError::FileServedByIbsrv { .. } | IbcmdError::SnapshotBusy { .. } => {
+                Self::InfobaseBusy(error.to_string())
+            }
             IbcmdError::SnapshotProbe { .. } => Self::environment(error.to_string()),
             IbcmdError::SnapshotUnsupported => {
                 Self::capability_for(CapabilityReason::Target, error.to_string())

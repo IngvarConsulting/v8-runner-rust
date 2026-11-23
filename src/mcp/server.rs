@@ -74,6 +74,7 @@ enum McpTool {
     RunModuleTests,
     BuildProject,
     DumpConfig,
+    CheckInfobase,
     LaunchApp,
     CheckSyntaxEdt,
     CheckSyntaxDesignerConfig,
@@ -100,6 +101,7 @@ impl McpTool {
             Self::RunModuleTests => "run_module_tests",
             Self::BuildProject => "build_project",
             Self::DumpConfig => "dump_config",
+            Self::CheckInfobase => "check_infobase",
             Self::LaunchApp => "launch_app",
             Self::CheckSyntaxEdt => "check_syntax_edt",
             Self::CheckSyntaxDesignerConfig => "check_syntax_designer_config",
@@ -914,6 +916,23 @@ impl McpToolServer {
         .await
     }
 
+    #[tool(description = "Verify login to the selected 1C infobase and report the client version")]
+    async fn check_infobase(
+        &self,
+        cancellation: CancellationToken,
+        CallId(id): CallId,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.execute_tool(
+            McpTool::CheckInfobase,
+            (),
+            self.signals(id, cancellation),
+            |config, _, call_context, ()| {
+                crate::mcp::service::check_infobase(config.as_ref(), call_context)
+            },
+        )
+        .await
+    }
+
     #[tool(description = "Launch a 1C application")]
     async fn launch_app(
         &self,
@@ -1059,13 +1078,9 @@ fn execution_error(
             ExecutionStage::Queued => "queued",
             ExecutionStage::Running => "running",
         },
-        "timeoutMs": timeout.map(duration_to_millis),
+        "timeoutMs": timeout.map(crate::support::time::millis),
     });
     ErrorData::internal_error(message, Some(data))
-}
-
-fn duration_to_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn extract_http_rpc_method(

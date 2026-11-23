@@ -1,9 +1,10 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
+  - tests/cli_launch_debug.rs::a_debug_launch_preview_attaches_the_client_to_the_debug_server
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_launch.rs::an_epf_wait_interrupted_after_the_client_started_answers_in_its_form
   - tests/cli_launch.rs::thin_application_parameter_wait_preserves_values_without_execute
@@ -53,6 +54,10 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 
 **Что изменила версия 6.** Схема запрещает `external_epf_wait` и `client_wait`
 в одном ответе (`not: {required: [...]}`): обещание выше теперь проверяет и форма.
+
+**Что изменила версия 7.** Появилось `debug` — `{url}` сервера отладки, к которому клиент
+подключён ключом `launch --debug <url>` (`INV.CLI.A-DEBUG-LAUNCH-ATTACHES-THE-ENTERPRISE-CLIENT`).
+Без ключа поля нет.
 
 ## Наблюдение MCP
 

@@ -1,6 +1,7 @@
 //! Автономный сервер `ibsrv`, которого поднимает раннер: ключи запуска. Что запускать и в каком
 //! порядке, решает `use_cases/managed_stand`.
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,18 @@ impl ServerPorts {
         [self.direct, self.ssh, self.http]
             .into_iter()
             .chain(self.range_start..self.range_start + DIRECT_RANGE_WIDTH)
+    }
+
+    /// Порт сервера отладки стенда (`standalone start --debug`): следом за диапазоном прямых
+    /// соединений, внутри шага блока. В [`Self::all`] его нет — его занятость проверяет только
+    /// запуск с отладкой, и тогда блок переезжает целиком.
+    pub fn debug(self) -> u16 {
+        self.range_start.saturating_add(DIRECT_RANGE_WIDTH)
+    }
+
+    /// Порты блока, которые займёт запуск: с портом отладки, если она включена.
+    pub fn used(self, debug: bool) -> impl Iterator<Item = u16> {
+        self.all().chain(debug.then(|| self.debug()))
     }
 
     /// Блоки делят хотя бы один порт.
@@ -81,6 +94,50 @@ pub fn file_base_keys(db_path: &Path) -> Vec<String> {
     vec![format!("--db-path={}", db_path.display())]
 }
 
+/// A local ibsrv which names this physical file base in its launch arguments.
+pub(super) fn file_server_pid(base: &Path, cancelled: impl Fn() -> bool) -> Option<u32> {
+    use crate::platform::file_base_hold::DATABASE_FILE;
+    use crate::support::path::filesystem_object_identity;
+
+    let directory = filesystem_object_identity(base).ok()?;
+    let data = filesystem_object_identity(&base.join(DATABASE_FILE)).ok();
+    crate::platform::service::first_process_with_arguments("ibsrv", cancelled, |arguments| {
+        explicit_file_base(arguments).is_some_and(|path| {
+            filesystem_object_identity(path).is_ok_and(|server_dir| server_dir == directory)
+                || data.as_ref().is_some_and(|data| {
+                    filesystem_object_identity(&path.join(DATABASE_FILE))
+                        .is_ok_and(|server_data| &server_data == data)
+                })
+        })
+    })
+}
+
+fn explicit_file_base<'a>(argv: &[&'a OsStr]) -> Option<&'a Path> {
+    let mut arguments = argv.iter().skip(1);
+    let mut path = None;
+    while let Some(argument) = arguments.next() {
+        let bytes = argument.as_encoded_bytes();
+        let end = bytes
+            .iter()
+            .position(|&byte| byte == b'=')
+            .unwrap_or(bytes.len());
+        if !matches!(&bytes[..end], b"--db-path" | b"--database-path") {
+            continue;
+        }
+        let value = if end == bytes.len() {
+            arguments.next()?
+        } else {
+            // SAFETY: the bytes came from this OsStr and '=' is an ASCII boundary.
+            unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[end + 1..]) }
+        };
+        if path.replace(Path::new(value)).is_some() {
+            return None;
+        }
+    }
+    // Relative paths depend on the data directory chosen by the running server.
+    path.filter(|path| path.is_absolute())
+}
+
 /// Ключи запуска, которые называют базу в СУБД. По ним же узнают чужой сервер над ней.
 pub fn database_keys(server: &str, name: &str) -> Vec<String> {
     vec![format!("--db-server={server}"), format!("--db-name={name}")]
@@ -95,6 +152,7 @@ pub fn start_server(
     storage: &ServerStorage<'_>,
     name: &str,
     ports: ServerPorts,
+    debugger: Option<&str>,
     host_key: &Path,
     log: &Path,
 ) -> ServiceRequest {
@@ -127,6 +185,14 @@ pub fn start_server(
         format!("--ssh-port={}", ports.ssh),
         format!("--ssh-host-key={}", host_key.display()),
     ]);
+    // Свой сервер отладки `ibsrv` (`--debug-port`) внешнему отладчику протокола `rdbg` отвечает
+    // 406; цели он регистрирует на внешнем `dbgs` по адресу `--debug-server-url` (замер #759).
+    if let Some(url) = debugger {
+        args.extend([
+            "--debug=http".to_owned(),
+            format!("--debug-server-url={url}"),
+        ]);
+    }
     ServiceRequest {
         program: ibsrv.to_path_buf(),
         args,
@@ -328,6 +394,7 @@ mod tests {
             &ServerStorage::File(Path::new("ib")),
             "demo",
             ServerPorts::from_first(24000),
+            None,
             Path::new("key"),
             Path::new("log"),
         );
@@ -341,6 +408,40 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("extended-designer")));
         assert_eq!(request.workdir.as_deref(), Some(Path::new("root")));
+        assert!(!request.args.iter().any(|arg| arg.starts_with("--debug")));
+    }
+
+    /// С отладкой `ibsrv` регистрирует цели на внешнем `dbgs`, а свой сервер отладки не
+    /// открывает (замер #759); порт отладки — за диапазоном прямых соединений, внутри шага.
+    #[test]
+    fn a_debug_server_registers_its_targets_on_the_given_debugger() {
+        let ports = ServerPorts::from_first(24000);
+        assert_eq!(ports.debug(), 24019);
+        assert!(!ports.all().any(|port| port == ports.debug()));
+        assert!(ports.used(true).any(|port| port == ports.debug()));
+        let request = start_server(
+            Path::new("ibsrv"),
+            Path::new("root/data"),
+            &ServerStorage::File(Path::new("ib")),
+            "demo",
+            ports,
+            Some("http://127.0.0.1:24019"),
+            Path::new("key"),
+            Path::new("log"),
+        );
+        let at = request
+            .args
+            .iter()
+            .position(|arg| arg == "--debug=http")
+            .expect("--debug=http");
+        assert_eq!(
+            request.args[at + 1],
+            "--debug-server-url=http://127.0.0.1:24019"
+        );
+        assert!(!request
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("--debug-port")));
     }
 
     #[test]
@@ -357,6 +458,7 @@ mod tests {
             }),
             "demo",
             ServerPorts::from_first(24000),
+            None,
             Path::new("key"),
             Path::new("log"),
         );
