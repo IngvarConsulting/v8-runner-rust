@@ -313,6 +313,21 @@ impl<'a> DesignerDsl<'a> {
 
     /// `CREATEINFOBASE <connection-string>`
     pub fn create_infobase(&self) -> Result<PlatformCommandResult, DesignerError> {
+        self.create_file_infobase(None)
+    }
+
+    /// Create a file infobase and apply the configuration from a CF template.
+    pub fn create_infobase_from_cf(
+        &self,
+        input: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        self.create_file_infobase(Some(input))
+    }
+
+    fn create_file_infobase(
+        &self,
+        template: Option<&Path>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = vec!["CREATEINFOBASE".to_owned()];
         let connection =
             self.connection
@@ -321,6 +336,17 @@ impl<'a> DesignerDsl<'a> {
                     "a file-based connection File=…",
                 ))?;
         args.push(connection);
+        if let Some(template) = template {
+            args.extend([
+                "/UseTemplate".to_owned(),
+                template.display().to_string(),
+                "/DisableStartupDialogs".to_owned(),
+                "/DisableStartupMessages".to_owned(),
+            ]);
+            if let Some(log) = &self.log_file {
+                args.extend(["/Out".to_owned(), log.display().to_string()]);
+            }
+        }
         self.run_raw(&args)
     }
 

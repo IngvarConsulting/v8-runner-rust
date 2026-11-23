@@ -476,6 +476,8 @@ pub(crate) fn load_cli_config(
         crate::config::loader::load_config_for_managed_standalone(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Cluster(_) | Command::Web(_)) {
         crate::config::loader::load_config_for_managed_cluster(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Init(args) if args.seeds_a_new_file_base()) {
+        crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(_)) {
         crate::config::loader::load_config_for_infobase_create(
             config_path,

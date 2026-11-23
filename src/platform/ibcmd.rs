@@ -479,9 +479,23 @@ impl<'a> IbcmdDsl<'a> {
         &self,
         import: Option<&Path>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
+        self.create_with_configuration(import.map(|path| ("--import", path)))
+    }
+
+    pub fn infobase_create_from_cf(
+        &self,
+        input: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        self.create_with_configuration(Some(("--load", input)))
+    }
+
+    fn create_with_configuration(
+        &self,
+        configuration: Option<(&str, &Path)>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.create_infobase_args();
-        if let Some(import) = import {
-            args.push(format!("--import={}", import.display()));
+        if let Some((flag, path)) = configuration {
+            args.push(format!("{flag}={}", path.display()));
             args.push("--apply".to_owned());
             args.push("--force".to_owned());
         }
