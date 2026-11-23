@@ -77,7 +77,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::infobase_lock::BaseAccess;
-use crate::use_cases::init_project;
+use crate::use_cases::init_project::{self, InitRequest};
 use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
@@ -87,9 +87,8 @@ use crate::use_cases::request::{
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DownloadAllRequest,
     DumpModeRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut,
-    InitRequest, LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode, SyntaxExtensionScope,
+    SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -797,22 +796,8 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
-        Command::Infobase(InfobaseArgs {
-            command:
-                InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
-                    command: InfobaseConfigurationCommand::Export(_),
-                }),
-        }) => CommandName::InfobaseConfigurationExport,
+        Command::Infobase(args) => infobase_command_name(args),
         Command::Init(_) => CommandName::Init,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create(_),
-        }) => unreachable!("infobase create is normalised into its own command in app::run"),
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Dump(_),
-        }) => CommandName::InfobaseDump,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Restore(_),
-        }) => CommandName::InfobaseRestore,
         Command::Convert(_) => CommandName::Convert,
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
@@ -871,7 +856,7 @@ pub fn infobase_transfer_operation(
             }) => Some(Operation::ConfigurationExport),
             InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
             InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
-            InfobaseCommand::Create(_) => None,
+            InfobaseCommand::Create(_) | InfobaseCommand::Check => None,
         },
         _ => None,
     }
@@ -1291,17 +1276,34 @@ fn execute_init(
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    let context = cli_context(config, CommandName::Init, cancellation);
+    let file_creation = if args.seeds_a_new_file_base() {
+        let creation = init_project::file_seed::FileCreation::prepare(
+            config,
+            args.input.as_deref(),
+            clean_before_execution,
+        )
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Init, error))?;
+        Some(creation)
+    } else {
+        None
+    };
+    let access = if file_creation.is_some() {
+        BaseAccess::Creates
+    } else {
+        BaseAccess::Writes
+    };
     let request = InitRequest {
         dry_run,
         from: args.from.clone(),
         recreate: args.recreate,
+        file_creation,
     };
-    let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Init,
-        BaseAccess::Writes,
+        access,
         clean_before_execution,
         dry_run,
         || {
@@ -2903,6 +2905,7 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
+        InfobaseCommand::Check => Ok(()),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
@@ -2980,6 +2983,11 @@ pub fn render_infobase_pre_dispatch_failure(
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
+        InfobaseCommand::Check => crate::cli::output::print_command_use_case_error(
+            presenter,
+            CommandName::InfobaseCheck,
+            &error,
+        ),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create has no export request to render")
         }
@@ -3037,6 +3045,7 @@ pub fn prepare_infobase_command(
     dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
+        InfobaseCommand::Check => unreachable!("infobase check is dispatched before exports"),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is dispatched before the export machinery")
         }
@@ -3148,6 +3157,7 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
+        InfobaseCommand::Check => CommandName::InfobaseCheck,
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
@@ -3189,6 +3199,40 @@ fn map_infobase_configuration_export_request(
         subject,
         output: PathBuf::from(&args.output),
     }
+}
+
+pub(crate) fn execute_infobase_check(
+    config: &AppConfig,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseCheck;
+    let cancellation = CancellationToken::new();
+    let _signal_guard = CliSignalGuard::install(cancellation.clone());
+    let context = cli_context(config, command, cancellation);
+    let started = std::time::Instant::now();
+    let result = crate::use_cases::infobase_check::check(&context, config);
+    let elapsed = crate::support::time::elapsed_ms(started);
+    match &result {
+        Ok(data) if presenter.is_json() => {
+            presenter.print_envelope(&Envelope::ok(command.as_str(), elapsed, data));
+        }
+        Ok(data) => {
+            if let Some(version) = &data.platform_version {
+                presenter.print_bare(&format!("Connected (1C {version})"));
+            }
+        }
+        Err(error) if presenter.is_json() && context.work().given() => {
+            let data = crate::use_cases::infobase_check::ConnectionChecked::default();
+            presenter.print_envelope(&crate::cli::output::failure_envelope(
+                command.as_str(),
+                elapsed,
+                data,
+                error,
+            ));
+        }
+        Err(error) => crate::cli::output::print_command_use_case_error(presenter, command, error),
+    }
+    result.map(|_| ())
 }
 
 fn execute_infobase(

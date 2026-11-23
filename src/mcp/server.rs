@@ -74,6 +74,7 @@ enum McpTool {
     RunModuleTests,
     BuildProject,
     DumpConfig,
+    CheckInfobase,
     LaunchApp,
     CheckSyntaxEdt,
     CheckSyntaxDesignerConfig,
@@ -100,6 +101,7 @@ impl McpTool {
             Self::RunModuleTests => "run_module_tests",
             Self::BuildProject => "build_project",
             Self::DumpConfig => "dump_config",
+            Self::CheckInfobase => "check_infobase",
             Self::LaunchApp => "launch_app",
             Self::CheckSyntaxEdt => "check_syntax_edt",
             Self::CheckSyntaxDesignerConfig => "check_syntax_designer_config",
@@ -909,6 +911,23 @@ impl McpToolServer {
             |config, port, call_context, request| {
                 let service = McpService::with_port(config.as_ref(), port);
                 service.dump_config(call_context, &request)
+            },
+        )
+        .await
+    }
+
+    #[tool(description = "Verify login to the selected 1C infobase and report the client version")]
+    async fn check_infobase(
+        &self,
+        cancellation: CancellationToken,
+        CallId(id): CallId,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.execute_tool(
+            McpTool::CheckInfobase,
+            (),
+            self.signals(id, cancellation),
+            |config, _, call_context, ()| {
+                crate::mcp::service::check_infobase(config.as_ref(), call_context)
             },
         )
         .await

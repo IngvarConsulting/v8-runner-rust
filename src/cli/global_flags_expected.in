@@ -40,6 +40,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "sessions terminate",
     "sessions deny",
     "sessions allow",
+    "infobase check",
     "agent keeper",
     "remove-backup",
 ];

@@ -722,6 +722,7 @@ async fn mcp_http_initialize_reuses_session_and_lists_tools() {
         names,
         vec![
             "build_project",
+            "check_infobase",
             "check_syntax_designer_config",
             "check_syntax_designer_modules",
             "check_syntax_edt",

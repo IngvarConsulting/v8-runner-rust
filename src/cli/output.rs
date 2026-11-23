@@ -90,6 +90,8 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
             },
             ErrorKind::Environment,
         ),
+        UseCaseErrorKind::InfobaseNotFound => (ErrorCode::InfobaseNotFound, ErrorKind::Environment),
+        UseCaseErrorKind::ConnectionFailed => (ErrorCode::ConnectionFailed, ErrorKind::Platform),
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseBusy => (ErrorCode::InfobaseBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseSessions => (ErrorCode::InfobaseSessions, ErrorKind::Workspace),

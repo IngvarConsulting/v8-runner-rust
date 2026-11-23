@@ -23,6 +23,7 @@ pub enum CommandName {
     Test,
     Dump,
     InfobaseConfigurationExport,
+    InfobaseCheck,
     InfobaseDump,
     InfobaseRestore,
     Convert,
@@ -98,6 +99,7 @@ impl CommandName {
             | Self::Test
             | Self::Dump
             | Self::InfobaseConfigurationExport
+            | Self::InfobaseCheck
             | Self::InfobaseDump
             | Self::InfobaseRestore
             | Self::Convert
@@ -152,6 +154,7 @@ impl CommandName {
             Self::Test => "test",
             Self::Dump => "pull",
             Self::InfobaseConfigurationExport => "download",
+            Self::InfobaseCheck => "infobase.check",
             Self::InfobaseDump => "infobase.dump",
             Self::InfobaseRestore => "infobase.restore",
             Self::Convert => "convert",

@@ -40,6 +40,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `upload` | `format=DESIGNER`, провайдер только `designer`; у автономного сервера — по прямому шлюзу | Загрузка `.cf` / `.cfe` артефактов в ИБ. Перед `.cfe` у кластера и автономного сервера список читает исполнитель `extensions list`, секция `infobase.dbms` не нужна. Если выбранный агент не поднялся, команда отказывает с родом `environment` до загрузки |
 | `make` / `artifacts` | Конфигуратор → `ibcmd`; `.epf`/`.erf` — Конфигуратор; любой формат | Собирает пакеты из исходников в постоянной базе `workPath/temp/build-infobase/`; при повторе переводит и загружает только необходимое; `--full` пересоздаёт базу |
 | `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
+| `infobase check` | Конфигуратор с прямым адресом файловой или клиент-серверной ИБ | Подтверждает вход без выгрузки. В JSON `command: "infobase.check"`, при успехе `data.platform_version` |
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `debug-server` | Файловая база — свой `dbgs` раннера (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux), автономный сервер раннера с `standalone start --debug` — его `dbgs` (Windows); чужой кластер или автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
@@ -675,7 +676,16 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 
 ```bash
 v8-runner infobase create [--from <INFOBASE>] [--recreate] [--dry-run]
+v8-runner infobase create --empty [--dry-run]
+v8-runner infobase create --input <FILE> [--dry-run]
 ```
+
+- `--empty` создаёт пустую файловую ИБ. `--input <файл.cf>` создаёт ИБ с применённой
+  конфигурацией, а `--input <файл.dt>` восстанавливает снимок с данными. Наборы,
+  XML/BSL и рабочая область EDT для этих режимов не нужны. Для новой файловой цели
+  выберите один режим. Сочетания с `--from` и `--recreate` отклоняются. После загрузки
+  файла объявите набор и выполните `pull <SET> --force`, чтобы получить исходники.
+  При частичном сбое файлы новой ИБ остаются, и ответ называет каталог.
 
 - `--recreate` заменяет существующую базу этой копии; без базы просто создаёт её, и
   `data.removed` пуст. Через MCP ключа нет. Порядок: замок `workPath`, замок базы (другая
@@ -1835,6 +1845,14 @@ v8-runner pull --all [--dry-run] [--force]
 `published` `result.data.losses` называет то, что замена уничтожила, как у обычного
 `pull --force`: счёт `count` и первые двадцать путей `named`.
 
+После `rejected` в `STAGE` остаётся полное дерево выгрузки в том виде, в каком оно было при
+кадре `ready`, без описи платформы `ConfigDumpInfo.xml`: раннер его не меняет и не удаляет, и
+вызывающий может взять его снимком базы. `ConfigDumpInfo.xml`, оставленный в каталоге набора
+прежними версиями раннера или ручной выгрузкой, переходит в дерево как был и выгрузку не
+описывает. Без кадра `ready` готового дерева нет: после ошибки или отмены в `STAGE` может
+остаться часть выгрузки, её содержимое не обещано
+([правило](../spec/rules/use-cases/a-rejected-tree-stays-in-the-callers-stage.md)).
+
 Вызывающий владеет публикацией и очисткой `STAGE`. Превью с `--dry-run`
 согласует исполнителя и возвращает терминальный результат до выгрузки.
 Полная [форма кадров и ответов](../spec/rules/wire/full-pull-publication.md)
@@ -2334,6 +2352,10 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - `--dry-run` несовместим с `--wait-for-exit` и `--wait-ready`: оба сообщают исход работающего
   клиента, которого превью не запускает.
 
+`infobase check` использует реквизиты выбранной базы. При отсутствии файла ИБ отвечает
+`infobase_not_found`, при неразличимом отказе входа — `connection_failed`.
+Проверка удаляет свой приватный каталог `workPath/temp` перед ответом.
+
 ### `mcp serve`
 
 ```bash
@@ -2358,6 +2380,7 @@ v8-runner mcp serve http
 | `build_project` | `fullRebuild`, `sourceSet` | `fullRebuild=false`; `sourceSet` omitted значит все source-set |
 | `run_all_tests` | `full`, `runner`, `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter` | Компактный вывод по умолчанию; `runner=vanessa` запускает Vanessa Automation с выбранным профилем и фильтрами |
 | `run_module_tests` | `moduleName`, `full` | Отклоняет пустой `moduleName` |
+| `check_infobase` | Нет | Проверяет вход в базу, выбранную при запуске MCP. При отсутствии файла ИБ возвращает `infobase_not_found`, при неразличимом отказе платформы — `connection_failed` |
 | `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL`; согласия на уничтожение у MCP нет: отказ сторожа называет повтор после коммита или `v8-runner --config … pull <SET> --force` с тем же набором и ключами `--infobase`/`--workdir`, с которыми запущен сервер |
 | `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady`, `via` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp`; `via` (`web` или `connection`) выбирает адрес и принимается только у тонкого клиента |
 | `check_syntax_edt` | `projectName` | Пустой `projectName` значит “все EDT-проекты” |

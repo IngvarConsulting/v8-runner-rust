@@ -95,6 +95,18 @@ pub fn select_from(
     operation: Operation,
     plan: ProviderPlan,
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
+    let selected = locate_from(config, utilities, operation, plan)?;
+    release_for_another_executor(config, operation, selected.provider);
+    Ok(selected)
+}
+
+/// Locate an executor without disconnecting agents or opening the infobase.
+pub(crate) fn locate_from(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    operation: Operation,
+    plan: ProviderPlan,
+) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     if plan.candidates().is_empty() {
         return Err((
             no_executor(config, operation),
@@ -126,7 +138,6 @@ pub fn select_from(
         }
         match not_ready {
             None => {
-                release_for_another_executor(config, operation, provider);
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(SelectedProvider {
                     provider,

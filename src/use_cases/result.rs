@@ -31,6 +31,8 @@ pub enum UseCaseErrorKind {
     Capability(CapabilityReason),
     /// Окружение не готово; причина уточняет, чего не хватает.
     Environment(EnvironmentReason),
+    InfobaseNotFound,
+    ConnectionFailed,
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
@@ -75,7 +77,7 @@ impl UseCaseErrorKind {
     pub const fn exit_code(self) -> i32 {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
-            Self::Environment(_) => VALIDATION_EXIT_CODE,
+            Self::Environment(_) | Self::InfobaseNotFound => VALIDATION_EXIT_CODE,
             Self::LiveAgentOff | Self::LiveAgentJob | Self::AgentLimit => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy
             | Self::InfobaseBusy
@@ -87,7 +89,9 @@ impl UseCaseErrorKind {
                 VALIDATION_EXIT_CODE
             }
             Self::Runtime => RUNTIME_EXIT_CODE,
-            Self::Platform | Self::AgentCommandAbandoned => PLATFORM_EXIT_CODE,
+            Self::Platform | Self::ConnectionFailed | Self::AgentCommandAbandoned => {
+                PLATFORM_EXIT_CODE
+            }
         }
     }
 
@@ -155,6 +159,8 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => "capability_unavailable",
             Self::Environment(_) => "environment_unavailable",
+            Self::InfobaseNotFound => "infobase_not_found",
+            Self::ConnectionFailed => "connection_failed",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InfobaseSessions => "infobase_sessions",
@@ -184,6 +190,8 @@ impl UseCaseErrorKind {
             Self::Cancelled(_) => ExecutionStatus::Cancelled,
             Self::Capability(_)
             | Self::Environment(_)
+            | Self::InfobaseNotFound
+            | Self::ConnectionFailed
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
             | Self::InfobaseSessions
@@ -206,6 +214,8 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => "capability unavailable",
             Self::Environment(_) => "environment unavailable",
+            Self::InfobaseNotFound => "infobase not found",
+            Self::ConnectionFailed => "connection failed",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
             Self::InfobaseSessions => "infobase held by other sessions",

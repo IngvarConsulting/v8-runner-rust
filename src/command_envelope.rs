@@ -40,6 +40,8 @@ pub enum ErrorCode {
     /// Пока не умеет.
     Soon,
     EnvironmentUnavailable,
+    InfobaseNotFound,
+    ConnectionFailed,
     /// Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет
     /// формат исходников, среди установок нет.
     PlatformReleaseMissing,
@@ -121,6 +123,8 @@ impl ErrorCode {
             Self::Target => "target",
             Self::Soon => "soon",
             Self::EnvironmentUnavailable => "environment_unavailable",
+            Self::InfobaseNotFound => "infobase_not_found",
+            Self::ConnectionFailed => "connection_failed",
             Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
@@ -152,6 +156,8 @@ impl ErrorCode {
         Self::Target,
         Self::Soon,
         Self::EnvironmentUnavailable,
+        Self::InfobaseNotFound,
+        Self::ConnectionFailed,
         Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
@@ -536,6 +542,16 @@ mod schema_tests {
         use crate::use_cases::result::{EnvironmentReason, UseCaseErrorKind};
         let cli: Vec<(UseCaseErrorKind, &str, &str)> = vec![
             (
+                UseCaseErrorKind::InfobaseNotFound,
+                "infobase_not_found",
+                "environment",
+            ),
+            (
+                UseCaseErrorKind::ConnectionFailed,
+                "connection_failed",
+                "platform",
+            ),
+            (
                 UseCaseErrorKind::Capability(CapabilityReason::Unavailable),
                 "capability_unavailable",
                 "capability",
@@ -660,6 +676,8 @@ mod schema_tests {
             (McpErrorCode::RuntimeFailure, "runtime_failure"),
             (McpErrorCode::PlatformFailure, "platform_failure"),
             (McpErrorCode::Internal, "runtime_failure"),
+            (McpErrorCode::InfobaseNotFound, "infobase_not_found"),
+            (McpErrorCode::ConnectionFailed, "connection_failed"),
         ] {
             let rendered: ErrorCode = code.into();
             assert_eq!(rendered.as_str(), name, "{code:?}");
