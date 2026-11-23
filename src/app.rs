@@ -468,14 +468,18 @@ pub(crate) fn load_cli_config(
             })
     ) {
         crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Publish(_)) {
+        crate::config::loader::load_config_for_publish(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Dbms(_)) {
         crate::config::loader::load_config_for_managed_dbms(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Standalone(_)) {
         crate::config::loader::load_config_for_managed_standalone(config_path, workdir, &selector)
-    } else if matches!(&cli.command, Command::Cluster(_) | Command::Web(_)) {
+    } else if matches!(&cli.command, Command::Cluster(_)) {
         crate::config::loader::load_config_for_managed_cluster(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Web(_)) {
+        crate::config::loader::load_config_for_managed_web(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(args) if args.seeds_a_new_file_base()) {
         crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(_)) {

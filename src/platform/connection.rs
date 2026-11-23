@@ -15,7 +15,7 @@ impl V8Connection {
     /// Use a single `/F` argument when the path could be parsed as a connection string.
     pub(crate) fn for_file(path: &std::path::Path) -> Self {
         let path = path.display().to_string();
-        if !path.contains([';', '"', '\'']) {
+        if !path.contains([';', '"', '\'']) && path.trim_end() == path {
             return Self::from_connection_string(&format!("File={path}"));
         }
         Self {
@@ -609,6 +609,23 @@ mod tests {
         assert_eq!(
             connection.args(),
             vec!["/F", "/tmp/my ib", "/N", "alice", "/P", "secret"]
+        );
+    }
+
+    #[test]
+    fn a_file_connection_preserves_trailing_space_and_quotes_when_rendered() {
+        let path = std::path::Path::new("a;folder's name ");
+        let connection = V8Connection::for_file(path);
+        assert_eq!(
+            connection.create_infobase_arg().as_deref(),
+            Some("File='a;folder''s name '")
+        );
+
+        let path = std::path::Path::new("base ");
+        let connection = V8Connection::for_file(path);
+        assert_eq!(
+            connection.create_infobase_arg().as_deref(),
+            Some("File='base '")
         );
     }
 

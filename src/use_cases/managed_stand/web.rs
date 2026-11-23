@@ -1,4 +1,4 @@
-//! Lifecycle of the private Apache belonging to a declared cluster.
+//! Lifecycle of the private Apache belonging to a declared infobase.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -8,6 +8,7 @@ use super::{
     RealHost, ServiceHost, IDENTIFY_TIMEOUT, POLL, STOP_TIMEOUT,
 };
 use crate::config::model::AppConfig;
+use crate::domain::capability::TargetKind;
 use crate::domain::dbms::{ServiceAction, ServiceState};
 use crate::domain::web::WebResult;
 use crate::platform::apache;
@@ -213,6 +214,9 @@ impl<'a> Web<'a> {
     }
 
     fn publication_stale(&self) -> bool {
+        if self.config.target_kind() == TargetKind::File {
+            return false;
+        }
         let descriptor = self.paths.root().join("publication/default.vrd");
         let Ok(descriptor) = std::fs::read_to_string(descriptor) else {
             return false;
@@ -247,8 +251,8 @@ impl<'a> Web<'a> {
         Ok(program)
     }
 
-    fn check_module(&self, ragent: &Path) -> Result<(), UseCaseError> {
-        let module = apache::platform_module(ragent);
+    fn check_module(&self, platform_tool: &Path) -> Result<(), UseCaseError> {
+        let module = apache::platform_module(platform_tool);
         let expected = apache::module_directive(&module)
             .map_err(|err| io_failure("cannot represent", &module, &err))?;
         let path = self.conf();
@@ -308,7 +312,7 @@ impl<'a> Web<'a> {
             Ok(())
         } else {
             Err(validation(
-                "declare infobase.web.managed for a managed cluster",
+                "declare infobase.web.managed for a local file infobase or managed cluster",
             ))
         }
     }
@@ -322,7 +326,9 @@ impl<'a> Web<'a> {
             ));
         }
         if let Observed::Own(mut record) = observed {
-            if let Some(cluster) = self.paths.sibling(StandService::Cluster).own_record() {
+            if self.config.target_kind() == TargetKind::File {
+                self.check_module(&locate(self.config, UtilityType::Webinst)?)?;
+            } else if let Some(cluster) = self.paths.sibling(StandService::Cluster).own_record() {
                 self.check_module(&cluster.bin)?;
             }
             let mut result = self.result(ServiceAction::AlreadyRunning);
@@ -349,12 +355,16 @@ impl<'a> Web<'a> {
             .ok_or_else(|| environment("no machine identity for Apache"))?;
         let program = self.program()?;
         self.foreign_config(&program)?;
-        let cluster = self.paths.sibling(StandService::Cluster);
-        let ragent = match cluster.own_record() {
-            Some(record) => record.bin,
-            None => locate(self.config, UtilityType::Ragent)?,
+        let platform_tool = if self.config.target_kind() == TargetKind::File {
+            locate(self.config, UtilityType::Webinst)?
+        } else {
+            let cluster = self.paths.sibling(StandService::Cluster);
+            match cluster.own_record() {
+                Some(record) => record.bin,
+                None => locate(self.config, UtilityType::Ragent)?,
+            }
         };
-        let module = apache::platform_module(&ragent);
+        let module = apache::platform_module(&platform_tool);
         if !module.is_file() {
             return Err(environment(format!(
                 "1C Apache module is missing: {}",
@@ -724,6 +734,68 @@ pub(crate) fn publication_with<'a>(
         }
         _ => None,
     };
+    let (webinst, connection) = if config.target_kind() == TargetKind::File {
+        let path = config
+            .v8_connection()
+            .file_infobase_dir(&config.base_path)
+            .ok_or_else(|| validation("missing file infobase path"))?;
+        if path
+            .to_str()
+            .is_none_or(|value| crate::platform::connection::control_character(value).is_some())
+        {
+            return Err(validation("cannot represent file infobase address"));
+        }
+        let connection = crate::platform::connection::V8Connection::for_file(&path)
+            .create_infobase_arg()
+            .ok_or_else(|| validation("cannot represent file infobase address"))?;
+        let webinst = locate(config, UtilityType::Webinst)?;
+        if !dry_run {
+            web.check_module(&webinst)?;
+        }
+        (webinst, connection)
+    } else {
+        cluster_publication_target(&web, action, dry_run)?
+    };
+    let log_root = web.paths.root().to_owned();
+    let mut target = config
+        .infobase
+        .web
+        .clone()
+        .ok_or_else(|| validation("missing web configuration"))?;
+    let wsdir = target
+        .wsdir
+        .as_deref()
+        .ok_or_else(|| validation("infobase.web.wsdir is required"))?;
+    let port = match &record {
+        Some(record) => record.port,
+        None => match web.pinned_port() {
+            Some(port) => port,
+            None => web.choose_port()?,
+        },
+    };
+    target.dir = Some(web.paths.root().join("publication"));
+    target.conf = Some(web.conf());
+    target.url = Some(format!("{}/{wsdir}/", address(port)));
+    target.server = Some(crate::config::model::WebServerKind::Apache24);
+    let elevation = host.webinst_elevation()?;
+    Ok(Some(ManagedPublication {
+        web,
+        record,
+        target,
+        webinst,
+        connection,
+        log_root,
+        elevation,
+    }))
+}
+
+fn cluster_publication_target(
+    web: &Web<'_>,
+    action: crate::domain::publish::PublishAction,
+    dry_run: bool,
+) -> Result<(PathBuf, String), UseCaseError> {
+    let config = web.config;
+    let host = web.host;
     let cluster = web.paths.sibling(StandService::Cluster);
     let cluster_record = if crate::platform::service_record::record_names_own_process(
         &cluster,
@@ -755,38 +827,8 @@ pub(crate) fn publication_with<'a>(
         .and_then(|cluster| cluster.managed.as_ref())
         .ok_or_else(|| validation("publish needs a managed cluster"))?;
     let connection = pins.ports.connection(&managed.reference(web.infobase));
-    let log_root = web.paths.root().to_owned();
-    let mut target = config
-        .infobase
-        .web
-        .clone()
-        .ok_or_else(|| validation("missing web configuration"))?;
-    let wsdir = target
-        .wsdir
-        .as_deref()
-        .ok_or_else(|| validation("infobase.web.wsdir is required"))?;
-    let port = match &record {
-        Some(record) => record.port,
-        None => match web.pinned_port() {
-            Some(port) => port,
-            None => web.choose_port()?,
-        },
-    };
-    target.dir = Some(web.paths.root().join("publication"));
-    target.conf = Some(web.conf());
-    target.url = Some(format!("{}/{wsdir}/", address(port)));
-    target.server = Some(crate::config::model::WebServerKind::Apache24);
     let webinst = cluster_webinst(config, cluster_record.as_ref())?;
-    let elevation = host.webinst_elevation()?;
-    Ok(Some(ManagedPublication {
-        web,
-        record,
-        target,
-        webinst,
-        connection,
-        log_root,
-        elevation,
-    }))
+    Ok((webinst, connection))
 }
 
 /// `webinst` берёт поиск утилит, а не запись кластера под `localPath`: путь из правимого
@@ -1655,6 +1697,43 @@ mod stand_tests {
             }
             ReloadStrategy::Unsupported => {}
         }
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_file_infobase_starts_and_publishes_with_webinst_without_a_cluster() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        stand.config.infobase.cluster = None;
+        stand.config.infobase.dbms = None;
+        stand.config.infobase.connection = "File='test base'".to_owned();
+        std::fs::remove_file(
+            release_bin(&stand.config).join(format!("ragent{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
+        let host = Host::default();
+        let started = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert!(started.ready);
+        assert_eq!(host.spawned.borrow().as_slice(), &["httpd"]);
+        assert!(!stand.agent().root().exists());
+
+        let published = publish(&stand, &host, false).unwrap();
+        assert!(published.ok);
+        assert!(published.url.as_deref().unwrap().ends_with("/demo/"));
+        let run = host.ran.borrow();
+        let call = run
+            .iter()
+            .find(|call| call.iter().any(|arg| arg == "-connstr"))
+            .unwrap();
+        let position = call.iter().position(|arg| arg == "-connstr").unwrap();
+        let base = stand
+            .config
+            .v8_connection()
+            .file_infobase_dir(&stand.config.base_path)
+            .unwrap();
+        assert_eq!(call[position + 1], format!("File='{}'", base.display()));
+        assert!(descriptor(&stand).is_file());
+        assert!(!stand.agent().root().exists());
     }
 
     #[test]

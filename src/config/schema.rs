@@ -726,7 +726,7 @@ enum WebServerKindSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseWebSchema {
-    /// Publish to the local Apache of a managed cluster.
+    /// Publish to a private Apache for a local file infobase or a managed cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed: Option<bool>,
     /// Web server to publish on with `v8-runner publish`.

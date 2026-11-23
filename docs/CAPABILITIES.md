@@ -44,7 +44,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `debug-server` | Файловая база — свой `dbgs` раннера (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux), автономный сервер раннера с `standalone start --debug` — его `dbgs` (Windows); чужой кластер или автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
-| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует базу кластера раннера в его частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` берёт из выпуска кластера ([`web`](#web)) |
+| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует именованную файловую ИБ или базу кластера раннера в частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` выбирает из настроенного выпуска платформы и сверяет с выпуском работающего кластера, если он используется ([`web`](#web)) |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `localPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Квитанция `data.provider` относится к чтению поколения. Для имён из пакетного Конфигуратора активность имеет значение `null` |
 | `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
@@ -967,12 +967,13 @@ v8-runner web stop [--dry-run]
 v8-runner web restart [--dry-run]
 ```
 
-- Обслуживают частный Apache 2.4 базы с `infobase.web.managed` и `cluster.managed` на Windows и Linux, без
+- Обслуживают частный Apache 2.4 именованной файловой ИБ или базы управляемого кластера с `infobase.web.managed` на Windows и Linux, без
   системной службы: конфиг `httpd.conf`, журналы, PID-файл и каталог публикации лежат под
   `localPath/infobases/<база>/managed/web/`. Apache слушает только `127.0.0.1`, модуль 1С берёт из выпуска
-  кластера. Системные службы, конфиги и сценарии `apachectl` раннер не трогает: свой экземпляр он гасит по
+  кластера или из каталога `webinst` у файловой ИБ. Системные службы, конфиги и сценарии `apachectl` раннер не трогает: свой экземпляр он гасит по
   записи службы и идентичности процесса.
-- Цикл: `cluster start` (Apache поднимается шагом после готовности кластера) → `infobase create` → `publish` →
+- Файловая база: `web start` → `publish` → HTTP по адресу из ответа → `web stop`.
+- Кластер: `cluster start` (Apache поднимается шагом после готовности кластера) → `infobase create` → `publish` →
   HTTP по адресу из ответа `publish` → `cluster stop` (гасит Apache, поднятый шагом). `web start` делает
   экземпляр явным и запускает только Apache: он переживает `cluster stop` и гаснет по `web stop`. Если Apache не поднялся, `cluster start`
   гасит кластер и PostgreSQL, поднятые этим запуском.

@@ -1,6 +1,9 @@
 ---
 id: INV.USE-CASES.MANAGED-APACHE-LIFECYCLE
 check:
+  - src/use_cases/managed_stand/web.rs::a_file_infobase_starts_and_publishes_with_webinst_without_a_cluster
+  - tests/cli_web.rs::a_named_file_base_can_plan_its_own_apache_without_a_cluster
+  - tests/cli_web.rs::a_named_file_base_can_plan_publication_without_source_sets
   - src/use_cases/managed_stand/web.rs::web_start_starts_only_apache_when_the_cluster_is_stopped
   - src/use_cases/managed_stand/cluster.rs::cluster_stops_only_the_apache_it_started_as_a_step
   - src/use_cases/managed_stand/cluster.rs::a_failed_apache_takes_down_the_cluster_and_the_postgres_this_start_raised
@@ -14,7 +17,10 @@ check:
   - src/use_cases/managed_stand/web.rs::a_preview_with_apache_stopped_names_the_pinned_address_and_writes_nothing
 ---
 
-# Частный Apache управляемого кластера
+# Частный Apache именованной базы
+
+Для файловой ИБ `web start` запускает Apache с модулем из каталога выбранного `webinst`. Публикация
+указывает абсолютный `File=…` без реквизитов. Запуск и публикация не требуют кластера.
 
 При `infobase.web.managed: true` кластер запускает Apache после своего запуска
 и останавливает его перед остановкой кластера. Если Apache не поднялся, `cluster start`
