@@ -16,6 +16,7 @@ const EXPECTED_MCP_TOOLS: &[&str] = &[
     "run_module_tests",
     "build_project",
     "dump_config",
+    "check_infobase",
     "launch_app",
     "check_syntax_edt",
     "check_syntax_designer_config",
@@ -531,6 +532,10 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 /// больше никто не пользуется, валит проверку.
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
+        "crate::use_cases::infobase_check::check",
+        "проверка входа работает только в приватном временном каталоге, общего состояния под workPath не меняет (CTR.WIRE.INFOBASE-CHECK-DATA)",
+    ),
+    (
         "crate::use_cases::managed_stand::dbms_status",
         "читает запись без замка, чтобы отвечать и пока идёт другая команда",
     ),
@@ -545,6 +550,14 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
         "crate::use_cases::managed_stand::web::web_status",
         "читает запись Apache без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::debug_server_start",
+        "сервер отладки не трогает базу и стенд; гонку команд сеанса решает его запись (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
+    ),
+    (
+        "crate::use_cases::managed_stand::debug_server_stop",
+        "отладчик гасит сервер при отсоединении, даже пока идёт другая команда (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
     ),
     (
         "crate::use_cases::live_agent::status",

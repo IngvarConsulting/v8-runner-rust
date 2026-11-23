@@ -319,7 +319,7 @@ fn planned_result(check_name: CheckName, started: Instant) -> SyntaxCheckResult 
         check_name,
         summary: summarize_issues(&[]),
         issues: vec![],
-        duration_ms: elapsed_millis(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
         platform_log_path: None,
         stderr: None,
         log_read_warning: None,
@@ -765,7 +765,7 @@ fn check_edt_projects(
         check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
-        duration_ms: elapsed_millis(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
         platform_log_path: single_platform_log_path,
         stderr,
         log_read_warning,
@@ -1351,7 +1351,7 @@ fn build_result(
         check_name,
         summary: summarize_issues(&issues),
         issues,
-        duration_ms: elapsed_millis(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
         platform_log_path,
         stderr,
         log_read_warning,
@@ -1377,7 +1377,7 @@ fn failed_result(
         check_name,
         summary: summarize_issues(&issues),
         issues,
-        duration_ms: elapsed_millis(started),
+        duration_ms: crate::support::time::elapsed_ms(started),
         platform_log_path,
         stderr,
         log_read_warning,
@@ -1398,10 +1398,6 @@ fn verdict(exit_code: i32, log_unreadable: bool) -> SyntaxCheckStatus {
         return SyntaxCheckStatus::ToolFailed;
     }
     status
-}
-
-fn elapsed_millis(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn summarize_issues(issues: &[Issue]) -> SyntaxIssueSummary {

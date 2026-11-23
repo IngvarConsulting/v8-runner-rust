@@ -40,8 +40,10 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `upload` | `format=DESIGNER`, провайдер только `designer`; у автономного сервера — по прямому шлюзу | Загрузка `.cf` / `.cfe` артефактов в ИБ. Перед `.cfe` у кластера и автономного сервера список читает исполнитель `extensions list`, секция `infobase.dbms` не нужна. Если выбранный агент не поднялся, команда отказывает с родом `environment` до загрузки |
 | `make` / `artifacts` | Конфигуратор → `ibcmd`; `.epf`/`.erf` — Конфигуратор; любой формат | Собирает пакеты из исходников в постоянной базе `workPath/temp/build-infobase/`; при повторе переводит и загружает только необходимое; `--full` пересоздаёт базу |
 | `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
+| `infobase check` | Конфигуратор с прямым адресом файловой или клиент-серверной ИБ | Подтверждает вход без выгрузки. В JSON `command: "infobase.check"`, при успехе `data.platform_version` |
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
+| `debug-server` | Файловая база — свой `dbgs` раннера (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux), автономный сервер раннера с `standalone start --debug` — его `dbgs` (Windows); чужой кластер или автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует базу кластера раннера в его частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` берёт из выпуска кластера ([`web`](#web)) |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `localPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Квитанция `data.provider` относится к чтению поколения. Для имён из пакетного Конфигуратора активность имеет значение `null` |
 | `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
@@ -266,6 +268,16 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | `invalid_output` | `invalid_output` | 4 |
 | `interruption` | `cancelled`, `timed_out` | 4 |
 | `non_fast_forward`, `untracked_base` | одноимённые коды | 3 |
+
+На Windows и Linux прямой `ibcmd` к файловой базе получает `infobase_busy` до запуска
+утилиты, если найден работающий локальный `ibsrv` с абсолютным `--db-path` или
+`--database-path` к тому же каталогу или файлу данных базы. Ответ называет PID, сервер остаётся работать.
+Проверка охватывает вложенные шаги, в том числе опись расширений перед `upload .cfe`.
+Она видит только процессы, аргументы которых доступны пользователю раннера: `ibsrv` службы под
+другим пользователем (на Linux закрыт `/proc/<pid>/exe`, на Windows без повышенных прав пуст
+`CommandLine`) или недоступный перечень процессов проверку не останавливают (#780). На Linux
+сравниваются процессы с тем же корнем файловой системы и пространством монтирования. Подтверждение безопасного окна
+для прямого доступа по-прежнему требуется отдельно.
 
 `source_set_ignored_by_git` — у `status`, `push` (и `--full`), `pull` (и `--force`) и `make`:
 правило отслеживаемого `.gitignore`, `.git/info/exclude` или `core.excludesFile` задевает файл,
@@ -663,7 +675,16 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 
 ```bash
 v8-runner infobase create [--from <INFOBASE>] [--recreate] [--dry-run]
+v8-runner infobase create --empty [--dry-run]
+v8-runner infobase create --input <FILE> [--dry-run]
 ```
+
+- `--empty` создаёт пустую файловую ИБ. `--input <файл.cf>` создаёт ИБ с применённой
+  конфигурацией, а `--input <файл.dt>` восстанавливает снимок с данными. Наборы,
+  XML/BSL и рабочая область EDT для этих режимов не нужны. Для новой файловой цели
+  выберите один режим. Сочетания с `--from` и `--recreate` отклоняются. После загрузки
+  файла объявите набор и выполните `pull <SET> --force`, чтобы получить исходники.
+  При частичном сбое файлы новой ИБ остаются, и ответ называет каталог.
 
 - `--recreate` заменяет существующую базу этой копии; без базы просто создаёт её, и
   `data.removed` пуст. Через MCP ключа нет. Порядок: замок `workPath`, замок базы (другая
@@ -808,10 +829,10 @@ v8-runner dbms restart [--dry-run]
 ### `standalone`
 
 ```text
-v8-runner standalone start [--dry-run]
+v8-runner standalone start [--dry-run] [--debug | --no-debug]
 v8-runner standalone status
 v8-runner standalone stop [--dry-run]
-v8-runner standalone restart [--dry-run]
+v8-runner standalone restart [--dry-run] [--debug | --no-debug]
 ```
 
 - Поднимают `ibsrv` базы из `standalone.managed` на Windows, без службы. Адрес, SSH-шлюз и HTTP называет `status`,
@@ -834,14 +855,24 @@ v8-runner standalone restart [--dry-run]
   `dbms start` → `infobase create` → `standalone start` → `push` → `test` → `standalone stop` → `dbms stop`. Пароль СУБД
   `ibsrv` получает через stdin; `ibcmd infobase create` несёт его в аргументах.
 - СУБД, поднятая шагом `standalone start`, гаснет вместе с сервером; поднятая `dbms start` остаётся. `standalone restart` её не трогает.
+- `--debug` поднимает `ibsrv` с `--debug=http --debug-server-url=http://127.0.0.1:<порт>`, затем рядом свой
+  `dbgs --addr=127.0.0.1 --port=<порт> --ownerPID=<pid ibsrv>` из той же установки и ждёт его ответа по `rdbg`. Свой
+  сервер отладки `ibsrv` (`--debug-port`) внешнему отладчику `rdbg` отвечает 406, поэтому не используется. Порт — первый
+  после 16 портов диапазона прямых соединений, внутри закреплённого блока; проверяется только с `--debug`, занятый
+  переносит весь блок. Признак закрепляется в `ports.json` вместе с именем базы в сервере: следующие `start` и
+  `restart` без ключа поднимают сервер так же, пока `--no-debug` его не снимет. Пока сервер с отладкой работает,
+  `start`, `restart` и `status` называют адрес в `debug_url`. Работающий сервер с другим признаком `start` не
+  перезапускает: `invalid_argument` с `standalone restart --debug` или `--no-debug`; работающий с отладкой без своего
+  `dbgs` — `environment_unavailable` с `standalone restart`. `stop` и `restart` дожидаются конца `dbgs` (он выходит с
+  `ibsrv`) и называют его pid в `stopped_debug_pid`.
 
 ### `cluster`
 
 ```text
-v8-runner cluster start [--dry-run] [--new-regport]
+v8-runner cluster start [--dry-run] [--new-regport] [--debug | --no-debug]
 v8-runner cluster status
 v8-runner cluster stop [--dry-run]
-v8-runner cluster restart [--dry-run]
+v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 ```
 
 - Поднимают кластер базы из `cluster.managed` на Windows и Linux, без службы: `ragent` с `rmngr` и `rphost`, затем `ras`;
@@ -872,6 +903,59 @@ v8-runner cluster restart [--dry-run]
 - `start`, `stop` и `restart` всех трёх команд стенда берут замок `<localPath>/.lock` после замка `workPath`. Запись
   службы помнит свой каталог и проект: копия `.local` в другой каталог чужой сервер своим не считает и не гасит, а при
   `localPath`, общем у двух проектов, команды стенда второго отказывают `workspace_busy`, называя первый проект.
+- `--debug` поднимает агента с сервером отладки HTTP на `127.0.0.1` (`-debug -http`): его `dbgs` агент запускает сам
+  вместе с первым рабочим процессом, `cluster stop` снимает и его. Порт — следующий за диапазоном рабочих процессов
+  внутри закреплённого блока; `/range` не меняется. Признак закрепляется с портами после успешного запуска (отказ,
+  например из-за занятого порта отладки, оставляет прежний): `start` и `restart` без ключа поднимают кластер так же,
+  пока `--no-debug` его не снимет. Пока кластер с отладкой работает, `start`, `restart` и
+  `status` называют адрес в `debug_url`. Работающий кластер с другим признаком `start` не перезапускает:
+  `invalid_argument` с `cluster restart --debug` или `--no-debug`.
+
+### `debug-server`
+
+```text
+v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
+v8-runner debug-server stop <SESSION> [--dry-run]
+```
+
+- Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows; на Linux и macOS раннер его не
+  запрещает, но он не замерен ([#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)). Сервер
+  отладки кластера — Windows и Linux (Linux замерен в
+  [#768](https://github.com/IngvarConsulting/v8-runner-rust/issues/768)), автономного сервера — Windows. Базу
+  команды не открывают и не берут замок `workPath` и стенда: `stop` отвечает и пока идёт другая команда.
+- Файловая база: `start` запускает `dbgs` из установки тонкого клиента (той же, что у `launch thin`) на `127.0.0.1`, без
+  пароля, и отвечает, когда сервер назвал адрес и ответил по протоколу `rdbg`. Ответ: `url`
+  (`http://127.0.0.1:<порт>`), `port`, `pid`, `session` (32 hex), `owner: "runner"`, `platform_resolution`,
+  `log_path`. Сервер переживает команду; запись сеанса и журнал — в `workPath/debug-server/<session>/`. Каждый `start` —
+  новый сервер и новый сеанс.
+- Порт без `--port`: первый свободный в окне из 32 портов в полосе 10000–19999, окно выводится из пути `workPath`.
+  Занятый явный `--port` — `environment_unavailable` до запуска, слушающий процесс не тронут. Нет `dbgs` рядом с
+  клиентом — `environment_unavailable` с `layer: platform`, называющий версию и путь клиента.
+- `--owner-pid <PID>` передаётся в `dbgs --ownerPID`: с концом процесса отладчика сервер выходит сам. Мёртвый pid —
+  `invalid_argument` до запуска. Сеансы вышедших серверов убирает следующий `start`.
+- Выход `dbgs` до готовности — `platform_failure`, срок готовности (60 с) — `timed_out`, отмена — `cancelled`; во всех
+  трёх случаях процесс попытки и запись сеанса снимаются.
+- `stop <session>` гасит только сервер этого сеанса, подтверждая конец процесса: `action: stopped`, `stopped_pid`.
+  Неизвестный, уже остановленный или чужой рабочей копии сеанс — `nothing_to_stop`, `known_session: false`; вышедший
+  сам сервер — `stale_record: true`; процесс, занявший pid сервера, раннер не трогает. Сеанс, который сейчас запускает
+  другая команда, — `workspace_busy`.
+- База на кластере раннера (`cluster.managed`, Windows и Linux), поднятом `cluster start --debug`: `start` ничего не запускает и
+  отдаёт адрес сервера отладки кластера с `owner: "cluster"`, без `pid`; `--port` и `--owner-pid` игнорируются с
+  предупреждением в `warnings`. Кластер не работает или без `--debug` — `environment_unavailable` с нужной командой.
+  `stop` такого сеанса кластер не трогает (`nothing_to_stop`). Кластер, запущенный не раннером, — `target`.
+- База на автономном сервере раннера (`standalone.managed`, Windows), поднятом `standalone start --debug`: `start`
+  ничего не запускает и отдаёт адрес его `dbgs` с `owner: "standalone"`, без `pid`; `--port` и `--owner-pid`
+  игнорируются с предупреждением. На Linux и macOS — `environment_unavailable`, как у `standalone start`. Сервер
+  не поднят, поднят без отладки или его `dbgs` уже нет — `environment_unavailable` с `standalone start --debug`,
+  `standalone restart --debug` или `standalone restart`. `stop` такого сеанса сервер не трогает (`nothing_to_stop`,
+  `owner: "standalone"`). Автономный сервер без `managed` — `target`.
+- `infobase_alias` в ответе `start` — имя базы, которое отладчик передаёт как `infoBaseAlias` в запросах `rdbg`: `DefAlias`
+  у файловой базы, имя базы в сервере (`ibsrv --name`, `standalone.managed.name`) у автономного сервера; с другим именем
+  сервер отладки отвечает пустым списком. У сервера кластера поля нет.
+- Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
+  `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
+  `launch thin --debug <url>` → `debug-server stop <session>`. Перед удалением `workPath` —
+  `debug-server stop` по каждому сеансу.
 
 ### `web`
 
@@ -1760,6 +1844,14 @@ v8-runner pull --all [--dry-run] [--force]
 `published` `result.data.losses` называет то, что замена уничтожила, как у обычного
 `pull --force`: счёт `count` и первые двадцать путей `named`.
 
+После `rejected` в `STAGE` остаётся полное дерево выгрузки в том виде, в каком оно было при
+кадре `ready`, без описи платформы `ConfigDumpInfo.xml`: раннер его не меняет и не удаляет, и
+вызывающий может взять его снимком базы. `ConfigDumpInfo.xml`, оставленный в каталоге набора
+прежними версиями раннера или ручной выгрузкой, переходит в дерево как был и выгрузку не
+описывает. Без кадра `ready` готового дерева нет: после ошибки или отмены в `STAGE` может
+остаться часть выгрузки, её содержимое не обещано
+([правило](../spec/rules/use-cases/a-rejected-tree-stays-in-the-callers-stage.md)).
+
 Вызывающий владеет публикацией и очисткой `STAGE`. Превью с `--dry-run`
 согласует исполнителя и возвращает терминальный результат до выгрузки.
 Полная [форма кадров и ответов](../spec/rules/wire/full-pull-publication.md)
@@ -1900,6 +1992,17 @@ v8-runner download [--state db] --output <DIR> [--dry-run]
 - `--dry-run` возвращает выбранный provider и compact plan, но не создаёт `workPath`, locks,
   staging/output и не запускает provider process. JSON явно сообщает
   `mode=preview`, `provider_dispatched=false` и `published=false`.
+- Текст BSL, который исполняет база, — это конфигурация базы данных. Квитанция `push` его не
+  доказывает: хешей BSL она не несёт, а исходники формата Конфигуратора платформа читает прямо
+  из каталога набора и во время загрузки. Текст дают `download <SET> --state db --output <файл>`
+  и затем `convert <файл> --to xml --output <каталог>` (каталог вне проекта, раскладка выгрузки
+  Конфигуратора); хеши `.bsl` считает потребитель. Пакет отражает конфигурацию базы на момент
+  выгрузки: идентификатора поколения ответ не несёт, и следующее применение его не обновит.
+  `push --no-apply` результат не меняет; расширение, которое ни разу не применялось, —
+  отказ платформы. Замерено на файловой базе 8.3.27 через `designer`; кластер, автономный
+  сервер, `ibcmd`, неудачное применение и модули без исходного текста (пароль, поставка без
+  исходников — у них `.bsl` может не быть) не замерены. Замер — «Текст BSL применённой
+  конфигурации (#762)» в `references/1c/confirmed-runtime-measurements.md`.
 
 ### `infobase dump`
 
@@ -2146,9 +2249,9 @@ v8-runner status [--deep | --all]
 ### `launch`
 
 ```bash
-v8-runner launch <designer|thin|thick|ordinary> [--via <web|connection>] [--dry-run] [FLAGS]
+v8-runner launch <designer|thin|thick|ordinary> [--via <web|connection>] [--debug <URL>] [--dry-run] [FLAGS]
 v8-runner launch web [--dry-run]
-v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>] [--wait-ready] [FLAGS]
+v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>] [--debug <URL>] [--wait-ready] [FLAGS]
 ```
 
 - Для обычного запуска (`designer`/`thin`/`thick`/`ordinary`) режим задаётся позиционным
@@ -2173,9 +2276,23 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - Пользовательский `/IBConnectionString` из `tools.enterprise.additional-launch-keys`
   встаёт после адреса раннера (`/S` или `/IBConnectionString`), хотя справка платформы
   требует его раньше `/S`: известный предел, раннер порядок не меняет.
+- `--debug <URL>` запускает клиент предприятия (`thin`, `thick`, `ordinary`, `mcp`) подключённым
+  к серверу отладки: раннер добавляет `/DEBUG -http -attach /DEBUGGERURL <URL>` перед ключами
+  `--raw-key`, ответ называет адрес в `debug.url`. Адрес — `http://<host>:<port>`, как его отдаёт
+  `debug-server start` ([подробности](#debug-server)); путь, параметры, фрагмент, учётные данные и порт 0 — отказ; `/DEBUG` или `/DEBUGGERURL` в `--raw-key` или `tools.enterprise.additional-launch-keys` рядом с `--debug` — тоже отказ.
+  Сервер перед запуском не проверяется: если его уже нет, клиент работает без отладки.
+  `launch designer --debug` (у Конфигуратора свой отладчик), `launch web --debug` (веб-клиент
+  не получает ключей запуска) и `/DEBUG` или `/DEBUGGERURL` в `--raw-key` рядом с `--debug` —
+  отказ `invalid_argument` до запуска.
 - Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
   userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
+- `thin`, `thick` и `ordinary` без `--wait-for-exit` запускаются без `/DisableStartupDialogs`:
+  клиент показывает окна при старте: тонкий клиент на комьюнити-лицензии — окно лицензии (без
+  него выходил с кодом 1 сразу после входа, #784), любой из трёх — окно входа, если имя или
+  пароль не подошли.
+  `designer`, `mcp`, ожидаемый `thin --wait-for-exit` и клиент `test` идут с этим ключом
+  ([правило](../spec/rules/cli/an-interactive-client-may-show-startup-dialogs.md)).
 - `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
 - `launch mcp --mode thick` использует `1cv8`; `launch mcp --mode ordinary` использует `1cv8`
@@ -2234,6 +2351,10 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - `--dry-run` несовместим с `--wait-for-exit` и `--wait-ready`: оба сообщают исход работающего
   клиента, которого превью не запускает.
 
+`infobase check` использует реквизиты выбранной базы. При отсутствии файла ИБ отвечает
+`infobase_not_found`, при неразличимом отказе входа — `connection_failed`.
+Проверка удаляет свой приватный каталог `workPath/temp` перед ответом.
+
 ### `mcp serve`
 
 ```bash
@@ -2258,6 +2379,7 @@ v8-runner mcp serve http
 | `build_project` | `fullRebuild`, `sourceSet` | `fullRebuild=false`; `sourceSet` omitted значит все source-set |
 | `run_all_tests` | `full`, `runner`, `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter` | Компактный вывод по умолчанию; `runner=vanessa` запускает Vanessa Automation с выбранным профилем и фильтрами |
 | `run_module_tests` | `moduleName`, `full` | Отклоняет пустой `moduleName` |
+| `check_infobase` | Нет | Проверяет вход в базу, выбранную при запуске MCP. При отсутствии файла ИБ возвращает `infobase_not_found`, при неразличимом отказе платформы — `connection_failed` |
 | `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL`; согласия на уничтожение у MCP нет: отказ сторожа называет повтор после коммита или `v8-runner --config … pull <SET> --force` с тем же набором и ключами `--infobase`/`--workdir`, с которыми запущен сервер |
 | `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady`, `via` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp`; `via` (`web` или `connection`) выбирает адрес и принимается только у тонкого клиента |
 | `check_syntax_edt` | `projectName` | Пустой `projectName` значит “все EDT-проекты” |

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STANDALONE-STOP-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/standalone-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,6 +17,8 @@ check:
 `stale_record` говорит, что запись была, а процесса из неё уже нет.
 `stopped_pid` — остановленный `ibsrv`, `stopped_dbms_pid` — PostgreSQL, поднятый шагом сервера и остановленный
 вместе с ним; текстовый вывод называет его строкой `PostgreSQL stopped`.
+
+**Что изменила версия 3.** Появилось `stopped_debug_pid` — `dbgs`, погашенный вместе с сервером.
 
 ## Пример
 

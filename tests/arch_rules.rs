@@ -669,7 +669,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ),
     ("config/target-declarations-are-exclusive.md", "три"),
     ("mcp/admission-is-shared-by-both-transports.md", "обоих"),
-    ("mcp/published-tool-surface.md", "восемь,три"),
+    ("mcp/published-tool-surface.md", "девять,три"),
     ("mcp/surface-stays-explicit.md", "оба"),
     ("platform/agent-session-lives-with-the-lock.md", "два,два"),
     ("platform/edt-has-two-execution-modes.md", "два"),

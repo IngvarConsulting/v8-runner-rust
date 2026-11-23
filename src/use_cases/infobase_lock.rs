@@ -28,6 +28,8 @@ pub enum BaseAccess {
     Reads,
     /// Создаёт, меняет или заменяет базу либо работает в ней: без замка отказывает.
     Writes,
+    /// Takes writer locks, but records ownership only after a new file base is created.
+    Creates,
 }
 
 /// Замок базы, взятый командой, или предупреждение, что команда чтения идёт без него.
@@ -58,7 +60,7 @@ pub(crate) fn acquire_infobase_lock(
     let writes = match access {
         BaseAccess::Untouched => return Ok(InfobaseLock::default()),
         BaseAccess::Reads => false,
-        BaseAccess::Writes => true,
+        BaseAccess::Writes | BaseAccess::Creates => true,
     };
     let Some(base_dir) = config.v8_connection().file_infobase_dir(&config.base_path) else {
         return Ok(InfobaseLock::default());

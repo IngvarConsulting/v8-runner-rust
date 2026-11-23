@@ -77,7 +77,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::infobase_lock::BaseAccess;
-use crate::use_cases::init_project;
+use crate::use_cases::init_project::{self, InitRequest};
 use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
@@ -87,9 +87,8 @@ use crate::use_cases::request::{
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DownloadAllRequest,
     DumpModeRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut,
-    InitRequest, LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode, SyntaxExtensionScope,
+    SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -260,6 +259,9 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::DebugServer(args) => {
+            execute_debug_server(config, args.command, presenter, dry_run, cancellation)
+        }
         Command::Sessions(args) => super::sessions::execute(
             config,
             &args.command,
@@ -794,29 +796,15 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
-        Command::Infobase(InfobaseArgs {
-            command:
-                InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
-                    command: InfobaseConfigurationCommand::Export(_),
-                }),
-        }) => CommandName::InfobaseConfigurationExport,
+        Command::Infobase(args) => infobase_command_name(args),
         Command::Init(_) => CommandName::Init,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create(_),
-        }) => unreachable!("infobase create is normalised into its own command in app::run"),
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Dump(_),
-        }) => CommandName::InfobaseDump,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Restore(_),
-        }) => CommandName::InfobaseRestore,
         Command::Convert(_) => CommandName::Convert,
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
-        Command::Standalone(args) => match args.command {
+        Command::Standalone(args) => match args.command.service() {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
@@ -828,6 +816,10 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::ClusterStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::ClusterRestart,
+        },
+        Command::DebugServer(args) => match args.command {
+            crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
+            crate::cli::args::DebugServerCommandArgs::Stop { .. } => CommandName::DebugServerStop,
         },
         Command::Dbms(args) => match args.command {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
@@ -864,7 +856,7 @@ pub fn infobase_transfer_operation(
             }) => Some(Operation::ConfigurationExport),
             InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
             InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
-            InfobaseCommand::Create(_) => None,
+            InfobaseCommand::Create(_) | InfobaseCommand::Check => None,
         },
         _ => None,
     }
@@ -1284,17 +1276,34 @@ fn execute_init(
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    let context = cli_context(config, CommandName::Init, cancellation);
+    let file_creation = if args.seeds_a_new_file_base() {
+        let creation = init_project::file_seed::FileCreation::prepare(
+            config,
+            args.input.as_deref(),
+            clean_before_execution,
+        )
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Init, error))?;
+        Some(creation)
+    } else {
+        None
+    };
+    let access = if file_creation.is_some() {
+        BaseAccess::Creates
+    } else {
+        BaseAccess::Writes
+    };
     let request = InitRequest {
         dry_run,
         from: args.from.clone(),
         recreate: args.recreate,
+        file_creation,
     };
-    let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Init,
-        BaseAccess::Writes,
+        access,
         clean_before_execution,
         dry_run,
         || {
@@ -1729,23 +1738,33 @@ fn render_web_text(
 /// `standalone`: запись под замком `workPath`, `status` без него.
 fn execute_standalone(
     config: &AppConfig,
-    action: crate::cli::args::ServiceCommandArgs,
+    action: crate::cli::args::StandaloneCommandArgs,
     command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::cli::args::StandaloneCommandArgs as Action;
     use crate::use_cases::managed_stand::{
-        execute_standalone as run, standalone_status, ServiceCommand,
+        execute_standalone as run, standalone_status, StandaloneCommand,
     };
 
     let (name, command) = match action {
-        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
-        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
-        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
-        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
+        Action::Start { debug } => (
+            CommandName::StandaloneStart,
+            StandaloneCommand::Start {
+                debug: debug.choice(),
+            },
+        ),
+        Action::Status => (CommandName::StandaloneStatus, StandaloneCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, StandaloneCommand::Stop),
+        Action::Restart { debug } => (
+            CommandName::StandaloneRestart,
+            StandaloneCommand::Restart {
+                debug: debug.choice(),
+            },
+        ),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1778,7 +1797,7 @@ fn execute_standalone(
             Err(error)
         }
     };
-    if command == ServiceCommand::Status {
+    if command == StandaloneCommand::Status {
         return present(standalone_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1790,6 +1809,115 @@ fn execute_standalone(
         dry_run,
         || present(run(&context, config, command, dry_run)),
     )
+}
+
+/// `debug-server start|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
+fn execute_debug_server(
+    config: &AppConfig,
+    action: crate::cli::args::DebugServerCommandArgs,
+    presenter: &Presenter,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::DebugServerCommandArgs as Action;
+    use crate::use_cases::managed_stand::{
+        debug_server_start, debug_server_stop, DebugServerStart,
+    };
+
+    let name = match action {
+        Action::Start { .. } => CommandName::DebugServerStart,
+        Action::Stop { .. } => CommandName::DebugServerStop,
+    };
+    let context = cli_context(config, name, cancellation);
+    let outcome = match action {
+        Action::Start { port, owner_pid } => debug_server_start(
+            &context,
+            config,
+            DebugServerStart { port, owner_pid },
+            dry_run,
+        ),
+        Action::Stop { session } => debug_server_stop(&context, config, session, dry_run),
+    };
+    match outcome {
+        Ok(mut result) => {
+            if presenter.is_json() {
+                let warnings = std::mem::take(&mut result.warnings);
+                let mut envelope = Envelope::ok(name.as_str(), result.duration_ms, result);
+                envelope.warnings = warnings;
+                presenter.print_envelope(&envelope);
+            } else {
+                for line in debug_server_text(name, &result) {
+                    presenter.print_bare(&line);
+                }
+                for warning in &result.warnings {
+                    presenter.print_bare(&format!("warning: {warning}"));
+                }
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn debug_server_text(
+    name: CommandName,
+    result: &crate::domain::debug_server::DebugServerResult,
+) -> Vec<String> {
+    use crate::domain::debug_server::{DebugServerAction, DebugServerOwner};
+
+    let owner = match result.owner {
+        Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
+        Some(DebugServerOwner::Standalone) => "the debug server of the standalone server",
+        Some(DebugServerOwner::Runner) | None => "the debug server",
+    };
+    let mut lines = vec![match result.action {
+        DebugServerAction::Started => format!(
+            "{}: {owner} answers at {}",
+            name.as_str(),
+            result.url.as_deref().unwrap_or("?")
+        ),
+        DebugServerAction::Stopped => format!(
+            "{}: {owner} pid {} stopped",
+            name.as_str(),
+            result.stopped_pid.unwrap_or_default()
+        ),
+        DebugServerAction::Planned => {
+            format!("{}: planned, nothing started or stopped", name.as_str())
+        }
+        DebugServerAction::NothingToStop if result.known_session == Some(false) => format!(
+            "{}: this working copy knows no such session; nothing to stop",
+            name.as_str()
+        ),
+        DebugServerAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
+    }];
+    if let (DebugServerAction::Started, Some(session)) = (result.action, &result.session) {
+        lines.push(format!("session: {session}"));
+    }
+    if let Some(alias) = &result.infobase_alias {
+        lines.push(format!("infobase alias: {alias}"));
+    }
+    if let Some(pid) = result.pid {
+        lines.push(format!("pid: {pid}"));
+    }
+    if let Some(log) = &result.log_path {
+        lines.push(format!("log: {}", log.display()));
+    }
+    lines
 }
 
 fn render_standalone_text(
@@ -1845,6 +1973,7 @@ fn standalone_text(
         ("direct gate", result.connection.clone()),
         ("ssh gate", result.gate.clone()),
         ("http", result.http.clone()),
+        ("debug server", result.debug_url.clone()),
         (
             "data",
             result
@@ -1866,6 +1995,10 @@ fn standalone_text(
         (
             "PostgreSQL stopped",
             result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
+        (
+            "debug server stopped",
+            result.stopped_debug_pid.map(|pid| format!("pid {pid}")),
         ),
         (
             "previous port",
@@ -2151,13 +2284,21 @@ fn execute_cluster(
     use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ClusterCommand};
 
     let (name, command) = match action {
-        Action::Start { new_regport } => (
+        Action::Start { new_regport, debug } => (
             CommandName::ClusterStart,
-            ClusterCommand::Start { new_regport },
+            ClusterCommand::Start {
+                new_regport,
+                debug: debug.choice(),
+            },
         ),
         Action::Status => (CommandName::ClusterStatus, ClusterCommand::Status),
         Action::Stop => (CommandName::ClusterStop, ClusterCommand::Stop),
-        Action::Restart => (CommandName::ClusterRestart, ClusterCommand::Restart),
+        Action::Restart { debug } => (
+            CommandName::ClusterRestart,
+            ClusterCommand::Restart {
+                debug: debug.choice(),
+            },
+        ),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -2263,6 +2404,7 @@ fn render_cluster_text(
         ("agent", result.agent.clone()),
         ("ras", result.ras.clone()),
         ("worker range", result.worker_range.clone()),
+        ("debug server", result.debug_url.clone()),
         ("ras pid", result.ras_pid.map(|pid| pid.to_string())),
         (
             "rac cluster list",
@@ -2763,6 +2905,7 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
+        InfobaseCommand::Check => Ok(()),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
@@ -2840,6 +2983,11 @@ pub fn render_infobase_pre_dispatch_failure(
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
+        InfobaseCommand::Check => crate::cli::output::print_command_use_case_error(
+            presenter,
+            CommandName::InfobaseCheck,
+            &error,
+        ),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create has no export request to render")
         }
@@ -2897,6 +3045,7 @@ pub fn prepare_infobase_command(
     dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
+        InfobaseCommand::Check => unreachable!("infobase check is dispatched before exports"),
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is dispatched before the export machinery")
         }
@@ -3008,6 +3157,7 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
+        InfobaseCommand::Check => CommandName::InfobaseCheck,
         InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
@@ -3049,6 +3199,40 @@ fn map_infobase_configuration_export_request(
         subject,
         output: PathBuf::from(&args.output),
     }
+}
+
+pub(crate) fn execute_infobase_check(
+    config: &AppConfig,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseCheck;
+    let cancellation = CancellationToken::new();
+    let _signal_guard = CliSignalGuard::install(cancellation.clone());
+    let context = cli_context(config, command, cancellation);
+    let started = std::time::Instant::now();
+    let result = crate::use_cases::infobase_check::check(&context, config);
+    let elapsed = crate::support::time::elapsed_ms(started);
+    match &result {
+        Ok(data) if presenter.is_json() => {
+            presenter.print_envelope(&Envelope::ok(command.as_str(), elapsed, data));
+        }
+        Ok(data) => {
+            if let Some(version) = &data.platform_version {
+                presenter.print_bare(&format!("Connected (1C {version})"));
+            }
+        }
+        Err(error) if presenter.is_json() && context.work().given() => {
+            let data = crate::use_cases::infobase_check::ConnectionChecked::default();
+            presenter.print_envelope(&crate::cli::output::failure_envelope(
+                command.as_str(),
+                elapsed,
+                data,
+                error,
+            ));
+        }
+        Err(error) => crate::cli::output::print_command_use_case_error(presenter, command, error),
+    }
+    result.map(|_| ())
 }
 
 fn execute_infobase(
@@ -4602,6 +4786,7 @@ fn map_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<LaunchOptions
         internal_out: None,
         raw_args: args.raw_keys.clone(),
         external_epf_wait: None,
+        debugger_url: None,
     })
 }
 
@@ -4972,13 +5157,53 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         }
         None
     };
+    let mut launch = map_direct_launch_options(target, &args.launch, client_mcp.is_some())?;
+    launch.debugger_url = map_launch_debug(target, args.debug.as_deref())?;
     Ok(LaunchRequest {
         target,
-        launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
+        launch,
         client_mcp,
         via: map_launch_via(args.via.as_deref())?,
         dry_run,
     })
+}
+
+/// `launch --debug <url>`: только клиент предприятия — у Конфигуратора свой отладчик, а
+/// веб-клиент ключей командной строки не получает. Адрес — `http://<хост>:<порт>`, как его
+/// отвечает `debug-server start`. Ключи отладки рядом с ним (в `--raw-key` и в настройках)
+/// проверяет сценарий запуска: только он видит настройки.
+fn map_launch_debug(
+    target: crate::use_cases::request::LaunchTargetRequest,
+    url: Option<&str>,
+) -> Result<Option<crate::domain::launch::DebuggerUrl>, UseCaseError> {
+    use crate::use_cases::request::LaunchTargetRequest;
+
+    let Some(url) = url else {
+        return Ok(None);
+    };
+    let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    match target {
+        LaunchTargetRequest::Designer => {
+            return refuse(
+                "--debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
+                    .to_owned(),
+            )
+        }
+        LaunchTargetRequest::Web => {
+            return refuse(
+                "--debug is for the 1C:Enterprise client: the web client takes no launch keys"
+                    .to_owned(),
+            )
+        }
+        LaunchTargetRequest::Enterprise(_) => {}
+    }
+    match crate::domain::launch::DebuggerUrl::parse(url) {
+        Some(parsed) => Ok(Some(parsed)),
+        // Введённое не повторяется: в нём могут быть учётные данные.
+        None => refuse(
+            "--debug: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it".to_owned(),
+        ),
+    }
 }
 
 fn map_direct_launch_options(
@@ -5042,6 +5267,7 @@ fn map_direct_launch_options(
         internal_out: None,
         raw_args: common.raw_keys.clone(),
         external_epf_wait,
+        debugger_url: None,
     })
 }
 
@@ -5071,6 +5297,7 @@ fn map_mcp_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Use
         internal_out: None,
         raw_args: args.raw_keys.clone(),
         external_epf_wait: None,
+        debugger_url: None,
     })
 }
 
@@ -6279,6 +6506,9 @@ fn render_launch_text_with_status(
     if let Some(pid) = result.pid {
         details.push(format!("pid: {pid}"));
     }
+    if let Some(debug) = &result.debug {
+        details.push(format!("debug: {}", debug.url));
+    }
     if !result.provider_dispatched {
         details.push("provider dispatched: false".to_owned());
     }
@@ -6760,6 +6990,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -6792,6 +7023,7 @@ mod tests {
                     internal_out: None,
                     raw_args: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
                     external_epf_wait: None,
+                    debugger_url: None,
                 },
                 client_mcp: None,
                 dry_run: false,
@@ -6800,6 +7032,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "ordinary".to_owned(),
                     mcp_scenario: None,
@@ -6818,6 +7051,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -6836,6 +7070,7 @@ mod tests {
         assert_eq!(
             map_launch_request(
                 &LaunchArgs {
+                    debug: None,
                     via: None,
                     target: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
@@ -6859,6 +7094,7 @@ mod tests {
                     internal_out: None,
                     raw_args: Vec::new(),
                     external_epf_wait: None,
+                    debugger_url: None,
                 },
                 client_mcp: Some(ClientMcpOptionsRequest {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),
@@ -6932,6 +7168,7 @@ mod tests {
         .expect_err("dump mode should be rejected");
         let launch_error = map_launch_request(
             &LaunchArgs {
+                debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
@@ -7363,6 +7600,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Launch(LaunchArgs {
+                debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
@@ -7583,6 +7821,8 @@ mod tests {
             stopped_pid: Some(8576),
             stopped_dbms_pid: Some(6320),
             previous_port: None,
+            debug_url: None,
+            stopped_debug_pid: None,
             duration_ms: 0,
             warnings: Vec::new(),
         };

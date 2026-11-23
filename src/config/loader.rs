@@ -255,7 +255,7 @@ pub fn load_config_for_launch(
     )
 }
 
-pub fn load_config_for_sessions(
+pub fn load_config_for_infobase_runtime(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
     selector: &InfobaseSelector,
@@ -264,7 +264,7 @@ pub fn load_config_for_sessions(
         config_path,
         workdir_override,
         selector,
-        ConfigValidationMode::Sessions,
+        ConfigValidationMode::InfobaseRuntime,
     )
 }
 
@@ -316,7 +316,7 @@ enum ConfigValidationMode {
     ToolsDownload,
     VanessaDownload,
     Launch,
-    Sessions,
+    InfobaseRuntime,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
         operation: crate::domain::capability::Operation,
@@ -480,7 +480,7 @@ fn build_config(
             validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
         }
         ConfigValidationMode::Launch => validate_launch(&config)?,
-        ConfigValidationMode::Sessions => {
+        ConfigValidationMode::InfobaseRuntime => {
             crate::config::validate::validate_infobase_runtime(&config)?
         }
         ConfigValidationMode::ManagedDbms => {
@@ -3420,6 +3420,7 @@ source-set:
             registry: "registry-24001".to_owned(),
             registered: false,
             previous: None,
+            debug: false,
         };
         write_json(&paths.pins(), &pins).unwrap();
         write_json(

@@ -50,6 +50,10 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::create_dir_all(install_dir.join("bin")).expect("platform dir");
     if with_platform {
         write_shell_script(&install_dir.join("bin").join("1cv8"), "exit 0");
+        // Тонкий клиент и сервер отладки из его установки: превью `debug-server start`
+        // находит их и ничего не запускает.
+        write_shell_script(&install_dir.join("bin").join("1cv8c"), "exit 0");
+        write_shell_script(&install_dir.join("bin").join("dbgs"), "exit 0");
         write_shell_script(&install_dir.join("bin").join("ibcmd"), "exit 0");
         write_shell_script(&install_dir.join("bin").join("webinst"), "exit 0");
         write_shell_script(&install_dir.join("bin").join("1cedtcli"), "exit 0");
@@ -224,6 +228,18 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             &["--infobase", "stand", "cluster", "start"],
             "cluster start",
             "cluster start",
+            work.clone(),
+        ),
+        row(
+            &["debug-server", "start"],
+            "debug-server start",
+            "debug-server start",
+            work.clone(),
+        ),
+        row(
+            &["debug-server", "stop", "0123456789abcdef0123456789abcdef"],
+            "debug-server stop",
+            "debug-server stop",
             work.clone(),
         ),
         row(

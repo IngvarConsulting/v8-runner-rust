@@ -18,6 +18,8 @@ pub mod config_init;
 pub mod convert;
 /// Ответ команд `dbms`.
 pub mod dbms;
+/// Ответ команд `debug-server`.
+pub mod debug_server;
 /// Ответ и предмет сравнения команды `diff`.
 pub mod diff;
 /// Dump domain models.

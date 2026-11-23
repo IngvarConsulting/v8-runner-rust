@@ -51,6 +51,13 @@
         "null"
       ]
     },
+    "debug_url": {
+      "description": "Адрес своего сервера отладки сервера, поднятого с `--debug`: `http://127.0.0.1:<порт>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,
@@ -120,6 +127,15 @@
     },
     "stopped_dbms_pid": {
       "description": "PostgreSQL, погашенный вместе с сервером, потому что поднят его шагом.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stopped_debug_pid": {
+      "description": "`dbgs` сервера, погашенный вместе с ним.",
       "format": "uint32",
       "minimum": 0,
       "type": [

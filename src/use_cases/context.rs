@@ -23,6 +23,7 @@ pub enum CommandName {
     Test,
     Dump,
     InfobaseConfigurationExport,
+    InfobaseCheck,
     InfobaseDump,
     InfobaseRestore,
     Convert,
@@ -47,6 +48,8 @@ pub enum CommandName {
     WebStatus,
     WebStop,
     WebRestart,
+    DebugServerStart,
+    DebugServerStop,
     AgentHold,
     AgentRelease,
     AgentStop,
@@ -96,6 +99,7 @@ impl CommandName {
             | Self::Test
             | Self::Dump
             | Self::InfobaseConfigurationExport
+            | Self::InfobaseCheck
             | Self::InfobaseDump
             | Self::InfobaseRestore
             | Self::Convert
@@ -107,6 +111,8 @@ impl CommandName {
             | Self::StandaloneStatus
             | Self::ClusterStatus
             | Self::WebStatus
+            | Self::DebugServerStart
+            | Self::DebugServerStop
             | Self::AgentHold
             | Self::AgentRelease
             | Self::AgentStop
@@ -148,6 +154,7 @@ impl CommandName {
             Self::Test => "test",
             Self::Dump => "pull",
             Self::InfobaseConfigurationExport => "download",
+            Self::InfobaseCheck => "infobase.check",
             Self::InfobaseDump => "infobase.dump",
             Self::InfobaseRestore => "infobase.restore",
             Self::Convert => "convert",
@@ -172,6 +179,8 @@ impl CommandName {
             Self::WebStatus => "web status",
             Self::WebStop => "web stop",
             Self::WebRestart => "web restart",
+            Self::DebugServerStart => "debug-server start",
+            Self::DebugServerStop => "debug-server stop",
             Self::AgentHold => "agent hold",
             Self::AgentRelease => "agent release",
             Self::AgentStop => "agent stop",

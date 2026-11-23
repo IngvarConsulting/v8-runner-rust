@@ -25,17 +25,20 @@ pub enum StandService {
     Cluster,
     Ras,
     Web,
+    /// Сервер отладки `dbgs` автономного сервера, поднятого с `--debug`.
+    StandaloneDebug,
 }
 
 impl StandService {
     /// Все службы стенда: их обходят тесты.
     #[cfg(test)]
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Postgres,
         Self::Standalone,
         Self::Cluster,
         Self::Ras,
         Self::Web,
+        Self::StandaloneDebug,
     ];
 
     /// Имя каталога службы, её журнала и слово, которым её называет ответ.
@@ -46,6 +49,7 @@ impl StandService {
             Self::Cluster => "cluster",
             Self::Ras => "ras",
             Self::Web => "web",
+            Self::StandaloneDebug => "standalone-debug",
         }
     }
 }
@@ -322,6 +326,21 @@ pub struct PinnedPorts {
     pub port: u16,
 }
 
+/// Закреплённое автономного сервера: блок портов, поднят ли он с сервером отладки и имя, с
+/// которым поднят. Блок лежит в корне файла (`flatten`), поэтому закреплённое прежних версий —
+/// голый `ServerPorts` — читается без отладки, а читатели одного блока читают и новое.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StandalonePins {
+    #[serde(flatten)]
+    pub ports: ServerPorts,
+    /// `standalone start --debug`: признак держится до `--no-debug`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
+    /// Имя базы в сервере (`--name`): под ним отладчик видит её цели.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Закреплённое кластера: порты, каталог реестра и создана ли в нём база. Признак базы живёт с
 /// реестром: новый реестр (`cluster start --new-regport`) получает его только после регистрации.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -335,6 +354,11 @@ pub struct ClusterPins {
     /// откатывает следующий `cluster start`, а рабочие команды такой кластер не видят.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<PreviousRegistry>,
+    /// Агент поднимается с сервером отладки (`cluster start --debug`). Признак переживает
+    /// `stop` и `restart`, пока его не снимет `--no-debug`. Закреплённое без него — кластер без
+    /// отладки.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
 }
 
 /// Реестр, из которого идёт перенос.
@@ -643,6 +667,7 @@ mod tests {
                 registry: "registry-24001".to_owned(),
                 registered: true,
                 previous: None,
+                debug: false,
             },
         )
         .unwrap();

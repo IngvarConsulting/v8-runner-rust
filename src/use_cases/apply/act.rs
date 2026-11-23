@@ -192,7 +192,8 @@ fn apply_with(
         }
         Err(refused) => refused,
     };
-    if refused.error.cancellation().is_some() {
+    if matches!(refused.error, AppError::InfobaseBusy(_)) || refused.error.cancellation().is_some()
+    {
         return Err(refused.error);
     }
     let holder = sessions::holder(
@@ -227,6 +228,12 @@ fn apply_with(
         deferrals,
         SessionTerminate::Force { message: &message },
     );
+    let result = match result {
+        Err(refused) if matches!(refused.error, AppError::InfobaseBusy(_)) => {
+            return Err(refused.error);
+        }
+        other => other,
+    };
     if let Err(refused) = &result {
         if verified_holder
             && config.target_kind() == crate::domain::capability::TargetKind::Cluster

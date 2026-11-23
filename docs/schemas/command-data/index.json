@@ -49,6 +49,12 @@
     "dbms stop": [
       "dbms-stop"
     ],
+    "debug-server start": [
+      "debug-server-start"
+    ],
+    "debug-server stop": [
+      "debug-server-stop"
+    ],
     "diff": [
       "diff"
     ],
@@ -62,6 +68,9 @@
     ],
     "infobase create": [
       "infobase-create"
+    ],
+    "infobase.check": [
+      "infobase-check"
     ],
     "infobase.dump": [
       "infobase-dump"

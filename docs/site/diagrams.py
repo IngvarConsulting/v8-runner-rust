@@ -312,6 +312,7 @@ def processes(id):
     d.node('W', 'webinst', 'sw', 260, 420)
     d.node('E', '1cedtcli', 'sw', 640, 420)
     d.node('C', 'клиент 1С', 'sw', 450, 490)
+    d.node('DB', 'dbgs\nфайловой базы и ibsrv', 'svc', 810, 480)
     d.edge('R', 'D', 'процесс на операцию', fa='t', fb='b', t=0.5)
     d.edge('R', 'RS', 'поднимает на время команды', fa='t:0.12', fb='b:0.85', t=0.5)
     d.edge('R', 'I', 'процесс на операцию', fa='t:0.88', fb='b:0.2', t=0.5)
@@ -320,6 +321,7 @@ def processes(id):
     d.edge('R', 'W', 'процесс на операцию', fa='b:0.12', fb='t:0.85', t=0.5)
     d.edge('R', 'E', 'одна живая сессия', fa='b:0.88', fb='t:0.15', t=0.5)
     d.edge('R', 'C', 'процесс на запуск', fa='b', fb='t', t=0.5)
+    d.edge('R', 'DB', 'живёт после команды', fa='r:0.8', fb='t', t=0.6)
     return d
 processes('processes')
 

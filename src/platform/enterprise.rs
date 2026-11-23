@@ -17,6 +17,18 @@ pub enum EnterpriseError {
     Spawn(ProcessError),
 }
 
+/// Может ли клиент показывать окна при старте. Пакетный запуск их запрещает
+/// (`/DisableStartupDialogs`): ждать ответа человека некому. Интерактивный клиент показывает их,
+/// иначе тонкий клиент на комьюнити-лицензии выходит с кодом 1 сразу после входа — ему нужно
+/// окно лицензии (#784).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupDialogs {
+    /// `/DisableStartupDialogs`: окно при старте — отказ клиента.
+    Suppressed,
+    /// Окна при старте разрешены: лицензия, окно входа при неверном пароле.
+    Shown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchClientMode {
     Designer,
@@ -102,6 +114,7 @@ impl<'a> EnterpriseDsl<'a> {
             &self.connection,
             &self.additional_launch_keys,
             &launch,
+            StartupDialogs::Suppressed,
         )
     }
 }
@@ -187,7 +200,15 @@ pub fn build_launch_args(
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
-    build_launch_command(mode, address, connection, additional_launch_keys, launch).args
+    build_launch_command(
+        mode,
+        address,
+        connection,
+        additional_launch_keys,
+        launch,
+        StartupDialogs::Suppressed,
+    )
+    .args
 }
 
 pub fn build_launch_command(
@@ -196,6 +217,7 @@ pub fn build_launch_command(
     connection: &V8Connection,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
+    dialogs: StartupDialogs,
 ) -> LaunchCommand {
     let mut args = vec![match mode {
         LaunchClientMode::Designer => "DESIGNER",
@@ -204,7 +226,9 @@ pub fn build_launch_command(
         }
     }
     .to_owned()];
-    args.push("/DisableStartupDialogs".to_owned());
+    if dialogs == StartupDialogs::Suppressed {
+        args.push("/DisableStartupDialogs".to_owned());
+    }
     args.extend(address.args(connection));
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
@@ -221,6 +245,22 @@ pub fn build_launch_command(
         args.push("/C".to_owned());
         verbatim_args.push(args.len());
         args.push(encode_launch_parameter(c));
+    }
+
+    // Сервер отладки: клиент подключается к нему сразу после запуска, и `-attach` подключает
+    // его предметы отладки без ручного выбора в отладчике. Конфигуратору адрес не доходит:
+    // `launch designer --debug` отвергает разбор ключей (у него свой отладчик).
+    debug_assert!(
+        !(matches!(mode, LaunchClientMode::Designer) && launch.debugger_url.is_some()),
+        "Designer is launched without a debugger url"
+    );
+    if let Some(url) = launch
+        .debugger_url
+        .as_ref()
+        .filter(|_| !matches!(mode, LaunchClientMode::Designer))
+    {
+        args.extend(["/DEBUG", "-http", "-attach", "/DEBUGGERURL"].map(str::to_owned));
+        args.push(url.to_string());
     }
 
     let mut extra_args = Vec::new();
@@ -315,6 +355,7 @@ mod tests {
     use super::{
         build_launch_args, build_launch_command, encode_launch_parameter,
         normalize_launch_payload_path, ClientAddress, EnterpriseDsl, LaunchClientMode,
+        StartupDialogs,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -354,6 +395,37 @@ mod tests {
                 "http://localhost/base".to_owned(),
             ]
         );
+    }
+
+    /// `launch --debug`: клиент подключается к серверу отладки сразу после запуска, ключи идут
+    /// до сырых ключей; у Конфигуратора их нет.
+    #[test]
+    fn a_debugger_url_attaches_the_client_to_its_debug_server() {
+        let connection = V8Connection::from_connection_string("File=/tmp/ib");
+        let launch = LaunchOptions {
+            debugger_url: crate::domain::launch::DebuggerUrl::parse("http://127.0.0.1:12961"),
+            raw_args: vec!["/L ru".to_owned()],
+            ..LaunchOptions::default()
+        };
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            &ClientAddress::Connection,
+            &connection,
+            &[],
+            &launch,
+        );
+        let at = args.iter().position(|arg| arg == "/DEBUG").expect("/DEBUG");
+        assert_eq!(
+            args[at..at + 5],
+            [
+                "/DEBUG",
+                "-http",
+                "-attach",
+                "/DEBUGGERURL",
+                "http://127.0.0.1:12961"
+            ]
+        );
+        assert!(at < args.iter().position(|arg| arg == "/L ru").expect("raw key"));
     }
 
     #[test]
@@ -465,6 +537,7 @@ mod tests {
                     raw_args: vec!["/custom=\"unchanged\"".to_owned()],
                     ..Default::default()
                 },
+                StartupDialogs::Suppressed,
             );
             let args = &command.args;
             let position = args
@@ -489,6 +562,7 @@ mod tests {
             &V8Connection::from_connection_string("File=/tmp/ib"),
             &[],
             &LaunchOptions::default(),
+            StartupDialogs::Suppressed,
         );
         assert!(!omitted.args.iter().any(|arg| arg == "/C"));
         assert!(omitted.verbatim_args.is_empty());
@@ -510,6 +584,7 @@ mod tests {
                 c: Some("x\" /Execute \"evil.epf".to_owned()),
                 ..Default::default()
             },
+            StartupDialogs::Suppressed,
         );
 
         assert_eq!(command.verbatim_args.len(), 1);
@@ -751,6 +826,8 @@ mod tests {
             })
             .args;
 
+        // Клиент тестов ждёт раннер: окну при старте отвечать некому (#784).
+        assert!(args.iter().any(|arg| arg == "/DisableStartupDialogs"));
         assert!(args.ends_with(&[
             "/Out".to_owned(),
             dir.path().join("platform.log").display().to_string()

@@ -10,6 +10,7 @@ use crate::domain::progress::ProgressPhase;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
+    StartupDialogs,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
@@ -119,6 +120,7 @@ fn run_launch(
     let reported_url = web_url.map(mask_url_userinfo);
 
     let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
+    refuse_a_second_debugger(config, &launch).map_err(UseCaseFailure::without_payload)?;
     if launch.c.as_ref().is_some_and(|value| value.contains('\0')) {
         return Err(UseCaseFailure::without_payload(AppError::Validation(
             "--c must not contain NUL".to_owned(),
@@ -161,6 +163,7 @@ fn run_launch(
             &connection,
             &additional_launch_keys,
             &launch,
+            startup_dialogs(args.target, client_wait.as_ref()),
         ),
         location.path.clone(),
         client_wait.as_ref(),
@@ -211,6 +214,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         });
     }
 
@@ -293,6 +297,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait,
             client_wait,
+            debug: launch_debug(&launch),
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -332,6 +337,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: launch_debug(&launch),
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -397,7 +403,33 @@ fn run_launch(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: launch_debug(&launch),
     })
+}
+
+/// Окна при старте разрешены только интерактивному клиенту предприятия, которого раннер не
+/// ждёт: человек ответит на окно лицензии или входа (#784). Ожидаемый клиент, клиент MCP и
+/// Конфигуратор запускаются с `/DisableStartupDialogs`
+/// (`INV.CLI.AN-INTERACTIVE-CLIENT-MAY-SHOW-STARTUP-DIALOGS`).
+fn startup_dialogs(
+    target: LaunchTargetRequest,
+    client_wait: Option<&ClientWaitPlan>,
+) -> StartupDialogs {
+    match target {
+        LaunchTargetRequest::Enterprise(
+            EnterpriseLaunchTarget::ThinClient
+            | EnterpriseLaunchTarget::ThickClient
+            | EnterpriseLaunchTarget::OrdinaryApplication,
+        ) if client_wait.is_none() => StartupDialogs::Shown,
+        LaunchTargetRequest::Enterprise(
+            EnterpriseLaunchTarget::ThinClient
+            | EnterpriseLaunchTarget::ThickClient
+            | EnterpriseLaunchTarget::OrdinaryApplication
+            | EnterpriseLaunchTarget::ClientMcp { .. },
+        )
+        | LaunchTargetRequest::Designer
+        | LaunchTargetRequest::Web => StartupDialogs::Suppressed,
+    }
 }
 
 /// The client request: an awaited client mirrors its stderr and skips the startup
@@ -645,6 +677,7 @@ fn execute_web(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
+            debug: None,
         });
     }
 
@@ -670,7 +703,41 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
+        debug: None,
     })
+}
+
+/// `--debug` ставит `/DEBUG` и `/DEBUGGERURL` сам: такие ключи в `--raw-key` или в
+/// `tools.enterprise.additional-launch-keys` дали бы клиенту второй сервер отладки.
+fn refuse_a_second_debugger(config: &AppConfig, launch: &LaunchOptions) -> Result<(), AppError> {
+    if launch.debugger_url.is_none() {
+        return Ok(());
+    }
+    let configured = &config.tools.enterprise.additional_launch_keys;
+    let names_a_debugger = |key: &String| {
+        ["debug", "debuggerurl"]
+            .iter()
+            .any(|name| crate::domain::runner::launch_key_alias_matches(key, name))
+    };
+    if launch.raw_args.iter().any(names_a_debugger) {
+        return Err(AppError::Validation(
+            "--debug sets /DEBUG and /DEBUGGERURL itself: remove them from --raw-key".to_owned(),
+        ));
+    }
+    if configured.iter().any(names_a_debugger) {
+        return Err(AppError::Validation(
+            "--debug sets /DEBUG and /DEBUGGERURL itself: tools.enterprise.additional-launch-keys already names a debugger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Отладка в ответе — тот адрес, что получил клиент.
+fn launch_debug(launch: &LaunchOptions) -> Option<Box<crate::domain::launch::LaunchDebug>> {
+    launch
+        .debugger_url
+        .clone()
+        .map(|url| Box::new(crate::domain::launch::LaunchDebug { url }))
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {
@@ -733,12 +800,13 @@ fn build_client_mcp_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{client_process_request, execute, ClientWaitPlan};
+    use super::{client_process_request, execute, startup_dialogs, ClientWaitPlan};
     use crate::config::model::{
         AppConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
         ToolExtensionInput, ToolsConfig,
     };
+    use crate::platform::enterprise::StartupDialogs;
     use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::platforms::platform_resolution;
@@ -1070,6 +1138,42 @@ mod tests {
         assert!(!args.contains("/TESTMANAGER"));
     }
 
+    /// Окна при старте получает только интерактивный клиент предприятия без ожидания (#784):
+    /// Конфигуратор, клиент MCP и ожидаемый клиент остаются с `/DisableStartupDialogs`.
+    #[test]
+    fn only_an_interactive_enterprise_client_may_show_startup_dialogs() {
+        let wait = ClientWaitPlan {
+            timeout_ms: 1,
+            execute_path: None,
+            output_path: String::new(),
+            stderr_path: std::path::PathBuf::new(),
+        };
+        for target in [
+            LaunchTargetRequest::thin_client(),
+            LaunchTargetRequest::thick_client(),
+            LaunchTargetRequest::ordinary_application(),
+        ] {
+            assert_eq!(
+                startup_dialogs(target, None),
+                StartupDialogs::Shown,
+                "{target:?}"
+            );
+            assert_eq!(
+                startup_dialogs(target, Some(&wait)),
+                StartupDialogs::Suppressed,
+                "{target:?} awaited"
+            );
+        }
+        assert_eq!(
+            startup_dialogs(LaunchTargetRequest::designer(), None),
+            StartupDialogs::Suppressed
+        );
+        assert_eq!(
+            startup_dialogs(LaunchTargetRequest::client_mcp(), None),
+            StartupDialogs::Suppressed
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn ordinary_launch_app_uses_enterprise_binary_and_ordinary_mode_key() {
@@ -1097,7 +1201,7 @@ mod tests {
         let args = read_args_log(&args_log);
         assert!(args.contains("ENTERPRISE"));
         assert!(args.contains("/RunModeOrdinaryApplication"));
-        assert!(args.contains("/DisableStartupDialogs"));
+        assert!(!args.contains("/DisableStartupDialogs"));
     }
 
     #[cfg(unix)]
