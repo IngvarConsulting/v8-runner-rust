@@ -67,6 +67,84 @@ fn run_json(config: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON envelope")
 }
 
+#[test]
+fn download_state_db_passes_a_dotted_extension_name_to_the_provider() {
+    const NAME: &str = "Демо.Документ";
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    fs::create_dir(root.path().join("project/extension")).expect("extension sources");
+    let yaml = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        yaml.replace(
+            "source-set: []",
+            &format!(
+                "source-set:\n  - name: {NAME}\n    type: EXTENSION\n    path: project/extension"
+            ),
+        ),
+    )
+    .expect("config with extension set");
+
+    for (selector, stem) in [
+        (&["--extension", NAME][..], "by-name"),
+        (&[NAME][..], "by-set"),
+    ] {
+        let output = root.path().join(format!("{stem}.cfe"));
+        let calls = root.path().join(format!("{stem}.calls"));
+        let result = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+            .arg("--config")
+            .arg(&config)
+            .args(["--json-message", "download"])
+            .args(selector)
+            .args(["--state", "db", "--output"])
+            .arg(&output)
+            .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+            .output()
+            .expect("run download");
+        assert!(
+            result.status.success(),
+            "{selector:?}: {}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let envelope: Value = serde_json::from_slice(&result.stdout).expect("JSON envelope");
+        assert_eq!(envelope["data"]["subject"]["name"], NAME, "{envelope}");
+        assert_eq!(fs::read(&output).expect("published CFE"), b"payload");
+        let argv = fs::read_to_string(&calls).expect("designer arguments");
+        assert!(argv.contains("\"/DumpDBCfg\""), "{argv}");
+        assert!(
+            argv.contains(&format!("\"-Extension\", \"{NAME}\"")),
+            "{argv}"
+        );
+    }
+}
+
+#[test]
+fn download_rejects_empty_or_malformed_extension_names_before_dispatch() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    let calls = root.path().join("platform.calls");
+    let output = root.path().join("invalid.cfe");
+
+    for name in ["", "Демо..Документ", "Демо/Документ", r"Демо\Документ"]
+    {
+        let result = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+            .arg("--config")
+            .arg(&config)
+            .args(["--json-message", "download", "--extension", name])
+            .args(["--state", "db", "--output"])
+            .arg(&output)
+            .env("V8_RUNNER_FAKE_PLATFORM_CALLS", &calls)
+            .output()
+            .expect("run download");
+        let envelope: Value = serde_json::from_slice(&result.stdout).expect("JSON envelope");
+        assert_eq!(result.status.code(), Some(2), "{name:?}: {envelope}");
+        assert_eq!(envelope["error"]["code"], "invalid_argument", "{envelope}");
+        assert!(!calls.exists() && !output.exists(), "{name:?}");
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn workdir_rejects_file_traversal_before_creating_a_directory() {
