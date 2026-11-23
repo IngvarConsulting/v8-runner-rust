@@ -21,7 +21,7 @@ check:
 `agent` и `worker_range` — новые порты. Во втором случае `warnings` конверта называет порт и pid того, кто его занял,
 или порт PostgreSQL раннера.
 `stale_record` говорит, что запись была, а процесса из неё уже нет.
-`debug_url` — адрес сервера отладки агента, поднятого с `--debug` (`INV.USE-CASES.THE-CLUSTER-DEBUG-SERVER-STAYS-ON-UNTIL-NO-DEBUG`); без отладки поля нет.
+`debug_url` — адрес сервера отладки агента, поднятого с HTTP-отладкой (`INV.USE-CASES.THE-CLUSTER-DEBUG-SERVER-STAYS-ON-UNTIL-NO-DEBUG`); без отладки поля нет.
 
 Адрес кластера живёт только в состоянии стенда: `v8project*.yaml` раннер не правит, адрес у `origin` не пишет. Берите
 его из ответа `start` или `status` и не кешируйте.

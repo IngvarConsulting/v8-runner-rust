@@ -174,7 +174,7 @@ impl Cluster<'_> {
     fn wanted_debug(&self, pins: Option<&ClusterPins>) -> bool {
         self.debug
             .requested()
-            .unwrap_or_else(|| pins.is_some_and(|pins| pins.debug))
+            .unwrap_or_else(|| pins.map_or(DEBUG_CLUSTER_SUPPORTED, |pins| pins.debug))
     }
 
     fn registry(&self, pins: &ClusterPins) -> PathBuf {
@@ -952,7 +952,7 @@ impl Cluster<'_> {
                 pins
             }
             // Новые порты закрепляются до запуска: прерванный запуск оставит реестр, где база.
-            // Признак отладки — нет, он закрепляется ниже, после успешного подъёма.
+            // До успешного подъёма записывается умолчание, чтобы отказ не закрепил запрошенное исключение.
             None => {
                 let ports = self.choose_ports(stand, None)?;
                 let pins = ClusterPins {
@@ -960,7 +960,7 @@ impl Cluster<'_> {
                     registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
                     registered: false,
                     previous: None,
-                    debug: false,
+                    debug: DEBUG_CLUSTER_SUPPORTED,
                 };
                 self.write_pins(&pins)?;
                 pins
@@ -1020,7 +1020,8 @@ impl Cluster<'_> {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
-            debug: self.wanted_debug(Some(&old)),
+            // A recovered move returns to the previous registry and its saved debug mode.
+            debug: old.debug,
         };
         for paths in [&self.agent, &self.ras] {
             paths
@@ -1050,7 +1051,11 @@ impl Cluster<'_> {
             let _ = std::fs::remove_dir_all(&new_registry);
             error
         };
-        let agent = match self.raise(&moving, machine) {
+        let requested = ClusterPins {
+            debug: self.wanted_debug(Some(&old)),
+            ..moving
+        };
+        let agent = match self.raise(&requested, machine) {
             Ok(agent) => agent,
             Err(error) => return Err(roll_back(error, None)),
         };
@@ -1061,7 +1066,7 @@ impl Cluster<'_> {
         let pins = ClusterPins {
             registered: existed,
             previous: None,
-            ..moving
+            ..requested
         };
         if let Err(error) = registered.and_then(|()| self.write_pins(&pins)) {
             return Err(roll_back(error, Some(&agent)));
@@ -2826,6 +2831,49 @@ pub(super) mod tests {
         assert_eq!(started.debug_url, Some(format!("http://127.0.0.1:{port}")));
     }
 
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_new_cluster_starts_with_debugging_unless_explicitly_disabled() {
+        let setup = setup();
+        let host = Host::default();
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(started.debug_url.is_some());
+        assert!(setup.pins().debug);
+        let disabled = setup
+            .command(
+                ClusterCommand::Restart {
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(disabled.debug_url.is_none());
+        setup.command(ClusterCommand::Stop, &host).unwrap();
+        let still_disabled = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(still_disabled.debug_url.is_none());
+        assert!(!setup.pins().debug);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_failed_first_no_debug_start_does_not_override_the_default() {
+        let setup = setup();
+        let host = Host::default();
+        host.agent_exits_at_once.set(true);
+        setup
+            .command(debug_start(DebugChoice::Off), &host)
+            .unwrap_err();
+        host.agent_exits_at_once.set(false);
+        let started = setup
+            .command(debug_start(DebugChoice::AsPinned), &host)
+            .unwrap();
+        assert!(started.debug_url.is_some());
+    }
+
     /// Признак переживает `restart` без ключа; `--no-debug` его снимает.
     #[test]
     #[cfg(any(windows, target_os = "linux"))]
@@ -2861,9 +2909,7 @@ pub(super) mod tests {
     fn a_debug_start_on_a_cluster_running_without_it_is_refused() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         let error = setup
             .command(debug_start(DebugChoice::On), &host)
             .unwrap_err();
@@ -2887,9 +2933,7 @@ pub(super) mod tests {
     fn a_taken_debug_port_moves_no_registry() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         setup.command(ClusterCommand::Stop, &host).unwrap();
         let pins = setup.pins();
         host.listeners.borrow_mut().insert(pins.ports.debug(), 9999);
@@ -2916,9 +2960,7 @@ pub(super) mod tests {
     fn a_refused_debug_start_pins_no_debug() {
         let setup = setup();
         let host = Host::default();
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         setup.command(ClusterCommand::Stop, &host).unwrap();
         let pins = setup.pins();
         assert!(!pins.debug);
@@ -2976,9 +3018,7 @@ pub(super) mod tests {
             error.to_string().contains("cluster start --debug"),
             "{error}"
         );
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
+        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
         let error = debug_port(&context, &setup.config, &host).unwrap_err();
         assert!(
             error.to_string().contains("cluster restart --debug"),
@@ -3291,7 +3331,7 @@ pub(super) mod tests {
                 registry: old.registry.clone(),
                 registered: old.registered,
             }),
-            debug: false,
+            debug: old.debug,
         };
         std::fs::create_dir_all(setup.agent().root().join(&moving.registry)).unwrap();
         write_json(&setup.agent().pins(), &moving).unwrap();
@@ -4256,11 +4296,22 @@ pub(super) mod tests {
         host.registration_fails.set(true);
         host.immortal.borrow_mut().insert(AGENT_PID);
         let refused = setup
-            .run_with(ServiceCommand::Start, true, &host)
+            .command(
+                ClusterCommand::Start {
+                    new_regport: true,
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
             .unwrap_err();
         assert!(refused.to_string().contains("roll back"), "{refused}");
         let moving = setup.pins();
         assert!(moving.previous.is_some(), "the move is still recorded");
+        assert_eq!(
+            moving.debug, old.debug,
+            "the pending move keeps the saved mode"
+        );
+        assert!(!host.agent_args.borrow().iter().any(|arg| arg == "-debug"));
         assert!(setup.agent().root().join(&moving.registry).is_dir());
         // `infobase create` такой кластер работающим не считает.
         assert!(setup.base(&host).is_err());

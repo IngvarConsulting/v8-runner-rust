@@ -1,6 +1,9 @@
 ---
 id: INV.USE-CASES.THE-CLUSTER-DEBUG-SERVER-STAYS-ON-UNTIL-NO-DEBUG
 check:
+  - src/use_cases/managed_stand/cluster.rs::a_new_cluster_starts_with_debugging_unless_explicitly_disabled
+  - src/use_cases/managed_stand/cluster.rs::a_failed_first_no_debug_start_does_not_override_the_default
+  - src/use_cases/managed_stand/cluster.rs::a_move_whose_new_agent_does_not_stop_is_left_to_the_next_start
   - src/use_cases/managed_stand/cluster.rs::a_debug_start_raises_the_agent_with_its_debug_server
   - src/use_cases/managed_stand/cluster.rs::the_debug_server_stays_on_until_no_debug
   - src/use_cases/managed_stand/cluster.rs::a_debug_start_on_a_cluster_running_without_it_is_refused
@@ -12,10 +15,11 @@ check:
 
 # Сервер отладки кластера остаётся включённым до `--no-debug`
 
-`cluster start --debug` и `cluster restart --debug` поднимают агента с сервером отладки HTTP на петле и закрепляют
-это вместе с портами кластера: следующие `start` и `restart` без ключа поднимают его так же, пока `--no-debug` не
-снимет признак. Признак закрепляется только после успешного запуска агента: отказанный или упавший запуск оставляет
-прежний, и следующий `start` без ключа поднимает кластер, как было закреплено до него. Работающий кластер с другим признаком `start` не перезапускает: это отказ, называющий `cluster
+Управляемый кластер без закреплённого режима на Windows и Linux по умолчанию поднимает агента с сервером
+отладки HTTP на петле. `--debug` явно включает отладку, `--no-debug` явно отключает. После успешного запуска
+выбор сохраняется вместе с портами. Следующие `start` и `restart` без ключа используют сохранённый режим.
+Неудачный первый запуск сохраняет умолчание, а не запрошенное исключение. Неудачный последующий запуск
+сохраняет прежний режим. Работающий кластер с другим признаком `start` не перезапускает: это отказ, называющий `cluster
 restart` с нужным ключом. Закреплённое прежних версий без признака — кластер без отладки, реестр и порты те же. Занятый чужим процессом
 порт отладки реестр не переносит: без отладки он не нужен, а запуск с отладкой отказывает, называя порт и процесс.
 Сервер отладки кластера есть там же, где управляемый кластер, — на Windows и Linux

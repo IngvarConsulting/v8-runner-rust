@@ -1494,7 +1494,21 @@ mod stand_tests {
     #[test]
     #[cfg(any(windows, target_os = "linux"))]
     fn web_start_waits_for_cluster_http_debugging_before_declaring_apache_ready() {
-        let (stand, host) = running();
+        use super::super::{ClusterCommand, DebugChoice};
+
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+        stand
+            .command(
+                ClusterCommand::Start {
+                    new_regport: false,
+                    debug: DebugChoice::Off,
+                },
+                &host,
+            )
+            .unwrap();
+        assert!(host.alive(WEB_PID));
         let result = web(&stand, WebCommand::Start, false, &host).unwrap_err();
         assert!(result.error.message().contains("cluster restart --debug"));
         assert_eq!(status(&stand, &host).explicit, Some(false));

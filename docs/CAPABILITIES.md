@@ -939,7 +939,7 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   Неизвестный, уже остановленный или чужой рабочей копии сеанс — `nothing_to_stop`, `known_session: false`; вышедший
   сам сервер — `stale_record: true`; процесс, занявший pid сервера, раннер не трогает. Сеанс, который сейчас запускает
   другая команда, — `workspace_busy`.
-- База на кластере раннера (`cluster.managed`, Windows и Linux), поднятом `cluster start --debug`: `start` ничего не запускает и
+- База на кластере раннера (`cluster.managed`, Windows и Linux) с HTTP-отладкой: новый кластер запускается с ней по умолчанию. `--no-debug` явно выключает отладку и сохраняет режим. `debug-server start` ничего не запускает и
   отдаёт адрес сервера отладки кластера с `owner: "cluster"`, без `pid`; `--port` и `--owner-pid` игнорируются с
   предупреждением в `warnings`. Кластер не работает или без `--debug` — `environment_unavailable` с нужной командой.
   `stop` такого сеанса кластер не трогает (`nothing_to_stop`). Кластер, запущенный не раннером, — `target`.
