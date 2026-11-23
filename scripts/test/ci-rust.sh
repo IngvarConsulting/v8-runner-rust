@@ -41,6 +41,7 @@ case "$CI_SCOPE" in
           "platform::process::tests::windows_process_group::a_ctrl_break_to_the_runner_group_misses_its_managed_child"
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
           "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
+          "platform::service::imp::tests::a_stalled_soft_stop_helper_is_terminated_at_its_deadline"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
           "support::path::tests::resolve_from_builds_native_windows_paths"
           "support::path::tests::planned_path_rejects_regular_file_traversal_even_before_parent_components"
