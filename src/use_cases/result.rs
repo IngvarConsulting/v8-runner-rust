@@ -33,13 +33,14 @@ pub enum UseCaseErrorKind {
     Environment(EnvironmentReason),
     InfobaseNotFound,
     ConnectionFailed,
+    CredentialsRejected,
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
     /// Применению нужен монопольный доступ, а базу держат чужие сеансы
     /// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
     InfobaseSessions,
-    /// Файловую базу держит чужой Конфигуратор; его раннер не закрывает.
+    /// Базу держит чужой Конфигуратор; его раннер не закрывает.
     InfobaseDesignerBusy,
     /// База ушла вперёд записанного поколения: сперва `pull` или перезапись `push --force`.
     NonFastForward,
@@ -89,9 +90,10 @@ impl UseCaseErrorKind {
                 VALIDATION_EXIT_CODE
             }
             Self::Runtime => RUNTIME_EXIT_CODE,
-            Self::Platform | Self::ConnectionFailed | Self::AgentCommandAbandoned => {
-                PLATFORM_EXIT_CODE
-            }
+            Self::Platform
+            | Self::ConnectionFailed
+            | Self::CredentialsRejected
+            | Self::AgentCommandAbandoned => PLATFORM_EXIT_CODE,
         }
     }
 
@@ -161,6 +163,7 @@ impl UseCaseErrorKind {
             Self::Environment(_) => "environment_unavailable",
             Self::InfobaseNotFound => "infobase_not_found",
             Self::ConnectionFailed => "connection_failed",
+            Self::CredentialsRejected => "credentials_rejected",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InfobaseSessions => "infobase_sessions",
@@ -192,6 +195,7 @@ impl UseCaseErrorKind {
             | Self::Environment(_)
             | Self::InfobaseNotFound
             | Self::ConnectionFailed
+            | Self::CredentialsRejected
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
             | Self::InfobaseSessions
@@ -216,6 +220,7 @@ impl UseCaseErrorKind {
             Self::Environment(_) => "environment unavailable",
             Self::InfobaseNotFound => "infobase not found",
             Self::ConnectionFailed => "connection failed",
+            Self::CredentialsRejected => "credentials rejected",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
             Self::InfobaseSessions => "infobase held by other sessions",

@@ -78,6 +78,31 @@ const IBCMD_SESSION_INPUT_MARKERS: &[(&str, &str)] = &[
     ("src/platform/ibsrv.rs", "Имя пользователя: Пароль:"),
 ];
 
+/// Measured refusal signatures in the private /Out of an unsuccessful CLI infobase check.
+const INFOBASE_CHECK_OUT_SIGNATURES: &[(&str, &str)] = &[
+    ("src/use_cases/infobase_check.rs", "компьютер:"),
+    ("src/use_cases/infobase_check.rs", "пользователь:"),
+    ("src/use_cases/infobase_check.rs", "сеанс:"),
+    ("src/use_cases/infobase_check.rs", "начат:"),
+    ("src/use_cases/infobase_check.rs", "приложение:"),
+    (
+        "src/use_cases/infobase_check.rs",
+        "Пользователь ИБ не идентифицирован",
+    ),
+    (
+        "src/use_cases/infobase_check.rs",
+        "Ошибка блокировки информационной базы для конфигурирования.",
+    ),
+    (
+        "src/use_cases/infobase_check.rs",
+        "Возможно, информационная база уже открыта Конфигуратором.",
+    ),
+    (
+        "src/use_cases/infobase_check.rs",
+        "С этой информационной базой уже работает конфигуратор:",
+    ),
+];
+
 /// Prose that labels text the runner passes through, and never decides what it does.
 ///
 /// The distinction is DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER's, and it is narrow. A label is admitted only where all three
@@ -219,6 +244,11 @@ impl DecisionLiterals {
                     self.record_pattern(case);
                 }
             }
+            Pat::Slice(pattern) => {
+                for element in &pattern.elems {
+                    self.record_pattern(element);
+                }
+            }
             Pat::Tuple(pattern) => {
                 for element in &pattern.elems {
                     self.record_pattern(element);
@@ -230,6 +260,11 @@ impl DecisionLiterals {
                 for element in &pattern.elems {
                     self.record_pattern(element);
                 }
+            }
+            // Unqualified constants parse as identifiers in patterns. Resolution below
+            // only retains names that match a prose constant in this file.
+            Pat::Ident(pattern) => {
+                self.constant_decisions.insert(pattern.ident.to_string());
             }
             // A constant in a pattern position decides exactly like a literal would.
             Pat::Path(pattern) => {
@@ -394,6 +429,7 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
     let declared = PROSE_DEBT
         .iter()
         .chain(IBCMD_SESSION_INPUT_MARKERS)
+        .chain(INFOBASE_CHECK_OUT_SIGNATURES)
         .map(|(file, literal)| ((*file).to_owned(), (*literal).to_owned()))
         .collect::<BTreeSet<_>>();
 
@@ -409,8 +445,7 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
     );
     assert!(
         stale.is_empty(),
-        "A declared prose site no longer exists; remove it from PROSE_DEBT or \
-         IBCMD_SESSION_INPUT_MARKERS:\n{}",
+        "A declared prose site no longer exists; remove it from PROSE_DEBT or the applicable exact-marker list:\n{}",
         render(&stale)
     );
 }

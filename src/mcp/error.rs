@@ -52,6 +52,7 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             UseCaseErrorKind::Runtime => Self::Runtime,
             UseCaseErrorKind::Platform
             | UseCaseErrorKind::ConnectionFailed
+            | UseCaseErrorKind::CredentialsRejected
             | UseCaseErrorKind::AgentCommandAbandoned => Self::Platform,
         }
     }
@@ -84,7 +85,9 @@ impl McpBusinessError {
         let code = match kind {
             UseCaseErrorKind::Capability(_) => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::InfobaseNotFound => McpErrorCode::InfobaseNotFound,
-            UseCaseErrorKind::ConnectionFailed => McpErrorCode::ConnectionFailed,
+            UseCaseErrorKind::ConnectionFailed | UseCaseErrorKind::CredentialsRejected => {
+                McpErrorCode::ConnectionFailed
+            }
             UseCaseErrorKind::Environment(_)
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy

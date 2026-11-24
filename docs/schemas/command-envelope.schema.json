@@ -269,6 +269,7 @@
             "environment_unavailable",
             "infobase_not_found",
             "connection_failed",
+            "credentials_rejected",
             "workspace_busy",
             "invalid_output",
             "cancelled",

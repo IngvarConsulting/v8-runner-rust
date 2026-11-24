@@ -2354,7 +2354,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   клиента, которого превью не запускает.
 
 `infobase check` использует реквизиты выбранной базы. При отсутствии файла ИБ отвечает
-`infobase_not_found`, при неразличимом отказе входа — `connection_failed`.
+`infobase_not_found`. Точный ответ Конфигуратора в журнале текущей пробы даёт `credentials_rejected` или `infobase_designer_busy`. При неразличимом отказе входа CLI возвращает `connection_failed`.
 Проверка удаляет свой приватный каталог `workPath/temp` перед ответом.
 
 ### `mcp serve`

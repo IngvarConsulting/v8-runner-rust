@@ -8,7 +8,7 @@ use crate::platform::locator::{PlatformVersion, UtilityType, UtilityVersion};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::{AppError, EnvironmentLayer};
 use crate::support::temp::private_temp_dir;
-use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, ExecutionTransport, InterruptionSafetyClass};
 
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -86,10 +86,11 @@ pub(crate) fn check(
             Some(Duration::from_secs(60)),
         ),
     );
-    check_with_designer(config, &designer, version)
+    check_with_designer(context, config, &designer, version)
 }
 
 fn check_with_designer(
+    context: &ExecutionContext,
     config: &AppConfig,
     designer: &DesignerDsl<'_>,
     version: PlatformVersion,
@@ -123,6 +124,23 @@ fn check_with_designer(
         }
     };
     if let Err(code) = result.process.outcome() {
+        if context.transport() == ExecutionTransport::Cli {
+            match classify_login_failure(result.platform_log.as_deref()) {
+                UseCaseErrorKind::CredentialsRejected => {
+                    return Err(UseCaseError::new(
+                        UseCaseErrorKind::CredentialsRejected,
+                        "the Designer rejected the infobase credentials",
+                    ))
+                }
+                UseCaseErrorKind::InfobaseDesignerBusy => {
+                    return Err(UseCaseError::new(
+                        UseCaseErrorKind::InfobaseDesignerBusy,
+                        "another Designer has the infobase open",
+                    ))
+                }
+                _ => {}
+            }
+        }
         let infobase = &config.infobase;
         let secrets = [infobase.user.as_deref(), infobase.password.as_deref()];
         let secrets: Vec<_> = secrets
@@ -130,11 +148,15 @@ fn check_with_designer(
             .flatten()
             .filter(|s| !s.is_empty())
             .collect();
+        let log = result.platform_log.as_deref().filter(|log| {
+            context.transport() != ExecutionTransport::Cli
+                || !probe_lines(log).any(|line| line == SESSIONS)
+        });
         let evidence = super::ibcmd_diagnostics::format_failure_evidence(
             format!("the Designer could not open the infobase (exit code {code})"),
             &result.process.stdout,
             &result.process.stderr,
-            result.platform_log.as_deref(),
+            log,
             None,
         );
         let message = crate::platform::secrets::mask_text(&evidence, &secrets);
@@ -152,4 +174,90 @@ fn check_with_designer(
     Ok(ConnectionChecked {
         platform_version: Some(version.to_string()),
     })
+}
+
+const CREDENTIALS: &str = "Пользователь ИБ не идентифицирован";
+const LOCK: &str = "Ошибка блокировки информационной базы для конфигурирования.";
+const DESIGNER: &str = "Возможно, информационная база уже открыта Конфигуратором.";
+const SESSIONS: &str = "С этой информационной базой уже работает конфигуратор:";
+
+fn probe_lines(log: &str) -> impl Iterator<Item = &str> {
+    log.trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
+/// Только полные сигнатуры приватного /Out этой пробы (CTR.WIRE.INFOBASE-CHECK-DATA).
+fn classify_login_failure(log: Option<&str>) -> UseCaseErrorKind {
+    let lines: Vec<_> = probe_lines(log.unwrap_or_default()).collect();
+    match lines.as_slice() {
+        [CREDENTIALS] => UseCaseErrorKind::CredentialsRejected,
+        [LOCK, DESIGNER] => UseCaseErrorKind::InfobaseDesignerBusy,
+        [LOCK, DESIGNER, SESSIONS, session] if is_designer_session_row(session) => {
+            UseCaseErrorKind::InfobaseDesignerBusy
+        }
+        _ => UseCaseErrorKind::ConnectionFailed,
+    }
+}
+
+/// The observed clustered reply has exactly one row with these fields.
+fn is_designer_session_row(line: &str) -> bool {
+    const FIELDS: [&str; 5] = [
+        "компьютер:",
+        "пользователь:",
+        "сеанс:",
+        "начат:",
+        "приложение:",
+    ];
+    let row = line.to_lowercase();
+    let mut values = row.split(", ");
+    FIELDS.iter().all(|field| {
+        values
+            .next()
+            .and_then(|value| value.strip_prefix(field))
+            .is_some_and(|value| !value.trim().is_empty())
+    }) && values.next().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_login_failure, UseCaseErrorKind};
+
+    #[test]
+    fn only_complete_unambiguous_probe_signatures_are_classified() {
+        let credentials = "Пользователь ИБ не идентифицирован";
+        let busy = "Ошибка блокировки информационной базы для конфигурирования.\r\nВозможно, информационная база уже открыта Конфигуратором.";
+        let heading = "С этой информационной базой уже работает конфигуратор:";
+        for (log, expected) in [
+            (format!("\u{feff}{credentials}\r\n"), "credentials_rejected"),
+            (format!("{busy}\r\n"), "infobase_designer_busy"),
+            (
+                format!("{busy}\n{heading}\nКомпьютер: test, Пользователь: test, Сеанс: 1, Начат: test, Приложение: test"),
+                "infobase_designer_busy",
+            ),
+            (format!("{busy}\n{heading}\n"), "connection_failed"),
+            (format!("{busy}\n{heading}\nОшибка лицензии"), "connection_failed"),
+            (
+                format!("Ошибка лицензии\n{credentials}"),
+                "connection_failed",
+            ),
+            (format!("{credentials}\n{busy}"), "connection_failed"),
+            (
+                format!("{busy}\n{heading}\n{credentials}"),
+                "connection_failed",
+            ),
+            (format!("prefix: {credentials}"), "connection_failed"),
+        ] {
+            assert_eq!(
+                classify_login_failure(Some(&log)).execution_step_code(),
+                expected,
+                "{log}"
+            );
+        }
+        assert_eq!(
+            classify_login_failure(None),
+            UseCaseErrorKind::ConnectionFailed
+        );
+    }
 }
