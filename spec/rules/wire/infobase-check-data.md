@@ -4,6 +4,7 @@ version: 2
 artifact: docs/schemas/command-data/infobase-check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
+  - src/support/temp.rs::private_directory_waits_for_a_transient_windows_delete_share_conflict
   - src/use_cases/infobase_check.rs::only_complete_unambiguous_probe_signatures_are_classified
   - tests/cli_infobase.rs::infobase_check_needs_native_login_evidence_and_leaves_no_files
   - tests/mcp_stdio.rs::mcp_check_infobase_confirms_login_and_reports_a_missing_file
@@ -29,7 +30,9 @@ CLI `infobase check` и MCP `check_infobase` отвечают `command: "infobas
 Отмена, тайм-аут и неверный формат ответа имеют собственные коды CLI. MCP
 сохраняет общий код `platform_failure` для этих отказов. При отказе после запуска `data` —
 пустой объект. Локализованная диагностика может сопровождать отказ как улика.
-Приватный каталог проверки в `workPath/temp` убирается перед ответом.
+Приватный каталог проверки в `workPath/temp` убирается перед ответом. На Windows при
+временном конфликте совместного доступа раннер повторяет удаление до 30 секунд. Сам вход в
+базу не повторяется. Постоянная ошибка удаления остаётся отказом.
 
 Защита от повторения: сырой адрес рабочего проекта может содержать управляющие
 ключи Конфигуратора. Допустимость адреса для пробы определяет
