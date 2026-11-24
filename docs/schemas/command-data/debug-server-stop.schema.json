@@ -1,11 +1,21 @@
 {
   "$defs": {
     "DebugServerAction": {
-      "description": "Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не\nстартует повторно: каждый `start` создаёт отдельный сеанс.",
+      "description": "Что сделала команда `debug-server`. Обычный `start` создаёт отдельный сеанс.",
       "oneOf": [
         {
           "const": "started",
           "description": "`start`: сервер отвечает, сеанс записан.",
+          "type": "string"
+        },
+        {
+          "const": "reused",
+          "description": "`start --ensure`: существующий сеанс подтвердил готовность.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "`start --ensure`: the attempt failed after work was dispatched.",
           "type": "string"
         },
         {
@@ -108,7 +118,7 @@
   "properties": {
     "action": {
       "$ref": "#/$defs/DebugServerAction",
-      "description": "`started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`."
+      "description": "Исход запуска, восстановления или остановки."
     },
     "duration_ms": {
       "format": "uint64",

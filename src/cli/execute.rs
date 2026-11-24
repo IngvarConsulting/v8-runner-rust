@@ -1835,10 +1835,15 @@ fn execute_debug_server(
     };
     let context = cli_context(config, name, cancellation);
     let outcome = match action {
-        Action::Start { port, owner_pid } => debug_server_start(
+        Action::Start {
+            port,
+            owner_pid,
+            ensure,
+        } => debug_server_start(
             &context,
             config,
             DebugServerStart { port, owner_pid },
+            ensure,
             dry_run,
         ),
         Action::Status { session } => match debug_server_status(&context, config, session) {
@@ -1929,11 +1934,12 @@ fn debug_server_text(
         Some(DebugServerOwner::Runner) | None => "the debug server",
     };
     let mut lines = vec![match result.action {
-        DebugServerAction::Started => format!(
+        DebugServerAction::Started | DebugServerAction::Reused => format!(
             "{}: {owner} answers at {}",
             name.as_str(),
             result.url.as_deref().unwrap_or("?")
         ),
+        DebugServerAction::Failed => format!("{}: could not prepare {owner}", name.as_str()),
         DebugServerAction::Stopped => format!(
             "{}: {owner} pid {} stopped",
             name.as_str(),
@@ -1948,7 +1954,9 @@ fn debug_server_text(
         ),
         DebugServerAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
     }];
-    if let (DebugServerAction::Started, Some(session)) = (result.action, &result.session) {
+    if let (DebugServerAction::Started | DebugServerAction::Reused, Some(session)) =
+        (result.action, &result.session)
+    {
         lines.push(format!("session: {session}"));
     }
     if let Some(alias) = &result.infobase_alias {

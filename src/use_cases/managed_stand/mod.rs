@@ -72,6 +72,9 @@ pub(crate) trait ServiceHost {
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
+    fn can_confirm_debug_endpoint(&self) -> bool {
+        cfg!(any(windows, target_os = "macos"))
+    }
     fn debug_loopback_owner(&self, _pid: u32, _port: u16) -> bool {
         false
     }
@@ -450,6 +453,8 @@ enum DebuggerSpawn {
     /// Вышел, едва запустившись: запись снята, причину знает журнал.
     ExitedAtOnce,
     Failed(UseCaseError),
+    /// A spawned process could not be identified or confirmed stopped.
+    Uncertain(UseCaseError),
 }
 
 /// Что запускать как свой `dbgs` и где его запись.
@@ -461,6 +466,7 @@ struct DebuggerLaunch<'a> {
     owner: Option<u32>,
     machine: String,
     version: Option<String>,
+    protect_unidentified: bool,
 }
 
 /// Единственный запуск своего `dbgs` с записью — для сеанса `debug-server` и для автономного
@@ -520,18 +526,32 @@ fn spawn_debugger(
         }
     };
     let Some(facts) = host.facts(pid) else {
+        if launch.protect_unidentified && !host.debug_process_gone(pid) {
+            return DebuggerSpawn::Uncertain(UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("dbgs pid {pid} started, but the system could not identify it; its record was retained for recovery"),
+            ));
+        }
         forget_record(launch.paths);
         return DebuggerSpawn::ExitedAtOnce;
     };
+    if launch.protect_unidentified && facts.image != crate::platform::dbgs::executable_name() {
+        return DebuggerSpawn::Uncertain(UseCaseError::new(
+            UseCaseErrorKind::Platform,
+            format!("pid {pid} no longer belongs to dbgs; its record was retained for recovery"),
+        ));
+    }
     record.pid = Some(pid);
     record.started = Some(facts.started);
     record.image = Some(facts.image);
     if let Err(error) = write_record(launch.paths, &record) {
-        if stop_confirmed(host, runner, context, pid, record.started, Duration::ZERO) {
+        if stop_confirmed(host, runner, context, pid, record.started, Duration::ZERO)
+            && (!launch.protect_unidentified || debug_process_ended(host, &record, pid))
+        {
             forget_record(launch.paths);
             return DebuggerSpawn::Failed(error);
         }
-        return DebuggerSpawn::Failed(error.followed_by(format!("dbgs pid {pid} did not stop")));
+        return DebuggerSpawn::Uncertain(error.followed_by(format!("dbgs pid {pid} did not stop")));
     }
     DebuggerSpawn::Spawned(Box::new(SpawnedDebugger { record, pid }))
 }
@@ -563,6 +583,17 @@ fn stop_confirmed(
     await_gone(host, pid, started, patience)
 }
 
+fn debug_process_ended(host: &dyn ServiceHost, record: &ServiceRecord, pid: u32) -> bool {
+    host.facts(pid).map_or_else(
+        || host.debug_process_gone(pid),
+        |facts| {
+            record
+                .started
+                .is_some_and(|started| started != facts.started)
+        },
+    )
+}
+
 /// Чем кончилось ожидание сервера отладки.
 enum RdbgWait {
     /// По этому порту ответил обработчик `rdbg`.
@@ -582,13 +613,14 @@ fn await_rdbg(
     what: &str,
     port: &dyn Fn() -> Option<u16>,
     alive: &dyn Fn() -> bool,
+    probe: &dyn Fn(u16) -> bool,
 ) -> RdbgWait {
     let deadline = Instant::now() + host.patience(DEBUG_READY_TIMEOUT);
     loop {
         if let Some(error) = interruption_before_safe_point(context, what) {
             return RdbgWait::Interrupted(error.into());
         }
-        if let Some(port) = port().filter(|port| host.rdbg_answers(*port)) {
+        if let Some(port) = port().filter(|port| probe(*port)) {
             return RdbgWait::Ready(port);
         }
         if !alive() {
@@ -1498,9 +1530,27 @@ pub fn debug_server_start(
     context: &ExecutionContext,
     config: &AppConfig,
     request: DebugServerStart,
+    ensure: bool,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
-    with_debug_server(context, config, |server| server.start(request, dry_run))
+    let started = Instant::now();
+    with_debug_server(context, config, |server| {
+        if ensure {
+            server.ensure(request, dry_run)
+        } else {
+            server.start(request, dry_run)
+        }
+    })
+    .map_err(|failure| {
+        if !ensure {
+            return failure;
+        }
+        UseCaseFailure::after_possible_work(failure.error, context.work(), || {
+            let mut result = debug_server::failed_ensure(request);
+            result.duration_ms = crate::support::time::elapsed_ms(started);
+            result
+        })
+    })
 }
 
 /// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.

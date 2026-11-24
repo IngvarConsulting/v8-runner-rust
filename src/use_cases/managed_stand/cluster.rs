@@ -1451,6 +1451,7 @@ pub(super) fn debug_port(
         "waiting for the debug server of the cluster",
         &|| Some(port),
         &agent_alive,
+        &|port| host.rdbg_answers(port),
     ) {
         super::RdbgWait::Ready(port) => Ok(port),
         super::RdbgWait::Interrupted(error) => Err(error),

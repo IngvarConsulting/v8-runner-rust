@@ -915,7 +915,8 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 ### `debug-server`
 
 ```text
-v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
+v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>]
+v8-runner debug-server start --ensure --owner-pid <PID> [--dry-run]
 v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
@@ -930,7 +931,13 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   пароля, и отвечает, когда сервер назвал адрес и ответил по протоколу `rdbg`. Ответ: `url`
   (`http://127.0.0.1:<порт>`), `port`, `pid`, `session` (32 hex), `owner: "runner"`, `platform_resolution`,
   `log_path`. Сервер переживает команду; запись сеанса и журнал — в `workPath/debug-server/<session>/`. Каждый `start` —
-  новый сервер и новый сеанс.
+  новый сервер и новый сеанс, кроме вызова с `--ensure`.
+- Для автозапуска отладки файловой базы на Windows и macOS используйте
+  `debug-server start --ensure --owner-pid <PID>`. Раннер сам проверяет, переиспользует
+  или восстанавливает принадлежащий владельцу сеанс. Запросы одной рабочей
+  копии к одному сеансу сериализуются. Используйте адрес из этого ответа для
+  подключения. После замены раннер выдаёт новый токен. Сохраните последний
+  полученный токен для `debug-server stop`, если отладку нужно закрыть до выхода владельца.
 - Порт без `--port`: первый свободный в окне из 32 портов в полосе 10000–19999, окно выводится из пути `workPath`.
   Занятый явный `--port` — `environment_unavailable` до запуска, слушающий процесс не тронут. Нет `dbgs` рядом с
   клиентом — `environment_unavailable` с `layer: platform`, называющий версию и путь клиента.
@@ -957,8 +964,8 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   сервер отладки отвечает пустым списком. У сервера кластера поля нет.
 - Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
   `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
-  `launch thin --debug <url>` → `debug-server stop <session>`. Перед повторным подключением
-  вызовите `debug-server status <session>` из той же рабочей копии. Для файловой ИБ команда
+  `launch thin --debug <url>` → `debug-server stop <session>`. Чтобы отдельно проверить
+  существующий сеанс, вызовите `debug-server status <session>` из той же рабочей копии. Для файловой ИБ команда
   проверяет PID и время запуска процесса, подтверждает владельца loopback-порта средствами
   ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
   состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился

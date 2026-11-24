@@ -447,6 +447,9 @@ pub enum DebugServerCommandArgs {
         /// The debugger process: the debug server ends by itself when this process ends
         #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
         owner_pid: Option<u32>,
+        /// Reuse or recover the file-infobase session of this owner
+        #[arg(long, requires = "owner_pid", conflicts_with = "port")]
+        ensure: bool,
     },
     /// Check whether a runner-owned debug server is ready for attachment
     Status {
