@@ -568,8 +568,10 @@ impl DebugServer<'_> {
 
         verify_process()?;
         verify_listener()?;
-        if !self.host.rdbg_answers(port) {
-            return Err(Reason::RdbgUnavailable);
+        match self.host.debug_rdbg_answers(pid, port) {
+            Some(true) => {}
+            Some(false) => return Err(Reason::RdbgUnavailable),
+            None => return Err(Reason::ListenerUnverified),
         }
         verify_listener()?;
         verify_process()?;

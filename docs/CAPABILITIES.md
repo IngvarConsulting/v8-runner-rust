@@ -920,8 +920,9 @@ v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
 
-- Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows; на Linux и macOS раннер его не
-  запрещает, но он не замерен ([#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)). Сервер
+- Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows и macOS arm64
+  ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). Linux не замерен
+  ([#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)). Сервер
   отладки кластера — Windows и Linux (Linux замерен в
   [#768](https://github.com/IngvarConsulting/v8-runner-rust/issues/768)), автономного сервера — Windows. Базу
   команды не открывают и не берут замок `workPath` и стенда: `stop` отвечает и пока идёт другая команда.
@@ -962,7 +963,9 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
   состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился
   или сменился), `unverified` (готовность подтвердить нельзя). В 0.19 подтверждение владельца
-  порта доступно на Windows. Проверка отражает состояние на момент вызова, поэтому отладчик
+  порта доступно на Windows и macOS arm64. На macOS раннер также проверяет, что
+  запрос `rdbg` прошёл по соединению, принятому записанным процессом.
+  Проверка отражает состояние на момент вызова, поэтому отладчик
   обрабатывает также отказ самого подключения. Наличие операции проверяет
   `v8-runner debug-server status --help`. Перед удалением `workPath` —
   `debug-server stop` по каждому сеансу.

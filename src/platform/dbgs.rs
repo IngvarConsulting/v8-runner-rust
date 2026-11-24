@@ -11,6 +11,12 @@ use std::time::Duration;
 
 use crate::platform::service::ServiceRequest;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+const RDBG_PATH: &str = "/e1crdbg/rdbg?cmd=getDbgTargets";
+const RDBG_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Имя исполняемого файла сервера отладки на этой системе.
 pub const fn executable_name() -> &'static str {
     if cfg!(windows) {
@@ -103,7 +109,7 @@ pub fn rdbg_answers(port: u16) -> bool {
             reqwest::blocking::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(2))
+                .timeout(RDBG_TIMEOUT)
                 .build()
                 .ok()
         })
@@ -111,10 +117,7 @@ pub fn rdbg_answers(port: u16) -> bool {
     else {
         return false;
     };
-    let url = format!(
-        "http://{}:{port}/e1crdbg/rdbg?cmd=getDbgTargets",
-        Ipv4Addr::LOCALHOST
-    );
+    let url = format!("{}{RDBG_PATH}", url(port));
     let Ok(response) = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/xml")
@@ -128,6 +131,16 @@ pub fn rdbg_answers(port: u16) -> bool {
         return false;
     }
     response.text().is_ok_and(|body| is_rdbg_refusal(&body))
+}
+
+/// On macOS bind the protocol response to an accepted socket of the recorded PID.
+#[cfg(target_os = "macos")]
+pub(crate) fn owned_rdbg_answers(pid: u32, port: u16) -> Option<bool> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?
+        .block_on(macos::owned_rdbg_answers(pid, port))
 }
 
 /// Отказ обработчика `rdbg`: исключение `virtual-resource-system`. С `Accept: application/json`

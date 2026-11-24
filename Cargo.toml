@@ -47,6 +47,10 @@ russh = { version = "0.63", default-features = false, features = ["ring", "rsa"]
 unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+
 [target.'cfg(windows)'.dependencies]
 junction = { version = "2", default-features = false }
 process-wrap = { version = "9.1.0", default-features = false, features = ["std", "job-object", "creation-flags"] }

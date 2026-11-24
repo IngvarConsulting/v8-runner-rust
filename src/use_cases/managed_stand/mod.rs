@@ -75,6 +75,10 @@ pub(crate) trait ServiceHost {
     fn debug_loopback_owner(&self, _pid: u32, _port: u16) -> bool {
         false
     }
+    /// None means the protocol connection could not be attributed to the PID.
+    fn debug_rdbg_answers(&self, _pid: u32, port: u16) -> Option<bool> {
+        Some(self.rdbg_answers(port))
+    }
     fn debug_process_gone(&self, _pid: u32) -> bool {
         false
     }
@@ -222,7 +226,15 @@ impl ServiceHost for RealHost {
     fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
         service::listens_on(pid, port)
     }
-    #[cfg(windows)]
+    #[cfg(target_os = "macos")]
+    fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
+        service::macos_debug_loopback_owner(pid, port)
+    }
+    #[cfg(target_os = "macos")]
+    fn debug_rdbg_answers(&self, pid: u32, port: u16) -> Option<bool> {
+        crate::platform::dbgs::owned_rdbg_answers(pid, port)
+    }
+    #[cfg(any(windows, target_os = "macos"))]
     fn debug_process_gone(&self, pid: u32) -> bool {
         crate::support::machine::process_definitely_gone(pid)
     }

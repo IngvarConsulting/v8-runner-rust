@@ -5,6 +5,10 @@ artifact: docs/schemas/command-data/debug-server-status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_debug_server.rs::status_reports_an_unknown_session_without_waiting_for_the_work_path
+  - src/platform/service/macos_listener.rs::macos_proves_only_an_exact_loopback_listener_held_by_the_pid
+  - src/platform/service/macos_listener.rs::macos_finds_the_accepted_socket_by_both_endpoints
+  - src/platform/dbgs/macos.rs::macos_rdbg_requires_the_same_accepted_connection_after_the_reply
+  - src/platform/dbgs/macos.rs::macos_rdbg_does_not_send_a_request_to_an_unattributed_connection
   - src/use_cases/managed_stand/debug_server.rs::status_confirms_only_the_recorded_listener_without_mutating_the_session
 ---
 
@@ -27,7 +31,10 @@ check:
   (`listener_unverified`) или ответа протокола (`rdbg_unavailable`).
 
 Проверка читает запись, ничего в ней не меняет, процессы не запускает и не завершает.
-На ОС без доказательства принадлежности порта действует `unverified`.
+На macOS раннер убеждается, что записанному процессу принадлежит и слушатель, и
+принятый сокет конкретного запроса `rdbg`. Принятый сокет проверяется до запроса
+и после ответа по адресам и портам обеих сторон и идентификатору TCP-записи.
+При отсутствии доказательства принадлежности действует `unverified`.
 
 ## Пример
 
