@@ -819,6 +819,9 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::DebugServer(args) => match args.command {
             crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
+            crate::cli::args::DebugServerCommandArgs::Status { .. } => {
+                CommandName::DebugServerStatus
+            }
             crate::cli::args::DebugServerCommandArgs::Stop { .. } => CommandName::DebugServerStop,
         },
         Command::Dbms(args) => match args.command {
@@ -1811,7 +1814,7 @@ fn execute_standalone(
     )
 }
 
-/// `debug-server start|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// `debug-server start|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
 /// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
 fn execute_debug_server(
     config: &AppConfig,
@@ -1822,11 +1825,12 @@ fn execute_debug_server(
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::DebugServerCommandArgs as Action;
     use crate::use_cases::managed_stand::{
-        debug_server_start, debug_server_stop, DebugServerStart,
+        debug_server_start, debug_server_status, debug_server_stop, DebugServerStart,
     };
 
     let name = match action {
         Action::Start { .. } => CommandName::DebugServerStart,
+        Action::Status { .. } => CommandName::DebugServerStatus,
         Action::Stop { .. } => CommandName::DebugServerStop,
     };
     let context = cli_context(config, name, cancellation);
@@ -1837,6 +1841,45 @@ fn execute_debug_server(
             DebugServerStart { port, owner_pid },
             dry_run,
         ),
+        Action::Status { session } => match debug_server_status(&context, config, session) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        name.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    let status = result.status.as_str();
+                    presenter.print_bare(&format!("{}: {status}", name.as_str()));
+                    if let Some(reason) = result.reason {
+                        presenter.print_bare(&format!("reason: {}", reason.as_str()));
+                    }
+                    if let Some(url) = result.url {
+                        presenter.print_bare(&format!("url: {url}"));
+                    }
+                    if let Some(pid) = result.pid {
+                        presenter.print_bare(&format!("pid: {pid}"));
+                    }
+                }
+                return Ok(());
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    print_failure(
+                        presenter,
+                        name,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    presenter.print_error(&error.to_string());
+                }
+                return Err(error);
+            }
+        },
         Action::Stop { session } => debug_server_stop(&context, config, session, dry_run),
     };
     match outcome {

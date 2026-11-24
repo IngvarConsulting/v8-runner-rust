@@ -17,9 +17,13 @@ check:
 `standalone start|restart` на Linux и запуск этих служб на остальных платформах отвечают
 `environment_unavailable` до запуска процессов.
 
-Сервер отладки `debug-server` службой стенда не является и раннер его не ограничивает по ОС. Свой `dbgs`
+Запуск своего `dbgs` через `debug-server start` раннер не ограничивает по ОС. Свой `dbgs`
 раннера для файловой базы вживую замерен только на Windows; на Linux и macOS он не замерен (#778). Сервер
 отладки кластера (`cluster start --debug`) есть там же, где управляемый кластер, — на Windows и Linux (Linux
 замерен в #768); на остальных платформах `--debug` отвечает `environment_unavailable`. Сервер отладки
 автономного сервера — только на Windows: `debug-server start` у его базы на других системах отвечает
 `environment_unavailable`, как `standalone start`.
+
+Проверка файлового сеанса через `debug-server status` требует доказательства принадлежности
+loopback-сокета процессу. В 0.19 раннер получает его на Windows. При отсутствии такого доказательства
+адрес для подключения не выдаётся, см. `CTR.WIRE.DEBUG-SERVER-STATUS-DATA`.

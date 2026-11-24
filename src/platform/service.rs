@@ -1348,7 +1348,7 @@ mod imp {
             let rows = std::ptr::addr_of!((*table).table)
                 .cast::<windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID>(
             );
-            let mut wildcard = None;
+            let mut owner = None;
             for index in 0..count {
                 let row = rows.add(index).read_unaligned();
                 // Порт в таблице — младшие 16 бит в сетевом порядке.
@@ -1356,14 +1356,17 @@ mod imp {
                     continue;
                 }
                 let address = std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
-                if !loopback || address == std::net::Ipv4Addr::LOCALHOST {
+                if !loopback {
                     return Some(row.dwOwningPid);
                 }
-                if address.is_unspecified() {
-                    wildcard = Some(row.dwOwningPid);
+                if address == std::net::Ipv4Addr::LOCALHOST || address.is_unspecified() {
+                    if owner.is_some_and(|pid| pid != row.dwOwningPid) {
+                        return None;
+                    }
+                    owner = Some(row.dwOwningPid);
                 }
             }
-            wildcard
+            owner
         }
     }
 

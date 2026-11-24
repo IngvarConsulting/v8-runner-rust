@@ -916,6 +916,7 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 
 ```text
 v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
+v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
 
@@ -955,7 +956,15 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   сервер отладки отвечает пустым списком. У сервера кластера поля нет.
 - Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
   `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
-  `launch thin --debug <url>` → `debug-server stop <session>`. Перед удалением `workPath` —
+  `launch thin --debug <url>` → `debug-server stop <session>`. Перед повторным подключением
+  вызовите `debug-server status <session>` из той же рабочей копии. Для файловой ИБ команда
+  проверяет PID и время запуска процесса, подтверждает владельца loopback-порта средствами
+  ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
+  состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился
+  или сменился), `unverified` (готовность подтвердить нельзя). В 0.19 подтверждение владельца
+  порта доступно на Windows. Проверка отражает состояние на момент вызова, поэтому отладчик
+  обрабатывает также отказ самого подключения. Наличие операции проверяет
+  `v8-runner debug-server status --help`. Перед удалением `workPath` —
   `debug-server stop` по каждому сеансу.
 
 ### `web`

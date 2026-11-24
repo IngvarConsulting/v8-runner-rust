@@ -61,6 +61,26 @@ fn stop_answers_while_another_command_holds_the_work_path() {
     assert_eq!(answer["data"]["session"], SESSION);
 }
 
+/// Проверка другого сеанса отвечает из текущего workPath, даже если он заблокирован.
+#[test]
+fn status_reports_an_unknown_session_without_waiting_for_the_work_path() {
+    let dir = temp_workspace();
+    project(dir.path());
+    fs::create_dir_all(dir.path().join("work")).expect("work");
+    hold_workspace_lock(&dir.path().join("work"));
+
+    let (code, answer) = run(dir.path(), &["debug-server", "status", SESSION]);
+    assert_eq!(code, 0, "{answer}");
+    assert_eq!(answer["command"], "debug-server status");
+    support::command_data::assert_data_matches_its_command_form(&answer, "unknown debug session");
+    assert_eq!(answer["data"]["status"], "unknown");
+    assert_eq!(answer["data"]["session"], SESSION);
+    for field in ["reason", "pid", "url", "port", "infobase_alias"] {
+        assert!(answer["data"].get(field).is_none(), "{answer}");
+    }
+    assert!(!dir.path().join("work/debug-server").exists());
+}
+
 /// Сеанс становится именем каталога: иное, чем 32 шестнадцатеричных знака, отвергает разбор.
 #[test]
 fn a_session_that_is_not_hex_is_refused_by_the_parser() {

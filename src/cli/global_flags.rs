@@ -245,6 +245,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "debug-server status",
+        preview: Preview::Absent("it starts nothing: the answer is the observed session state"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "debug-server stop",
         preview: Preview::Runs,
         base: Base::Resolves,

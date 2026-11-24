@@ -86,7 +86,7 @@ pub enum DebugServerOwner {
 }
 
 /// Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не
-/// описывается отчётом: у `debug-server` нет ни `status`, ни повторного `start` того же сеанса.
+/// стартует повторно: каждый `start` создаёт отдельный сеанс.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugServerAction {
@@ -144,4 +144,72 @@ pub struct DebugServerResult {
     /// Предупреждения идут только в `warnings` конверта: форма `data` их не несёт.
     #[serde(skip)]
     pub warnings: Vec<String>,
+}
+
+/// Read-only observation of a recorded file-infobase debug server.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerStatus {
+    Ready,
+    Unknown,
+    Stale,
+    Unverified,
+}
+
+impl DebugServerStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Unknown => "unknown",
+            Self::Stale => "stale",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerStatusReason {
+    ProcessChanged,
+    ProcessGone,
+    RecordUnavailable,
+    Starting,
+    UnsupportedOwner,
+    ProcessUnverified,
+    ListenerUnverified,
+    RdbgUnavailable,
+    RecordChanged,
+}
+
+impl DebugServerStatusReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessChanged => "process_changed",
+            Self::ProcessGone => "process_gone",
+            Self::RecordUnavailable => "record_unavailable",
+            Self::Starting => "starting",
+            Self::UnsupportedOwner => "unsupported_owner",
+            Self::ProcessUnverified => "process_unverified",
+            Self::ListenerUnverified => "listener_unverified",
+            Self::RdbgUnavailable => "rdbg_unavailable",
+            Self::RecordChanged => "record_changed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DebugServerStatusResult {
+    pub session: DebugSession,
+    pub status: DebugServerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DebugServerStatusReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infobase_alias: Option<&'static str>,
+    pub duration_ms: u64,
 }
