@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
@@ -14,9 +15,14 @@ impl PrivateTempDir {
     }
 
     /// Report cleanup failures instead of silently leaving a full CFE behind.
-    pub fn close(mut self) -> std::io::Result<()> {
+    pub fn close(self) -> std::io::Result<()> {
+        self.close_waiting_for_windows_sharing(Duration::ZERO)
+    }
+
+    /// Wait only for a Windows sharing conflict, with a caller-supplied time limit.
+    pub fn close_waiting_for_windows_sharing(mut self, limit: Duration) -> std::io::Result<()> {
         let path = self.path.as_ref().expect("private temp dir is open");
-        std::fs::remove_dir_all(path)?;
+        remove_private_dir(path, limit)?;
         self.path = None;
         Ok(())
     }
@@ -28,6 +34,35 @@ impl Drop for PrivateTempDir {
             let _ = std::fs::remove_dir_all(path);
         }
     }
+}
+
+#[cfg(windows)]
+fn remove_private_dir(path: &Path, limit: Duration) -> std::io::Result<()> {
+    use std::time::Instant;
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+    let started = Instant::now();
+    let mut delay = Duration::from_millis(25);
+    loop {
+        let result = std::fs::remove_dir_all(path);
+        let sharing_conflict = result.as_ref().is_err_and(|error| {
+            matches!(
+                error.raw_os_error().map(|code| code as u32),
+                Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+            )
+        });
+        let remaining = limit.saturating_sub(started.elapsed());
+        if !sharing_conflict || remaining.is_zero() {
+            return result;
+        }
+        std::thread::sleep(delay.min(remaining));
+        delay = (delay * 2).min(Duration::from_millis(250));
+    }
+}
+
+#[cfg(not(windows))]
+fn remove_private_dir(path: &Path, _limit: Duration) -> std::io::Result<()> {
+    std::fs::remove_dir_all(path)
 }
 
 pub fn private_temp_dir(work_path: &Path, prefix: &str) -> std::io::Result<PrivateTempDir> {
@@ -278,6 +313,38 @@ mod tests {
         let expected = dir.path().join("temp").join("partial-lists");
         assert_eq!(partial.path().parent(), Some(expected.as_path()));
         assert_eq!(dump_partial.path().parent(), Some(expected.as_path()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_waits_for_a_transient_windows_delete_share_conflict() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Duration;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let work = tempdir().unwrap();
+        let private = private_temp_dir(work.path(), "infobase-check-").unwrap();
+        let path = private.path().to_owned();
+        let log = path.join("login.log");
+        std::fs::write(&log, b"probe").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&log)
+            .unwrap();
+        assert_eq!(
+            std::fs::remove_dir_all(&path).unwrap_err().raw_os_error(),
+            Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+        );
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            drop(held);
+        });
+        let cleanup = private.close_waiting_for_windows_sharing(Duration::from_secs(1));
+        release.join().unwrap();
+        cleanup.expect("remove the private directory after the handle closes");
+        assert!(!path.exists());
     }
 
     #[test]

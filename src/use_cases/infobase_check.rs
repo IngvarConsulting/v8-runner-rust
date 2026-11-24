@@ -105,7 +105,8 @@ fn check_with_designer(
             ) => AppError::TimedOut(error.to_string()),
             error => AppError::from(error),
         });
-    let cleanup = scratch.close();
+    // On Windows the empty working directory can still be held after the Designer exits.
+    let cleanup = scratch.close_waiting_for_windows_sharing(Duration::from_secs(30));
     let result = match (result, cleanup) {
         (Ok(result), Ok(())) => result,
         (Ok(_), Err(error)) => {
