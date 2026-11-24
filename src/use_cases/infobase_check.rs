@@ -203,15 +203,20 @@ fn classify_login_failure(log: Option<&str>) -> UseCaseErrorKind {
 
 /// The observed clustered reply has exactly one row with these fields.
 fn is_designer_session_row(line: &str) -> bool {
-    const FIELDS: [&str; 5] = ["компьютер", "пользователь", "сеанс", "начат", "приложение"];
-    let mut values = line.split(", ");
+    const FIELDS: [&str; 5] = [
+        "компьютер:",
+        "пользователь:",
+        "сеанс:",
+        "начат:",
+        "приложение:",
+    ];
+    let row = line.to_lowercase();
+    let mut values = row.split(", ");
     FIELDS.iter().all(|field| {
         values
             .next()
-            .and_then(|value| value.split_once(':'))
-            .is_some_and(|(key, value)| {
-                key.trim().to_lowercase() == *field && !value.trim().is_empty()
-            })
+            .and_then(|value| value.strip_prefix(field))
+            .is_some_and(|value| !value.trim().is_empty())
     }) && values.next().is_none()
 }
 

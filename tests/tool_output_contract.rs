@@ -80,11 +80,11 @@ const IBCMD_SESSION_INPUT_MARKERS: &[(&str, &str)] = &[
 
 /// Measured refusal signatures in the private /Out of an unsuccessful CLI infobase check.
 const INFOBASE_CHECK_OUT_SIGNATURES: &[(&str, &str)] = &[
-    ("src/use_cases/infobase_check.rs", "компьютер"),
-    ("src/use_cases/infobase_check.rs", "пользователь"),
-    ("src/use_cases/infobase_check.rs", "сеанс"),
-    ("src/use_cases/infobase_check.rs", "начат"),
-    ("src/use_cases/infobase_check.rs", "приложение"),
+    ("src/use_cases/infobase_check.rs", "компьютер:"),
+    ("src/use_cases/infobase_check.rs", "пользователь:"),
+    ("src/use_cases/infobase_check.rs", "сеанс:"),
+    ("src/use_cases/infobase_check.rs", "начат:"),
+    ("src/use_cases/infobase_check.rs", "приложение:"),
     (
         "src/use_cases/infobase_check.rs",
         "Пользователь ИБ не идентифицирован",
