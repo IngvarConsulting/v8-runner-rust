@@ -15,7 +15,7 @@ use super::process::{ProcessError, ProcessResult};
 use super::secrets::{mask_known_secrets, mask_text};
 
 mod descriptor;
-pub(crate) use descriptor::publication_debug_edit;
+pub(crate) use descriptor::{publication_alias_matches, publication_debug_edit};
 
 /// Аргументы `webinst` для объявленной публикации.
 pub fn webinst_args(

@@ -914,7 +914,7 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 
 ### `debug-server`
 
-Веб-клиент запускается в два шага. Выполните `publish --prepare-debug <IDE_URL>`,
+Веб-клиент запускается в два шага. Выполните `web publish --prepare-debug <IDE_URL>`,
 подключите отладчик IDE по `data.debug.ide_url` и включите автоподключение `WEBClient`.
 Затем выполните `launch web --web-debug <DEBUGGER_URL>` с адресом `data.debug.debugger_url`.
 Раннер сохраняет путь, параметры и фрагмент URL публикации и добавляет `Debug=http,attach`

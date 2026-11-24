@@ -305,8 +305,7 @@ pub struct PublishArgs {
     /// Delete the publication named in infobase.web instead of creating it
     #[arg(long)]
     pub delete: bool,
-    /// Prepare or check publication HTTP debugging and return the IDE debugger address
-    #[arg(long, value_name = "IDE_URL", conflicts_with = "delete")]
+    #[arg(skip)]
     pub prepare_debug: Option<String>,
 }
 
@@ -349,7 +348,21 @@ pub struct BootstrapArgs {
 #[derive(Args, Debug)]
 pub struct WebArgs {
     #[command(subcommand)]
-    pub command: ServiceCommandArgs,
+    pub command: WebCommandArgs,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebCommandArgs {
+    #[command(flatten)]
+    Service(ServiceCommandArgs),
+    /// Publish the infobase or prepare its publication for HTTP debugging
+    Publish {
+        #[command(flatten)]
+        publish: PublishArgs,
+        /// Prepare or check publication HTTP debugging and return the IDE debugger address
+        #[arg(long, value_name = "IDE_URL", conflicts_with = "delete")]
+        prepare_debug: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

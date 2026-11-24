@@ -259,7 +259,13 @@ fn external_web_debug_checks_the_descriptor_and_rdbg_without_republishing() {
         support::v8_runner_command()
             .current_dir(dir.path())
             .env_remove("V8TR_CONFIG")
-            .args(["--json-message", "publish", "--prepare-debug", ide_url])
+            .args([
+                "--json-message",
+                "web",
+                "publish",
+                "--prepare-debug",
+                ide_url,
+            ])
             .output()
             .unwrap()
     };
@@ -285,9 +291,25 @@ fn external_web_debug_checks_the_descriptor_and_rdbg_without_republishing() {
     assert_eq!(rejected["error"]["code"], "invalid_argument");
 }
 
+#[test]
+fn prepare_debug_flag_is_only_available_under_web_publish() {
+    let output = v8_runner_command()
+        .args(["publish", "--prepare-debug", "http://localhost:1561"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unexpected argument"), "{stderr}");
+}
+
 fn run_invalid_prepare(dir: &Path) -> (i32, Value) {
     run(
         dir,
-        &["publish", "--prepare-debug", "https://localhost:1561"],
+        &[
+            "web",
+            "publish",
+            "--prepare-debug",
+            "https://localhost:1561",
+        ],
     )
 }

@@ -61,6 +61,7 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "cluster start",
     "cluster stop",
     "cluster restart",
+    "web publish",
     "web start",
     "web stop",
     "web restart",

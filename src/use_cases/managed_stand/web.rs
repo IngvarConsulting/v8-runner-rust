@@ -215,7 +215,10 @@ impl<'a> Web<'a> {
 
     fn publication_stale(&self) -> bool {
         let descriptor = self.paths.root().join("publication/default.vrd");
-        let Ok(descriptor) = std::fs::read_to_string(descriptor) else {
+        let Ok(file) = FileSnapshot::read(&descriptor) else {
+            return false;
+        };
+        let Ok(descriptor) = std::str::from_utf8(&file.contents) else {
             return false;
         };
         let cluster = self.paths.sibling(StandService::Cluster);
@@ -630,16 +633,37 @@ pub(crate) fn managed_publication_url(
         .web
         .as_ref()
         .and_then(|web| web.wsdir.as_deref());
-    status.address.zip(wsdir).filter(|_| {
-        let Some(root) = status.config_path.parent() else { return false };
-        status.ready && !status.publication_stale
-            && root.join("publication/default.vrd").is_file()
-            && !root.join(DEBUG_ACTIVATION_PENDING).exists()
-    })
-        .map(|(address, wsdir)| Some(publication_url(&address, wsdir)))
-        .ok_or_else(|| environment(
-            "the managed publication is not ready: start Apache and prepare the publication with `publish --prepare-debug`",
-        ))
+    let unavailable = || {
+        environment(
+        "the managed publication is not ready: start Apache and prepare the publication with `web publish --prepare-debug`",
+    )
+    };
+    let root = status.config_path.parent().ok_or_else(unavailable)?;
+    let marker = root.join(DEBUG_ACTIVATION_PENDING);
+    let pending = marker
+        .try_exists()
+        .map_err(|error| io_failure("cannot check", &marker, &error))?;
+    if !status.ready || status.publication_stale || pending {
+        return Err(unavailable());
+    }
+    let (address, wsdir) = status.address.zip(wsdir).ok_or_else(unavailable)?;
+    let path = root.join("publication/default.vrd");
+    let file =
+        FileSnapshot::read(&path).map_err(|error| io_failure("cannot read", &path, &error))?;
+    require_publication_alias(&file.contents, wsdir)?;
+    Ok(Some(publication_url(&address, wsdir)))
+}
+
+fn require_publication_alias(contents: &[u8], wsdir: &str) -> Result<(), UseCaseError> {
+    match crate::platform::webinst::publication_alias_matches(contents, wsdir) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(environment(format!(
+            "the managed publication does not serve '/{wsdir}/': run `web publish` before preparing debug"
+        ))),
+        Err(error) => Err(environment(format!(
+            "cannot verify the managed publication path: {error}; run `web publish`"
+        ))),
+    }
 }
 
 fn publication_url(address: &str, wsdir: &str) -> String {
@@ -995,6 +1019,12 @@ impl ManagedPublication<'_> {
         let file = snapshot.descriptor.as_ref().ok_or_else(|| {
             environment("the managed publication has no default.vrd: run `publish` first")
         })?;
+        let wsdir = self
+            .target
+            .wsdir
+            .as_deref()
+            .ok_or_else(|| validation("infobase.web.wsdir is required"))?;
+        require_publication_alias(&file.contents, wsdir)?;
         let path = snapshot.vrd.clone();
         let edit = file.debug_edit(debugger, &path)?;
         let marker = self.web.paths.root().join(DEBUG_ACTIVATION_PENDING);
@@ -1525,6 +1555,31 @@ mod stand_tests {
             },
             managed,
         )
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_debug_preparation_refuses_a_renamed_publication_before_editing() {
+        let (mut stand, host) = running();
+        publish(&stand, &host, false).unwrap();
+        let path = descriptor(&stand);
+        let original = std::fs::read(&path).unwrap();
+        let before = host.ran_with("-t").len();
+        stand.config.infobase.web.as_mut().unwrap().wsdir = Some("renamed".to_owned());
+        let context = context(CommandName::Publish);
+        let runner = Runner { host: &host };
+        let publication = publication_with(&context, &stand.config, None, false, &runner, &host)
+            .unwrap()
+            .unwrap();
+        let debugger = crate::domain::launch::DebuggerUrl::parse("http://localhost:1561").unwrap();
+        assert!(publication
+            .prepare_debug(&debugger)
+            .unwrap_err()
+            .to_string()
+            .contains("run `web publish`"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(host.ran_with("-t").len(), before);
+        assert!(!paths(&stand).root().join(DEBUG_ACTIVATION_PENDING).exists());
     }
 
     #[test]

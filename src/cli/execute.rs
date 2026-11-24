@@ -289,7 +289,7 @@ pub fn execute_command(
         ),
         Command::Web(args) => execute_web(
             config,
-            args.command,
+            web_service_command(&args.command),
             command_line,
             presenter,
             clean_before_execution,
@@ -840,7 +840,7 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
         },
-        Command::Web(args) => match args.command {
+        Command::Web(args) => match web_service_command(&args.command) {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::WebStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::WebStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::WebStop,
@@ -1631,6 +1631,17 @@ fn execute_dbms(
         dry_run,
         || present(run(&context, config, command, dry_run)),
     )
+}
+
+fn web_service_command(
+    args: &crate::cli::args::WebCommandArgs,
+) -> crate::cli::args::ServiceCommandArgs {
+    match args {
+        crate::cli::args::WebCommandArgs::Service(action) => *action,
+        crate::cli::args::WebCommandArgs::Publish { .. } => {
+            unreachable!("web publish is normalised in canonical_command")
+        }
+    }
 }
 
 fn execute_web(

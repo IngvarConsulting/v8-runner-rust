@@ -1,6 +1,8 @@
 ---
 id: INV.CLI.A-DEBUG-LAUNCH-ATTACHES-THE-ENTERPRISE-CLIENT
 check:
+  - tests/cli_launch_debug.rs::prepare_debug_flag_is_only_available_under_web_publish
+  - src/use_cases/managed_stand/web.rs::web_debug_preparation_refuses_a_renamed_publication_before_editing
   - src/platform/enterprise.rs::a_debugger_url_attaches_the_client_to_its_debug_server
   - tests/cli_launch_debug.rs::a_debug_launch_preview_attaches_the_client_to_the_debug_server
   - tests/cli_launch_debug.rs::a_debug_launch_is_refused_where_it_cannot_work
@@ -22,8 +24,10 @@ check:
 или `/DEBUGGERURL` в `--raw-key` или в `tools.enterprise.additional-launch-keys` рядом с `--debug`: второй сервер
 отладки клиенту не передаётся. Отказ не повторяет введённый адрес — в нём могут быть учётные данные.
 
-Веб-отладка идёт двумя явными вызовами. `publish --prepare-debug <IDE_URL>` готовит публикацию
+Веб-отладка идёт двумя явными вызовами. `web publish --prepare-debug <IDE_URL>` готовит публикацию
 и сообщает IDE адреса. IDE подключает отладчик и настраивает приём `WEBClient`, затем вызывает
 `launch web --web-debug <URL>`, передавая `debugger_url` из подготовки. Браузер получает
 `Debug=http,attach` и `DebuggerURL`. Остальные параметры, путь и фрагмент адреса сохраняются.
 Обычный `launch web` передаёт исходный адрес публикации.
+
+У управляемой публикации запрошенный `wsdir` сверяется с путём в действующем дескрипторе. После смены пути нужна повторная публикация.

@@ -896,7 +896,7 @@ infobases:
 
 `debugger-url` задаёт прямой `http://<хост>:<порт>` для HTTP-отладки со стороны
 публикации. Он может отличаться от адреса того же сервера отладки, доступного IDE.
-У `web.managed` поле применяется при `publish` и `publish --prepare-debug`. У внешнего
+У `web.managed` поле применяется при `publish` и `web publish --prepare-debug`. У внешнего
 сервера оно служит для проверки маршрута и `default.vrd` на хосте публикации.
 
 #### `infobase.dbms`

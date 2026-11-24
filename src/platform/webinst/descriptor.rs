@@ -10,20 +10,38 @@ use crate::domain::launch::DebuggerUrl;
 const VRD: &[u8] = b"http://v8.1c.ru/8.2/virtual-resource-system";
 const DEBUG_KEYS: [&[u8]; 3] = [b"enable", b"protocol", b"url"];
 
+/// Whether a managed VRD describes the requested published path.
+pub(crate) fn publication_alias_matches(contents: &[u8], wsdir: &str) -> io::Result<bool> {
+    let publication = inspect_publication(contents, None)?;
+    let requested = format!("/{wsdir}");
+    Ok(publication
+        .alias
+        .is_some_and(|alias| alias.strip_suffix('/').unwrap_or(&alias) == requested))
+}
+
 /// `None` means the publication already has this route. Return a byte-preserving edit
 /// otherwise; only the publication's direct `debug` element belongs to this operation.
 pub(crate) fn publication_debug_edit(
     contents: &[u8],
     debugger: &DebuggerUrl,
 ) -> io::Result<Option<Vec<u8>>> {
+    Ok(inspect_publication(contents, Some(&debugger.to_string()))?.edit)
+}
+
+struct Publication {
+    alias: Option<String>,
+    edit: Option<Vec<u8>>,
+}
+
+fn inspect_publication(contents: &[u8], debugger: Option<&str>) -> io::Result<Publication> {
     let bom_len = usize::from(contents.starts_with(b"\xef\xbb\xbf")) * 3;
     let mut reader = NsReader::from_reader(contents);
     let mut depth = 0usize;
     let mut debug_name = None;
+    let mut alias = None;
     let mut edit = None;
     let mut found_debug = false;
     let mut closed = false;
-    let debugger = debugger.to_string();
 
     loop {
         let start = reader.buffer_position() as usize + bom_len;
@@ -35,6 +53,17 @@ pub(crate) fn publication_debug_edit(
                 if !vrd || element.local_name().as_ref() != b"point" || debug_name.is_some() {
                     return Err(io::Error::other("expected one VRD publication point"));
                 }
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(io::Error::other)?;
+                    if attribute.key.as_ref() == b"base" {
+                        alias = Some(
+                            attribute
+                                .unescape_value()
+                                .map_err(io::Error::other)?
+                                .into_owned(),
+                        );
+                    }
+                }
                 let name = element.name();
                 let qualified = match name.prefix() {
                     Some(prefix) => format!(
@@ -44,18 +73,20 @@ pub(crate) fn publication_debug_edit(
                     None => "debug".to_owned(),
                 };
                 if matches!(event, Event::Empty(_)) {
-                    let mut writer = Writer::new(Vec::new());
-                    writer
-                        .write_event(Event::Start(element.borrow()))
-                        .map_err(io::Error::other)?;
-                    writer
-                        .write_event(debug_element(&qualified, &debugger))
-                        .map_err(io::Error::other)?;
-                    writer
-                        .write_event(Event::End(element.to_end()))
-                        .map_err(io::Error::other)?;
-                    edit = Some((start, end, writer.into_inner()));
                     closed = true;
+                    if let Some(debugger) = debugger {
+                        let mut writer = Writer::new(Vec::new());
+                        writer
+                            .write_event(Event::Start(element.borrow()))
+                            .map_err(io::Error::other)?;
+                        writer
+                            .write_event(debug_element(&qualified, debugger))
+                            .map_err(io::Error::other)?;
+                        writer
+                            .write_event(Event::End(element.to_end()))
+                            .map_err(io::Error::other)?;
+                        edit = Some((start, end, writer.into_inner()));
+                    }
                 } else {
                     depth = 1;
                 }
@@ -69,7 +100,11 @@ pub(crate) fn publication_debug_edit(
                         ));
                     }
                     found_debug = true;
-                    if let Some(new) = edit_debug(element, &debugger)? {
+                    let new = debugger
+                        .map(|debugger| edit_debug(element, debugger))
+                        .transpose()?
+                        .flatten();
+                    if let Some(new) = new {
                         let mut writer = Writer::new(Vec::new());
                         if matches!(event, Event::Start(_)) {
                             writer
@@ -93,19 +128,22 @@ pub(crate) fn publication_debug_edit(
                     .ok_or_else(|| io::Error::other("unmatched VRD end element"))?;
                 if depth == 0 {
                     closed = true;
-                    if !found_debug {
+                    if let Some(debugger) = debugger.filter(|_| !found_debug) {
                         let mut writer = Writer::new(Vec::new());
                         writer
                             .write_event(debug_element(
                                 debug_name.as_deref().ok_or_else(|| {
                                     io::Error::other("missing VRD publication point")
                                 })?,
-                                &debugger,
+                                debugger,
                             ))
                             .map_err(io::Error::other)?;
                         edit = Some((start, start, writer.into_inner()));
                     }
                 }
+            }
+            Event::Text(text) if depth == 0 && !text.iter().all(u8::is_ascii_whitespace) => {
+                return Err(io::Error::other("text outside the VRD publication point"));
             }
             Event::Eof if closed => break,
             Event::Eof => return Err(io::Error::other("incomplete VRD publication point")),
@@ -113,9 +151,12 @@ pub(crate) fn publication_debug_edit(
         }
     }
 
-    Ok(edit.map(|(start, end, replacement)| {
-        [&contents[..start], &replacement, &contents[end..]].concat()
-    }))
+    Ok(Publication {
+        alias,
+        edit: edit.map(|(start, end, replacement)| {
+            [&contents[..start], &replacement, &contents[end..]].concat()
+        }),
+    })
 }
 
 fn debug_element<'a>(name: &'a str, debugger: &str) -> Event<'a> {
@@ -154,6 +195,21 @@ fn edit_debug<'a>(element: &BytesStart<'a>, debugger: &str) -> io::Result<Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_publication_alias_is_the_vrd_root_base() {
+        let vrd = br#"<?xml version="1.0"?>
+            <v:point xmlns:v="http://v8.1c.ru/8.2/virtual-resource-system" base="/demo/">
+              <v:ws base="/renamed"/>
+            </v:point>"#;
+        assert!(publication_alias_matches(vrd, "demo").unwrap());
+        assert!(!publication_alias_matches(vrd, "renamed").unwrap());
+        assert!(publication_alias_matches(br#"<point base="/demo"/>"#, "demo").is_err());
+        assert!(publication_alias_matches(&vrd[..vrd.len() - 10], "demo").is_err());
+        assert!(
+            publication_alias_matches(&[vrd.as_slice(), b"<other/>"].concat(), "demo").is_err()
+        );
+    }
 
     #[test]
     fn an_edit_keeps_the_bom_and_other_vrd_settings() {
