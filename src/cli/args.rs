@@ -448,6 +448,12 @@ pub enum DebugServerCommandArgs {
         #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
         owner_pid: Option<u32>,
     },
+    /// Check whether a runner-owned debug server is ready for attachment
+    Status {
+        /// The session `debug-server start` answered
+        #[arg(value_name = "SESSION")]
+        session: crate::domain::debug_server::DebugSession,
+    },
     /// Stop the debug server of this session; a repeated or unknown session stops nothing
     Stop {
         /// The session `debug-server start` answered

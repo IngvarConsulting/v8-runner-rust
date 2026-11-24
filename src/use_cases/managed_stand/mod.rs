@@ -72,6 +72,12 @@ pub(crate) trait ServiceHost {
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
+    fn debug_loopback_owner(&self, _pid: u32, _port: u16) -> bool {
+        false
+    }
+    fn debug_process_gone(&self, _pid: u32) -> bool {
+        false
+    }
     fn soft_stop(
         &self,
         runner: &dyn ProcessRunner,
@@ -211,6 +217,14 @@ impl ServiceHost for RealHost {
     }
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
+    }
+    #[cfg(windows)]
+    fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
+        service::listens_on(pid, port)
+    }
+    #[cfg(windows)]
+    fn debug_process_gone(&self, pid: u32) -> bool {
+        crate::support::machine::process_definitely_gone(pid)
     }
     fn soft_stop(
         &self,
@@ -1485,6 +1499,15 @@ pub fn debug_server_stop(
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
     with_debug_server(context, config, |server| server.stop(session, dry_run))
+}
+
+/// Observe a file-infobase debug session without starting or stopping it.
+pub fn debug_server_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    session: crate::domain::debug_server::DebugSession,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerStatusResult> {
+    with_debug_server(context, config, |server| server.status(session))
 }
 
 /// Сценарий `debug-server` над настоящей системой.
