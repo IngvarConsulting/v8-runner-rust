@@ -648,10 +648,19 @@ pub(crate) fn managed_publication_url(
     }
     let (address, wsdir) = status.address.zip(wsdir).ok_or_else(unavailable)?;
     let path = root.join("publication/default.vrd");
-    let file =
-        FileSnapshot::read(&path).map_err(|error| io_failure("cannot read", &path, &error))?;
+    let file = FileSnapshot::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            missing_publication()
+        } else {
+            io_failure("cannot read", &path, &error)
+        }
+    })?;
     require_publication_alias(&file.contents, wsdir)?;
     Ok(Some(publication_url(&address, wsdir)))
+}
+
+fn missing_publication() -> UseCaseError {
+    environment("the managed publication has no default.vrd: run `web publish` first")
 }
 
 fn require_publication_alias(contents: &[u8], wsdir: &str) -> Result<(), UseCaseError> {
@@ -1016,9 +1025,10 @@ impl ManagedPublication<'_> {
             ));
         }
         let snapshot = self.snapshot()?;
-        let file = snapshot.descriptor.as_ref().ok_or_else(|| {
-            environment("the managed publication has no default.vrd: run `publish` first")
-        })?;
+        let file = snapshot
+            .descriptor
+            .as_ref()
+            .ok_or_else(missing_publication)?;
         let wsdir = self
             .target
             .wsdir
