@@ -28,3 +28,26 @@ check:
 
 Проверка читает запись, ничего в ней не меняет, процессы не запускает и не завершает.
 На ОС без доказательства принадлежности порта действует `unverified`.
+
+## Пример
+
+```json
+{
+  "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+  "status": "ready",
+  "pid": 1280,
+  "port": 13872,
+  "url": "http://127.0.0.1:13872",
+  "infobase_alias": "DefAlias",
+  "duration_ms": 35
+}
+```
+
+```json
+{
+  "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+  "status": "unverified",
+  "reason": "rdbg_unavailable",
+  "duration_ms": 2004
+}
+```
