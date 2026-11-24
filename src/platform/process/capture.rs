@@ -184,7 +184,7 @@ fn omission_line(head: &[u8], omitted: u64) -> String {
 pub(super) fn read_stream(
     mut stream: impl Read,
     question: Option<&QuestionSlot>,
-) -> CapturedStream {
+) -> std::io::Result<CapturedStream> {
     let mut captured = CapturedStream::default();
     let mut buffer = vec![0u8; READ_CHUNK];
     let mut asked = question.is_none();
@@ -193,7 +193,7 @@ pub(super) fn read_stream(
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(error) => return Err(error),
         };
         captured.push(&buffer[..read]);
         if !asked && captured.total() >= QUESTION_EVIDENCE as u64 {
@@ -203,7 +203,7 @@ pub(super) fn read_stream(
             }
         }
     }
-    captured
+    Ok(captured)
 }
 
 /// Вопрос, который процесс повторяет с самого начала вывода: всё после пояснения не длиннее
@@ -264,8 +264,23 @@ mod tests {
         stream
     }
 
+    #[test]
+    fn a_read_failure_cannot_be_an_empty_capture() {
+        struct FailedPipe;
+        impl std::io::Read for FailedPipe {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        assert_eq!(
+            read_stream(FailedPipe, None).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
     fn read_all(bytes: &[u8], question: Option<&QuestionSlot>) -> CapturedStream {
-        read_stream(std::io::Cursor::new(bytes.to_vec()), question)
+        read_stream(std::io::Cursor::new(bytes.to_vec()), question).unwrap()
     }
 
     /// Поток в сто мегабайт держится в пределе: начало и конец целы, середина названа строкой

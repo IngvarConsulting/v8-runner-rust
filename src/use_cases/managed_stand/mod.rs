@@ -225,10 +225,10 @@ impl ServiceHost for RealHost {
             let _ = service::signal_owned_process(pid, started, libc::SIGTERM);
         }
         #[cfg(windows)]
-        service::with_process_identity(pid, started, || {
-            let request = stop_request(pid, false);
-            let _ = runner.run_with_policy(&request, &context.cleanup_policy());
-        });
+        {
+            let _ = runner;
+            service::soft_stop_windows_service(pid, started, context.work());
+        }
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             let _ = (runner, context);
@@ -251,7 +251,7 @@ impl ServiceHost for RealHost {
         }
         #[cfg(windows)]
         service::with_process_identity(pid, started, || {
-            let request = stop_request(pid, true);
+            let request = hard_stop_request(pid);
             let _ = runner.run_with_policy(&request, &context.cleanup_policy());
         });
         #[cfg(all(unix, not(target_os = "linux")))]
@@ -314,16 +314,15 @@ fn signal_if_own(pid: u32, started: Option<u64>, hard: bool) {
 }
 
 #[cfg(windows)]
-fn stop_request(pid: u32, force: bool) -> ProcessRequest {
-    let pid = pid.to_string();
-    let (program, args) = if force {
-        ("taskkill", vec!["/PID", &pid, "/T", "/F"])
-    } else {
-        ("taskkill", vec!["/PID", &pid])
-    };
+fn hard_stop_request(pid: u32) -> ProcessRequest {
     ProcessRequest {
-        program: PathBuf::from(program),
-        args: args.into_iter().map(str::to_owned).collect(),
+        program: PathBuf::from("taskkill"),
+        args: vec![
+            "/PID".to_owned(),
+            pid.to_string(),
+            "/T".to_owned(),
+            "/F".to_owned(),
+        ],
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: None,

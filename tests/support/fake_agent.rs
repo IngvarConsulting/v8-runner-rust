@@ -127,6 +127,7 @@ pub struct FakeAgent {
     /// Команды базы без подключения отвечают ошибкой платформы, пока флаг поднят: так тест
     /// показывает подключение, которое устарело (сеанс завершили, сервер перезапустили).
     pub require_connection: Arc<AtomicBool>,
+    pub detached_error: &'static str,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -196,6 +197,7 @@ impl FakeAgent {
             connected: Arc::new(AtomicBool::new(false)),
             fail_connect: Arc::new(AtomicBool::new(false)),
             require_connection: Arc::new(AtomicBool::new(false)),
+            detached_error: "DesignerNotConnectedToInfoBase",
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -381,7 +383,8 @@ impl FakeAgent {
             };
             return (
                 format!(
-                    "{progress}[{{\"type\":\"error\",\"error-type\":\"DesignerNotConnectedToInfoBase\",\"message\":\"Конфигуратор не подключен к информационной базе\"}}]\n"
+                    "{progress}[{{\"type\":\"error\",\"error-type\":\"{}\",\"message\":\"Конфигуратор не подключен к информационной базе\"}}]\n",
+                    self.detached_error
                 ),
                 false,
             );

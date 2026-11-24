@@ -32,14 +32,25 @@ use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::provider_selection::stamp_session;
-use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
 pub(crate) mod copy;
+pub(crate) mod file_seed;
 mod recreate;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InitRequest {
+    pub dry_run: bool,
+    /// Name of an infobase declared in the local overlay to copy.
+    pub from: Option<String>,
+    /// Set aside the existing database and put it back if creation fails.
+    pub recreate: bool,
+    /// Explicit creation options for a new file infobase.
+    pub(crate) file_creation: Option<file_seed::FileCreation>,
+}
 
 pub fn execute(
     context: &ExecutionContext,
@@ -68,7 +79,9 @@ fn run_init(
     args: &InitRequest,
 ) -> UseCaseResult<InitResult> {
     let started = Instant::now();
-    let answer = if args.recreate {
+    let answer = if let Some(creation) = &args.file_creation {
+        creation.execute(context, config, args.dry_run)
+    } else if args.recreate {
         recreate_infobase(context, config, args, started)
     } else {
         // Простаивающие агенты базы снимаются до создания: их ключ ничему больше не отвечает.
@@ -362,7 +375,7 @@ fn copy_infobase(
         ))
     };
     let plan = config.provider_plan(Operation::Init);
-    let (plan, skipped) = match copy_restore_plan(plan) {
+    let (plan, skipped) = match create_from_dt_plan(plan, "--from") {
         Ok(narrowed) => narrowed,
         Err((error, receipt)) => return refuse(error, receipt),
     };
@@ -417,8 +430,9 @@ fn copy_infobase(
 /// исполнителя, — отказ `validation` до снимка: названный ключом исполнитель не подменяется.
 /// Можно ли `ibcmd` передать DT на этой ОС, решает его адаптер.
 #[allow(clippy::result_large_err)] // The refusal carries the receipt the answer reports.
-fn copy_restore_plan(
+fn create_from_dt_plan(
     plan: ProviderPlan,
+    option: &str,
 ) -> Result<(ProviderPlan, Vec<SkippedProvider>), (AppError, ProviderReceipt)> {
     let refusal = |provider: Provider| match provider {
         Provider::Designer => None,
@@ -426,7 +440,7 @@ fn copy_restore_plan(
             crate::platform::ibcmd::dt_transfer_refusal().map(|error| error.to_string())
         }
         other => Some(format!(
-            "{other} does not load a DT image into the infobase of infobase create --from"
+            "{other} does not load a DT image into the infobase of infobase create {option}"
         )),
     };
     match plan {
@@ -434,7 +448,7 @@ fn copy_restore_plan(
             None => Ok((plan, Vec::new())),
             Some(reason) => Err((
                 AppError::Validation(format!(
-                    "infobase create --from cannot load the image with providers.{}: {}: {reason}; remove the key or set it to designer",
+                    "infobase create {option} cannot load the image with providers.{}: {}: {reason}; remove the key or set it to designer",
                     Operation::Init.as_str(),
                     provider.as_str()
                 )),
@@ -2078,7 +2092,7 @@ mod tests {
             super::execute(
                 &ExecutionContext::cli(CommandName::Init).with_cancellation(cancellation),
                 config,
-                &crate::use_cases::request::InitRequest::default(),
+                &super::InitRequest::default(),
             )
         })
     }
@@ -2639,9 +2653,12 @@ mod tests {
     fn a_copy_restores_with_the_chain_its_adapters_can_run() {
         use crate::domain::capability::{Provider, ProviderPlan};
 
-        let (plan, skipped) = super::copy_restore_plan(ProviderPlan::Default {
-            chain: vec![Provider::Ibcmd, Provider::Designer],
-        })
+        let (plan, skipped) = super::create_from_dt_plan(
+            ProviderPlan::Default {
+                chain: vec![Provider::Ibcmd, Provider::Designer],
+            },
+            "--from",
+        )
         .expect("default chain");
         if cfg!(unix) {
             assert_eq!(plan.candidates(), [Provider::Ibcmd, Provider::Designer]);
@@ -2657,15 +2674,19 @@ mod tests {
             provider: Provider::Designer,
             file: "v8project.yaml".to_owned(),
         };
-        let (plan, skipped) = super::copy_restore_plan(designer.clone()).expect("designer key");
+        let (plan, skipped) =
+            super::create_from_dt_plan(designer.clone(), "--from").expect("designer key");
         assert_eq!(plan, designer);
         assert!(skipped.is_empty());
 
         for provider in [Provider::Agent, Provider::Ibcmd] {
-            let named = super::copy_restore_plan(ProviderPlan::Override {
-                provider,
-                file: "v8project.yaml".to_owned(),
-            });
+            let named = super::create_from_dt_plan(
+                ProviderPlan::Override {
+                    provider,
+                    file: "v8project.yaml".to_owned(),
+                },
+                "--from",
+            );
             let refused = provider == Provider::Agent || cfg!(not(unix));
             match named {
                 Ok((plan, _)) => {

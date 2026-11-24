@@ -326,11 +326,20 @@ impl<'a> Web<'a> {
             if let Some(cluster) = self.paths.sibling(StandService::Cluster).own_record() {
                 self.check_module(&cluster.bin)?;
             }
-            if ownership == Ownership::Explicit && !record.explicit {
-                record.explicit = true;
-                write_record(&self.paths, &record)?;
+            let mut result = self.result(ServiceAction::AlreadyRunning);
+            if ownership == Ownership::Explicit {
+                if !result.ready {
+                    return Err(environment(
+                        "the managed Apache is not listening on its pinned port",
+                    ));
+                }
+                if !record.explicit {
+                    record.explicit = true;
+                    write_record(&self.paths, &record)?;
+                    result.explicit = Some(true);
+                }
             }
-            return Ok(self.result(ServiceAction::AlreadyRunning));
+            return Ok(result);
         }
         if matches!(observed, Observed::Starting(_)) {
             return Err(being_started("Apache", self.infobase));
@@ -458,28 +467,37 @@ impl<'a> Web<'a> {
             }
             self.host.sleep(POLL);
         };
-        if let Err(error) = outcome {
-            if record.started.is_some() {
-                self.host
-                    .hard_stop(self.runner, pid, record.started, self.context);
-                if !await_gone(
-                    self.host,
-                    pid,
-                    record.started,
-                    self.host.patience(IDENTIFY_TIMEOUT),
-                ) {
-                    record.state = RecordState::Running;
-                    record.starter = None;
-                    write_record(&self.paths, &record)?;
-                    return Err(error.followed_by(format!("Apache PID {pid} did not stop")));
-                }
+        match outcome.and_then(|()| {
+            let mut result = self.result(ServiceAction::Started);
+            if ownership == Ownership::Explicit && !result.ready {
+                return Err(environment(
+                    "the managed Apache stopped listening during startup",
+                ));
             }
-            forget_record(&self.paths);
-            return Err(error);
+            result.previous_port = previous_port.filter(|previous| *previous != port);
+            Ok(result)
+        }) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if record.started.is_some() {
+                    self.host
+                        .hard_stop(self.runner, pid, record.started, self.context);
+                    if !await_gone(
+                        self.host,
+                        pid,
+                        record.started,
+                        self.host.patience(IDENTIFY_TIMEOUT),
+                    ) {
+                        record.state = RecordState::Running;
+                        record.starter = None;
+                        write_record(&self.paths, &record)?;
+                        return Err(error.followed_by(format!("Apache PID {pid} did not stop")));
+                    }
+                }
+                forget_record(&self.paths);
+                Err(error)
+            }
         }
-        let mut result = self.result(ServiceAction::Started);
-        result.previous_port = previous_port.filter(|previous| *previous != port);
-        Ok(result)
     }
 
     fn replace_config(&self, path: &Path, contents: &str) -> Result<(), UseCaseError> {
@@ -1591,6 +1609,26 @@ mod stand_tests {
 
     fn address_of(port: u16) -> String {
         format!("http://127.0.0.1:{port}/demo/")
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_start_starts_only_apache_when_the_cluster_is_stopped() {
+        let mut stand = setup();
+        with_web(&mut stand);
+        let host = Host::default();
+
+        let result = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert!(result.ready);
+        assert_eq!(result.explicit, Some(true));
+        assert!(host.alive(WEB_PID));
+        assert_eq!(host.spawned.borrow().len(), 1);
+        assert!(!stand.agent().root().exists());
+
+        let repeated = web(&stand, WebCommand::Start, false, &host).unwrap();
+        assert_eq!(repeated.action, ServiceAction::AlreadyRunning);
+        assert_eq!(repeated.pid, result.pid);
+        assert_eq!(host.spawned.borrow().len(), 1);
     }
 
     #[test]

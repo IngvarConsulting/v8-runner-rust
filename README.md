@@ -66,7 +66,8 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
    `v8-runner tools download vanessa` — последний выпуск YAxUnit и Vanessa Automation
    ([подробнее](docs/CAPABILITIES.md#tools-download)).
 3. **База.** `v8-runner infobase create` — рабочая база по виду цели; копия другой объявленной
-   базы с данными — `--from <база>`.
+   базы с данными — `--from <база>`. Для новой файловой ИБ без исходников используйте
+   `--empty` или `--input <файл.cf|файл.dt>`.
 4. **Загрузка.** `v8-runner push` — загружает изменённые исходники и применяет конфигурацию к
    базе данных; `--full` грузит набор целиком.
 5. **Проверка.** `v8-runner check` — проверка конфигурации Конфигуратором или проекта EDT.
@@ -101,7 +102,7 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
 | Стенд | `dbms`, `standalone`, `cluster`, `web`, `agent`, `publish` | PostgreSQL, автономный сервер, кластер и агент Конфигуратора раннера, веб-публикация |
 | Прямой запуск | `launch <designer\|thin\|thick\|ordinary>` | Запускает Конфигуратор и клиенты 1С; `--debug <url>` подключает клиент к серверу отладки |
 | Веб-клиент с отладкой | `publish --prepare-debug`, затем `launch web --web-debug` | Между подготовкой и открытием браузера IDE подключает отладчик к серверу HTTP-отладки |
-| Отладка | `debug-server start`, `debug-server stop` | Поднимает сервер отладки 1С и отдаёт его адрес: свой `dbgs` для файловой базы (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)), сервер кластера раннера после `cluster start --debug` (Windows и Linux), `dbgs` автономного сервера раннера после `standalone start --debug` (Windows) |
+| Отладка | `debug-server start`, `debug-server stop` | Поднимает сервер отладки 1С и отдаёт его адрес: свой `dbgs` для файловой базы (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)), сервер кластера раннера с HTTP-отладкой (Windows и Linux), `dbgs` автономного сервера раннера после `standalone start --debug` (Windows) |
 
 Полный каталог команд, исполнители, коды отказов и ограничения —
 [docs/CAPABILITIES.md](docs/CAPABILITIES.md). Прежние имена команд и ключей принимаются один

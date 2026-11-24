@@ -56,9 +56,11 @@ pub(super) fn export_configuration(
     extension: Option<&str>,
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, CommandFailure> {
-    let name = match extension {
-        Some(extension) => format!("{extension}.cfe"),
-        None => "main.cf".to_owned(),
+    // Имя расширения — аргумент платформы, а временный файл лежит в уникальном каталоге.
+    let name = if extension.is_some() {
+        "extension.cfe"
+    } else {
+        "main.cf"
     };
     let mut command = String::from("config dump-cfg");
     with_session(

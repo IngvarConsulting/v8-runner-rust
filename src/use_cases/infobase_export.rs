@@ -24,6 +24,7 @@ use crate::domain::infobase_export::{
     RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
+use crate::platform::extension_inventory::is_extension_identifier;
 use crate::platform::ibcmd::{dt_transfer_refusal, IbcmdConnection};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessError;
@@ -494,16 +495,20 @@ pub(crate) fn validate_restore_request(
     request: &RestoreInfobaseSnapshotRequest,
 ) -> Result<(), AppError> {
     validate_output_suffix(&request.input, "dt")?;
-    let metadata = std::fs::symlink_metadata(&request.input).map_err(|error| {
+    validate_transfer_input(&request.input)
+}
+
+pub(crate) fn validate_transfer_input(input: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(input).map_err(|error| {
         AppError::Validation(format!(
             "--input '{}' is not readable: {error}",
-            request.input.display()
+            input.display()
         ))
     })?;
     if !metadata.file_type().is_file() || metadata.len() == 0 {
         return Err(AppError::Validation(format!(
             "--input '{}' is not a non-empty regular file",
-            request.input.display()
+            input.display()
         )));
     }
     Ok(())
@@ -840,9 +845,10 @@ pub(crate) fn validate_configuration_request(
     request: &ExportConfigurationPackageRequest,
 ) -> Result<(), AppError> {
     if let ConfigurationSubject::Extension { name } = &request.subject {
-        if !valid_platform_identifier(name) {
+        if !name.split('.').all(is_extension_identifier) {
             return Err(AppError::Validation(
-                "--extension must be a non-empty 1C identifier".to_owned(),
+                "--extension must be a 1C identifier or a dot-separated sequence of 1C identifiers"
+                    .to_owned(),
             ));
         }
     }
@@ -874,14 +880,6 @@ fn record_uncertain_target_warning(warnings: &mut Vec<String>, state: InfobaseTa
             "publication rollback failed; the output target requires manual inspection".to_owned(),
         );
     }
-}
-
-fn valid_platform_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
 }
 
 pub fn prepare_configuration_export(

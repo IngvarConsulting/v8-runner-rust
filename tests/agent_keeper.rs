@@ -1124,6 +1124,28 @@ fn the_first_read_on_a_stale_connection_reconnects_and_repeats() {
     );
 }
 
+#[test]
+fn an_unknown_error_without_a_managed_snapshot_reaches_the_client() {
+    let (bench, stale) = Bench::with_server(false, |mut agent| {
+        let connected = Arc::clone(&agent.connected);
+        agent.require_connection.store(true, Ordering::SeqCst);
+        agent.detached_error = "UnknownError";
+        serve_managed_launches(agent, None);
+        connected
+    });
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    keeper.once("config generation-id");
+    stale.store(false, Ordering::SeqCst);
+
+    let reply = keeper.once("config generation-id");
+
+    assert!(format!("{reply:?}").contains("UnknownError"), "{reply:?}");
+    let commands = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(commands.matches("config generation-id").count(), 2);
+    assert_eq!(commands.matches("common connect-ib").count(), 1);
+}
+
 /// Агент, поднятый без подключения, чьё первое подключение не удалось, не остаётся держать сеанс
 /// лицензии: сторож снимает его, как агента, который не поднялся (#574).
 #[test]

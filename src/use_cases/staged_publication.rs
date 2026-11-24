@@ -359,9 +359,11 @@ fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval<'_>) -> Op
             {
                 return backup.remove();
             }
-            if let Err(refusal) = hide_from_git(&backup) {
+            if let Err(refusal) = backup.hide_from_git() {
                 tracing::debug!(%refusal, "removing the replaced tree in place");
-                return backup.remove();
+                return backup.remove().map(|warning| {
+                    format!("could not hide the backup from Git: {refusal}; {warning}")
+                });
             }
             if let BackupRemoval::AfterMemory(pending) = removal {
                 *pending = Some(backup);
@@ -389,20 +391,6 @@ pub(super) fn finish_background_removal(backup: Option<SupersededBackup>) -> Opt
             backup.remove()
         }
     }
-}
-
-/// Прежнее дерево лежит рядом с набором и после ответа: git его не видит, и `git add -A`
-/// сразу после `pull --force` его не возьмёт.
-fn hide_from_git(backup: &SupersededBackup) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    // Replace the entry itself: a previous .gitignore may refer to another file.
-    let mut ignore = tempfile::NamedTempFile::new_in(backup.path())?;
-    ignore.write_all(b"*\n")?;
-    ignore
-        .persist(backup.path().join(".gitignore"))
-        .map_err(|error| error.error)?;
-    Ok(())
 }
 
 /// Переносит дерево `source` поверх `target`, кроме файла `skip` в корне: каталоги
@@ -483,12 +471,25 @@ pub(super) fn cleanup_owned_orphan_files(
                 continue;
             }
 
-            remove_path_if_exists(&temp_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to remove stale publication temp '{}': {error}",
-                    temp_path.display()
-                ))
-            })?;
+            let removal = if metadata.is_superseded_backup() {
+                crate::support::fs::remove_superseded_backup(&temp_path)
+            } else {
+                remove_path_if_exists(&temp_path)
+            };
+            removal
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "failed to remove stale publication temp '{}': {error}",
+                        temp_path.display()
+                    ))
+                })?;
             remove_path_if_exists(&metadata_path).map_err(|error| {
                 AppError::Runtime(format!(
                     "failed to remove stale publication metadata '{}': {error}",
@@ -968,10 +969,13 @@ mod tests {
             fs::read_to_string(&referent).expect("original ignore"),
             "keep me"
         );
-        assert_eq!(
-            fs::read_to_string(backup.path().join(".gitignore")).expect("backup ignore"),
-            "*\n"
-        );
+        assert!(fs::read_to_string(backup.path().join(".gitignore"))
+            .expect("backup ignore")
+            .starts_with("*\n"));
+        assert!(!metadata_sidecar_path(backup.path()).exists());
+        assert!(read_temp_dir_metadata(backup.path())
+            .expect("hidden marker")
+            .is_superseded_backup());
         assert_eq!(backup.remove(), None);
     }
 

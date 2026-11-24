@@ -1,6 +1,7 @@
 ---
 id: INV.USE-CASES.MANAGED-APACHE-LIFECYCLE
 check:
+  - src/use_cases/managed_stand/web.rs::web_start_starts_only_apache_when_the_cluster_is_stopped
   - src/use_cases/managed_stand/cluster.rs::cluster_stops_only_the_apache_it_started_as_a_step
   - src/use_cases/managed_stand/cluster.rs::a_failed_apache_takes_down_the_cluster_and_the_postgres_this_start_raised
   - src/use_cases/managed_stand/web.rs::publication_rollback_restores_both_files
@@ -19,7 +20,8 @@ check:
 При `infobase.web.managed: true` кластер запускает Apache после своего запуска
 и останавливает его перед остановкой кластера. Если Apache не поднялся, `cluster start`
 гасит кластер и PostgreSQL, поднятые этим запуском. `web start` делает экземпляр
-явным. `publish` использует `webinst` выпуска кластера, свой конфиг и текущий
+явным и запускает только Apache. Кластер и его HTTP-отладка запускаются через `cluster start`.
+`publish` использует `webinst` выпуска кластера, свой конфиг и текущий
 адрес кластера, а после него перезагружает Apache. Неудача `webinst` или перезагрузки
 возвращает конфиг и `default.vrd`, и Apache работает на прежнем конфиге. Превью
 `publish` при остановленном Apache называет закреплённый адрес и ничего не пишет.

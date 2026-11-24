@@ -847,7 +847,7 @@ fn installed_extension_state(
         // work if `ibcmd` started. A cancellation keeps its type — it is not an answer.
         Err(error) => {
             let error = AppError::from(error);
-            if matches!(error, AppError::InfobaseBusy(_)) || error.cancellation().is_some() {
+            if error.file_access_was_refused() || error.cancellation().is_some() {
                 return Err(error);
             }
             return Ok(ExtensionPresence::NotEstablished(error.to_string()));

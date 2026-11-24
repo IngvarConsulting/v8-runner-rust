@@ -40,6 +40,8 @@ pub struct KeeperLaunch {
     /// `workPath` рабочей копии: в нём дом агента ([`KeeperHome::of`]); он идёт в запись
     /// агента, и его называет ожидание на пределе.
     pub work_path: PathBuf,
+    #[serde(default)]
+    pub managed_sessions: Option<crate::platform::rac::ManagedSessionTarget>,
 }
 
 /// Учётные данные базы: сторож открывает ими сессию агента. В командную строку и журнал они не
@@ -2709,6 +2711,7 @@ mod tests {
                 startup_timeout_ms: 1,
                 infobase: String::new(),
                 work_path: PathBuf::from("/work"),
+                managed_sessions: None,
             },
             credentials: Credentials {
                 user: "Администратор".to_owned(),

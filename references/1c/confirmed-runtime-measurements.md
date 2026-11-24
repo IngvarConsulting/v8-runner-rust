@@ -4869,6 +4869,23 @@ ibsrv --data=<каталог> --db-path=<db-path> --name=<имя> --http-port=<h
 - `ibcmd server config init` не вызывался: `ibsrv` работает над файловой базой без него, код 0 у `push`, `upload`, `extensions` и `test`.
 - `--ssh-host-key` принимает ключ ED25519 в формате OpenSSH: `extensions list` по шлюзу код 0, отпечаток закреплён на этом ключе. Раньше замерялся только RSA 2048.
 
+### Linux: видимость `ibsrv` другого пользователя (#780)
+
+18.11.2026, Ubuntu 24.04.4, ядро 6.8.0-149-generic, 1С 8.5.1.1343.
+На отдельной файловой базе в закрытом сетевом пространстве запустили:
+
+```text
+runuser -u usr1cv8 -- ibsrv --data=<data> --db-path=<base> --name=issue780 --http-address=127.0.0.1 --http-port=28331 --direct-regport=28332 --direct-range=28340:28355
+runuser -u victor -- strace -f -e execve,readlink,readlinkat v8-runner --config v8project.yaml --json-message download main --output probe.cf
+```
+
+Процесс `ibsrv` с PID 25284 слушал порт 28332. Обычный пользователь видел имя процесса
+в `/proc/25284/comm`, чтение `/proc/25284/exe` возвращало `EACCES`. Раннер ответил кодом 2
+(`environment_unavailable`) с PID процесса. В трассе отсутствовал `execve` для `ibcmd`,
+сервер продолжал работать. Превью завершилось кодом 0, `provider_dispatched: false`.
+После остановки сервера та же команда завершилась кодом 0, запустила `ibcmd`
+и опубликовала CF размером 4973 байта.
+
 ## Общий токен поколения у агента, Конфигуратора и ibcmd (#559)
 
 Замер 08.11.2026. Задача: [#559](https://github.com/IngvarConsulting/v8-runner-rust/issues/559)
@@ -4936,6 +4953,22 @@ cluster start → test → cluster restart → test → cluster stop` прохо
 --new-regport` поднимает реестр на новых портах и регистрирует базу через `rac infobase create` без
 `--create-database` над прежней БД. После этого `test yaxunit all` проходит, а прежний каталог реестра удалён.
 Перезагрузка машины не проверялась.
+
+## Восстановление сохранённого подключения по снимку RAC (#649)
+
+18.11.2026, Windows, 1С 8.3.27.2342, серверная копия БСП 3.1 в управляемом
+кластере раннера с PostgreSQL для 1С 17.11. После `cluster start` выполнили
+`agent hold --ttl 600` и завершили его сеанс через
+`rac session terminate --cluster=<uuid> --session=<uuid>`. Успешный
+`rac session list --cluster=<uuid> --infobase=<uuid>` дал полный список без
+сеансов Designer. Затем `pull --force` с `providers.pull: agent` взял тот же
+живой агент (`endpoint.live.reused: true`). Сторож переподключился и записал один
+повтор `config generation-id`. Команда завершила полную выгрузку за 70,9 с.
+
+Во втором прогоне после завершения сеанса сторожа в той же базе подключили другой
+Designer. Список RAC содержал его UUID. `pull --force` вернул прежний
+`UnknownError` без переподключения и повтора. Второй Designer продолжил успешно
+отвечать на `config generation-id`.
 
 ## Процесс агента между командами (#577)
 
@@ -7263,3 +7296,45 @@ ibcmd infobase --data=<scratch>/ibcmd-data --db-path=<copy> config extension lis
 базе (29,964 и 2,740 с), в том числе с неверным пользователем (26,133 с).
 У отсутствующей регистрации прервали ожидание после 45 с, подтверждённого итога
 от Конфигуратора не получено. Успешный вход в кластер на этом стенде не подтверждён.
+
+## Выгрузка применённого расширения с точкой в имени (#796)
+
+Замер 21.11.2026. Windows, платформа 8.3.27.2342, отдельная файловая копия БСП 3.1.
+
+`ibcmd infobase config extension create --name=Демо.Документ` отказал с кодом 2 и
+сообщением о недопустимом имени. В XML существующего тестового расширения
+`_ДемоПустоеРасширение` изменили `Properties/Name` на `Демо.Документ`. Конфигуратор
+принял `/LoadConfigFromFiles <XML> -Extension _ДемоПустоеРасширение`, затем
+`/UpdateDBCfg -Extension _ДемоПустоеРасширение` (оба вызова — код 0).
+`ibcmd infobase config extension info --name=Демо.Документ` вернул точное имя и
+`active: yes`.
+
+`ibcmd infobase config save --db --extension=Демо.Документ expected.cfe` и
+Конфигуратор `/DumpDBCfg <CFE> -Extension Демо.Документ` успешно выгрузили
+применённое расширение. Разобранные через `ibcmd config export --file=<CFE>` деревья
+совпали по относительным путям и SHA-256 обоих файлов. В `Configuration.xml` —
+имя `Демо.Документ` и версия `1.0.1.1`.
+
+## Файловая ИБ из CF или DT через CREATEINFOBASE (Windows, 8.3.27.2342)
+
+23.11.2026, Windows x64, клиент и `ibcmd` 1С 8.3.27.2342. Каждая цель — отдельный
+новый каталог временного стенда. CF собран из репозиторного тестового набора Designer.
+DT получен командой `infobase dump --output template.dt` из временной ИБ после применения
+этого CF. Вызовы:
+
+```text
+1cv8 CREATEINFOBASE "File='<target>';" /DisableStartupDialogs /DisableStartupMessages /Out <log>
+1cv8 CREATEINFOBASE "File='<target>';" /UseTemplate <input.cf> /DisableStartupDialogs /DisableStartupMessages /Out <log>
+1cv8 CREATEINFOBASE "File='<target>';" /UseTemplate <template.dt> /DisableStartupDialogs /DisableStartupMessages /Out <log>
+ibcmd infobase create --db-path=<target> --load=<input.cf> --apply --force
+```
+
+Все четыре вызова завершились с кодом 0. `CREATEINFOBASE` создал `1Cv8.1CD` в каждом
+случае. Для CF журнал Конфигуратора дошёл до принятия изменений. Для CF и DT проверочная
+выгрузка `DESIGNER /DumpConfigToFiles` вернула 0 и дала по два BSL-файла.
+`ibcmd` с `--force` сообщил об успешном обновлении конфигурации базы данных. Без
+`--force` тот же вызов запросил подтверждение и завершился с кодом 102 при закрытом stdin.
+SHA-256 входов до и после прогона совпал:
+
+- CF: `9bd3b172f4fefd7199fdb49bd0f4ccb4b589fee6e2e98b71cf1742a80513c63e`.
+- DT: `11937932ffaf0c1b888f9736cb052ad47a82b9890ddd81bb79f631ffdac2d133`.

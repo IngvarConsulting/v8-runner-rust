@@ -128,6 +128,8 @@ pub struct ProcessFacts {
     pub image: String,
 }
 
+#[cfg(windows)]
+pub(crate) use imp::soft_stop_windows_service;
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
 /// Unix: сигнал группе службы. `spawn_hidden` уводит службу в свой сеанс (`setsid`), поэтому её
@@ -221,7 +223,7 @@ fn windows_processes(images: &[&str], cancelled: impl Fn() -> bool) -> Option<Ve
         .collect::<Vec<_>>()
         .join(" OR ");
     let query = format!(
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"{filter}\" | ForEach-Object {{ [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId + ' ' + $_.CommandLine }}"
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"{filter}\" | ForEach-Object {{ [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId + ' ' + $_.CommandLine }}"
     );
     let mut powershell = std::process::Command::new("powershell");
     // CTRL_BREAK to the runner must not interrupt the child during cleanup.
@@ -267,77 +269,264 @@ fn windows_processes(images: &[&str], cancelled: impl Fn() -> bool) -> Option<Ve
     })
 }
 
-/// Finds a live local process by image and native arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub(super) enum ProcessInspectionError {
+    #[error("process inventory unavailable")]
+    Inventory,
+    #[error("could not inspect ibsrv pid {0}")]
+    Process(u32),
+}
+
+/// Finds a matching live process, or reports an inventory or candidate we could not inspect.
 pub(super) fn first_process_with_arguments(
     image: &str,
     cancelled: impl Fn() -> bool,
-    matches: impl Fn(&[&std::ffi::OsStr]) -> bool,
-) -> Option<u32> {
+    matches: impl Fn(&[&std::ffi::OsStr]) -> Option<bool>,
+) -> Result<Option<u32>, ProcessInspectionError> {
     #[cfg(windows)]
     {
         let image = format!("{image}.exe");
-        if imp::has_image(&image) == Some(false) || cancelled() {
-            return None;
+        let candidates = imp::image_pids(&image).ok_or(ProcessInspectionError::Inventory)?;
+        if candidates.is_empty() || cancelled() {
+            return Ok(None);
         }
-        windows_processes(&[&image], &cancelled)?
-            .into_iter()
-            .take_while(|_| !cancelled())
-            .find_map(|row| {
-                let tokens = command_tokens(&row.command);
-                let argv: Vec<_> = tokens.iter().map(std::ffi::OsStr::new).collect();
-                (matches(&argv) && process_facts(row.pid).is_some_and(|facts| facts.image == image))
-                    .then_some(row.pid)
-            })
+        let rows =
+            windows_processes(&[&image], &cancelled).ok_or(ProcessInspectionError::Inventory)?;
+        let missing = |pid: &u32| !rows.iter().any(|row| row.pid == *pid);
+        if candidates.iter().any(missing) {
+            // CIM can omit individual processes. Only ignore a missing PID after a fresh snapshot.
+            let live = imp::image_pids(&image).ok_or(ProcessInspectionError::Inventory)?;
+            if live.iter().any(missing) {
+                return Err(ProcessInspectionError::Inventory);
+            }
+        }
+        let mut unverified = None;
+        for row in rows.into_iter().take_while(|_| !cancelled()) {
+            let tokens = command_tokens(&row.command);
+            let argv: Vec<_> = tokens.iter().map(std::ffi::OsStr::new).collect();
+            match (!argv.is_empty()).then(|| matches(&argv)).flatten() {
+                Some(false) => {}
+                Some(true) => match process_facts(row.pid) {
+                    Some(facts) if facts.image == image => return Ok(Some(row.pid)),
+                    Some(_) => {}
+                    None => {
+                        unverified.get_or_insert(row.pid);
+                    }
+                },
+                None => {
+                    unverified.get_or_insert(row.pid);
+                }
+            }
+        }
+        unverified.map_or(Ok(None), |pid| Err(ProcessInspectionError::Process(pid)))
     }
     #[cfg(target_os = "linux")]
     {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt as _;
-
-        use crate::support::path::filesystem_object_identity;
-
-        let mounts = std::fs::read_link("/proc/self/ns/mnt").ok()?;
-        let root = filesystem_object_identity(Path::new("/")).ok()?;
-        visit_linux_processes(
-            cancelled,
-            |name| name == image,
-            LinuxProcessImage::Executable,
-            |pid, _, argv| {
-                let proc_dir = PathBuf::from(format!("/proc/{pid}"));
-                // Identical path strings may identify different bases across container roots.
-                if std::fs::read_link(proc_dir.join("ns/mnt")).ok().as_ref() != Some(&mounts)
-                    || filesystem_object_identity(&proc_dir.join("root"))
-                        .ok()
-                        .as_ref()
-                        != Some(&root)
-                {
-                    return false;
-                }
-                let Some(argv) = argv.strip_suffix(b"\0") else {
-                    return false;
-                };
-                let args: Vec<_> = argv
-                    .split(|&byte| byte == 0)
-                    .map(OsStr::from_bytes)
-                    .collect();
-                matches(&args)
-            },
-        )
-        .ok()
-        .flatten()
+        linux_process_with_arguments(Path::new("/proc"), image, cancelled, matches)
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (image, cancelled, matches);
-        None
+        Ok(None)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn proc_pids() -> std::io::Result<impl Iterator<Item = u32>> {
-    Ok(std::fs::read_dir("/proc")?
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok()))
+fn linux_process_with_arguments(
+    proc_root: &Path,
+    image: &str,
+    cancelled: impl Fn() -> bool,
+    matches: impl Fn(&[&std::ffi::OsStr]) -> Option<bool>,
+) -> Result<Option<u32>, ProcessInspectionError> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use crate::support::path::filesystem_object_identity;
+
+    let mountinfo = std::fs::read(proc_root.join("self/mountinfo"))
+        .map_err(|_| ProcessInspectionError::Inventory)?;
+    if !has_unfiltered_proc_mount(&mountinfo) {
+        return Err(ProcessInspectionError::Inventory);
+    }
+    let mounts =
+        std::fs::read_link("/proc/self/ns/mnt").map_err(|_| ProcessInspectionError::Inventory)?;
+    let root = filesystem_object_identity(Path::new("/"))
+        .map_err(|_| ProcessInspectionError::Inventory)?;
+    let mut unverified = None;
+    let found = visit_linux_processes(
+        proc_root,
+        cancelled,
+        |name| name == image,
+        LinuxProcessImage::Executable,
+        |process| {
+            let checked = || {
+                if !process.image_confirmed {
+                    return None;
+                }
+                // Identical path strings may identify different bases across container roots.
+                if std::fs::read_link(process.dir.join("ns/mnt")).ok()? != mounts
+                    || filesystem_object_identity(&process.dir.join("root")).ok()? != root
+                {
+                    return Some(false);
+                }
+                let argv = process
+                    .argv?
+                    .strip_suffix(b"\0")
+                    .filter(|argv| !argv.is_empty())?;
+                let args: Vec<_> = argv
+                    .split(|&byte| byte == 0)
+                    .map(OsStr::from_bytes)
+                    .collect();
+                if !matches(&args)? {
+                    return Some(false);
+                }
+                // The PID may have executed another image while being inspected.
+                linux_executable_name(process.dir)
+                    .ok()
+                    .map(|name| name == image)
+            };
+            let result = checked();
+            if result == Some(false) || !process.still_running()? {
+                return Ok(false);
+            }
+            match result {
+                Some(true) => Ok(true),
+                Some(false) => Ok(false),
+                None => {
+                    unverified.get_or_insert(process.pid);
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .map_err(|_| ProcessInspectionError::Inventory)?;
+    found.map_or_else(
+        || unverified.map_or(Ok(None), |pid| Err(ProcessInspectionError::Process(pid))),
+        |pid| Ok(Some(pid)),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn has_unfiltered_proc_mount(mountinfo: &[u8]) -> bool {
+    let mut found = false;
+    for line in mountinfo.split(|&byte| byte == b'\n') {
+        let mut fields = line.split(|&byte| byte == b' ');
+        let root = fields.nth(3);
+        if fields.next() != Some(b"/proc") {
+            continue;
+        }
+        // The variable-length optional fields end at '-'. Filesystem options follow the source.
+        let mount_options = fields.next();
+        if !fields.any(|field| field == b"-") {
+            return false;
+        }
+        if found || root != Some(b"/") || fields.next() != Some(b"proc") {
+            return false;
+        }
+        let Some(super_options) = fields.nth(1) else {
+            return false;
+        };
+        let restricted = mount_options
+            .into_iter()
+            .chain([super_options])
+            .flat_map(|options| options.split(|&byte| byte == b','))
+            .filter_map(|option| option.strip_prefix(b"hidepid="))
+            .any(|mode| mode != b"0" && mode != b"off");
+        if restricted {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_inspection_tests {
+    use super::*;
+
+    fn process_inventory_fixture(mountinfo: &str) -> tempfile::TempDir {
+        let proc = tempfile::tempdir().unwrap();
+        let info = proc.path().join("self");
+        std::fs::create_dir(&info).unwrap();
+        std::fs::write(info.join("mountinfo"), mountinfo).unwrap();
+        proc
+    }
+
+    const UNRESTRICTED_PROC: &str = "10 9 0:5 / /proc rw - proc proc rw\n";
+
+    #[test]
+    fn restricted_procfs_is_not_an_empty_process_list() {
+        let listed = |mountinfo: &str| {
+            let proc = process_inventory_fixture(mountinfo);
+            linux_process_with_arguments(proc.path(), "ibsrv", || false, |_| Some(false))
+        };
+        assert_eq!(listed(UNRESTRICTED_PROC), Ok(None));
+        assert_eq!(
+            listed(concat!(
+                "10 9 0:5 / /proc rw - proc proc rw,hidepid=off\n",
+                "11 9 0:6 / /other-proc rw - proc proc rw,hidepid=2\n"
+            )),
+            Ok(None)
+        );
+        for opts in ["noaccess", "2", "invisible", "4", "ptraceable", "future"] {
+            let restricted = format!("10 9 0:5 / /proc rw - proc proc rw,hidepid={opts}\n");
+            assert_eq!(listed(&restricted), Err(ProcessInspectionError::Inventory));
+        }
+        assert_eq!(
+            listed("11 9 0:6 / /other-proc rw - proc proc rw\n"),
+            Err(ProcessInspectionError::Inventory)
+        );
+        assert_eq!(
+            listed(concat!(
+                "10 9 0:5 / /proc rw - proc proc rw\n",
+                "11 10 0:6 / /proc rw - proc proc rw\n"
+            )),
+            Err(ProcessInspectionError::Inventory)
+        );
+    }
+
+    #[test]
+    fn unreadable_ibsrv_image_is_not_an_empty_process_list() {
+        let proc = process_inventory_fixture(UNRESTRICTED_PROC);
+        let row = proc.path().join("42");
+        std::fs::create_dir(&row).unwrap();
+        std::fs::write(row.join("comm"), "ibsrv\n").unwrap();
+        std::fs::write(
+            row.join("stat"),
+            "42 (ibsrv) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 123",
+        )
+        .unwrap();
+
+        assert_eq!(
+            linux_process_with_arguments(proc.path(), "ibsrv", || false, |_| Some(false)),
+            Err(ProcessInspectionError::Process(42))
+        );
+    }
+
+    #[test]
+    fn inaccessible_process_inventory_is_not_an_empty_process_list() {
+        let proc = tempfile::tempdir().unwrap();
+        assert_eq!(
+            linux_process_with_arguments(
+                &proc.path().join("missing"),
+                "ibsrv",
+                || false,
+                |_| Some(false)
+            ),
+            Err(ProcessInspectionError::Inventory)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_pids(proc_root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<u32>>> {
+    Ok(
+        std::fs::read_dir(proc_root)?.filter_map(|entry| match entry {
+            Ok(entry) => entry.file_name().to_str()?.parse().ok().map(Ok),
+            Err(error) => Some(Err(error)),
+        }),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -347,29 +536,66 @@ enum LinuxProcessImage {
 }
 
 #[cfg(target_os = "linux")]
+struct LinuxProcess<'a> {
+    pid: u32,
+    parent: u32,
+    dir: &'a Path,
+    stat: &'a str,
+    image_confirmed: bool,
+    argv: Option<&'a [u8]>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcess<'_> {
+    fn still_running(&self) -> std::io::Result<bool> {
+        use crate::support::machine::proc_stat_field;
+
+        match std::fs::read_to_string(self.dir.join("stat")) {
+            Ok(stat) => Ok(!matches!(proc_stat_field(&stat, 3), Some("Z" | "X"))
+                && proc_stat_field(&stat, 22).is_some()
+                && proc_stat_field(&stat, 22) == proc_stat_field(self.stat, 22)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn visit_linux_processes(
+    proc_root: &Path,
     cancelled: impl Fn() -> bool,
     name_matches: impl Fn(&str) -> bool,
     image: LinuxProcessImage,
-    mut visit: impl FnMut(u32, u32, &[u8]) -> bool,
+    mut visit: impl FnMut(LinuxProcess<'_>) -> std::io::Result<bool>,
 ) -> std::io::Result<Option<u32>> {
     use crate::support::machine::proc_stat_field;
 
-    for pid in proc_pids()?.take_while(|_| !cancelled()) {
-        let dir = PathBuf::from(format!("/proc/{pid}"));
-        let name = match image {
-            LinuxProcessImage::Comm => std::fs::read_to_string(dir.join("comm"))
-                .ok()
-                .map(|name| name.trim_end().to_owned()),
-            LinuxProcessImage::Executable => std::fs::read_link(dir.join("exe"))
-                .ok()
-                .map(|path| image_name(&imp::without_deleted_mark(path))),
+    for pid in proc_pids(proc_root)?.take_while(|_| !cancelled()) {
+        let pid = pid?;
+        let dir = proc_root.join(pid.to_string());
+        let comm_matches = || {
+            std::fs::read(dir.join("comm"))
+                .map(|name| name_matches(String::from_utf8_lossy(&name).trim_end()))
         };
-        if !name.is_some_and(|name| name_matches(&name)) {
-            continue;
-        }
-        let Ok(stat) = std::fs::read_to_string(dir.join("stat")) else {
-            continue;
+        let image_confirmed = match image {
+            LinuxProcessImage::Comm if comm_matches().unwrap_or(false) => true,
+            LinuxProcessImage::Comm => continue,
+            LinuxProcessImage::Executable => match linux_executable_name(&dir) {
+                Ok(name) if name_matches(&name) => true,
+                Ok(_) => continue,
+                Err(_) => match comm_matches() {
+                    Ok(true) => false,
+                    Ok(false) => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                },
+            },
+        };
+        let stat = match std::fs::read_to_string(dir.join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if matches!(image, LinuxProcessImage::Executable) => return Err(error),
+            Err(_) => continue,
         };
         let Some(parent) = proc_stat_field(&stat, 4).and_then(|value| value.parse().ok()) else {
             continue;
@@ -378,18 +604,19 @@ fn visit_linux_processes(
             continue;
         }
         let argv = match std::fs::read(dir.join("cmdline")) {
-            Ok(argv) => argv,
+            Ok(argv) => Some(argv),
+            Err(_) if matches!(image, LinuxProcessImage::Executable) => None,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) if matches!(image, LinuxProcessImage::Executable) => continue,
             Err(error) => return Err(error),
         };
-        if visit(pid, parent, &argv)
-            && process_facts(pid).is_some_and(|facts| {
-                Some(facts.started)
-                    == proc_stat_field(&stat, 22).and_then(|value| value.parse().ok())
-                    && (matches!(image, LinuxProcessImage::Comm) || name_matches(&facts.image))
-            })
-        {
+        if visit(LinuxProcess {
+            pid,
+            parent,
+            dir: &dir,
+            stat: &stat,
+            image_confirmed,
+            argv: argv.as_deref(),
+        })? {
             return Ok(Some(pid));
         }
     }
@@ -397,19 +624,27 @@ fn visit_linux_processes(
 }
 
 #[cfg(target_os = "linux")]
+fn linux_executable_name(dir: &Path) -> std::io::Result<String> {
+    std::fs::read_link(dir.join("exe")).map(|path| image_name(&imp::without_deleted_mark(path)))
+}
+
+#[cfg(target_os = "linux")]
 fn linux_processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
     let mut rows = Vec::new();
     visit_linux_processes(
+        Path::new("/proc"),
         || false,
         |name| images.contains(&name),
         LinuxProcessImage::Comm,
-        |pid, parent, command| {
-            rows.push(ProcessRow {
-                pid,
-                parent,
-                command: String::from_utf8_lossy(command).into_owned(),
-            });
-            false
+        |process| {
+            if let Some(command) = process.argv {
+                rows.push(ProcessRow {
+                    pid: process.pid,
+                    parent: process.parent,
+                    command: String::from_utf8_lossy(command).into_owned(),
+                });
+            }
+            Ok(false)
         },
     )
     .ok()?;
@@ -687,11 +922,13 @@ mod imp {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
+    use std::process::{Child, Command, ExitStatus, Stdio};
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, ERROR_NO_MORE_FILES, FALSE,
         FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -718,7 +955,7 @@ mod imp {
 
     use super::{image_name, ProcessFacts, ServiceRequest, ServiceSpawnError};
 
-    pub(super) fn has_image(image: &str) -> Option<bool> {
+    pub(super) fn image_pids(image: &str) -> Option<Vec<u32>> {
         // SAFETY: TH32CS_SNAPPROCESS ignores the PID and returns an owned snapshot handle.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if snapshot == INVALID_HANDLE_VALUE {
@@ -732,17 +969,18 @@ mod imp {
         };
         // SAFETY: the handle and the correctly sized output live for the call.
         let mut present = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+        let mut pids = Vec::new();
         while present != FALSE {
             let end = entry.szExeFile.iter().position(|&unit| unit == 0)?;
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
             if name.eq_ignore_ascii_case(image) {
-                return Some(true);
+                pids.push(entry.th32ProcessID);
             }
             // SAFETY: the same valid snapshot and output are used for each entry.
             present = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
         }
         (io::Error::last_os_error().raw_os_error() == Some(ERROR_NO_MORE_FILES as i32))
-            .then_some(false)
+            .then_some(pids)
     }
 
     const SW_HIDE: u16 = 0;
@@ -1129,9 +1367,99 @@ mod imp {
         }
     }
 
+    // Срок самой утилиты, отдельно от ожидания конца службы после запроса остановки.
+    const SOFT_STOP_HELPER_TIMEOUT_MS: u32 = 5_000;
+
+    pub(crate) fn soft_stop_windows_service(
+        pid: u32,
+        started: Option<u64>,
+        work: &crate::platform::process::WorkGiven,
+    ) {
+        super::with_process_identity(pid, started, || {
+            let mut command = Command::new("taskkill");
+            command.args(["/PID", &pid.to_string()]);
+            tracing::debug!(
+                pid,
+                timeout_ms = SOFT_STOP_HELPER_TIMEOUT_MS,
+                "starting soft taskkill"
+            );
+            match spawn_soft_stop_helper(command, work).and_then(|mut child| {
+                await_soft_stop_helper(&mut child, SOFT_STOP_HELPER_TIMEOUT_MS)
+            }) {
+                Ok(status) => tracing::debug!(pid, ?status, "soft taskkill exited"),
+                Err(error) => tracing::debug!(pid, %error, "soft taskkill failed"),
+            }
+        });
+    }
+
+    fn spawn_soft_stop_helper(
+        mut command: Command,
+        work: &crate::platform::process::WorkGiven,
+    ) -> io::Result<Child> {
+        crate::platform::process::outside_the_runner_process_group(&mut command);
+        let child = command
+            .env_remove("V8_RUNNER_CLIENT_OWNER")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        work.mark_work_given();
+        Ok(child)
+    }
+
+    fn await_soft_stop_helper(child: &mut Child, timeout_ms: u32) -> io::Result<ExitStatus> {
+        let failure = match wait_for_soft_stop_helper(child, timeout_ms) {
+            Ok(true) => return child.wait(),
+            Ok(false) => io::Error::new(
+                io::ErrorKind::TimedOut,
+                "soft taskkill exceeded its timeout",
+            ),
+            Err(error) => error,
+        };
+        // CreateProcess даёт дескриптор с PROCESS_TERMINATE. Успешный TerminateProcess
+        // останавливает потоки утилиты сразу, а сигнал дескриптора может ждать отмены её I/O.
+        let termination = child.kill();
+        if wait_for_soft_stop_helper(child, SOFT_STOP_HELPER_TIMEOUT_MS)? {
+            return Err(failure);
+        }
+        termination?;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "soft taskkill did not exit after termination",
+        ))
+    }
+
+    fn wait_for_soft_stop_helper(child: &Child, timeout_ms: u32) -> io::Result<bool> {
+        // SAFETY: child owns the live process handle for the duration of the wait.
+        match unsafe { WaitForSingleObject(child.as_raw_handle(), timeout_ms) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_stalled_soft_stop_helper_is_terminated_at_its_deadline() {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ]);
+            let work = crate::platform::process::WorkGiven::for_command();
+            let mut helper = spawn_soft_stop_helper(command, &work).unwrap();
+
+            let result = await_soft_stop_helper(&mut helper, 100);
+
+            assert!(work.given());
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(helper.try_wait().unwrap().is_some(), "helper still running");
+        }
 
         #[test]
         fn a_job_that_kills_on_close_and_forbids_leaving_refuses_the_service() {
@@ -1509,8 +1837,9 @@ mod imp {
         if listeners.is_empty() {
             return None;
         }
-        super::proc_pids()
+        super::proc_pids(std::path::Path::new("/proc"))
             .ok()?
+            .filter_map(Result::ok)
             .filter_map(|pid| {
                 let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
                 let owns_socket = descriptors

@@ -71,6 +71,13 @@ pub enum EnvironmentLayer {
 pub struct EnvironmentRefusal {
     pub layer: Option<EnvironmentLayer>,
     pub message: String,
+    cause: EnvironmentCause,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentCause {
+    General,
+    FileServerUnverified,
 }
 
 impl std::fmt::Display for EnvironmentRefusal {
@@ -242,6 +249,7 @@ impl AppError {
         Self::EnvironmentUnavailable(EnvironmentRefusal {
             layer: None,
             message: message.into(),
+            cause: EnvironmentCause::General,
         })
     }
 
@@ -250,7 +258,20 @@ impl AppError {
         Self::EnvironmentUnavailable(EnvironmentRefusal {
             layer: Some(layer),
             message: message.into(),
+            cause: EnvironmentCause::General,
         })
+    }
+
+    /// Вызов платформы не начался: файловая база занята или прямой доступ не удалось проверить.
+    pub(crate) fn file_access_was_refused(&self) -> bool {
+        matches!(
+            self,
+            Self::InfobaseBusy(_)
+                | Self::EnvironmentUnavailable(EnvironmentRefusal {
+                    cause: EnvironmentCause::FileServerUnverified,
+                    ..
+                })
+        )
     }
 
     /// Слой окружения, который отказал, если он определён. Утилиты нет или она не той
@@ -329,6 +350,7 @@ impl AppError {
                     IbcmdError::MissingServerDbmsField(_)
                     | IbcmdError::DirectoryWipingExport
                     | IbcmdError::FileServedByIbsrv { .. }
+                    | IbcmdError::FileServerUnverified { .. }
                     | IbcmdError::SnapshotBusy { .. }
                     | IbcmdError::SnapshotProbe { .. }
                     | IbcmdError::SnapshotUnsupported
@@ -378,8 +400,8 @@ impl AppError {
             // Слой переживает уточнение текста так же: иначе `push; agent at …` его теряет.
             Self::EnvironmentUnavailable(refusal) => {
                 Self::EnvironmentUnavailable(EnvironmentRefusal {
-                    layer: refusal.layer,
                     message: format!("{context}; {}", refusal.message),
+                    ..refusal
                 })
             }
             Self::WorkspaceBusy(message) => Self::WorkspaceBusy(format!("{context}; {message}")),
@@ -463,6 +485,7 @@ fn process_cancellation(error: &ProcessError) -> Option<CancelledAt> {
         ProcessError::Cancelled { delivered, .. } => Some(CancelledAt::after(*delivered)),
         ProcessError::SpawnFailed { .. }
         | ProcessError::StartupCheckFailed { .. }
+        | ProcessError::OutputReadFailed { .. }
         | ProcessError::InterruptedEndUnconfirmed { .. }
         | ProcessError::ExitedEarly { .. }
         | ProcessError::StdoutLogIo { .. }
@@ -515,6 +538,13 @@ impl From<IbcmdError> for AppError {
         match error {
             IbcmdError::FileServedByIbsrv { .. } | IbcmdError::SnapshotBusy { .. } => {
                 Self::InfobaseBusy(error.to_string())
+            }
+            IbcmdError::FileServerUnverified { .. } => {
+                Self::EnvironmentUnavailable(EnvironmentRefusal {
+                    layer: Some(EnvironmentLayer::Platform),
+                    message: error.to_string(),
+                    cause: EnvironmentCause::FileServerUnverified,
+                })
             }
             IbcmdError::SnapshotProbe { .. } => Self::environment(error.to_string()),
             IbcmdError::SnapshotUnsupported => {
