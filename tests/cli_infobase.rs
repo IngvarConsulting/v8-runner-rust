@@ -2540,6 +2540,43 @@ printf '%s\n' 76cf68b0126837418abc9e878db8df1300000000 > "$out"
     assert_eq!(run()["error"]["code"], "invalid_output");
 
     let file_config = fs::read_to_string(&config).unwrap();
+    let credentials = "Пользователь ИБ не идентифицирован";
+    let busy = "Ошибка блокировки информационной базы для конфигурирования.\nВозможно, информационная база уже открыта Конфигуратором.";
+    let advice = "С этой информационной базой уже работает конфигуратор:";
+    for address in ["File=file base", "Srvr=cluster:1541;Ref=probe"] {
+        fs::write(&config, file_config.replace("File=file base", address)).unwrap();
+        let busy_log = if address.starts_with("File=") {
+            busy.to_owned()
+        } else {
+            format!("{busy}\n{advice}\nКомпьютер: private-session-sentinel, Пользователь: test, Сеанс: 1, Начат: test, Приложение: test")
+        };
+        for (log, expected) in [
+            (credentials.to_owned(), "credentials_rejected"),
+            (busy_log.clone(), "infobase_designer_busy"),
+            (
+                format!("{busy_log}\nНеизвестная ошибка"),
+                "connection_failed",
+            ),
+            (format!("{credentials}\n{busy}"), "connection_failed"),
+        ] {
+            write_shell_script(
+                &binary,
+                &format!(
+                    "old=''\nfor arg in \"$@\"; do [ \"$old\" != /Out ] || out=\"$arg\"; old=\"$arg\"; done\nprintf '%s\\n' '{log}' > \"$out\"\nexit 1"
+                ),
+            );
+            let reply = run();
+            assert_eq!(reply["error"]["code"], expected, "{reply}");
+            assert_eq!(reply["data"], serde_json::json!({}));
+            assert!(!reply.to_string().contains("private-session-sentinel"));
+        }
+        write_shell_script(
+            &binary,
+            &format!("printf '%s\\n' '{credentials}' >&2\nexit 1"),
+        );
+        assert_eq!(run()["error"]["code"], "connection_failed");
+    }
+
     fs::write(
         &config,
         file_config.replace("File=file base", "/F \"file base\" /DumpIB extra.dt"),

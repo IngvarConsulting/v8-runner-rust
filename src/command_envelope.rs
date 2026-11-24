@@ -42,6 +42,7 @@ pub enum ErrorCode {
     EnvironmentUnavailable,
     InfobaseNotFound,
     ConnectionFailed,
+    CredentialsRejected,
     /// Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет
     /// формат исходников, среди установок нет.
     PlatformReleaseMissing,
@@ -125,6 +126,7 @@ impl ErrorCode {
             Self::EnvironmentUnavailable => "environment_unavailable",
             Self::InfobaseNotFound => "infobase_not_found",
             Self::ConnectionFailed => "connection_failed",
+            Self::CredentialsRejected => "credentials_rejected",
             Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
@@ -158,6 +160,7 @@ impl ErrorCode {
         Self::EnvironmentUnavailable,
         Self::InfobaseNotFound,
         Self::ConnectionFailed,
+        Self::CredentialsRejected,
         Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
@@ -549,6 +552,11 @@ mod schema_tests {
             (
                 UseCaseErrorKind::ConnectionFailed,
                 "connection_failed",
+                "platform",
+            ),
+            (
+                UseCaseErrorKind::CredentialsRejected,
+                "credentials_rejected",
                 "platform",
             ),
             (
