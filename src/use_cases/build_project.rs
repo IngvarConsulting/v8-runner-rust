@@ -1238,13 +1238,16 @@ mod tests {
 
     /// `ibcmd`, который отвечает поколением, и отказывает на `fail_pattern`.
     #[cfg(unix)]
-    fn write_ibcmd_script_answering(path: &Path, calls_log: &Path, fail_pattern: &str) {
+    fn write_ibcmd_script_answering(path: &Path, calls_log: &Path, fail_pattern: Option<&str>) {
+        let fail = fail_pattern
+            .map(|pattern| {
+                format!("if printf '%s' \"$args\" | grep -F -q -- '{pattern}'; then exit 17; fi\n")
+            })
+            .unwrap_or_default();
         write_ibcmd_script_with(
             path,
             calls_log,
-            &format!(
-                "if printf '%s' \"$args\" | grep -F -q -- '{fail_pattern}'; then exit 17; fi\ncase \"$args\" in *generation-id*) echo '{ZERO_GENERATION}' ;; esac"
-            ),
+            &format!("{fail}case \"$args\" in *generation-id*) echo '{ZERO_GENERATION}' ;; esac"),
         );
     }
 
@@ -1519,6 +1522,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn forced_build_args() -> BuildArgs {
+        BuildArgs {
+            load: PushMode::Force,
+            ..build_args(true)
+        }
+    }
+
     fn build_args(full_rebuild: bool) -> BuildArgs {
         BuildArgs {
             dry_run: false,
@@ -1600,7 +1611,7 @@ mod tests {
             crate::domain::capability::ibcmd_for_every_choice(),
         );
 
-        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+        let failure = push_interrupted_while_held(&config, &held, &forced_build_args())
             .expect_err("build must stop before ibcmd apply");
 
         assert_eq!(
@@ -1655,7 +1666,7 @@ mod tests {
             crate::domain::capability::ibcmd_for_every_choice(),
         );
 
-        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+        let failure = push_interrupted_while_held(&config, &held, &forced_build_args())
             .expect_err("the apply failed");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
@@ -1704,7 +1715,7 @@ mod tests {
             Default::default(),
         );
 
-        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+        let failure = push_interrupted_while_held(&config, &held, &forced_build_args())
             .expect_err("the load failed");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
@@ -1750,7 +1761,7 @@ mod tests {
             Default::default(),
         );
 
-        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+        let failure = push_interrupted_while_held(&config, &held, &forced_build_args())
             .expect_err("the push stops before update_db_cfg");
 
         assert_eq!(
@@ -2193,6 +2204,23 @@ mod tests {
         assert!(!export_root.join("Configuration.xml").exists());
     }
 
+    #[cfg(unix)]
+    fn record_ibcmd_generation(config: &AppConfig, name: &str) {
+        use crate::domain::capability::Provider;
+        use crate::domain::status::GenerationAfter;
+        use crate::use_cases::agent_session::GenerationLedger;
+
+        let set = SourceSetsService::new(config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == name)
+            .expect("source set");
+        GenerationLedger::of(&set)
+            .expect("ledger")
+            .record(Provider::Ibcmd, ZERO_GENERATION, GenerationAfter::Build)
+            .expect("record ibcmd generation");
+    }
+
     fn prime_snapshots(config: &AppConfig) {
         let service = SourceSetsService::new(config);
         for context in service.designer_contexts() {
@@ -2312,7 +2340,7 @@ mod tests {
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
-        let result = run_build(&config, &build_args(true)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
 
         assert!(result.ok);
         let calls_text = fs::read_to_string(&calls).expect("calls");
@@ -2400,7 +2428,7 @@ mod tests {
             let script = dir.path().join("ibcmd");
             let calls = dir.path().join("calls.log");
             create_source_tree(&base);
-            write_ibcmd_script(&script, &calls, None);
+            write_ibcmd_script_answering(&script, &calls, None);
             let mut config = build_config(
                 &base,
                 &dir.path().join("work"),
@@ -2414,6 +2442,7 @@ mod tests {
             }
             add_external_sets(&base, &mut config, "ExternalReport");
 
+            record_ibcmd_generation(&config, "ext");
             let result = run_build(&config, &build_args(true)).expect("build");
 
             assert_external_sets_skipped(&result, crate::domain::capability::Provider::Ibcmd, case);
@@ -2454,7 +2483,7 @@ mod tests {
         );
         add_external_sets(&base, &mut config, "ExternalReport");
 
-        let result = run_build(&config, &build_args(true)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
 
         assert_external_sets_skipped(
             &result,
@@ -3106,7 +3135,7 @@ mod tests {
         )
         .with_credentials(Some("Admin".to_owned()), Some("secret".to_owned()));
 
-        let result = run_build(&config, &build_args(true)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
 
         assert!(result.ok);
         let calls_text = fs::read_to_string(&calls).expect("calls");
@@ -3128,7 +3157,7 @@ mod tests {
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_script_answering(&script, &calls, "config apply");
+        write_ibcmd_script_answering(&script, &calls, Some("config apply"));
         let config = build_config(
             &base,
             &work,
@@ -3326,7 +3355,7 @@ mod tests {
         )
         .expect("modify ext");
 
-        let result = run_build(&config, &build_args(false)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
 
         assert!(result.ok);
@@ -3366,7 +3395,7 @@ mod tests {
         )
         .expect("modify ext");
 
-        let error = run_build(&config, &build_args(false))
+        let error = run_build(&config, &forced_build_args())
             .expect_err("build should fail without valid .project");
 
         assert_eq!(error.error.kind(), UseCaseErrorKind::Validation);
@@ -3378,7 +3407,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn edt_extension_build_forces_full_load_after_incremental_export() {
+    fn forced_edt_extension_build_loads_whole_then_skips_unchanged_sources() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -3413,7 +3442,7 @@ mod tests {
         )
         .expect("modify ext");
 
-        let result = run_build(&config, &build_args(false)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
         let designer_calls_text = fs::read_to_string(&designer_calls).expect("designer calls");
 
@@ -3470,7 +3499,7 @@ mod tests {
             "procedure Test()\n  // changed ext\nendprocedure",
         )
         .expect("write ext");
-        write_ibcmd_script(&ibcmd_script, &ibcmd_calls, None);
+        write_ibcmd_script_answering(&ibcmd_script, &ibcmd_calls, None);
         write_edt_script(&edt_script, &edt_calls, None);
 
         let mut config = build_edt_config(&base, &work, &ibcmd_script, &edt_script);
@@ -3481,6 +3510,7 @@ mod tests {
             path: PathBuf::from("exts/client-mcp"),
         }];
         prime_edt_snapshots(&config);
+        record_ibcmd_generation(&config, "client_mcp");
         fs::write(
             base.join("exts").join("client-mcp").join("Module.bsl"),
             "procedure Test()\n  // changed after snapshot\nendprocedure",
@@ -3551,7 +3581,7 @@ mod tests {
         )
         .expect("modify ext");
 
-        let failure = run_build(&config, &build_args(false)).expect_err("expected failure");
+        let failure = run_build(&config, &forced_build_args()).expect_err("expected failure");
         let result = failure
             .payload
             .expect("build failures should preserve a structured payload");
@@ -3608,7 +3638,7 @@ mod tests {
         )
         .expect("modify edt ext");
 
-        let result = run_build(&config, &build_args(false)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
 
         assert!(result.ok);
@@ -4096,18 +4126,19 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let script = dir.path().join("1cv8");
+        let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(&script, &calls, None);
+        write_ibcmd_script_answering(&script, &calls, None);
         let config = build_config(
             &base,
             &work,
             &script,
             SourceFormat::Designer,
-            Default::default(),
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         prime_snapshots(&config);
+        record_ibcmd_generation(&config, "ext");
 
         fs::write(
             base.join("ext").join("CommonModules").join("Module.bsl"),
@@ -4120,7 +4151,7 @@ mod tests {
 
         assert!(matches!(result.steps[0].mode, BuildMode::Skipped));
         assert!(matches!(result.steps[1].mode, BuildMode::Partial { .. }));
-        assert!(calls_text.contains("-Extension ext"));
+        assert!(calls_text.contains("--extension ext"));
         assert_eq!(storage_generation(&config, "main"), 1);
         assert_eq!(storage_generation(&config, "ext"), 2);
     }
@@ -4131,18 +4162,19 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let script = dir.path().join("1cv8");
+        let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(&script, &calls, None);
+        write_ibcmd_script_answering(&script, &calls, None);
         let config = build_config(
             &base,
             &work,
             &script,
             SourceFormat::Designer,
-            Default::default(),
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         prime_snapshots(&config);
+        record_ibcmd_generation(&config, "ext");
 
         let service = SourceSetsService::new(&config);
         let main_context = service
@@ -4178,7 +4210,7 @@ mod tests {
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.steps[0].source_set, "ext");
         assert!(matches!(result.steps[0].mode, BuildMode::Partial { .. }));
-        assert!(calls_text.contains("-Extension ext"));
+        assert!(calls_text.contains("--extension ext"));
         assert_eq!(storage_generation(&config, "ext"), 2);
     }
 
@@ -4210,17 +4242,19 @@ mod tests {
         prime_snapshots(&config);
 
         fs::write(
-            base.join("ext").join("CommonModules").join("Module.bsl"),
-            "procedure Test()\n  // ext changed\nendprocedure",
+            base.join("main")
+                .join("Catalogs.Items")
+                .join("ObjectModule.bsl"),
+            "procedure Test()\n  // main changed\nendprocedure",
         )
-        .expect("modify ext");
+        .expect("modify main");
 
         let result = run_build(
             &config,
             &BuildArgs {
                 dry_run: false,
                 load: PushMode::Changes,
-                source_set: Some("ext".to_owned()),
+                source_set: Some("main".to_owned()),
                 apply: crate::use_cases::request::ApplyPolicy::Apply,
             },
         )
@@ -4228,11 +4262,12 @@ mod tests {
         let calls_text = fs::read_to_string(&calls).expect("calls");
 
         assert_eq!(result.steps.len(), 2);
-        assert_eq!(result.steps[0].source_set, "ext");
+        assert_eq!(result.steps[0].source_set, "main");
         assert_eq!(result.steps[1].source_set, "tool:client_mcp");
         assert!(matches!(result.steps[0].mode, BuildMode::Partial { .. }));
         assert!(matches!(result.steps[1].mode, BuildMode::Full));
-        assert!(calls_text.contains("-Extension ext"));
+        assert!(calls_text.contains("/LoadConfigFromFiles"));
+        assert!(calls_text.contains("-partial"));
         assert!(calls_text.contains(&artifact.display().to_string()));
         assert!(calls_text.contains("-Extension client_mcp"));
     }
@@ -4297,7 +4332,7 @@ mod tests {
             fs::write(storage_path, "corrupt").expect("corrupt storage");
         }
 
-        let result = run_build(&config, &build_args(true)).expect("build");
+        let result = run_build(&config, &forced_build_args()).expect("build");
         let calls_text = fs::read_to_string(&calls).expect("calls");
 
         assert!(result
@@ -4364,20 +4399,21 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let script = dir.path().join("1cv8");
+        let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        // Отказывает только загрузка расширения: её каталог идёт перед `-partial`.
-        let ext_load = format!("{} -partial", base.join("ext").display());
-        write_designer_script(&script, &calls, Some(&ext_load));
+        // Отказывает только частичный импорт расширения.
+        let ext_load = "--extension ext --partial";
+        write_ibcmd_script_answering(&script, &calls, Some(ext_load));
         let config = build_config(
             &base,
             &work,
             &script,
             SourceFormat::Designer,
-            Default::default(),
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         prime_snapshots(&config);
+        record_ibcmd_generation(&config, "ext");
 
         fs::write(
             base.join("main")
@@ -4405,7 +4441,7 @@ mod tests {
             .as_deref()
             .expect("message")
             .contains("load failed for source-set 'ext' with exit code 17"));
-        assert!(!calls_text.contains("/UpdateDBCfg -Extension ext"));
+        assert!(!calls_text.contains("config apply --extension ext"));
         assert_eq!(storage_generation(&config, "main"), 2);
         assert_eq!(storage_generation(&config, "ext"), 1);
     }
@@ -4435,7 +4471,7 @@ mod tests {
             Default::default(),
         );
 
-        let result = run_build(&config, &without_apply(build_args(true))).expect("build");
+        let result = run_build(&config, &without_apply(forced_build_args())).expect("build");
 
         let calls_text = fs::read_to_string(&calls).expect("calls");
         assert!(calls_text.contains("/LoadConfigFromFiles"), "{calls_text}");
@@ -4469,7 +4505,7 @@ mod tests {
             crate::domain::capability::ibcmd_for_every_choice(),
         );
 
-        let result = run_build(&config, &without_apply(build_args(true))).expect("build");
+        let result = run_build(&config, &without_apply(forced_build_args())).expect("build");
 
         let calls_text = fs::read_to_string(&calls).expect("calls");
         assert!(calls_text.contains("config import"), "{calls_text}");
