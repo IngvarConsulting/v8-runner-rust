@@ -498,6 +498,14 @@ pub struct InfobaseWebConfig {
     /// Address a client or a browser opens the infobase at.
     #[serde(default)]
     pub url: Option<String>,
+
+    /// Direct HTTP address of the debugger as seen by the publication and web client.
+    #[serde(
+        default,
+        rename = "debugger-url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub debugger_url: Option<crate::domain::launch::DebuggerUrl>,
 }
 
 impl InfobaseConfig {

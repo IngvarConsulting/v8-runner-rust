@@ -2508,6 +2508,12 @@
     "text": "web publish Создайте веб-публикацию на Apache или IIS. Вывод CLI JSON Примеры ответов; пути и длительность зависят от запуска."
   },
   {
+    "url": "cli-web-publish.html#managed-file-web",
+    "page": "web publish",
+    "section": "Управляемый Apache для файловой базы",
+    "text": "Управляемый Apache для файловой базы На Windows и Linux объявите файловую ИБ в v8project.local.yaml с connection: File=… и web: { managed: true, wsdir: demo } . web start поднимает частный Apache для этой ИБ. Затем web publish публикует базу и возвращает локальный URL. web stop останавливает Apache. После смены каталога базы повторите публикацию."
+  },
+  {
     "url": "cli-web-publish.html#op-web-publish",
     "page": "web publish",
     "section": "web publish",
@@ -2547,7 +2553,7 @@
     "url": "cli-web-publish.html#publish-preview",
     "page": "web publish",
     "section": "web publish --dry-run",
-    "text": "web publish --dry-run v8-runner web publish --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция. Требуются параметры управления web.server , wsdir и dir ; одного web.url недостаточно. --delete удаляет публикацию."
+    "text": "web publish --dry-run v8-runner web publish --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция. Требуются параметры управления web.server , wsdir и dir ; одного web.url недостаточно. --delete удаляет публикацию. web publish --prepare-debug <IDE_URL> готовит HTTP-отладку управляемой публикации или проверяет дескриптор и маршрут на хосте внешней. Ответ сообщает адрес для IDE и адрес для веб-клиента. Подключите отладчик перед открытием браузера ."
   },
   {
     "url": "cli-web-publish.html#publish-example-outcome",
@@ -2601,7 +2607,7 @@
     "url": "cli-launch.html#launch-variant-2",
     "page": "launch",
     "section": "launch web",
-    "text": "launch web v8-runner launch web открывает опубликованную базу в браузере"
+    "text": "launch web v8-runner launch web открывает опубликованную базу в браузере Для отладки выполните web publish --prepare-debug <IDE_URL> , подключите отладчик IDE и включите приём WEBClient . Затем запустите launch web --web-debug <DEBUGGER_URL> с data.debug.debugger_url из подготовки. Раннер добавляет Debug=http,attach и DebuggerURL в адрес веб-клиента."
   },
   {
     "url": "cli-launch.html#launch-variant-2-outcome",

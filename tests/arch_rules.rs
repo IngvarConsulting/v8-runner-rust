@@ -655,6 +655,10 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
         "cli/a-cluster-copy-is-created-in-two-steps.md",
         "два,двумя,двух,двух,оба",
     ),
+    (
+        "cli/a-debug-launch-attaches-the-enterprise-client.md",
+        "двумя",
+    ),
     ("cli/a-refusal-names-the-missing-credential-level.md", "три"),
     ("cli/apply-is-a-separate-step.md", "два,оба,три"),
     ("cli/concurrent-processes-are-serialized.md", "два"),

@@ -32,7 +32,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 fn canonical_command(command: Command) -> Command {
     use crate::cli::args::{
         ConfigArgs, ConfigCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationArgs,
-        InfobaseConfigurationCommand,
+        InfobaseConfigurationCommand, WebArgs, WebCommandArgs,
     };
     match command {
         Command::ConfigInit(args) => Command::Config(ConfigArgs {
@@ -48,6 +48,16 @@ fn canonical_command(command: Command) -> Command {
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Create(args),
         }) => Command::Init(args),
+        Command::Web(WebArgs {
+            command:
+                WebCommandArgs::Publish {
+                    mut publish,
+                    prepare_debug,
+                },
+        }) => {
+            publish.prepare_debug = prepare_debug;
+            Command::Publish(publish)
+        }
         command => command,
     }
 }
@@ -468,14 +478,18 @@ pub(crate) fn load_cli_config(
             })
     ) {
         crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Publish(_)) {
+        crate::config::loader::load_config_for_publish(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Dbms(_)) {
         crate::config::loader::load_config_for_managed_dbms(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Standalone(_)) {
         crate::config::loader::load_config_for_managed_standalone(config_path, workdir, &selector)
-    } else if matches!(&cli.command, Command::Cluster(_) | Command::Web(_)) {
+    } else if matches!(&cli.command, Command::Cluster(_)) {
         crate::config::loader::load_config_for_managed_cluster(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Web(_)) {
+        crate::config::loader::load_config_for_managed_web(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(args) if args.seeds_a_new_file_base()) {
         crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(_)) {

@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "DebuggerUrl": {
+      "description": "Адрес сервера отладки: http://<хост>:<порт>.",
+      "pattern": "^http://.+:[0-9]+$",
+      "type": "string"
+    },
     "LiveAgentHolder": {
       "anyOf": [
         {
@@ -342,6 +347,47 @@
         "reason"
       ],
       "type": "object"
+    },
+    "WebDebugPreparation": {
+      "additionalProperties": false,
+      "properties": {
+        "debugger_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DebuggerUrl"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Address in default.vrd and in the web client's DebuggerURL startup parameter."
+        },
+        "ide_url": {
+          "$ref": "#/$defs/DebuggerUrl",
+          "description": "Address to hand to the IDE debugger, independently of the browser and web server."
+        },
+        "publication_changed": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/WebDebugState"
+        }
+      },
+      "required": [
+        "state",
+        "ide_url",
+        "publication_changed"
+      ],
+      "type": "object"
+    },
+    "WebDebugState": {
+      "enum": [
+        "planned",
+        "ready",
+        "external_route_verified",
+        "route_unavailable"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/publish.schema.json",
@@ -351,6 +397,16 @@
   "properties": {
     "action": {
       "$ref": "#/$defs/PublishAction"
+    },
+    "debug": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WebDebugPreparation"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "dir": {
       "description": "Physical directory the publication is written to; under `localPath` for a managed base.",
@@ -398,7 +454,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "Whether `webinst` was started for this command. `false` in a preview. A refusal before\nthe start answers the shared refusal form, without this field; a failure after the\nstart answers this form with `ok: false` and `true`.",
+      "description": "The executor received work, such as running `webinst` or activating Apache. `false`\nin a preview and for an external route check.",
       "type": "boolean"
     },
     "server": {

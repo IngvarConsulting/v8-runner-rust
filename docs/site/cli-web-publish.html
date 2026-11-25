@@ -76,6 +76,8 @@
 <p class="lede">Создайте веб-публикацию на Apache или IIS.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <p class="hint">Примеры ответов; пути и длительность зависят от запуска.</p>
+<h2 id="managed-file-web">Управляемый Apache для файловой базы</h2>
+<p>На Windows и Linux объявите файловую ИБ в <code>v8project.local.yaml</code> с <code>connection: File=…</code> и <code>web: { managed: true, wsdir: demo }</code>. <code>web start</code> поднимает частный Apache для этой ИБ. Затем <a href="#op-web-publish"><code>web publish</code></a> публикует базу и возвращает локальный URL. <code>web stop</code> останавливает Apache. После смены каталога базы повторите публикацию.</p>
 <h2 class="command-variant" id="op-web-publish">web publish</h2>
 <pre data-output-command><code>v8-runner web publish</code></pre>
 <p>публикует базу на Apache или IIS <span class="ref">(<a href="platform.html#t69">69</a>)</span>; базу при этом не открывает</p>
@@ -108,6 +110,7 @@ ERROR: platform error: webinst failed with exit code 1</code></pre>
 <h2 class="command-variant" id="publish-preview">web publish --dry-run</h2>
 <pre data-output-command><code>v8-runner web publish --dry-run</code></pre>
 <p>Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без <code>--dry-run</code> выполняется указанная операция. Требуются параметры управления <code>web.server</code>, <code>wsdir</code> и <code>dir</code>; одного <code>web.url</code> недостаточно. <code>--delete</code> удаляет публикацию.</p>
+<p><code>web publish --prepare-debug &lt;IDE_URL&gt;</code> готовит HTTP-отладку управляемой публикации или проверяет дескриптор и маршрут на хосте внешней. Ответ сообщает адрес для IDE и адрес для веб-клиента. Подключите отладчик перед <a href="cli-launch.html#launch-variant-2">открытием браузера</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="publish-example-outcome">План публикации подготовлен</h4>
 <p>Успех превью подтверждает подготовку плана, а не выполнение операции. Фрагмент текстового ответа:</p>

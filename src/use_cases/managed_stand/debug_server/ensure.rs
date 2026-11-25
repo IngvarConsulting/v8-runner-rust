@@ -68,7 +68,7 @@ impl DebugServer<'_> {
             return Err(owner_exited());
         }
 
-        if let Some(session) = read_state_file::<DebugSession>(&intent)? {
+        if let Some(session) = self.find_ensured_session(scope, &intent)? {
             let paths = session_paths(self.config, session);
             if checked_session_directory(&paths)? && self.read_scope(&paths)? != Some(scope) {
                 return Err(UseCaseError::new(
@@ -182,6 +182,55 @@ impl DebugServer<'_> {
             Ok(_) => Err(reason.followed_by(format!("log: {}", log.display()))),
             Err(cleanup) => Err(reason.followed_by(format!("{cleanup}; log: {}", log.display()))),
         }
+    }
+
+    /// The index can be lost independently of the per-session marker. Under the
+    /// scope lock, recover that marker before starting another process.
+    fn find_ensured_session(
+        &self,
+        scope: DebugSession,
+        intent: &Path,
+    ) -> Result<Option<DebugSession>, UseCaseError> {
+        if let Some(session) = read_state_file::<DebugSession>(intent)? {
+            if checked_session_directory(&session_paths(self.config, session))? {
+                return Ok(Some(session));
+            }
+        }
+
+        let root = sessions_root(self.config);
+        let entries = std::fs::read_dir(&root)
+            .map_err(|error| super::super::io_failure("cannot list", &root, &error))?;
+        let mut found = None;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| super::super::io_failure("cannot list", &root, &error))?;
+            let Some(session) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+            else {
+                continue;
+            };
+            let paths = session_paths(self.config, session);
+            if !checked_session_directory(&paths)? {
+                continue;
+            }
+            let marker = paths.root().join(ENSURED);
+            let Some(recorded) = read_state_file::<EnsureScope>(&marker)? else {
+                continue;
+            };
+            if recorded.key != scope {
+                continue;
+            }
+            if recorded.work_path != self.scope_work_path()? || found.replace(session).is_some() {
+                return Err(invalid_state_path(intent, "ambiguous debug session index"));
+            }
+        }
+        if let Some(session) = found {
+            write_json(intent, &session)
+                .map_err(|error| super::super::io_failure("cannot restore", intent, &error))?;
+        }
+        Ok(found)
     }
 
     pub(super) fn record_debug_intent(

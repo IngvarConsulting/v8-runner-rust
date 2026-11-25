@@ -1343,6 +1343,35 @@ mod tests {
     }
 
     #[test]
+    fn ensure_reuses_a_live_session_with_a_missing_or_dangling_index() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let root = sessions_root(&setup.config).join("ensure");
+        let index = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        std::fs::remove_file(&index).unwrap();
+        for dangling in [false, true] {
+            if dangling {
+                write_json(&index, &DebugSession::new()).unwrap();
+            }
+            let reused = server.ensure(ensure_request(), false).unwrap();
+            assert_eq!(reused.session, first.session);
+            assert_eq!(reused.pid, first.pid);
+            assert_eq!(reused.action, DebugServerAction::Reused);
+            assert_eq!(read_json::<DebugSession>(&index), first.session);
+        }
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+    }
+
+    #[test]
     fn ensure_preserves_a_session_with_a_missing_process_record() {
         let setup = setup();
         let host = Host::with_owner();

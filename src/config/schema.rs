@@ -726,7 +726,7 @@ enum WebServerKindSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseWebSchema {
-    /// Publish to the local Apache of a managed cluster.
+    /// Publish to a private Apache for a local file infobase or a managed cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed: Option<bool>,
     /// Web server to publish on with `v8-runner publish`.
@@ -747,6 +747,13 @@ struct InfobaseWebSchema {
     /// Address a client or a browser opens the infobase at; `launch web` uses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    /// Direct HTTP debugger address used by the publication and web client.
+    #[serde(
+        default,
+        rename = "debugger-url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    debugger_url: Option<crate::domain::launch::DebuggerUrl>,
 }
 
 /// The cluster section of a server infobase: three credential levels lie side by side in

@@ -8,6 +8,33 @@ use std::process::{Command, Stdio};
 
 use crate::platform::process::{ProcessError, WorkGiven};
 
+/// Compose the 1C web client's startup parameters without changing unrelated query fields.
+pub(crate) fn with_http_debug(
+    address: &str,
+    debugger: &crate::domain::launch::DebuggerUrl,
+) -> Result<String, crate::support::error::AppError> {
+    let mut url = url::Url::parse(address)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+        .ok_or_else(|| {
+            crate::support::error::AppError::Validation(
+                "web debugging needs an HTTP or HTTPS publication address".to_owned(),
+            )
+        })?;
+    let retained = url.query().unwrap_or_default().split('&').filter(|pair| {
+        !pair.is_empty()
+            && !url::form_urlencoded::parse(pair.as_bytes()).any(|(name, _)| {
+                name.eq_ignore_ascii_case("Debug") || name.eq_ignore_ascii_case("DebuggerURL")
+            })
+    });
+    let query = retained.collect::<Vec<_>>().join("&");
+    url.set_query((!query.is_empty()).then_some(&query));
+    url.query_pairs_mut()
+        .append_pair("Debug", "http,attach")
+        .append_pair("DebuggerURL", &debugger.to_string());
+    Ok(url.into())
+}
+
 /// Программа, которой система открывает ссылки, и её аргументы перед адресом.
 pub fn opener() -> (PathBuf, Vec<String>) {
     #[cfg(target_os = "macos")]

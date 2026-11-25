@@ -402,6 +402,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
         ),
         row(&["check", "edt"], "check edt", "check", work.clone()),
         row(&["launch", "designer"], "launch", "launch", work.clone()),
-        row(&["publish"], "publish", "publish", work),
+        row(&["publish"], "publish", "publish", work.clone()),
+        row(&["web", "publish"], "web publish", "publish", work),
     ]
 }
