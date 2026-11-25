@@ -1798,6 +1798,7 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
         &harness.config_path.display().to_string(),
         "--json-message",
         "build",
+        "main",
     ]);
 
     let (code, payload) = support::interrupt_at_hold(
