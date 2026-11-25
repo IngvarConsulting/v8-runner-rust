@@ -3187,6 +3187,13 @@ pub(super) mod tests {
         let runner = Runner { host: &host };
         let context = ExecutionContext::cli(CommandName::DebugServerStart);
         setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        // This proof checks the process image as named by the native OS, while
+        // the shared service fixture launches Windows-shaped executables.
+        let agent = setup.agent();
+        let mut record = agent.own_record().unwrap();
+        host.live(AGENT_PID, AGENT_IMAGE);
+        record.image = Some(AGENT_IMAGE.to_owned());
+        write_record(&agent, &record).unwrap();
         remember_registered(&setup.config).unwrap();
         host.registered.borrow_mut().push("demo".to_owned());
         let port = setup.pins().ports.debug();
