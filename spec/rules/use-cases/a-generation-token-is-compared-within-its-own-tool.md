@@ -10,7 +10,7 @@ check:
   - src/use_cases/status.rs::the_verdict_compares_within_the_tool_of_the_record
   - tests/cli_dump_agent.rs::a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_not
   - tests/cli_push_generation.rs::a_generation_of_another_tool_refuses_a_push_into_a_base_that_moved_ahead
-  - tests/cli_push_generation.rs::an_extension_generation_of_another_tool_is_checked_by_that_tool_before_a_push
+  - tests/cli_push_generation.rs::a_legacy_designer_extension_record_cannot_authorize_an_ibcmd_push
   - tests/cli_push_generation.rs::an_unapplied_mark_survives_a_dump_by_another_tool
   - src/platform/generation.rs::an_unrecognized_answer_is_no_answer
 ---
@@ -36,8 +36,7 @@ check:
 ответ Конфигуратора у базы в кластере, держит
 `INV.USE-CASES.A-CLUSTER-DESIGNER-GENERATION-IS-READ-LIKE-A-FILE-ONE`.
 
-Требование обнаруживать чужую неприменённую загрузку расширения закреплено
-[отдельным правилом с открытым #687](a-push-checks-the-loaded-extension-generation.md).
+Для загрузки расширений действует [допуск через ibcmd](a-push-checks-the-loaded-extension-generation.md).
 
 ## Замер
 

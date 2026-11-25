@@ -608,7 +608,7 @@ fn an_extension_whose_generation_moves_only_on_apply_is_pushed_again_without_ref
         fs::write(&module, format!("{text}// edited\n")).expect("edit");
     };
     edit();
-    succeeded(&project.run(&["push", "ext", "--no-apply"]));
+    succeeded(&project.run(&["push", "ext", "--force", "--no-apply"]));
     fs::write(
         project.root().join("apply-token-ext"),
         format!("{SECOND}\r\n"),
@@ -622,7 +622,7 @@ fn an_extension_whose_generation_moves_only_on_apply_is_pushed_again_without_ref
     );
 
     edit();
-    let pushed = succeeded(&project.run(&["push", "ext"]));
+    let pushed = succeeded(&project.run(&["push", "ext", "--force"]));
     assert_eq!(pushed["data"]["steps"][0]["applied"], true, "{pushed}");
 }
 
@@ -637,7 +637,7 @@ fn an_apply_after_a_failed_extension_load_is_refused_even_with_an_unchanged_gene
     let module = project.root().join("ext").join("Module.bsl");
     fs::write(&module, "Procedure B()\n// edited\nEndProcedure\n").expect("edit");
     project.mark("fail");
-    assert!(!project.run(&["push", "ext"]).status.success());
+    assert!(!project.run(&["push", "ext", "--force"]).status.success());
     project.unmark("fail");
     project.forget_calls();
 
@@ -697,7 +697,7 @@ fn a_push_with_nothing_to_load_applies_an_unapplied_designer_extension() {
     succeeded(&project.run(&["push", "--force"]));
     let module = project.root().join("ext").join("Module.bsl");
     fs::write(&module, "Procedure B()\n// edited\nEndProcedure\n").expect("edit");
-    succeeded(&project.run(&["push", "ext", "--no-apply"]));
+    succeeded(&project.run(&["push", "ext", "--force", "--no-apply"]));
     fs::write(
         project.root().join("apply-token-ext"),
         format!("{SECOND}\r\n"),

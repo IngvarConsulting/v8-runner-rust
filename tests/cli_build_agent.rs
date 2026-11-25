@@ -994,10 +994,9 @@ fn failed_agent_load_keeps_the_nearest_filename_and_typed_cause_after_long_logs(
         .any(|line| line.starts_with("config update-db-cfg")));
 }
 
-/// Стенд с набором расширения `ext`, чью запись поколения сделал `ibcmd`: у расширения токены
-/// инструментов несравнимы, а грузит агент (#559). `ibcmd` в установке отвечает токеном
-/// `answer`; `None` — утилиты нет.
-fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness {
+/// Набор расширения с записанным загруженным поколением. Даже совпадающий ответ
+/// ibcmd не разрешает защищённую загрузку расширения другим исполнителем.
+fn harness_with_an_extension_recorded_by_ibcmd() -> Harness {
     let harness = harness();
     let root = harness.dir.path().to_path_buf();
     let ext = root.join("project").join("ext");
@@ -1027,83 +1026,52 @@ fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness 
     ledger["ext"]["tool"] = Value::from("ibcmd");
     ledger["ext"]["token"] = Value::from("1".repeat(40));
     fs::write(&ledger_path, ledger.to_string()).expect("ledger");
-    if let Some(answer) = answer {
-        support::write_shell_script(
-            &root
-                .join("platform")
-                .join("8.3.27.2074")
-                .join("bin")
-                .join("ibcmd"),
-            &format!(
-                "printf '%s\n' \"$*\" >> '{}'\ncase \"$*\" in *generation-id*) printf '{answer}\n' ;; esac\nexit 0",
-                root.join("ibcmd-calls.log").display()
-            ),
-        );
-    }
+    let answer = "1".repeat(40);
+    support::write_shell_script(
+        &root.join("platform/8.3.27.2074/bin/ibcmd"),
+        &format!(
+            "printf '%s\n' \"$*\" >> '{}'\ncase \"$*\" in *generation-id*) printf '{answer}\n' ;; esac\nexit 0",
+            root.join("ibcmd-calls.log").display()
+        ),
+    );
     harness
 }
 
-/// Агент грузит основную конфигурацию и расширение, а запись расширения сделал `ibcmd`:
-/// поколение расширения спрашивает `ibcmd` первым проходом — раньше, чем открыта сессия
-/// агента, которая держала бы файловую базу, — и расширение, ушедшее вперёд, отказывает
-/// `non_fast_forward` до загрузки. Агент, поднятый заранее, к базе не подключается ни в каком
-/// порядке событий (#653): он мог успеть подняться и выставить режим ответа — и только.
+/// Старый путь мог открыть агента после чтения `ibcmd` и допустить загрузку.
 #[test]
-fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
-    let second = "2".repeat(40);
-    let harness = harness_with_an_extension_recorded_by_ibcmd(Some(&second));
-
+fn an_ibcmd_baseline_does_not_allow_an_unforced_agent_extension_load() {
+    let harness = harness_with_an_extension_recorded_by_ibcmd();
     let (code, payload) = run(&harness, &["push"]);
 
     assert_eq!(code, 3, "{payload}");
     assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
-    assert_eq!(
-        payload["error"]["base_generation"],
-        second.as_str(),
-        "{payload}"
-    );
-    let ibcmd_calls = read_or_empty(&harness.dir.path().join("ibcmd-calls.log"));
-    assert_eq!(
-        ibcmd_calls
-            .lines()
-            .filter(|line| line.contains("generation-id"))
-            .count(),
-        1,
-        "only the record tool's read of the extension: {ibcmd_calls}"
-    );
+    assert_eq!(payload["error"]["next"]["source_set"], "ext", "{payload}");
     assert!(
-        ibcmd_calls.lines().all(|line| line.contains("--extension")),
-        "{ibcmd_calls}"
+        payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("push ext --force"),
+        "{payload}"
     );
     let agent_commands = commands(&harness);
     assert!(
         agent_commands
             .iter()
             .all(|line| line == "options set --show-prompt=no --output-format=json"),
-        "no agent session was opened and the agent was not connected to the infobase before the refusal: {agent_commands:?}"
+        "no agent connected or loaded before the refusal: {agent_commands:?}"
+    );
+    assert!(
+        read_or_empty(&harness.dir.path().join("ibcmd-calls.log")).is_empty(),
+        "the wrong write provider is refused before a generation probe"
     );
 }
 
-/// Поколение расширения, записанное `ibcmd`, совпало: агент, поднятый заранее без подключения
-/// к базе, подключает сессия команды после сверки (#653), и наборы грузятся в ней. `ibcmd`
-/// спрашивается один раз — до сессии; поколение после загрузки читает уже агент.
 #[test]
-fn an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check() {
-    let recorded = "1".repeat(40);
-    let harness = harness_with_an_extension_recorded_by_ibcmd(Some(&recorded));
-
-    let (code, payload) = run(&harness, &["push"]);
+fn a_forced_extension_push_connects_and_loads_through_the_agent() {
+    let harness = harness_with_an_extension_recorded_by_ibcmd();
+    let (code, payload) = run(&harness, &["push", "ext", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
-    let ibcmd_calls = read_or_empty(&harness.dir.path().join("ibcmd-calls.log"));
-    assert_eq!(
-        ibcmd_calls
-            .lines()
-            .filter(|line| line.contains("generation-id"))
-            .count(),
-        1,
-        "only the record tool's read of the extension: {ibcmd_calls}"
-    );
     let agent_commands = commands(&harness);
     let connect = agent_commands
         .iter()
@@ -1111,29 +1079,9 @@ fn an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_
         .unwrap_or_else(|| panic!("the session connects the agent: {agent_commands:?}"));
     let load = agent_commands
         .iter()
-        .position(|line| line.starts_with("config load-config-from-files"))
-        .unwrap_or_else(|| panic!("the sets are loaded: {agent_commands:?}"));
+        .position(|line| {
+            line.starts_with("config load-config-from-files") && line.contains("--extension=ext")
+        })
+        .unwrap_or_else(|| panic!("the extension is loaded: {agent_commands:?}"));
     assert!(connect < load, "{agent_commands:?}");
-}
-
-/// Инструмент записи поколением не ответил — здесь `ibcmd` нет в установке: сверить нечем,
-/// и отправка отказывает, называя причину и выход, а не грузит без сверки.
-#[test]
-fn a_record_tool_without_an_answer_refuses_the_push() {
-    let harness = harness_with_an_extension_recorded_by_ibcmd(None);
-
-    let (code, payload) = run(&harness, &["push"]);
-
-    assert_eq!(code, 3, "{payload}");
-    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
-    let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("recorded by ibcmd"), "{message}");
-    assert!(message.contains("ibcmd is not found"), "{message}");
-    assert!(message.contains("push ext --force"), "{message}");
-    assert!(
-        !commands(&harness)
-            .iter()
-            .any(|line| line.starts_with("config load-config-from-files")),
-        "nothing is loaded"
-    );
 }

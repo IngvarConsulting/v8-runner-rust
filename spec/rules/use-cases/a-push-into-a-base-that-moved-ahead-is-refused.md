@@ -7,10 +7,9 @@ check:
   - tests/cli_push_generation.rs::ibcmd_reads_the_generation_from_its_last_stdout_line
   - tests/cli_build_agent.rs::an_agent_push_into_a_base_that_moved_ahead_is_refused_before_the_load
   - tests/cli_push_generation.rs::a_generation_of_another_tool_refuses_a_push_into_a_base_that_moved_ahead
-  - tests/cli_push_generation.rs::an_extension_generation_of_another_tool_is_checked_by_that_tool_before_a_push
-  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens
-  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check
-  - tests/cli_build_agent.rs::a_record_tool_without_an_answer_refuses_the_push
+  - tests/cli_push_generation.rs::a_legacy_designer_extension_record_cannot_authorize_an_ibcmd_push
+  - tests/cli_build_agent.rs::an_ibcmd_baseline_does_not_allow_an_unforced_agent_extension_load
+  - tests/cli_build_agent.rs::a_forced_extension_push_connects_and_loads_through_the_agent
 ---
 
 # Отправка в ушедшую вперёд базу отклоняется
@@ -19,6 +18,8 @@ check:
 записанного в памяти, отказывает родом `non_fast_forward` до загрузки и называет оба
 поколения и следующий шаг. У базы в кластере и у автономного сервера отказ говорит ещё, что
 базу могла изменить другая рабочая копия.
+
+Для загрузки расширений действует [строгий допуск](a-push-checks-the-loaded-extension-generation.md).
 
 Поколение перед загрузкой набора спрашивает тот инструмент, которым набор грузится, —
 Конфигуратор (`/GetConfigGenerationID`), `ibcmd` (`config generation-id`) или агент, — если

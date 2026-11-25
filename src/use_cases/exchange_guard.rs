@@ -525,6 +525,23 @@ fn extension_of<'a>(config: &AppConfig, set: &'a SourceSetContext) -> Option<&'a
         .then(|| set.name())
 }
 
+/// Admission for a protected extension load. The compared value must be the
+/// loaded generation, which only ibcmd supplies.
+pub(crate) fn extension_generation_blocker(
+    tool: Provider,
+    record: Option<&GenerationRecord>,
+) -> Option<&'static str> {
+    if tool != Provider::Ibcmd {
+        return Some(
+            "extension loads with this provider require --force; use ibcmd for a protected push",
+        );
+    }
+    match record {
+        Some(record) if record.tool == Provider::Ibcmd => None,
+        _ => Some("the loaded extension generation has no recorded ibcmd baseline"),
+    }
+}
+
 /// Что покажет сверка поколения перед загрузкой набора — единственное место сравнения токена с
 /// записью: по нему отказывает `push` ([`GenerationGate`]) и отвечает `status --deep`. Ничего
 /// не пишет и не отказывает. Токены сравниваются в пределах `scope` ([`token_scope`]).
@@ -673,7 +690,14 @@ impl<'a> GenerationGate<'a> {
         {
             return Ok(BeforeLoad::Unchecked);
         }
-        let Some(record) = recorded_generation(set) else {
+        let record = recorded_generation(set);
+        let extension = extension_of(self.config, set).is_some();
+        if extension {
+            if let Some(reason) = extension_generation_blocker(tool, record.as_ref()) {
+                return Err(self.refuse_extension_load(set.name(), reason));
+            }
+        }
+        let Some(record) = record else {
             return Ok(BeforeLoad::Unchecked);
         };
         let scope = token_scope(self.config, set);
@@ -690,7 +714,14 @@ impl<'a> GenerationGate<'a> {
             return Ok(BeforeLoad::Unchecked);
         }
         let Some(token) = read()? else {
-            return Ok(BeforeLoad::Unchecked);
+            return if extension {
+                Err(self.refuse_extension_load(
+                    set.name(),
+                    "ibcmd did not report the loaded extension generation",
+                ))
+            } else {
+                Ok(BeforeLoad::Unchecked)
+            };
         };
         match predict(Some(&record), Some((tool, &token)), scope) {
             GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
@@ -720,6 +751,18 @@ impl<'a> GenerationGate<'a> {
             .is_some()
         {
             return Ok(());
+        }
+        for set in sets {
+            if extension_of(self.config, set).is_some() {
+                if let Some(reason) =
+                    extension_generation_blocker(tool, recorded_generation(set).as_ref())
+                {
+                    return Err((
+                        set.name().to_owned(),
+                        self.refuse_extension_load(set.name(), reason),
+                    ));
+                }
+            }
         }
         let mut utilities = None;
         for set in sets {
@@ -830,6 +873,22 @@ impl<'a> GenerationGate<'a> {
         AppError::Refused(Box::new(
             UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
                 .with_next(way_out.step(set, Some(set))),
+        ))
+    }
+
+    fn refuse_extension_load(&self, set: &str, reason: &str) -> AppError {
+        let force = self
+            .context
+            .advised_command(&format!("push {} --force", shell_word(set)));
+        let pull = self
+            .context
+            .advised_command(&format!("pull {}", shell_word(set)));
+        let message = format!(
+            "cannot push extension source-set '{set}': {reason}; record the loaded generation with {pull} using ibcmd, or explicitly overwrite with {force}"
+        );
+        AppError::Refused(Box::new(
+            UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
+                .with_next(WayOut::PushForce.step(set, Some(set))),
         ))
     }
 
