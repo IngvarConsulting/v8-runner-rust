@@ -1,8 +1,9 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 8
+version: 9
 artifact: docs/schemas/command-data/launch.schema.json
 check:
+  - src/use_cases/launch_app.rs::direct_managed_cluster_debug_reports_the_registered_ref
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_launch_debug.rs::a_debug_launch_preview_attaches_the_client_to_the_debug_server
   - tests/cli_launch_debug.rs::a_web_debug_preview_preserves_the_publication_url_and_replaces_old_debug_keys
@@ -68,6 +69,9 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 ## Наблюдение MCP
 
 При ожидании MCP готовность подтверждает только свежий успешный `tools/list` с нужными инструментами. После неудачного ожидания `tools` и `missing_tools` описывают последний успешный ответ в этом ожидании: ошибки повторного `initialize` или `tools/list` сохраняют это диагностическое наблюдение и сообщение о недостающих инструментах. Новый успешный список заменяет предыдущий. Сохранённый список не доказывает текущую доступность endpoint и не даёт `ok: true`; отмена сохраняет собственный исход и сообщение. Если успешного списка ещё не было, сообщается ошибка доступности endpoint.
+
+При прямом запуске клиента с `--debug` на управляемый кластер `debug.infobase_alias`
+равен зарегистрированному имени базы из `Ref`.
 
 ## Пример
 

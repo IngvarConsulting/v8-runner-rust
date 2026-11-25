@@ -1579,14 +1579,8 @@ fn with_debug_server<T>(
     run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
-    let cluster_server = || {
-        cluster::debug_port(context, config, &RealHost::CURRENT).map(|port| {
-            debug_server::StandDebugServer {
-                port,
-                infobase_alias: None,
-            }
-        })
-    };
+    let cluster_server =
+        || cluster::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
     let standalone_server =
         || standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
     run(&debug_server::DebugServer {

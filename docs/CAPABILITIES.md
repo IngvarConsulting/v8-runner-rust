@@ -980,7 +980,11 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   `owner: "standalone"`). Автономный сервер без `managed` — `target`.
 - `infobase_alias` в ответе `start` — имя базы, которое отладчик передаёт как `infoBaseAlias` в запросах `rdbg`: `DefAlias`
   у файловой базы, имя базы в сервере (`ibsrv --name`, `standalone.managed.name`) у автономного сервера; с другим именем
-  сервер отладки отвечает пустым списком. У сервера кластера поля нет.
+  сервер отладки отвечает пустым списком. У управляемого кластера алиас равен имени базы из `Ref`.
+  `debug-server status <SESSION>` для управляемого кластера подтверждает ту же регистрацию
+  ИБ и тот же `ragent`, принадлежность loopback-порта дочернему `dbgs` и ответ `rdbg`.
+  Если этих доказательств нет, адрес для подключения не выдаётся. Прямой `launch --debug`
+  в управляемый кластер называет зарегистрированное имя в `debug.infobase_alias`.
 - Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
   `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
   `launch thin --debug <url>` → `debug-server stop <session>`. Чтобы отдельно проверить
