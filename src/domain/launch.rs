@@ -62,6 +62,9 @@ pub struct LaunchResult {
 pub struct LaunchDebug {
     /// Адрес сервера отладки, как его получил клиент.
     pub url: DebuggerUrl,
+    /// Registered infobase name (Ref) for direct launches against a managed cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infobase_alias: Option<String>,
 }
 
 /// Адрес сервера отладки `http://<хост>:<порт>` — единственный вид, который принимает

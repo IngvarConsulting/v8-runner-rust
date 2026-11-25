@@ -1088,6 +1088,7 @@ pub(super) fn debug_server(
         RdbgWait::Ready(port) => Ok(StandDebugServer {
             port,
             infobase_alias,
+            cluster_binding: None,
         }),
         RdbgWait::Interrupted(error) => Err(error),
         RdbgWait::Gone => Err(environment(format!(

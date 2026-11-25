@@ -72,9 +72,11 @@ pub struct DebugServerStart {
 }
 
 /// Сервер отладки стенда: порт и имя базы для отладчика, если оно замерено.
+#[derive(Debug)]
 pub(super) struct StandDebugServer {
     pub port: u16,
     pub infobase_alias: Option<String>,
+    pub cluster_binding: Option<super::cluster::ClusterDebugBinding>,
 }
 
 /// Сервер отладки стенда, о котором спрашивает `start`: чей он, как его назвать в
@@ -246,12 +248,19 @@ impl DebugServer<'_> {
         let StandDebugServer {
             port,
             infobase_alias: alias,
+            cluster_binding,
         } = server()?;
         self.sweep();
         let session = DebugSession::new();
         let paths = session_paths(self.config, session);
-        write_json(&paths.root().join(STAND_SESSION), &SessionMarker { owner })
-            .map_err(|error| super::io_failure("cannot write", paths.root(), &error))?;
+        write_json(
+            &paths.root().join(STAND_SESSION),
+            &SessionMarker {
+                owner,
+                cluster_binding,
+            },
+        )
+        .map_err(|error| super::io_failure("cannot write", paths.root(), &error))?;
         result.action = DebugServerAction::Started;
         result.session = Some(session);
         result.port = Some(port);
@@ -509,10 +518,7 @@ impl DebugServer<'_> {
     }
 
     pub fn status(&self, session: DebugSession) -> Result<DebugServerStatusResult, UseCaseError> {
-        if self.config.target_kind() != TargetKind::File {
-            return Err(refuse("debug-server status requires a file infobase"));
-        }
-
+        let owner = server_of(self.config)?;
         let started = Instant::now();
         let paths = session_paths(self.config, session);
         let mut result = DebugServerStatusResult {
@@ -525,13 +531,24 @@ impl DebugServer<'_> {
             infobase_alias: None,
             duration_ms: 0,
         };
-        match self.confirm_endpoint(&paths) {
-            Ok(Some((pid, port))) => {
+        let observed = match owner {
+            DebugServerOwner::Runner => self
+                .confirm_endpoint(&paths)
+                .map(|endpoint| endpoint.map(|(pid, port)| (pid, port, FILE_ALIAS.to_owned()))),
+            DebugServerOwner::Cluster => self.confirm_cluster_endpoint(&paths),
+            DebugServerOwner::Standalone => {
+                return Err(refuse(
+                    "debug-server status requires a file infobase or managed cluster",
+                ));
+            }
+        };
+        match observed {
+            Ok(Some((pid, port, alias))) => {
                 result.status = DebugServerStatus::Ready;
                 result.pid = Some(pid);
                 result.port = Some(port);
                 result.url = Some(dbgs::url(port));
-                result.infobase_alias = Some(FILE_ALIAS);
+                result.infobase_alias = Some(alias);
             }
             Ok(None) => {}
             Err(reason) => {
@@ -545,6 +562,42 @@ impl DebugServer<'_> {
         }
         result.duration_ms = crate::support::time::elapsed_ms(started);
         Ok(result)
+    }
+
+    fn confirm_cluster_endpoint(
+        &self,
+        paths: &ServicePaths,
+    ) -> Result<Option<(u32, u16, String)>, DebugServerStatusReason> {
+        use DebugServerStatusReason as Reason;
+
+        if !ensure::checked_session_directory(paths).map_err(|_| Reason::RecordUnavailable)? {
+            return Ok(None);
+        }
+        let path = paths.root().join(STAND_SESSION);
+        let read_marker = || {
+            ensure::read_state_file::<SessionMarker>(&path).map_err(|_| Reason::RecordUnavailable)
+        };
+        let marker = read_marker()?.ok_or(Reason::UnsupportedOwner)?;
+        let binding = marker
+            .cluster_binding
+            .as_ref()
+            .filter(|_| marker.owner == DebugServerOwner::Cluster)
+            .ok_or(Reason::UnsupportedOwner)?;
+        super::cluster::confirm_debug_server(
+            self.context,
+            self.config,
+            self.runner,
+            self.host,
+            binding,
+        )?;
+        if read_marker()?.as_ref() != Some(&marker) {
+            return Err(Reason::RecordChanged);
+        }
+        Ok(Some((
+            binding.listener_pid,
+            binding.port,
+            binding.alias.clone(),
+        )))
     }
 
     fn confirm_endpoint(
@@ -807,11 +860,13 @@ impl DebugServer<'_> {
     }
 }
 
-/// Метка сеанса сервера отладки стенда: только чей он. Порта в ней нет: он принадлежит
-/// закреплённому стенда и меняется вместе с ним.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+/// Метка сеанса сервера отладки стенда. Доказательство статуса есть только
+/// у сеансов кластера, для которых раннер подтвердил владельца и регистрацию.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SessionMarker {
     owner: DebugServerOwner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster_binding: Option<super::cluster::ClusterDebugBinding>,
 }
 
 /// Чей сеанс стенда лежит в каталоге; `None` — сеанс своего `dbgs` раннера.
@@ -1231,11 +1286,12 @@ mod tests {
         }
     }
 
-    /// Сервер отладки кластера подделки: порт блока, имени базы нет.
+    /// Сервер отладки кластера подделки: порт блока и имя базы в кластере.
     fn fake_cluster() -> Result<StandDebugServer, UseCaseError> {
         Ok(StandDebugServer {
             port: 24018,
-            infobase_alias: None,
+            infobase_alias: Some("demo".to_owned()),
+            cluster_binding: None,
         })
     }
 
@@ -1244,6 +1300,7 @@ mod tests {
         Ok(StandDebugServer {
             port: 24019,
             infobase_alias: Some("demo".to_owned()),
+            cluster_binding: None,
         })
     }
 
@@ -1719,7 +1776,7 @@ mod tests {
             assert_eq!(ready.status, Status::Ready);
             assert_eq!(ready.pid, started.pid);
             assert_eq!(ready.url, started.url);
-            assert_eq!(ready.infobase_alias, Some(FILE_ALIAS));
+            assert_eq!(ready.infobase_alias.as_deref(), Some(FILE_ALIAS));
         }
         let assert_refused = |status, reason| {
             let response = server.status(session).unwrap();
@@ -1891,9 +1948,24 @@ mod tests {
         let started = setup.start(DebugServerStart::default(), &host).unwrap();
         assert_eq!(started.owner, Some(DebugServerOwner::Cluster));
         assert_eq!(started.url.as_deref(), Some("http://127.0.0.1:24018"));
+        assert_eq!(started.infobase_alias.as_deref(), Some("demo"));
         assert_eq!(started.pid, None);
         assert_eq!(host.spawned.get(), 0);
-        let stopped = setup.stop(started.session.unwrap(), &host).unwrap();
+        let session = started.session.unwrap();
+        let context = context();
+        let locate = || Ok(setup.resolution());
+        let status = setup
+            .server(&context, &host, &locate)
+            .status(session)
+            .unwrap();
+        assert_eq!(status.status, DebugServerStatus::Unverified);
+        assert_eq!(
+            status.reason,
+            Some(DebugServerStatusReason::UnsupportedOwner)
+        );
+        assert_eq!(status.url, None);
+        assert_eq!(status.infobase_alias, None);
+        let stopped = setup.stop(session, &host).unwrap();
         assert_eq!(stopped.action, DebugServerAction::NothingToStop);
         assert_eq!(stopped.owner, Some(DebugServerOwner::Cluster));
         assert_eq!(stopped.url, None, "the session keeps no stale address");

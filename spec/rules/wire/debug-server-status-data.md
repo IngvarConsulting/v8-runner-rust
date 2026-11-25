@@ -1,8 +1,9 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-STATUS-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/debug-server-status.schema.json
 check:
+  - src/use_cases/managed_stand/cluster.rs::cluster_debug_status_requires_the_same_registration_and_direct_listener
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_debug_server.rs::status_reports_an_unknown_session_without_waiting_for_the_work_path
   - src/platform/service/macos_listener.rs::macos_proves_only_an_exact_loopback_listener_held_by_the_pid
@@ -15,7 +16,7 @@ check:
 # `data` команды `debug-server status`
 
 `session` — идентификатор сеанса из вызова в нижнем регистре. `status` — результат
-проверки сеанса в текущей рабочей копии для файловой ИБ.
+проверки сеанса в текущей рабочей копии для файловой ИБ или ИБ управляемого кластера.
 
 - `ready` подтверждает записанные машину, PID и время запуска процесса, принадлежность
   ему loopback-порта и ответ `rdbg`. Идентичность процесса и владельца сокета проверяют
@@ -30,7 +31,15 @@ check:
   процесса (`process_unverified`), отсутствие доказательства принадлежности порта
   (`listener_unverified`) или ответа протокола (`rdbg_unavailable`).
 
-Проверка читает запись, ничего в ней не меняет, процессы не запускает и не завершает.
+Для управляемого кластера `ready` дополнительно требует совпадения зарегистрированного
+`Ref`, UUID кластера и регистрации ИБ, идентичности `ragent` и закреплённого порта.
+Слушатель должен быть дочерним `dbgs` этого `ragent`. После ответа `rdbg` раннер повторяет
+сверку регистрации и процесса. `pid` называет слушателя `dbgs`, а `infobase_alias` — `Ref`.
+Метки, выданные до привязки к регистрации, и наблюдения без подтверждённой принадлежности
+слушателя возвращают `unverified` без адреса.
+
+Проверка ничего не меняет в записи сеанса или кластере и не запускает или завершает
+службы. Для кластера запускается `rac` только на чтение регистрации.
 На macOS раннер убеждается, что записанному процессу принадлежит и слушатель, и
 принятый сокет конкретного запроса `rdbg`. Принятый сокет проверяется до запроса
 и после ответа по локальному и удалённому адресам, портам и идентификатору TCP-записи.
@@ -56,5 +65,17 @@ check:
   "status": "unverified",
   "reason": "rdbg_unavailable",
   "duration_ms": 2004
+}
+```
+
+```json
+{
+  "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+  "status": "ready",
+  "pid": 18752,
+  "port": 46497,
+  "url": "http://127.0.0.1:46497",
+  "infobase_alias": "registered-demo",
+  "duration_ms": 180
 }
 ```

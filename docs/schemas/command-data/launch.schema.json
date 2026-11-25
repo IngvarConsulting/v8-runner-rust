@@ -91,6 +91,13 @@
       "additionalProperties": false,
       "description": "Отладка, с которой запущен клиент: `/DEBUG -http -attach /DEBUGGERURL <url>`. Объект, а не\nстрока: так поле закреплено формой `launch` (`CTR.WIRE.LAUNCH-DATA`, версия 7).",
       "properties": {
+        "infobase_alias": {
+          "description": "Registered infobase name (Ref) for direct launches against a managed cluster.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
           "$ref": "#/$defs/DebuggerUrl",
           "description": "Адрес сервера отладки, как его получил клиент."

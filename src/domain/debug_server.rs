@@ -114,8 +114,7 @@ pub struct DebugServerResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<DebugServerOwner>,
     /// Имя базы, под которым отладчик видит её цели (`infoBaseAlias` запросов `rdbg`):
-    /// `DefAlias` у файловой базы, имя базы в сервере у автономного сервера. У сервера кластера
-    /// поля нет: не замерено.
+    /// `DefAlias` у файловой базы, имя базы в сервере у автономного сервера, `Ref` у кластера.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infobase_alias: Option<String>,
     /// Адрес для `/DEBUGGERURL` клиента и для отладчика: `http://127.0.0.1:<порт>`.
@@ -213,6 +212,6 @@ pub struct DebugServerStatusResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub infobase_alias: Option<&'static str>,
+    pub infobase_alias: Option<String>,
     pub duration_ms: u64,
 }

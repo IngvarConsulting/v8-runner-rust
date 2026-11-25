@@ -214,7 +214,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
-            debug: launch_debug(&launch),
+            debug: launch_debug(&launch, config, via),
         });
     }
 
@@ -297,7 +297,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait,
             client_wait,
-            debug: launch_debug(&launch),
+            debug: launch_debug(&launch, config, via),
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -337,7 +337,7 @@ fn run_launch(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
-            debug: launch_debug(&launch),
+            debug: launch_debug(&launch, config, via),
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -403,7 +403,7 @@ fn run_launch(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
-        debug: launch_debug(&launch),
+        debug: launch_debug(&launch, config, via),
     })
 }
 
@@ -706,7 +706,7 @@ fn execute_web(
             mcp_readiness: None,
             external_epf_wait: None,
             client_wait: None,
-            debug: launch_debug(&args.launch),
+            debug: launch_debug(&args.launch, config, LaunchVia::Web),
         });
     }
 
@@ -732,7 +732,7 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
         client_wait: None,
-        debug: launch_debug(&args.launch),
+        debug: launch_debug(&args.launch, config, LaunchVia::Web),
     })
 }
 
@@ -762,11 +762,23 @@ fn refuse_a_second_debugger(config: &AppConfig, launch: &LaunchOptions) -> Resul
 }
 
 /// Отладка в ответе — тот адрес, что получил клиент.
-fn launch_debug(launch: &LaunchOptions) -> Option<Box<crate::domain::launch::LaunchDebug>> {
-    launch
-        .debugger_url
-        .clone()
-        .map(|url| Box::new(crate::domain::launch::LaunchDebug { url }))
+fn launch_debug(
+    launch: &LaunchOptions,
+    config: &AppConfig,
+    via: LaunchVia,
+) -> Option<Box<crate::domain::launch::LaunchDebug>> {
+    let url = launch.debugger_url.clone()?;
+    let infobase_alias = config
+        .infobase
+        .cluster
+        .as_ref()
+        .filter(|cluster| cluster.managed.is_some() && via == LaunchVia::Connection)
+        .and_then(|_| config.v8_connection().cluster_address())
+        .map(|(_, reference)| reference);
+    Some(Box::new(crate::domain::launch::LaunchDebug {
+        url,
+        infobase_alias,
+    }))
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {
@@ -997,6 +1009,30 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         }
+    }
+
+    #[test]
+    fn direct_managed_cluster_debug_reports_the_registered_ref() {
+        use crate::domain::launch::{DebuggerUrl, LaunchVia};
+        use crate::domain::runner::LaunchOptions;
+
+        let path = std::path::Path::new(".");
+        let mut config = sample_config(path, path, path);
+        config.infobase_name = Some("origin".to_owned());
+        config.infobase.connection = "Srvr=127.0.0.1:24141;Ref=registered-demo".to_owned();
+        config.infobase.cluster =
+            Some(serde_yaml::from_str("managed: {name: registered-demo}").unwrap());
+        let launch = LaunchOptions {
+            debugger_url: DebuggerUrl::parse("http://127.0.0.1:24150"),
+            ..Default::default()
+        };
+        let reply = super::launch_debug(&launch, &config, LaunchVia::Connection).unwrap();
+        assert_eq!(reply.infobase_alias.as_deref(), Some("registered-demo"));
+        let via_web = super::launch_debug(&launch, &config, LaunchVia::Web).unwrap();
+        assert_eq!(via_web.infobase_alias, None);
+        config.infobase.cluster = None;
+        let external = super::launch_debug(&launch, &config, LaunchVia::Connection).unwrap();
+        assert_eq!(external.infobase_alias, None);
     }
 
     #[cfg(unix)]
