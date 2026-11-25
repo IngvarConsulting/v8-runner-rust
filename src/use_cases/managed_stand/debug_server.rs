@@ -10,6 +10,8 @@
 //! (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`). Гонку команд одного сеанса решает
 //! запись: её `starting` при живом запускающем — отказ «запускается».
 
+mod ensure;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -264,6 +266,12 @@ impl DebugServer<'_> {
         dry_run: bool,
     ) -> Result<DebugServerResult, UseCaseError> {
         self.check_owner(request.owner_pid)?;
+        let resolution = self.debug_resolution()?;
+        let session = DebugSession::new();
+        self.start_file_server(request, dry_run, resolution, session, None)
+    }
+
+    fn debug_resolution(&self) -> Result<PlatformResolution, UseCaseError> {
         let client = (self.locate_client)()?;
         let program = dbgs::beside(&client.path);
         if !program.is_file() {
@@ -277,19 +285,25 @@ impl DebugServer<'_> {
                 ),
             )));
         }
-        let resolution = PlatformResolution {
-            path: program.clone(),
+        Ok(PlatformResolution {
+            path: program,
             ..client
-        };
+        })
+    }
+
+    fn start_file_server(
+        &self,
+        request: DebugServerStart,
+        dry_run: bool,
+        resolution: PlatformResolution,
+        session: DebugSession,
+        scope: Option<ensure::EnsureScope>,
+    ) -> Result<DebugServerResult, UseCaseError> {
+        let protect_unidentified = scope.is_some();
+        let program = resolution.path.clone();
         let port = self.choose_port(request.port)?;
-        let mut result = empty(DebugServerAction::Planned);
-        result.owner = Some(DebugServerOwner::Runner);
-        result.owner_pid = request.owner_pid;
-        if let DebugPort::Exact(port) = port {
-            result.port = Some(port);
-        }
         let version = resolution.version.clone();
-        result.platform_resolution = Some(resolution);
+        let mut result = file_result(request, resolution);
         if dry_run {
             return Ok(result);
         }
@@ -298,9 +312,13 @@ impl DebugServer<'_> {
                 "the machine has no identifier: the runner could not tell its debug server from another process later",
             )));
         };
-        self.sweep();
-        let session = DebugSession::new();
+        if !protect_unidentified {
+            self.sweep();
+        }
         let paths = session_paths(self.config, session);
+        if let Some(scope) = scope {
+            self.record_debug_intent(&paths, scope, session)?;
+        }
         let notify = paths.root().join(NOTIFY);
         let launch = DebuggerLaunch {
             paths: &paths,
@@ -310,6 +328,7 @@ impl DebugServer<'_> {
             owner: request.owner_pid,
             machine,
             version,
+            protect_unidentified,
         };
         let SpawnedDebugger { mut record, pid } =
             match spawn_debugger(self.host, self.runner, self.context, launch) {
@@ -322,6 +341,12 @@ impl DebugServer<'_> {
                     forget(&paths);
                     return Err(error);
                 }
+                DebuggerSpawn::Uncertain(error) => {
+                    if !protect_unidentified {
+                        forget(&paths);
+                    }
+                    return Err(error);
+                }
             };
         let actual = self.await_ready(&paths, &record, pid, session, &notify, port)?;
         record.port = actual;
@@ -330,13 +355,7 @@ impl DebugServer<'_> {
         if let Err(error) = write_record(&paths, &record) {
             return Err(self.give_up(&paths, &record, session, error));
         }
-        result.action = DebugServerAction::Started;
-        result.session = Some(session);
-        result.port = Some(actual);
-        result.url = Some(dbgs::url(actual));
-        result.pid = Some(pid);
-        result.log_path = Some(paths.log());
-        result.infobase_alias = Some(FILE_ALIAS.to_owned());
+        complete_file_result(&mut result, &paths, session, pid, actual);
         Ok(result)
     }
 
@@ -381,10 +400,26 @@ impl DebugServer<'_> {
                     .is_none_or(|listener| listener == pid)
             })
         };
+        let protect = self.requires_confirmed_process_end(paths);
+        let probe = |port| {
+            if protect {
+                record.is_own(
+                    self.host.facts(pid).as_ref(),
+                    self.host.machine().as_deref(),
+                ) && self.host.debug_loopback_owner(pid, port)
+                    && self.host.debug_rdbg_answers(pid, port) == Some(true)
+            } else {
+                self.host.rdbg_answers(port)
+            }
+        };
         let alive = || {
-            self.host
-                .facts(pid)
-                .is_some_and(|facts| Some(facts.started) == record.started)
+            if protect {
+                !super::debug_process_ended(self.host, record, pid)
+            } else {
+                self.host
+                    .facts(pid)
+                    .is_some_and(|facts| Some(facts.started) == record.started)
+            }
         };
         match await_rdbg(
             self.host,
@@ -392,6 +427,7 @@ impl DebugServer<'_> {
             "waiting for the debug server",
             &named,
             &alive,
+            &probe,
         ) {
             RdbgWait::Ready(actual) => Ok(actual),
             RdbgWait::Gone => {
@@ -406,7 +442,12 @@ impl DebugServer<'_> {
                 let timeout = UseCaseError::new(
                     UseCaseErrorKind::TimedOut,
                     format!(
-                        "dbgs did not answer as a debug server in {} s",
+                        "dbgs did not {} in {} s",
+                        if protect {
+                            "provide a verified debug connection"
+                        } else {
+                            "answer as a debug server"
+                        },
                         DEBUG_READY_TIMEOUT.as_secs()
                     ),
                 );
@@ -512,11 +553,12 @@ impl DebugServer<'_> {
     ) -> Result<Option<(u32, u16)>, DebugServerStatusReason> {
         use DebugServerStatusReason as Reason;
 
-        match std::fs::symlink_metadata(paths.root()) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            _ => return Err(Reason::RecordUnavailable),
+        if !ensure::checked_session_directory(paths).map_err(|_| Reason::RecordUnavailable)? {
+            return Ok(None);
         }
+        let scope = self
+            .read_scope(paths)
+            .map_err(|_| Reason::RecordUnavailable)?;
         let read_record = || {
             let marker = paths.root().join(STAND_SESSION);
             match std::fs::symlink_metadata(marker) {
@@ -524,11 +566,10 @@ impl DebugServer<'_> {
                 Ok(_) => return Err(Reason::UnsupportedOwner),
                 Err(_) => return Err(Reason::RecordUnavailable),
             }
-            let path = paths.record();
-            if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
-                return Err(Reason::RecordUnavailable);
-            }
-            read_json::<ServiceRecord>(&path).ok_or(Reason::RecordUnavailable)
+            ensure::read_state_file::<ServiceRecord>(&paths.record())
+                .ok()
+                .flatten()
+                .ok_or(Reason::RecordUnavailable)
         };
         let record = read_record()?;
         if record.state == RecordState::Starting {
@@ -575,7 +616,7 @@ impl DebugServer<'_> {
         }
         verify_listener()?;
         verify_process()?;
-        if read_record().as_ref() != Ok(&record) {
+        if read_record().as_ref() != Ok(&record) || self.read_scope(paths).ok() != Some(scope) {
             return Err(Reason::RecordChanged);
         }
         Ok(Some((pid, port)))
@@ -588,7 +629,12 @@ impl DebugServer<'_> {
     ) -> Result<DebugServerResult, UseCaseError> {
         let started = Instant::now();
         let paths = session_paths(self.config, session);
-        let mut result = self.stop_session(&paths, dry_run)?;
+        let guard = self.lock_ensured_session(&paths, dry_run)?;
+        let mut result = if guard.is_some() {
+            self.stop_ensured_session(&paths)?
+        } else {
+            self.stop_session(&paths, dry_run)?
+        };
         result.session = Some(session);
         result.duration_ms = crate::support::time::elapsed_ms(started);
         Ok(result)
@@ -683,6 +729,7 @@ impl DebugServer<'_> {
     ///   `start`;
     /// - метки сеансов стенда и журналы неудачных попыток старше [`KEPT`] снимаются.
     fn sweep(&self) {
+        self.sweep_ensured_sessions();
         let root = sessions_root(self.config);
         let Ok(entries) = std::fs::read_dir(&root) else {
             return;
@@ -700,6 +747,9 @@ impl DebugServer<'_> {
                 continue;
             };
             let paths = session_paths(self.config, session);
+            if self.requires_confirmed_process_end(&paths) {
+                continue;
+            }
             if stand_session(&paths).is_some() {
                 if age(paths.root()).is_some_and(|age| age > KEPT) {
                     forget(&paths);
@@ -728,6 +778,20 @@ impl DebugServer<'_> {
             forget(paths);
             return true;
         };
+        let protect = self.requires_confirmed_process_end(paths);
+        if protect {
+            let machine = self.host.machine();
+            if machine.is_none() || record.machine != machine {
+                return false;
+            }
+            if super::debug_process_ended(self.host, record, pid) {
+                forget(paths);
+                return true;
+            }
+            if !record.is_own(self.host.facts(pid).as_ref(), machine.as_deref()) {
+                return false;
+            }
+        }
         let gone = stop_confirmed(
             self.host,
             self.runner,
@@ -735,7 +799,7 @@ impl DebugServer<'_> {
             pid,
             record.started,
             Duration::ZERO,
-        );
+        ) && (!protect || super::debug_process_ended(self.host, record, pid));
         if gone {
             forget(paths);
         }
@@ -758,6 +822,39 @@ fn stand_session(paths: &ServicePaths) -> Option<DebugServerOwner> {
 /// Снимает сеанс целиком: запись, файл адреса и журнал.
 fn forget(paths: &ServicePaths) {
     let _ = std::fs::remove_dir_all(paths.root());
+}
+
+fn file_result(request: DebugServerStart, resolution: PlatformResolution) -> DebugServerResult {
+    let mut result = empty(DebugServerAction::Planned);
+    result.owner = Some(DebugServerOwner::Runner);
+    result.owner_pid = request.owner_pid;
+    result.port = request.port;
+    result.platform_resolution = Some(resolution);
+    result
+}
+
+pub(super) fn failed_ensure(request: DebugServerStart) -> DebugServerResult {
+    let mut result = empty(DebugServerAction::Failed);
+    result.ok = false;
+    result.owner = Some(DebugServerOwner::Runner);
+    result.owner_pid = request.owner_pid;
+    result
+}
+
+fn complete_file_result(
+    result: &mut DebugServerResult,
+    paths: &ServicePaths,
+    session: DebugSession,
+    pid: u32,
+    port: u16,
+) {
+    result.action = DebugServerAction::Started;
+    result.session = Some(session);
+    result.port = Some(port);
+    result.url = Some(dbgs::url(port));
+    result.pid = Some(pid);
+    result.log_path = Some(paths.log());
+    result.infobase_alias = Some(FILE_ALIAS.to_owned());
 }
 
 fn empty(action: DebugServerAction) -> DebugServerResult {
@@ -841,6 +938,7 @@ mod tests {
         never_answers: Cell<bool>,
         replace_listener_during_probe: Cell<bool>,
         process_inaccessible: Cell<bool>,
+        proof_unavailable: Cell<bool>,
         /// Порт из файла адреса слушает чужой процесс.
         foreign_listener: Cell<bool>,
         /// Порт, который захватывает чужой процесс между проверкой и запуском.
@@ -873,6 +971,10 @@ mod tests {
     }
 
     impl ServiceHost for Host {
+        fn can_confirm_debug_endpoint(&self) -> bool {
+            true
+        }
+
         fn supported(&self) -> bool {
             false
         }
@@ -948,7 +1050,7 @@ mod tests {
             self.listeners.borrow().get(&port).copied()
         }
         fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
-            self.listening_pid(port) == Some(pid)
+            !self.proof_unavailable.get() && self.listening_pid(port) == Some(pid)
         }
         fn debug_process_gone(&self, pid: u32) -> bool {
             !self.process_inaccessible.get() && !self.alive(pid)
@@ -1150,6 +1252,187 @@ mod tests {
     }
 
     /// Приёмка 1: успех — адрес, который ответил по `rdbg`, из установки клиента.
+    fn ensure_request() -> DebugServerStart {
+        DebugServerStart {
+            owner_pid: Some(OWNER),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ensure_reuses_and_recovers_its_own_debug_server() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let ctx = context();
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let again = server.ensure(ensure_request(), false).unwrap();
+        assert_eq!(again.action, DebugServerAction::Reused);
+        assert_eq!(again.session, first.session);
+        assert_eq!(again.pid, first.pid);
+        assert_eq!(host.spawned.get(), 1);
+
+        // The old port now leads to another endpoint. The old process can
+        // still be identified independently, so it can be retired safely.
+        let previous_port = first.port.unwrap();
+        host.listeners.borrow_mut().insert(previous_port, 4242);
+        let replacement = server.ensure(ensure_request(), false).unwrap();
+        assert_eq!(replacement.action, DebugServerAction::Started);
+        assert_ne!(replacement.session, first.session);
+        assert_ne!(replacement.port, first.port);
+        assert!(host.soft_stops.borrow().contains(&PID));
+        assert_eq!(host.spawned.get(), 2);
+        assert_eq!(host.listening_pid(previous_port), Some(4242));
+        let old = server.stop(first.session.unwrap(), false).unwrap();
+        assert_eq!(old.known_session, Some(false));
+        assert_eq!(
+            server.status(replacement.session.unwrap()).unwrap().status,
+            DebugServerStatus::Ready
+        );
+    }
+
+    #[test]
+    fn ensure_keeps_unidentified_attempts_instead_of_starting_duplicates() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let paths = session_paths(&setup.config, first.session.unwrap());
+        let mut record = read_json::<ServiceRecord>(&paths.record()).unwrap();
+        record.state = RecordState::Starting;
+        record.pid = None;
+        write_record(&paths, &record).unwrap();
+        assert!(server.ensure(ensure_request(), false).is_err());
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+        assert_eq!(read_json::<ServiceRecord>(&paths.record()), Some(record));
+    }
+
+    #[test]
+    fn copying_ensured_state_does_not_grant_access_to_its_live_server() {
+        let mut setup = setup();
+        let host = Host::with_owner();
+        let ctx = context();
+        let original = {
+            let locate = || Ok(setup.resolution());
+            setup
+                .server(&ctx, &host, &locate)
+                .ensure(ensure_request(), false)
+                .unwrap()
+        };
+        let session = original.session.unwrap();
+        let old_paths = session_paths(&setup.config, session);
+        setup.config.work_path = setup.config.base_path.join("different-work");
+        let copied_paths = session_paths(&setup.config, session);
+        std::fs::create_dir_all(copied_paths.root()).unwrap();
+        for entry in std::fs::read_dir(old_paths.root()).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), copied_paths.root().join(entry.file_name())).unwrap();
+        }
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        let status = server.status(session).unwrap();
+        assert_eq!(status.status, DebugServerStatus::Unverified);
+        assert_eq!(status.url, None);
+        assert!(server.stop(session, false).is_err());
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(host.alive(PID));
+    }
+
+    #[test]
+    fn ensure_reuses_a_live_session_with_a_missing_or_dangling_index() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let root = sessions_root(&setup.config).join("ensure");
+        let index = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        std::fs::remove_file(&index).unwrap();
+        for dangling in [false, true] {
+            if dangling {
+                write_json(&index, &DebugSession::new()).unwrap();
+            }
+            let reused = server.ensure(ensure_request(), false).unwrap();
+            assert_eq!(reused.session, first.session);
+            assert_eq!(reused.pid, first.pid);
+            assert_eq!(reused.action, DebugServerAction::Reused);
+            assert_eq!(read_json::<DebugSession>(&index), first.session);
+        }
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_preserves_a_session_with_a_missing_process_record() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let paths = session_paths(&setup.config, first.session.unwrap());
+        std::fs::remove_file(paths.record()).unwrap();
+        assert!(server.ensure(ensure_request(), false).is_err());
+        assert!(server.stop(first.session.unwrap(), false).is_err());
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(paths.root().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_never_repairs_a_symlinked_record() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let first = server.ensure(ensure_request(), false).unwrap();
+        let paths = session_paths(&setup.config, first.session.unwrap());
+        let target = setup.config.base_path.join("foreign.json");
+        std::fs::rename(paths.record(), &target).unwrap();
+        std::os::unix::fs::symlink(&target, paths.record()).unwrap();
+
+        assert!(server.ensure(ensure_request(), false).is_err());
+        assert!(server.stop(first.session.unwrap(), false).is_err());
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(host.alive(PID));
+        assert!(std::fs::symlink_metadata(paths.record())
+            .unwrap()
+            .is_symlink());
+    }
+
+    #[test]
+    fn ensure_cleans_up_a_new_server_without_a_verified_connection() {
+        let setup = setup();
+        let host = Host::with_owner();
+        host.proof_unavailable.set(true);
+        let locate = || Ok(setup.resolution());
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        let error = server.ensure(ensure_request(), false).unwrap_err();
+        assert!(
+            error.to_string().contains("verified debug connection"),
+            "{error}"
+        );
+        assert_eq!(host.spawned.get(), 1);
+        assert!(!host.alive(PID));
+        assert!(setup
+            .sessions()
+            .into_iter()
+            .all(|name| name.parse::<DebugSession>().is_err()));
+    }
+
     #[test]
     fn start_answers_with_the_address_that_answered_as_a_debug_server() {
         let setup = setup();

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-START-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/debug-server-start.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -11,11 +11,20 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::a_standalone_infobase_gets_the_debug_server_of_the_server
   - src/use_cases/managed_stand/standalone.rs::the_debug_server_of_the_standalone_server_needs_a_debug_start
   - src/use_cases/managed_stand/debug_server.rs::a_preview_starts_and_writes_nothing
+  - src/use_cases/managed_stand/debug_server.rs::ensure_reuses_and_recovers_its_own_debug_server
+  - src/use_cases/managed_stand/debug_server.rs::ensure_cleans_up_a_new_server_without_a_verified_connection
+  - src/use_cases/managed_stand/debug_server.rs::ensure_keeps_unidentified_attempts_instead_of_starting_duplicates
+  - src/use_cases/managed_stand/debug_server.rs::ensure_never_repairs_a_symlinked_record
+  - src/use_cases/managed_stand/debug_server.rs::ensure_preserves_a_session_with_a_missing_process_record
+  - src/use_cases/managed_stand/debug_server.rs::copying_ensured_state_does_not_grant_access_to_its_live_server
 ---
 
 # `data` команды `debug-server start`
 
-`action`: `started` или `planned` в превью. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
+`action`: `started` при запуске, `reused` при переиспользовании через `--ensure`,
+`planned` в превью. Если попытка `--ensure` с передачей работы исполнителю
+завершилась ошибкой, ответ содержит `ok: false`, `action: failed` и причину
+в конверте. Адрес в таком ответе отсутствует. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
 файловой базы, `cluster` — сервер отладки управляемого кластера базы (с HTTP-отладкой, Windows и Linux),
 `standalone` — `dbgs` управляемого автономного сервера базы (`standalone start --debug`, Windows).
 `url` — адрес для `/DEBUGGERURL` клиента и для отладчика, `http://127.0.0.1:<порт>`; `port` — тот же порт.
@@ -27,6 +36,23 @@ check:
 (`--owner-pid`), `platform_resolution` — путь `dbgs` и установка тонкого клиента, из которой он взят, и `log_path`
 — журнал сервера. У `owner: cluster` и `owner: standalone` процесса раннера нет, и этих полей тоже; ключи `--port`
 и `--owner-pid` к серверу стенда не применяются, о чём говорит `warnings` конверта.
+
+## Автоматическое восстановление
+
+`debug-server start --ensure --owner-pid <PID>` готовит сервер файловой базы
+на Windows и macOS. Он принимает автоматически выбранный порт. Сеанс
+принадлежит рабочей копии, файловой базе и живому владельцу с тем же временем
+запуска. Повторный запрос возвращает его токен и PID, если подтверждены
+процесс, принадлежность адреса и ответ `rdbg`. При повторном отказе проверки
+раннер останавливает ранее опознанный собственный процесс, подтверждает
+остановку и пробует запустить замену. Если записанный процесс уже завершился
+или его PID занял другой, раннер запускает замену без сигнала этому PID.
+Новый адрес возвращается только после проверки готовности. Замена получает
+другой токен и свободный порт. Запросы к одному сеансу сериализуются раннером.
+
+Повреждённая запись или недоступная идентичность процесса не дают права
+остановить его или создать дубль. Обычный `start` создаёт отдельный сеанс
+при каждом вызове.
 
 ## Пример
 

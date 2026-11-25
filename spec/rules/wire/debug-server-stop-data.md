@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-STOP-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/debug-server-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -16,7 +16,9 @@ check:
 `action`: `stopped`, `nothing_to_stop` или `planned` в превью; `session` — сеанс из вызова в нижнем регистре
 (верхний регистр в вызове — тот же сеанс; иное, чем 32 шестнадцатеричных знака, отвергает разбор ключей). `known_session: false`
 — этой рабочей копии сеанс неизвестен: он уже остановлен, или его запустили из другой рабочей копии; раннер ничего
-не трогает. Повторный `stop` того же сеанса отвечает так же. `stopped_pid` — остановленный `dbgs`. `stale_record`
+не трогает. Повторный `stop` того же сеанса отвечает так же. При автоматической
+замене `start --ensure` выдаёт новый токен, поэтому остановка по старому токену
+не затрагивает замену. `stopped_pid` — остановленный `dbgs`. `stale_record`
 говорит, что запись была, а процесса из неё уже нет: сервер вышел сам, например с концом владельца, или его pid занял
 другой процесс, которого раннер не трогает. У сеанса сервера стенда (`owner: cluster` или `owner: standalone`)
 `action` — `nothing_to_stop`: сервер отладки живёт со своим кластером или автономным сервером, `stop` снимает

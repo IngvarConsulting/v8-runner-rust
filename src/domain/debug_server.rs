@@ -85,13 +85,16 @@ pub enum DebugServerOwner {
     Standalone,
 }
 
-/// Что сделала команда `debug-server`. Сервер отладки не бывает «уже работающим» и не
-/// стартует повторно: каждый `start` создаёт отдельный сеанс.
+/// Что сделала команда `debug-server`. Обычный `start` создаёт отдельный сеанс.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugServerAction {
     /// `start`: сервер отвечает, сеанс записан.
     Started,
+    /// `start --ensure`: существующий сеанс подтвердил готовность.
+    Reused,
+    /// `start --ensure`: the attempt failed after work was dispatched.
+    Failed,
     /// `stop`: свой `dbgs` сеанса остановлен.
     Stopped,
     /// `stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.
@@ -103,7 +106,7 @@ pub enum DebugServerAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DebugServerResult {
     pub ok: bool,
-    /// `started` или `planned` у `start`; `stopped`, `nothing_to_stop` или `planned` у `stop`.
+    /// Исход запуска, восстановления или остановки.
     pub action: DebugServerAction,
     /// Сеанс: его передают в `debug-server stop`. У предварительного просмотра `start` его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]

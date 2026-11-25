@@ -818,6 +818,7 @@ impl Server<'_> {
             owner: Some(owner),
             machine,
             version: None,
+            protect_unidentified: false,
         };
         let SpawnedDebugger { mut record, pid } =
             match spawn_debugger(self.host, self.runner, self.context, launch) {
@@ -825,7 +826,9 @@ impl Server<'_> {
                 DebuggerSpawn::ExitedAtOnce => {
                     return Err(self.debugger_not_ready("dbgs exited as soon as it started"))
                 }
-                DebuggerSpawn::Failed(error) => return Err(error),
+                DebuggerSpawn::Failed(error) | DebuggerSpawn::Uncertain(error) => {
+                    return Err(error)
+                }
             };
         let alive = || {
             self.host
@@ -846,6 +849,7 @@ impl Server<'_> {
             "waiting for the debug server of ibsrv",
             &ours,
             &alive,
+            &|port| self.host.rdbg_answers(port),
         ) {
             RdbgWait::Ready(_) => {
                 record.state = RecordState::Running;
@@ -1077,6 +1081,7 @@ pub(super) fn debug_server(
         "waiting for the debug server of the standalone server",
         &ours,
         &alive,
+        &|port| host.rdbg_answers(port),
     );
     let infobase_alias = Some(pinned.name.unwrap_or_else(|| server.declared.name.clone()));
     match wait {
