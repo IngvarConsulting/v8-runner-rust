@@ -13,6 +13,11 @@
       },
       "type": "object"
     },
+    "DebuggerUrl": {
+      "description": "Адрес сервера отладки: http://<хост>:<порт>.",
+      "pattern": "^http://.+:[0-9]+$",
+      "type": "string"
+    },
     "DesignerAgentSchema": {
       "additionalProperties": false,
       "properties": {
@@ -436,6 +441,17 @@
             "string",
             "null"
           ]
+        },
+        "debugger-url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DebuggerUrl"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Direct HTTP debugger address used by the publication and web client."
         },
         "dir": {
           "description": "Physical directory the publication is written to (`webinst -dir`); must exist.",

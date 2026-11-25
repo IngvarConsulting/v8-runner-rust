@@ -94,6 +94,11 @@ fn parse_notify(bytes: &[u8]) -> Option<u16> {
 /// (404) или запрос без `Content-Type: application/xml` (406) готовности не подтверждают.
 /// Прокси окружения не участвует: адрес — петля.
 pub fn rdbg_answers(port: u16) -> bool {
+    probe_rdbg(&url(port))
+}
+
+/// Probe the direct HTTP address using the same read-only request as local dbgs readiness.
+pub(crate) fn probe_rdbg(address: &str) -> bool {
     // Один клиент на процесс: ожидание опрашивает сервер каждые 200 мс, а клиент `blocking`
     // держит свой поток с рантаймом.
     static CLIENT: std::sync::OnceLock<Option<reqwest::blocking::Client>> =
@@ -111,10 +116,7 @@ pub fn rdbg_answers(port: u16) -> bool {
     else {
         return false;
     };
-    let url = format!(
-        "http://{}:{port}/e1crdbg/rdbg?cmd=getDbgTargets",
-        Ipv4Addr::LOCALHOST
-    );
+    let url = format!("{address}/e1crdbg/rdbg?cmd=getDbgTargets");
     let Ok(response) = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/xml")

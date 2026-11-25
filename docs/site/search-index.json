@@ -2547,7 +2547,7 @@
     "url": "cli-web-publish.html#publish-preview",
     "page": "web publish",
     "section": "web publish --dry-run",
-    "text": "web publish --dry-run v8-runner web publish --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция. Требуются параметры управления web.server , wsdir и dir ; одного web.url недостаточно. --delete удаляет публикацию."
+    "text": "web publish --dry-run v8-runner web publish --dry-run Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без --dry-run выполняется указанная операция. Требуются параметры управления web.server , wsdir и dir ; одного web.url недостаточно. --delete удаляет публикацию. web publish --prepare-debug <IDE_URL> готовит HTTP-отладку управляемой публикации или проверяет дескриптор и маршрут на хосте внешней. Ответ сообщает адрес для IDE и адрес для веб-клиента. Подключите отладчик перед открытием браузера ."
   },
   {
     "url": "cli-web-publish.html#publish-example-outcome",
@@ -2601,7 +2601,7 @@
     "url": "cli-launch.html#launch-variant-2",
     "page": "launch",
     "section": "launch web",
-    "text": "launch web v8-runner launch web открывает опубликованную базу в браузере"
+    "text": "launch web v8-runner launch web открывает опубликованную базу в браузере Для отладки выполните web publish --prepare-debug <IDE_URL> , подключите отладчик IDE и включите приём WEBClient . Затем запустите launch web --web-debug <DEBUGGER_URL> с data.debug.debugger_url из подготовки. Раннер добавляет Debug=http,attach и DebuggerURL в адрес веб-клиента."
   },
   {
     "url": "cli-launch.html#launch-variant-2-outcome",

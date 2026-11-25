@@ -914,6 +914,25 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 
 ### `debug-server`
 
+Веб-клиент запускается в два шага. Выполните `web publish --prepare-debug <IDE_URL>`,
+подключите отладчик IDE по `data.debug.ide_url` и включите автоподключение `WEBClient`.
+Затем выполните `launch web --web-debug <DEBUGGER_URL>` с адресом `data.debug.debugger_url`.
+Раннер сохраняет путь, параметры и фрагмент URL публикации и добавляет `Debug=http,attach`
+и `DebuggerURL`. Обычный `launch web` открывает исходный URL.
+
+- Управляемый Apache получает параметр `debug` в `default.vrd` из `infobase.web.debugger-url`.
+  При неизменной настройке повторная подготовка обходится без перезагрузки. Повторный `publish`
+  снова включает настройку.
+- Встроенная публикация управляемого `ibsrv` использует URL из `standalone start --debug`.
+- Для внешней публикации запустите подготовку на хосте веб-сервера. Укажите `infobase.web.dir`
+  с действующим `default.vrd`, `infobase.web.url` для браузера и `infobase.web.debugger-url`
+  для прямой проверки `rdbg`. Ответ `external_route_verified` подтверждает файл и сетевой
+  маршрут с этого хоста. Владелец внешнего сервера включает HTTP-отладку и активирует изменения.
+  Для повторной внешней публикации с отладкой он использует `webinst -descriptor`.
+- `data.debug.state: route_unavailable` позволяет IDE показать причину и действие отдельно.
+  Результат запуска браузера подтверждает передачу URL системному обработчику. Подключение
+  `WEBClient` и остановку на точке проверяет отладчик.
+
 ```text
 v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
 v8-runner debug-server status <SESSION>

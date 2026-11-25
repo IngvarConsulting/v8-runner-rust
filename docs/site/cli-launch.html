@@ -109,6 +109,7 @@ ERROR: runtime error: MCP endpoint did not become ready</code></pre>
 <h2 class="command-variant" id="launch-variant-2">launch web</h2>
 <pre data-output-command><code>v8-runner launch web</code></pre>
 <p>открывает опубликованную базу в браузере</p>
+<p>Для отладки выполните <code>web publish --prepare-debug &lt;IDE_URL&gt;</code>, подключите отладчик IDE и включите приём <code>WEBClient</code>. Затем запустите <code>launch web --web-debug &lt;DEBUGGER_URL&gt;</code> с <code>data.debug.debugger_url</code> из подготовки. Раннер добавляет <code>Debug=http,attach</code> и <code>DebuggerURL</code> в адрес веб-клиента.</p>
 <h3>Варианты ответа</h3>
 <h4 id="launch-variant-2-outcome">Операция завершилась успешно</h4>
 <p>Фрагмент успешного текстового ответа:</p>

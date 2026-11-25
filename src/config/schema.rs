@@ -747,6 +747,13 @@ struct InfobaseWebSchema {
     /// Address a client or a browser opens the infobase at; `launch web` uses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    /// Direct HTTP debugger address used by the publication and web client.
+    #[serde(
+        default,
+        rename = "debugger-url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    debugger_url: Option<crate::domain::launch::DebuggerUrl>,
 }
 
 /// The cluster section of a server infobase: three credential levels lie side by side in

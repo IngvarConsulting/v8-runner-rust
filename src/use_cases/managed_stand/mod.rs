@@ -7,7 +7,7 @@ mod recreate;
 mod standalone;
 mod web;
 pub use web::{execute_web, web_status, WebCommand};
-pub(crate) use web::{publication, ManagedPublication, Reload};
+pub(crate) use web::{managed_publication_url, publication, ManagedPublication};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
@@ -1563,6 +1563,33 @@ pub fn standalone_status(
         &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
+}
+
+pub(crate) fn standalone_publishes_its_own_web_client(config: &AppConfig) -> bool {
+    config
+        .infobase
+        .standalone
+        .as_ref()
+        .is_some_and(|server| server.managed.is_some())
+        && config
+            .infobase
+            .web
+            .as_ref()
+            .is_none_or(|web| web.dir.is_none())
+}
+
+pub(crate) fn standalone_web_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> Result<crate::domain::standalone::StandaloneResult, UseCaseError> {
+    let mut status = standalone_status(context, config).map_err(|failure| failure.error)?;
+    // The managed ibsrv sets no --http-base. Its built-in page is served at /.
+    status.http = status.http.as_deref().and_then(|address| {
+        let mut url = url::Url::parse(address).ok()?;
+        url.set_path("/");
+        Some(url.into())
+    });
+    Ok(status)
 }
 
 fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {
