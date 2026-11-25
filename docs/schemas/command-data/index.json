@@ -52,6 +52,9 @@
     "debug-server start": [
       "debug-server-start"
     ],
+    "debug-server status": [
+      "debug-server-status"
+    ],
     "debug-server stop": [
       "debug-server-stop"
     ],

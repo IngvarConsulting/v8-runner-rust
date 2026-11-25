@@ -220,6 +220,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "web publish",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "web start",
         preview: Preview::Runs,
         base: Base::Resolves,
@@ -242,6 +247,11 @@ const LEAVES: &[Leaf] = &[
     Leaf {
         path: "debug-server start",
         preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "debug-server status",
+        preview: Preview::Absent("it starts nothing: the answer is the observed session state"),
         base: Base::Resolves,
     },
     Leaf {

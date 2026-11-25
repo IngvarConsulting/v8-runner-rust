@@ -15,6 +15,7 @@ check:
   - src/use_cases/managed_stand/web.rs::webinst_comes_from_the_platform_search_not_from_the_cluster_record
   - src/use_cases/managed_stand/web.rs::status_marks_the_publication_stale_after_the_regport_moves
   - src/use_cases/managed_stand/web.rs::a_preview_with_apache_stopped_names_the_pinned_address_and_writes_nothing
+  - src/use_cases/managed_stand/web.rs::web_debug_preparation_edits_only_the_descriptor_and_reuses_it_on_repeat
 ---
 
 # Частный Apache именованной базы
@@ -31,3 +32,9 @@ check:
 возвращает конфиг и `default.vrd`, и Apache работает на прежнем конфиге. Превью
 `publish` при остановленном Apache называет закреплённый адрес и ничего не пишет.
 После переноса `regport` статус отмечает устаревшую публикацию.
+
+Явная подготовка HTTP-отладки меняет только элемент `debug` в `default.vrd` и активирует
+его тем же механизмом Apache с откатом. Готовая публикация с тем же адресом отладки
+не перезагружается. Отметка незавершённой активации убирается после успешной перезагрузки,
+а повтор подготовки завершает активацию после прерывания. При обычном `publish` настройка
+из `infobase.web.debugger-url` снова входит в дескриптор до активации.

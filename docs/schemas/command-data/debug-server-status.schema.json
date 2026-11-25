@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "DebugServerStatus": {
+      "description": "Read-only observation of a recorded file-infobase debug server.",
+      "enum": [
+        "ready",
+        "unknown",
+        "stale",
+        "unverified"
+      ],
+      "type": "string"
+    },
+    "DebugServerStatusReason": {
+      "enum": [
+        "process_changed",
+        "process_gone",
+        "record_unavailable",
+        "starting",
+        "unsupported_owner",
+        "process_unverified",
+        "listener_unverified",
+        "rdbg_unavailable",
+        "record_changed"
+      ],
+      "type": "string"
+    },
+    "DebugSession": {
+      "description": "Сеанс сервера отладки: его передают в `debug-server stop`.",
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/debug-server-status.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "infobase_alias": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "port": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DebugServerStatusReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session": {
+      "$ref": "#/$defs/DebugSession"
+    },
+    "status": {
+      "$ref": "#/$defs/DebugServerStatus"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session",
+    "status",
+    "duration_ms"
+  ],
+  "title": "DebugServerStatusResult",
+  "type": "object"
+}

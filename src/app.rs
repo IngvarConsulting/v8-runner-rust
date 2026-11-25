@@ -32,7 +32,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 fn canonical_command(command: Command) -> Command {
     use crate::cli::args::{
         ConfigArgs, ConfigCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationArgs,
-        InfobaseConfigurationCommand,
+        InfobaseConfigurationCommand, WebArgs, WebCommandArgs,
     };
     match command {
         Command::ConfigInit(args) => Command::Config(ConfigArgs {
@@ -48,6 +48,16 @@ fn canonical_command(command: Command) -> Command {
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Create(args),
         }) => Command::Init(args),
+        Command::Web(WebArgs {
+            command:
+                WebCommandArgs::Publish {
+                    mut publish,
+                    prepare_debug,
+                },
+        }) => {
+            publish.prepare_debug = prepare_debug;
+            Command::Publish(publish)
+        }
         command => command,
     }
 }

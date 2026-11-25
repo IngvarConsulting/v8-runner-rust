@@ -289,7 +289,7 @@ pub fn execute_command(
         ),
         Command::Web(args) => execute_web(
             config,
-            args.command,
+            web_service_command(&args.command),
             command_line,
             presenter,
             clean_before_execution,
@@ -637,6 +637,12 @@ fn execute_publish(
         } else {
             PublishAction::Publish
         },
+        prepare_debug: args
+            .prepare_debug
+            .as_deref()
+            .map(|url| parse_debugger_url(url, "--prepare-debug"))
+            .transpose()
+            .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Publish, error))?,
         dry_run,
     };
     let context = cli_context(config, CommandName::Publish, cancellation);
@@ -732,9 +738,10 @@ fn render_publish_text(
     succeeded: bool,
     requested: Requested,
 ) {
-    let verb = match result.action {
-        crate::domain::publish::PublishAction::Publish => "Publication",
-        crate::domain::publish::PublishAction::Delete => "Publication removal",
+    let verb = match (result.action, result.debug.is_some()) {
+        (_, true) => "Web debug preparation",
+        (crate::domain::publish::PublishAction::Publish, false) => "Publication",
+        (crate::domain::publish::PublishAction::Delete, false) => "Publication removal",
     };
     // «Запланировано» — не стандартный исход, у него своя подпись. Превью называет запрос:
     // `provider_dispatched` говорит о работе исполнителя, а не о превью.
@@ -747,6 +754,12 @@ fn render_publish_text(
     ];
     if let Some(url) = result.url.as_deref() {
         details.push(format!("url: {url}"));
+    }
+    if let Some(debug) = &result.debug {
+        details.push(format!("IDE debugger: {}", debug.ide_url));
+        if let Some(url) = &debug.debugger_url {
+            details.push(format!("publication debugger: {url}"));
+        }
     }
     if !result.provider_dispatched {
         details.push("provider dispatched: false".to_owned());
@@ -819,6 +832,9 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::DebugServer(args) => match args.command {
             crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
+            crate::cli::args::DebugServerCommandArgs::Status { .. } => {
+                CommandName::DebugServerStatus
+            }
             crate::cli::args::DebugServerCommandArgs::Stop { .. } => CommandName::DebugServerStop,
         },
         Command::Dbms(args) => match args.command {
@@ -827,7 +843,7 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
         },
-        Command::Web(args) => match args.command {
+        Command::Web(args) => match web_service_command(&args.command) {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::WebStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::WebStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::WebStop,
@@ -1620,6 +1636,17 @@ fn execute_dbms(
     )
 }
 
+fn web_service_command(
+    args: &crate::cli::args::WebCommandArgs,
+) -> crate::cli::args::ServiceCommandArgs {
+    match args {
+        crate::cli::args::WebCommandArgs::Service(action) => *action,
+        crate::cli::args::WebCommandArgs::Publish { .. } => {
+            unreachable!("web publish is normalised in canonical_command")
+        }
+    }
+}
+
 fn execute_web(
     config: &AppConfig,
     action: crate::cli::args::ServiceCommandArgs,
@@ -1811,7 +1838,7 @@ fn execute_standalone(
     )
 }
 
-/// `debug-server start|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// `debug-server start|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
 /// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
 fn execute_debug_server(
     config: &AppConfig,
@@ -1822,11 +1849,12 @@ fn execute_debug_server(
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::DebugServerCommandArgs as Action;
     use crate::use_cases::managed_stand::{
-        debug_server_start, debug_server_stop, DebugServerStart,
+        debug_server_start, debug_server_status, debug_server_stop, DebugServerStart,
     };
 
     let name = match action {
         Action::Start { .. } => CommandName::DebugServerStart,
+        Action::Status { .. } => CommandName::DebugServerStatus,
         Action::Stop { .. } => CommandName::DebugServerStop,
     };
     let context = cli_context(config, name, cancellation);
@@ -1837,6 +1865,45 @@ fn execute_debug_server(
             DebugServerStart { port, owner_pid },
             dry_run,
         ),
+        Action::Status { session } => match debug_server_status(&context, config, session) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        name.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    let status = result.status.as_str();
+                    presenter.print_bare(&format!("{}: {status}", name.as_str()));
+                    if let Some(reason) = result.reason {
+                        presenter.print_bare(&format!("reason: {}", reason.as_str()));
+                    }
+                    if let Some(url) = result.url {
+                        presenter.print_bare(&format!("url: {url}"));
+                    }
+                    if let Some(pid) = result.pid {
+                        presenter.print_bare(&format!("pid: {pid}"));
+                    }
+                }
+                return Ok(());
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    print_failure(
+                        presenter,
+                        name,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    presenter.print_error(&error.to_string());
+                }
+                return Err(error);
+            }
+        },
         Action::Stop { session } => debug_server_stop(&context, config, session, dry_run),
     };
     match outcome {
@@ -5158,7 +5225,17 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         None
     };
     let mut launch = map_direct_launch_options(target, &args.launch, client_mcp.is_some())?;
-    launch.debugger_url = map_launch_debug(target, args.debug.as_deref())?;
+    launch.debugger_url = if let Some(url) = args.web_debug.as_deref() {
+        if target != crate::use_cases::request::LaunchTargetRequest::Web {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--web-debug is supported only for `launch web`",
+            ));
+        }
+        Some(parse_debugger_url(url, "--web-debug")?)
+    } else {
+        map_launch_debug(target, args.debug.as_deref())?
+    };
     Ok(LaunchRequest {
         target,
         launch,
@@ -5197,13 +5274,20 @@ fn map_launch_debug(
         }
         LaunchTargetRequest::Enterprise(_) => {}
     }
-    match crate::domain::launch::DebuggerUrl::parse(url) {
-        Some(parsed) => Ok(Some(parsed)),
+    parse_debugger_url(url, "--debug").map(Some)
+}
+
+fn parse_debugger_url(
+    url: &str,
+    option: &str,
+) -> Result<crate::domain::launch::DebuggerUrl, UseCaseError> {
+    crate::domain::launch::DebuggerUrl::parse(url).ok_or_else(|| {
         // Введённое не повторяется: в нём могут быть учётные данные.
-        None => refuse(
-            "--debug: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it".to_owned(),
-        ),
-    }
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!("{option}: the address of a debug server is http://<host>:<port> without a path or credentials, as `debug-server start` answers it"),
+        )
+    })
 }
 
 fn map_direct_launch_options(
@@ -6991,6 +7075,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -7033,6 +7118,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "ordinary".to_owned(),
                     mcp_scenario: None,
@@ -7052,6 +7138,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "thin".to_owned(),
                     mcp_scenario: None,
@@ -7071,6 +7158,7 @@ mod tests {
             map_launch_request(
                 &LaunchArgs {
                     debug: None,
+                    web_debug: None,
                     via: None,
                     target: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
@@ -7169,6 +7257,7 @@ mod tests {
         let launch_error = map_launch_request(
             &LaunchArgs {
                 debug: None,
+                web_debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
@@ -7601,6 +7690,7 @@ mod tests {
             &config,
             &Command::Launch(LaunchArgs {
                 debug: None,
+                web_debug: None,
                 via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,

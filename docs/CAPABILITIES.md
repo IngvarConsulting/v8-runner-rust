@@ -914,8 +914,28 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 
 ### `debug-server`
 
+Веб-клиент запускается в два шага. Выполните `web publish --prepare-debug <IDE_URL>`,
+подключите отладчик IDE по `data.debug.ide_url` и включите автоподключение `WEBClient`.
+Затем выполните `launch web --web-debug <DEBUGGER_URL>` с адресом `data.debug.debugger_url`.
+Раннер сохраняет путь, параметры и фрагмент URL публикации и добавляет `Debug=http,attach`
+и `DebuggerURL`. Обычный `launch web` открывает исходный URL.
+
+- Управляемый Apache получает параметр `debug` в `default.vrd` из `infobase.web.debugger-url`.
+  При неизменной настройке повторная подготовка обходится без перезагрузки. Повторный `publish`
+  снова включает настройку.
+- Встроенная публикация управляемого `ibsrv` использует URL из `standalone start --debug`.
+- Для внешней публикации запустите подготовку на хосте веб-сервера. Укажите `infobase.web.dir`
+  с действующим `default.vrd`, `infobase.web.url` для браузера и `infobase.web.debugger-url`
+  для прямой проверки `rdbg`. Ответ `external_route_verified` подтверждает файл и сетевой
+  маршрут с этого хоста. Владелец внешнего сервера включает HTTP-отладку и активирует изменения.
+  Для повторной внешней публикации с отладкой он использует `webinst -descriptor`.
+- `data.debug.state: route_unavailable` позволяет IDE показать причину и действие отдельно.
+  Результат запуска браузера подтверждает передачу URL системному обработчику. Подключение
+  `WEBClient` и остановку на точке проверяет отладчик.
+
 ```text
 v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>] [--dry-run]
+v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
 
@@ -955,7 +975,15 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   сервер отладки отвечает пустым списком. У сервера кластера поля нет.
 - Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
   `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
-  `launch thin --debug <url>` → `debug-server stop <session>`. Перед удалением `workPath` —
+  `launch thin --debug <url>` → `debug-server stop <session>`. Перед повторным подключением
+  вызовите `debug-server status <session>` из той же рабочей копии. Для файловой ИБ команда
+  проверяет PID и время запуска процесса, подтверждает владельца loopback-порта средствами
+  ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
+  состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился
+  или сменился), `unverified` (готовность подтвердить нельзя). В 0.19 подтверждение владельца
+  порта доступно на Windows. Проверка отражает состояние на момент вызова, поэтому отладчик
+  обрабатывает также отказ самого подключения. Наличие операции проверяет
+  `v8-runner debug-server status --help`. Перед удалением `workPath` —
   `debug-server stop` по каждому сеансу.
 
 ### `web`
@@ -2355,7 +2383,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   клиента, которого превью не запускает.
 
 `infobase check` использует реквизиты выбранной базы. При отсутствии файла ИБ отвечает
-`infobase_not_found`, при неразличимом отказе входа — `connection_failed`.
+`infobase_not_found`. Точный ответ Конфигуратора в журнале текущей пробы даёт `credentials_rejected` или `infobase_designer_busy`. При неразличимом отказе входа CLI возвращает `connection_failed`.
 Проверка удаляет свой приватный каталог `workPath/temp` перед ответом.
 
 ### `mcp serve`

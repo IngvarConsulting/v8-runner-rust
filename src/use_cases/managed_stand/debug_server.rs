@@ -1,4 +1,4 @@
-//! `debug-server start` и `debug-server stop`: сервер отладки 1С для отладчика.
+//! `debug-server start`, `status` и `stop`: сервер отладки 1С для отладчика.
 //!
 //! У файловой базы сервер отладки поднимает раннер: свой `dbgs` из установки тонкого клиента, по
 //! сеансу на каждый `start`. Запись сеанса лежит в `workPath/debug-server/<сеанс>/` — сеанс
@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 use crate::config::model::AppConfig;
 use crate::domain::capability::TargetKind;
 use crate::domain::debug_server::{
-    DebugServerAction, DebugServerOwner, DebugServerResult, DebugSession,
+    DebugServerAction, DebugServerOwner, DebugServerResult, DebugServerStatus,
+    DebugServerStatusReason, DebugServerStatusResult, DebugSession,
 };
 use crate::domain::launch::PlatformResolution;
 use crate::platform::dbgs::{self, DebugPort};
@@ -466,6 +467,118 @@ impl DebugServer<'_> {
         )
     }
 
+    pub fn status(&self, session: DebugSession) -> Result<DebugServerStatusResult, UseCaseError> {
+        if self.config.target_kind() != TargetKind::File {
+            return Err(refuse("debug-server status requires a file infobase"));
+        }
+
+        let started = Instant::now();
+        let paths = session_paths(self.config, session);
+        let mut result = DebugServerStatusResult {
+            session,
+            status: DebugServerStatus::Unknown,
+            reason: None,
+            pid: None,
+            port: None,
+            url: None,
+            infobase_alias: None,
+            duration_ms: 0,
+        };
+        match self.confirm_endpoint(&paths) {
+            Ok(Some((pid, port))) => {
+                result.status = DebugServerStatus::Ready;
+                result.pid = Some(pid);
+                result.port = Some(port);
+                result.url = Some(dbgs::url(port));
+                result.infobase_alias = Some(FILE_ALIAS);
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                result.status = match reason {
+                    DebugServerStatusReason::ProcessGone
+                    | DebugServerStatusReason::ProcessChanged => DebugServerStatus::Stale,
+                    _ => DebugServerStatus::Unverified,
+                };
+                result.reason = Some(reason);
+            }
+        }
+        result.duration_ms = crate::support::time::elapsed_ms(started);
+        Ok(result)
+    }
+
+    fn confirm_endpoint(
+        &self,
+        paths: &ServicePaths,
+    ) -> Result<Option<(u32, u16)>, DebugServerStatusReason> {
+        use DebugServerStatusReason as Reason;
+
+        match std::fs::symlink_metadata(paths.root()) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => return Err(Reason::RecordUnavailable),
+        }
+        let read_record = || {
+            let marker = paths.root().join(STAND_SESSION);
+            match std::fs::symlink_metadata(marker) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(Reason::UnsupportedOwner),
+                Err(_) => return Err(Reason::RecordUnavailable),
+            }
+            let path = paths.record();
+            if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                return Err(Reason::RecordUnavailable);
+            }
+            read_json::<ServiceRecord>(&path).ok_or(Reason::RecordUnavailable)
+        };
+        let record = read_record()?;
+        if record.state == RecordState::Starting {
+            return Err(Reason::Starting);
+        }
+        let pid = record
+            .pid
+            .filter(|pid| *pid != 0)
+            .ok_or(Reason::RecordUnavailable)?;
+        let port = record.port;
+        if port == 0
+            || record.started.is_none()
+            || record.machine.is_none()
+            || record.image.as_deref() != Some(dbgs::executable_name())
+        {
+            return Err(Reason::RecordUnavailable);
+        }
+
+        let verify_process = || {
+            let machine = self.host.machine().ok_or(Reason::ProcessUnverified)?;
+            if record.machine.as_deref() != Some(machine.as_str()) {
+                return Err(Reason::ProcessChanged);
+            }
+            match self.host.facts(pid) {
+                Some(facts) if record.is_own(Some(&facts), Some(&machine)) => Ok(()),
+                Some(_) => Err(Reason::ProcessChanged),
+                None if self.host.debug_process_gone(pid) => Err(Reason::ProcessGone),
+                None => Err(Reason::ProcessUnverified),
+            }
+        };
+        let verify_listener = || {
+            self.host
+                .debug_loopback_owner(pid, port)
+                .then_some(())
+                .ok_or(Reason::ListenerUnverified)
+        };
+
+        verify_process()?;
+        verify_listener()?;
+        if !self.host.rdbg_answers(port) {
+            return Err(Reason::RdbgUnavailable);
+        }
+        verify_listener()?;
+        verify_process()?;
+        if read_record().as_ref() != Ok(&record) {
+            return Err(Reason::RecordChanged);
+        }
+        Ok(Some((pid, port)))
+    }
+
     pub fn stop(
         &self,
         session: DebugSession,
@@ -724,6 +837,8 @@ mod tests {
         exits_before_ready: Cell<bool>,
         /// Назвал адрес, но не отвечает по `rdbg`.
         never_answers: Cell<bool>,
+        replace_listener_during_probe: Cell<bool>,
+        process_inaccessible: Cell<bool>,
         /// Порт из файла адреса слушает чужой процесс.
         foreign_listener: Cell<bool>,
         /// Порт, который захватывает чужой процесс между проверкой и запуском.
@@ -830,6 +945,12 @@ mod tests {
         fn listening_pid(&self, port: u16) -> Option<u32> {
             self.listeners.borrow().get(&port).copied()
         }
+        fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
+            self.listening_pid(port) == Some(pid)
+        }
+        fn debug_process_gone(&self, pid: u32) -> bool {
+            !self.process_inaccessible.get() && !self.alive(pid)
+        }
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
@@ -860,6 +981,9 @@ mod tests {
             Duration::ZERO
         }
         fn rdbg_answers(&self, port: u16) -> bool {
+            if self.replace_listener_during_probe.get() {
+                self.listeners.borrow_mut().insert(port, OWNER);
+            }
             !self.never_answers.get() && self.listeners.borrow().contains_key(&port)
         }
     }
@@ -1281,6 +1405,80 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), UseCaseErrorKind::Validation);
         assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn status_confirms_only_the_recorded_listener_without_mutating_the_session() {
+        use DebugServerStatus as Status;
+        use DebugServerStatusReason as Reason;
+
+        let project = setup();
+        let host = Host::default();
+        let started = project.start(DebugServerStart::default(), &host).unwrap();
+        let session = started.session.unwrap();
+        let port = started.port.unwrap();
+        let context = context();
+        let locate = || unreachable!("status does not locate or launch the platform");
+        let server = project.server(&context, &host, &locate);
+        let record_path = session_paths(&project.config, session).record();
+        let original = std::fs::read(&record_path).unwrap();
+        let other = setup();
+        let other_server = other.server(&context, &host, &locate);
+        assert_eq!(
+            other_server.status(session).unwrap().status,
+            Status::Unknown
+        );
+
+        for _ in 0..2 {
+            let ready = server.status(session).unwrap();
+            assert_eq!(ready.status, Status::Ready);
+            assert_eq!(ready.pid, started.pid);
+            assert_eq!(ready.url, started.url);
+            assert_eq!(ready.infobase_alias, Some(FILE_ALIAS));
+        }
+        let assert_refused = |status, reason| {
+            let response = server.status(session).unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.reason, Some(reason));
+            assert!(response.url.is_none() && response.pid.is_none() && response.port.is_none());
+        };
+
+        host.never_answers.set(true);
+        assert_refused(Status::Unverified, Reason::RdbgUnavailable);
+        host.never_answers.set(false);
+        host.listeners.borrow_mut().remove(&port);
+        assert_refused(Status::Unverified, Reason::ListenerUnverified);
+        host.listeners.borrow_mut().insert(port, PID);
+        host.replace_listener_during_probe.set(true);
+        assert_refused(Status::Unverified, Reason::ListenerUnverified);
+        host.replace_listener_during_probe.set(false);
+        assert_refused(Status::Unverified, Reason::ListenerUnverified);
+
+        host.processes.borrow_mut().remove(&PID);
+        host.process_inaccessible.set(true);
+        assert_refused(Status::Unverified, Reason::ProcessUnverified);
+        host.process_inaccessible.set(false);
+        assert_refused(Status::Stale, Reason::ProcessGone);
+        host.processes.borrow_mut().insert(
+            PID,
+            ProcessFacts {
+                started: STARTED + 1,
+                image: dbgs::executable_name().to_owned(),
+            },
+        );
+        assert_refused(Status::Stale, Reason::ProcessChanged);
+        assert_eq!(std::fs::read(&record_path).unwrap(), original);
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(host.hard_stops.borrow().is_empty());
+        assert_eq!(host.listening_pid(port), Some(OWNER));
+
+        let mut partial: ServiceRecord = serde_json::from_slice(&original).unwrap();
+        partial.state = RecordState::Starting;
+        write_json(&record_path, &partial).unwrap();
+        assert_refused(Status::Unverified, Reason::Starting);
+        std::fs::write(record_path, "{").unwrap();
+        assert_refused(Status::Unverified, Reason::RecordUnavailable);
     }
 
     /// Приёмка 2: сервер жив после `start`; `stop` гасит его; повторный — безопасен.

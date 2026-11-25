@@ -10,6 +10,7 @@ use super::{
 use crate::config::model::AppConfig;
 use crate::domain::capability::TargetKind;
 use crate::domain::dbms::{ServiceAction, ServiceState};
+use crate::domain::launch::DebuggerUrl;
 use crate::domain::web::WebResult;
 use crate::platform::apache;
 use crate::platform::locator::{platform_version_of, UtilityType};
@@ -218,7 +219,10 @@ impl<'a> Web<'a> {
             return false;
         }
         let descriptor = self.paths.root().join("publication/default.vrd");
-        let Ok(descriptor) = std::fs::read_to_string(descriptor) else {
+        let Ok(file) = FileSnapshot::read(&descriptor) else {
+            return false;
+        };
+        let Ok(descriptor) = std::str::from_utf8(&file.contents) else {
             return false;
         };
         let cluster = self.paths.sibling(StandService::Cluster);
@@ -626,6 +630,65 @@ pub fn web_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseResu
     Ok(web.result(ServiceAction::Reported))
 }
 
+pub(crate) fn managed_publication_url(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> Result<Option<String>, UseCaseError> {
+    if !declared(config) {
+        return Ok(None);
+    }
+    let status = web_status(context, config).map_err(|failure| failure.error)?;
+    let wsdir = config
+        .infobase
+        .web
+        .as_ref()
+        .and_then(|web| web.wsdir.as_deref());
+    let unavailable = || {
+        environment(
+        "the managed publication is not ready: start Apache and prepare the publication with `web publish --prepare-debug`",
+    )
+    };
+    let root = status.config_path.parent().ok_or_else(unavailable)?;
+    let marker = root.join(DEBUG_ACTIVATION_PENDING);
+    let pending = marker
+        .try_exists()
+        .map_err(|error| io_failure("cannot check", &marker, &error))?;
+    if !status.ready || status.publication_stale || pending {
+        return Err(unavailable());
+    }
+    let (address, wsdir) = status.address.zip(wsdir).ok_or_else(unavailable)?;
+    let path = root.join("publication/default.vrd");
+    let file = FileSnapshot::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            missing_publication()
+        } else {
+            io_failure("cannot read", &path, &error)
+        }
+    })?;
+    require_publication_alias(&file.contents, wsdir)?;
+    Ok(Some(publication_url(&address, wsdir)))
+}
+
+fn missing_publication() -> UseCaseError {
+    environment("the managed publication has no default.vrd: run `web publish` first")
+}
+
+fn require_publication_alias(contents: &[u8], wsdir: &str) -> Result<(), UseCaseError> {
+    match crate::platform::webinst::publication_alias_matches(contents, wsdir) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(environment(format!(
+            "the managed publication does not serve '/{wsdir}/': run `web publish` before preparing debug"
+        ))),
+        Err(error) => Err(environment(format!(
+            "cannot verify the managed publication path: {error}; run `web publish`"
+        ))),
+    }
+}
+
+fn publication_url(address: &str, wsdir: &str) -> String {
+    format!("{address}/{wsdir}/")
+}
+
 /// `web start|stop|restart`: команда записи, под замком `workPath`.
 pub fn execute_web(
     context: &ExecutionContext,
@@ -673,7 +736,7 @@ pub(crate) struct ManagedPublication<'a> {
     /// Экземпляр, снятый до публикации; в превью Apache может не работать.
     record: Option<ServiceRecord>,
     pub(crate) target: crate::config::model::InfobaseWebConfig,
-    pub(crate) webinst: PathBuf,
+    pub(crate) webinst: Option<PathBuf>,
     pub(crate) connection: String,
     pub(crate) log_root: PathBuf,
     /// `sudo`, которым поднимаются права одного `webinst`: на Linux он публикует только от
@@ -685,7 +748,7 @@ pub(crate) struct ManagedPublication<'a> {
 pub(crate) fn publication<'a>(
     context: &'a ExecutionContext,
     config: &'a AppConfig,
-    action: crate::domain::publish::PublishAction,
+    action: Option<crate::domain::publish::PublishAction>,
     dry_run: bool,
 ) -> Result<Option<ManagedPublication<'a>>, UseCaseError> {
     publication_with(
@@ -701,7 +764,7 @@ pub(crate) fn publication<'a>(
 pub(crate) fn publication_with<'a>(
     context: &'a ExecutionContext,
     config: &'a AppConfig,
-    action: crate::domain::publish::PublishAction,
+    action: Option<crate::domain::publish::PublishAction>,
     dry_run: bool,
     runner: &'a dyn ProcessRunner,
     host: &'a dyn ServiceHost,
@@ -748,9 +811,11 @@ pub(crate) fn publication_with<'a>(
         let connection = crate::platform::connection::V8Connection::for_file(&path)
             .create_infobase_arg()
             .ok_or_else(|| validation("cannot represent file infobase address"))?;
-        let webinst = locate(config, UtilityType::Webinst)?;
-        if !dry_run {
-            web.check_module(&webinst)?;
+        let webinst = action
+            .map(|_| locate(config, UtilityType::Webinst))
+            .transpose()?;
+        if let Some(webinst) = webinst.as_ref().filter(|_| !dry_run) {
+            web.check_module(webinst)?;
         }
         (webinst, connection)
     } else {
@@ -775,9 +840,12 @@ pub(crate) fn publication_with<'a>(
     };
     target.dir = Some(web.paths.root().join("publication"));
     target.conf = Some(web.conf());
-    target.url = Some(format!("{}/{wsdir}/", address(port)));
+    target.url = Some(publication_url(&address(port), wsdir));
     target.server = Some(crate::config::model::WebServerKind::Apache24);
-    let elevation = host.webinst_elevation()?;
+    let elevation = action
+        .map(|_| host.webinst_elevation())
+        .transpose()?
+        .flatten();
     Ok(Some(ManagedPublication {
         web,
         record,
@@ -791,9 +859,9 @@ pub(crate) fn publication_with<'a>(
 
 fn cluster_publication_target(
     web: &Web<'_>,
-    action: crate::domain::publish::PublishAction,
+    action: Option<crate::domain::publish::PublishAction>,
     dry_run: bool,
-) -> Result<(PathBuf, String), UseCaseError> {
+) -> Result<(Option<PathBuf>, String), UseCaseError> {
     let config = web.config;
     let host = web.host;
     let cluster = web.paths.sibling(StandService::Cluster);
@@ -815,7 +883,8 @@ fn cluster_publication_target(
     let pins = read_json::<ClusterPins>(&cluster.pins())
         .filter(|pins| {
             pins.previous.is_none()
-                && (pins.registered || action == crate::domain::publish::PublishAction::Delete)
+                && (pins.registered
+                    || action == Some(crate::domain::publish::PublishAction::Delete))
         })
         .ok_or_else(|| {
             validation("create the infobase in the running cluster before publishing")
@@ -827,7 +896,9 @@ fn cluster_publication_target(
         .and_then(|cluster| cluster.managed.as_ref())
         .ok_or_else(|| validation("publish needs a managed cluster"))?;
     let connection = pins.ports.connection(&managed.reference(web.infobase));
-    let webinst = cluster_webinst(config, cluster_record.as_ref())?;
+    let webinst = action
+        .map(|_| cluster_webinst(config, cluster_record.as_ref()))
+        .transpose()?;
     Ok((webinst, connection))
 }
 
@@ -862,6 +933,8 @@ fn cluster_webinst(
     Ok(webinst)
 }
 
+const DEBUG_ACTIVATION_PENDING: &str = "web-debug.pending";
+
 pub(crate) struct PublicationSnapshot {
     conf: PathBuf,
     config: FileSnapshot,
@@ -875,6 +948,21 @@ struct FileSnapshot {
 }
 
 impl FileSnapshot {
+    fn debug_edit(
+        &self,
+        debugger: &DebuggerUrl,
+        path: &Path,
+    ) -> Result<Option<Self>, UseCaseError> {
+        crate::platform::webinst::publication_debug_edit(&self.contents, debugger)
+            .map(|edit| {
+                edit.map(|contents| Self {
+                    contents,
+                    permissions: self.permissions.clone(),
+                })
+            })
+            .map_err(|err| io_failure("cannot configure HTTP debugging in", path, &err))
+    }
+
     fn read(path: &Path) -> std::io::Result<Self> {
         let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -904,24 +992,25 @@ impl ManagedPublication<'_> {
     }
 
     /// Программа и ключи запуска `webinst`: с `sudo -n` права поднимаются только у него.
-    pub(crate) fn command(&self, args: Vec<String>) -> (PathBuf, Vec<String>) {
+    pub(crate) fn command(&self, webinst: PathBuf, args: Vec<String>) -> (PathBuf, Vec<String>) {
         match &self.elevation {
             Some(sudo) => {
                 let mut elevated = vec![
                     "-n".to_owned(),
                     "--".to_owned(),
-                    self.webinst.display().to_string(),
+                    webinst.display().to_string(),
                 ];
                 elevated.extend(args);
                 (sudo.clone(), elevated)
             }
-            None => (self.webinst.clone(), args),
+            None => (webinst, args),
         }
     }
 
     /// Отказ `sudo -n` поднять права: `webinst` не запускался.
     pub(crate) fn elevation_refusal(&self, finished: &ProcessResult) -> Option<UseCaseError> {
         self.elevation.as_ref()?;
+        let webinst = self.webinst.as_ref()?;
         (finished.outcome().is_err()
             && finished
                 .stderr
@@ -930,7 +1019,7 @@ impl ManagedPublication<'_> {
         .then(|| {
             environment(format!(
                 "sudo -n did not run webinst: on Linux webinst publishes only as root, so a sudoers rule for it is effectively root for this user (its -dir and -confpath lie under localPath, which the user controls); grant it only to a user who may have root anyway, e.g. on a personal dev machine, for exactly the command line that `publish --dry-run` shows after `sudo -n --` (`{}` with these arguments); sudo said: {}",
-                self.webinst.display(),
+                webinst.display(),
                 finished.stderr.trim()
             ))
         })
@@ -972,6 +1061,103 @@ impl ManagedPublication<'_> {
         })
     }
 
+    pub(crate) fn prepare_debug(&self, debugger: &DebuggerUrl) -> Result<bool, UseCaseError> {
+        if self.web.publication_stale() {
+            return Err(environment(
+                "the managed publication uses the previous cluster port: run `publish` first",
+            ));
+        }
+        let snapshot = self.snapshot()?;
+        let file = snapshot
+            .descriptor
+            .as_ref()
+            .ok_or_else(missing_publication)?;
+        let wsdir = self
+            .target
+            .wsdir
+            .as_deref()
+            .ok_or_else(|| validation("infobase.web.wsdir is required"))?;
+        require_publication_alias(&file.contents, wsdir)?;
+        let path = snapshot.vrd.clone();
+        let edit = file.debug_edit(debugger, &path)?;
+        let marker = self.web.paths.root().join(DEBUG_ACTIVATION_PENDING);
+        let pending = marker
+            .try_exists()
+            .map_err(|err| io_failure("cannot check", &marker, &err))?;
+        if edit.is_none() && !pending {
+            return Ok(false);
+        }
+        let changed = edit.is_some();
+        self.activate(snapshot, || self.install_debug_edit(&path, edit))?;
+        Ok(changed)
+    }
+
+    pub(crate) fn activate_publish(
+        &self,
+        snapshot: PublicationSnapshot,
+        debugger: Option<&DebuggerUrl>,
+    ) -> Result<(), UseCaseError> {
+        self.activate(snapshot, || {
+            if let Some(debugger) = debugger {
+                let path = self.web.paths.root().join("publication/default.vrd");
+                let file = FileSnapshot::read(&path)
+                    .map_err(|err| io_failure("cannot read", &path, &err))?;
+                self.install_debug_edit(&path, file.debug_edit(debugger, &path)?)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn install_debug_edit(
+        &self,
+        path: &Path,
+        edit: Option<FileSnapshot>,
+    ) -> Result<(), UseCaseError> {
+        let pending = self.web.paths.root().join(DEBUG_ACTIVATION_PENDING);
+        crate::support::fs::write_file_atomically(&pending, |_| Ok(()))
+            .map_err(|err| io_failure("cannot record pending activation in", &pending, &err))?;
+        if let Some(edit) = edit {
+            edit.restore(path)
+                .map_err(|err| io_failure("cannot update", path, &err))?;
+        }
+        Ok(())
+    }
+
+    fn activate(
+        &self,
+        snapshot: PublicationSnapshot,
+        update: impl FnOnce() -> Result<(), UseCaseError>,
+    ) -> Result<(), UseCaseError> {
+        let reclaimed = self.reclaim_files();
+        let reclaim_failed = reclaimed.is_err();
+        let applied = reclaimed
+            .and_then(|()| update())
+            .and_then(|()| self.reload(Reload::Activate));
+        if let Err(mut error) = applied {
+            let restored = snapshot
+                .restore()
+                .and_then(|()| self.reload(Reload::Recover));
+            let reclaim = if reclaim_failed {
+                None
+            } else {
+                self.reclaim_files().err()
+            };
+            for rollback in [restored.err(), reclaim].into_iter().flatten() {
+                error = error.followed_by(rollback.to_string());
+            }
+            return Err(error);
+        }
+        let pending = self.web.paths.root().join(DEBUG_ACTIVATION_PENDING);
+        match std::fs::remove_file(&pending) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_failure(
+                "cannot clear pending activation from",
+                &pending,
+                &err,
+            )),
+        }
+    }
     /// Файлы, которые `webinst` с поднятыми правами записал под каталогом Apache, снова
     /// принадлежат пользователю раннера. Зовётся и после удачи, и после отката.
     pub(crate) fn reclaim_files(&self) -> Result<(), UseCaseError> {
@@ -1392,12 +1578,21 @@ mod stand_tests {
         host: &Host,
         dry_run: bool,
     ) -> Result<PublishResult, UseCaseFailure<PublishResult>> {
+        publish_or_prepare(stand, host, dry_run, None)
+    }
+
+    fn publish_or_prepare(
+        stand: &Setup,
+        host: &Host,
+        dry_run: bool,
+        prepare_debug: Option<crate::domain::launch::DebuggerUrl>,
+    ) -> Result<PublishResult, UseCaseFailure<PublishResult>> {
         let context = context(CommandName::Publish);
         let runner = Runner { host };
         let managed = publication_with(
             &context,
             &stand.config,
-            PublishAction::Publish,
+            prepare_debug.is_none().then_some(PublishAction::Publish),
             dry_run,
             &runner,
             host,
@@ -1408,10 +1603,100 @@ mod stand_tests {
             &stand.config,
             &PublishRequest {
                 action: PublishAction::Publish,
+                prepare_debug,
                 dry_run,
             },
             managed,
         )
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_debug_preparation_refuses_a_renamed_publication_before_editing() {
+        let (mut stand, host) = running();
+        publish(&stand, &host, false).unwrap();
+        let path = descriptor(&stand);
+        let original = std::fs::read(&path).unwrap();
+        let before = host.ran_with("-t").len();
+        stand.config.infobase.web.as_mut().unwrap().wsdir = Some("renamed".to_owned());
+        let context = context(CommandName::Publish);
+        let runner = Runner { host: &host };
+        let publication = publication_with(&context, &stand.config, None, false, &runner, &host)
+            .unwrap()
+            .unwrap();
+        let debugger = crate::domain::launch::DebuggerUrl::parse("http://localhost:1561").unwrap();
+        assert!(publication
+            .prepare_debug(&debugger)
+            .unwrap_err()
+            .to_string()
+            .contains("run `web publish`"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(host.ran_with("-t").len(), before);
+        assert!(!paths(&stand).root().join(DEBUG_ACTIVATION_PENDING).exists());
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn web_debug_preparation_edits_only_the_descriptor_and_reuses_it_on_repeat() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        use crate::domain::launch::DebuggerUrl;
+        use crate::domain::publish::WebDebugState;
+
+        let (mut stand, host) = running();
+        publish(&stand, &host, false).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let debug_url =
+            DebuggerUrl::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                let mut bytes = [0; 1024];
+                assert_ne!(stream.read(&mut bytes).unwrap(), 0);
+                let body = "virtual-resource-system Exception";
+                write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        stand.config.infobase.web.as_mut().unwrap().debugger_url = Some(debug_url.clone());
+        let path = descriptor(&stand);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let original = original.replace(
+            "/>",
+            "><ws pointEnableCommon=\"false\"/><analytics enable=\"false\"/></point>",
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let ide = DebuggerUrl::parse("http://localhost:1561").unwrap();
+        let prepare = || publish_or_prepare(&stand, &host, false, Some(ide.clone())).unwrap();
+        let prepared = prepare().debug.unwrap();
+        assert_eq!(prepared.state, WebDebugState::Ready);
+        assert!(prepared.publication_changed);
+        let expected = original.replace(
+            "</point>",
+            &format!("<debug enable=\"true\" protocol=\"http\" url=\"{debug_url}\"/></point>"),
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        let before_repeat = host.ran_with("-t").len();
+        let repeat = prepare().debug.unwrap();
+        assert_eq!(repeat.state, WebDebugState::Ready);
+        assert!(!repeat.publication_changed);
+        assert_eq!(host.ran_with("-t").len(), before_repeat);
+        assert_eq!(host.webinst_runs.get(), 1);
+        let pending = paths(&stand).root().join(DEBUG_ACTIVATION_PENDING);
+        std::fs::write(&pending, "").unwrap();
+        assert!(!prepare().debug.unwrap().publication_changed);
+        assert!(!pending.exists());
+        assert!(host.ran_with("-t").len() > before_repeat);
+        server.join().unwrap();
+
+        publish(&stand, &host, false).unwrap();
+        let republished = std::fs::read(&path).unwrap();
+        assert!(
+            crate::platform::webinst::publication_debug_edit(&republished, &debug_url)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn webinst() -> String {
@@ -1783,7 +2068,7 @@ mod stand_tests {
             let publication = publication_with(
                 &context,
                 &stand.config,
-                PublishAction::Publish,
+                Some(PublishAction::Publish),
                 false,
                 &runner,
                 &host,

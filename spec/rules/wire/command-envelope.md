@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 8
+version: 9
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -41,8 +41,8 @@ check:
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
 `workspace_busy` (рабочий каталог держит другая команда), `infobase_busy` (файловую базу
 держит другая команда или она обслуживается обнаруженным локальным `ibsrv`), `infobase_sessions` (обновлению конфигурации базы данных нужен
-монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (файловую базу
-держит чужой Конфигуратор). Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
+монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (базу
+держит чужой Конфигуратор). Для `infobase check` подробности сеанса не выдаются. Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
 завершить, блокировку начала сеансов, источник признака (`evidence`) и, если признак — список
 сервера, отказ исполнителя (`executor_error`)
 (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). База другой рабочей копии отказом не служит: команда идёт, а
@@ -166,3 +166,5 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 ```
 
 **Что изменила версия 8.** Добавлены коды `infobase_not_found` и `connection_failed` для [проверки подключения](infobase-check-data.md).
+
+**Что изменила версия 9.** `infobase check` различает `credentials_rejected` рода `platform` (выход 4) и `infobase_designer_busy` рода `workspace` (выход 3) на обеих целях по [правилу проверки входа](infobase-check-data.md).

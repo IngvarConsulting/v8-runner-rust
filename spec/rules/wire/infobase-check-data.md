@@ -1,9 +1,11 @@
 ---
 id: CTR.WIRE.INFOBASE-CHECK-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/infobase-check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
+  - src/support/temp.rs::private_directory_waits_for_a_transient_windows_delete_share_conflict
+  - src/use_cases/infobase_check.rs::only_complete_unambiguous_probe_signatures_are_classified
   - tests/cli_infobase.rs::infobase_check_needs_native_login_evidence_and_leaves_no_files
   - tests/mcp_stdio.rs::mcp_check_infobase_confirms_login_and_reports_a_missing_file
 ---
@@ -17,12 +19,20 @@ CLI `infobase check` и MCP `check_infobase` отвечают `command: "infobas
 Если версия выбранного исполняемого файла неизвестна, проверка отказывает до запуска.
 
 `infobase_not_found` означает, что для файловой цели ОС подтвердила отсутствие файла
-базы. При отказе запуска сеанса без подтверждённой причины код `connection_failed`.
-Отказ аутентификации нельзя выводить из локализованного журнала или общего кода выхода.
+базы. После неуспешного запуска CLI сверяет только приватный `/Out` конкретного вызова.
+Единственная точная строка «Пользователь ИБ не идентифицирован» даёт `credentials_rejected`.
+Точная пара строк ошибки блокировки конфигурирования и уже открытого Конфигуратора даёт
+`infobase_designer_busy` у файловой и клиент-серверной базы. Серверный вариант может
+содержать измеренный заголовок и сведения о сеансе. В ответ эти сведения не попадают.
+Неизвестная или неоднозначная причина, сбой лицензии и совпадение только в stdout или stderr
+оставляют `connection_failed`. Общий код выхода причину не определяет. MCP сохраняет прежнее
+поведение для отказов входа.
 Отмена, тайм-аут и неверный формат ответа имеют собственные коды CLI. MCP
 сохраняет общий код `platform_failure` для этих отказов. При отказе после запуска `data` —
 пустой объект. Локализованная диагностика может сопровождать отказ как улика.
-Приватный каталог проверки в `workPath/temp` убирается перед ответом.
+Приватный каталог проверки в `workPath/temp` убирается перед ответом. На Windows при
+временном конфликте совместного доступа раннер повторяет удаление до 30 секунд. Сам вход в
+базу не повторяется. Постоянная ошибка удаления остаётся отказом.
 
 Защита от повторения: сырой адрес рабочего проекта может содержать управляющие
 ключи Конфигуратора. Допустимость адреса для пробы определяет

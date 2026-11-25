@@ -7,7 +7,7 @@ mod recreate;
 mod standalone;
 mod web;
 pub use web::{execute_web, web_status, WebCommand};
-pub(crate) use web::{publication, ManagedPublication, Reload};
+pub(crate) use web::{managed_publication_url, publication, ManagedPublication};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
@@ -72,6 +72,12 @@ pub(crate) trait ServiceHost {
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
+    fn debug_loopback_owner(&self, _pid: u32, _port: u16) -> bool {
+        false
+    }
+    fn debug_process_gone(&self, _pid: u32) -> bool {
+        false
+    }
     fn soft_stop(
         &self,
         runner: &dyn ProcessRunner,
@@ -211,6 +217,14 @@ impl ServiceHost for RealHost {
     }
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
+    }
+    #[cfg(windows)]
+    fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {
+        service::listens_on(pid, port)
+    }
+    #[cfg(windows)]
+    fn debug_process_gone(&self, pid: u32) -> bool {
+        crate::support::machine::process_definitely_gone(pid)
     }
     fn soft_stop(
         &self,
@@ -1487,6 +1501,15 @@ pub fn debug_server_stop(
     with_debug_server(context, config, |server| server.stop(session, dry_run))
 }
 
+/// Observe a file-infobase debug session without starting or stopping it.
+pub fn debug_server_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    session: crate::domain::debug_server::DebugSession,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerStatusResult> {
+    with_debug_server(context, config, |server| server.status(session))
+}
+
 /// Сценарий `debug-server` над настоящей системой.
 fn with_debug_server<T>(
     context: &ExecutionContext,
@@ -1540,6 +1563,33 @@ pub fn standalone_status(
         &RealHost::CURRENT,
         &|| locate_ibsrv(config),
     )
+}
+
+pub(crate) fn standalone_publishes_its_own_web_client(config: &AppConfig) -> bool {
+    config
+        .infobase
+        .standalone
+        .as_ref()
+        .is_some_and(|server| server.managed.is_some())
+        && config
+            .infobase
+            .web
+            .as_ref()
+            .is_none_or(|web| web.dir.is_none())
+}
+
+pub(crate) fn standalone_web_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> Result<crate::domain::standalone::StandaloneResult, UseCaseError> {
+    let mut status = standalone_status(context, config).map_err(|failure| failure.error)?;
+    // The managed ibsrv sets no --http-base. Its built-in page is served at /.
+    status.http = status.http.as_deref().and_then(|address| {
+        let mut url = url::Url::parse(address).ok()?;
+        url.set_path("/");
+        Some(url.into())
+    });
+    Ok(status)
 }
 
 fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {

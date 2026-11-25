@@ -528,7 +528,7 @@ pub fn running_standalone(local: &LocalDir, infobase: &str) -> Option<RunningSer
 impl ServiceRecord {
     /// Свой ли процесс: совпали pid, время старта, образ и машина. Нет `machine_id` — чужой
     /// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
-    fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
+    pub(crate) fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
         let (Some(facts), Some(machine)) = (facts, machine) else {
             return false;
         };
@@ -557,8 +557,9 @@ mod tests {
     use super::*;
 
     /// Защита от повторения: «работает ли своя служба» решают `observe_service` и
-    /// `record_names_own_process`. `is_own` закрыт в этом модуле, а `adopt_recorded_pid` вне его
-    /// живёт только как `adopt` для `observe_service`, рядом с ним (ревью #538).
+    /// `record_names_own_process`. Наблюдение `debug-server status` сверяет точную запись через
+    /// тот же `is_own` без усыновления процесса. Вызовы `adopt_recorded_pid` снаружи остаются
+    /// рядом с `observe_service` (ревью #538).
     fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();

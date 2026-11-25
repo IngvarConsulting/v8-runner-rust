@@ -305,6 +305,8 @@ pub struct PublishArgs {
     /// Delete the publication named in infobase.web instead of creating it
     #[arg(long)]
     pub delete: bool,
+    #[arg(skip)]
+    pub prepare_debug: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -346,7 +348,21 @@ pub struct BootstrapArgs {
 #[derive(Args, Debug)]
 pub struct WebArgs {
     #[command(subcommand)]
-    pub command: ServiceCommandArgs,
+    pub command: WebCommandArgs,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebCommandArgs {
+    #[command(flatten)]
+    Service(ServiceCommandArgs),
+    /// Publish the infobase or prepare its publication for HTTP debugging
+    Publish {
+        #[command(flatten)]
+        publish: PublishArgs,
+        /// Prepare or check publication HTTP debugging and return the IDE debugger address
+        #[arg(long, value_name = "IDE_URL", conflicts_with = "delete")]
+        prepare_debug: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -447,6 +463,12 @@ pub enum DebugServerCommandArgs {
         /// The debugger process: the debug server ends by itself when this process ends
         #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
         owner_pid: Option<u32>,
+    },
+    /// Check whether a runner-owned debug server is ready for attachment
+    Status {
+        /// The session `debug-server start` answered
+        #[arg(value_name = "SESSION")]
+        session: crate::domain::debug_server::DebugSession,
     },
     /// Stop the debug server of this session; a repeated or unknown session stops nothing
     Stop {
@@ -1223,6 +1245,10 @@ pub struct LaunchArgs {
     #[arg(long = "debug", value_name = "URL")]
     pub debug: Option<String>,
 
+    /// Open the prepared web publication with HTTP debug auto-attachment (`launch web` only)
+    #[arg(long, value_name = "DEBUGGER_URL", conflicts_with = "debug")]
+    pub web_debug: Option<String>,
+
     /// Which address opens the base: `web` for infobase.web.url, `connection` for
     /// infobase.connection. Thin client only; the default is infobase.connection, or
     /// infobase.web.url when no connection string is declared
@@ -1777,6 +1803,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                web_debug: _,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
@@ -1830,6 +1857,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                web_debug: _,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1886,6 +1914,7 @@ mod tests {
                 wait_ready,
                 via: _,
                 debug: _,
+                web_debug: _,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());

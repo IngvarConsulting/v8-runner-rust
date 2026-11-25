@@ -26,8 +26,20 @@ pub fn is_process_alive(pid: u32) -> bool {
 /// be opened counts as alive.
 #[cfg(windows)]
 pub fn is_process_alive(pid: u32) -> bool {
+    observe_windows_process(pid).unwrap_or(true)
+}
+
+/// A missing PID or a signalled handle proves exit. Permission and observation
+/// failures do not distinguish a live process from an exited one.
+#[cfg(windows)]
+pub fn process_definitely_gone(pid: u32) -> bool {
+    observe_windows_process(pid) == Some(false)
+}
+
+#[cfg(windows)]
+fn observe_windows_process(pid: u32) -> Option<bool> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
@@ -35,15 +47,23 @@ pub fn is_process_alive(pid: u32) -> bool {
     // SAFETY: plain call with value arguments; a null result reports failure.
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
-        return std::io::Error::last_os_error().raw_os_error()
-            == i32::try_from(ERROR_ACCESS_DENIED).ok();
+        let error = std::io::Error::last_os_error().raw_os_error();
+        return if error == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
+            Some(false)
+        } else {
+            None
+        };
     }
     // SAFETY: `OpenProcess` succeeded and handed over this handle; the guard closes it once.
     let process = unsafe { OwnedHandle::from_raw_handle(handle) };
     // SAFETY: the handle stays open for the call; a zero timeout only polls the state.
     // Only a signalled handle means the process has ended: a failed wait (`WAIT_FAILED`)
     // tells nothing, and refusing is the safe side for every caller.
-    unsafe { WaitForSingleObject(process.as_raw_handle(), 0) != WAIT_OBJECT_0 }
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => Some(false),
+        WAIT_TIMEOUT => Some(true),
+        _ => None,
+    }
 }
 
 /// Without a way to ask, every process is taken as alive: callers use the answer to

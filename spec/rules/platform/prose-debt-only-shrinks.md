@@ -36,3 +36,7 @@ check:
 `IBCMD_SESSION_INPUT_MARKERS` в проверке фиксирует границы этого исключения.
 Поведение диалога измерено на
 [8.3.27.2074](../../../references/1c/confirmed-runtime-measurements.md#автономный-сервер).
+
+Для CLI `infobase check` узкое исключение задаёт [CTR.WIRE.INFOBASE-CHECK-DATA](../wire/infobase-check-data.md).
+Точные измеренные сигнатуры приватного `/Out` разделяют причины уже установленного отказа.
+Страж закрепляет ровно эти строки в `INFOBASE_CHECK_OUT_SIGNATURES`.

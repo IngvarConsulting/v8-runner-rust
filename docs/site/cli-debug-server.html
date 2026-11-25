@@ -73,7 +73,7 @@
 
 <main class="page">
 <h1>debug-server</h1>
-<p class="lede">Команды <code>debug-server</code> поднимают и останавливают сервер отладки 1С, к которому подключаются отладчик и отлаживаемый клиент. Для файловой базы раннер запускает свой <a href="glossary.html#tool-dbgs"><code>dbgs</code></a>; для базы на <a href="cli-cluster.html#op-cluster-debug">кластере раннера</a> или <a href="cli-standalone.html#op-standalone-debug">автономном сервере раннера</a>, с включённой HTTP-отладкой, отдаёт адрес их сервера отладки.</p>
+<p class="lede">Команды <code>debug-server</code> поднимают, проверяют и останавливают сервер отладки 1С, к которому подключаются отладчик и отлаживаемый клиент. Для файловой базы раннер запускает свой <a href="glossary.html#tool-dbgs"><code>dbgs</code></a>; для базы на <a href="cli-cluster.html#op-cluster-debug">кластере раннера</a> или <a href="cli-standalone.html#op-standalone-debug">автономном сервере раннера</a>, с включённой HTTP-отладкой, отдаёт адрес их сервера отладки.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-debug-server-start">debug-server start</h2>
 <pre data-output-command><code>v8-runner debug-server start</code></pre>
@@ -88,6 +88,11 @@
 <p>Сервер слушает этот порт. Если порт занят другим процессом, команда отказывает до запуска, а слушающий процесс остаётся работать; если порт заняли между проверкой и запуском, отказ тот же. К серверу отладки кластера и автономного сервера ключ не применяется: у него порт из их закреплённого блока.</p>
 <pre data-output-command id="op-debug-server-preview"><code>v8-runner debug-server start --dry-run</code></pre>
 <p>Показывает, чей сервер будет поднят и из какой установки взят <code>dbgs</code>. Ничего не запускает и не записывает, сеанса не выдаёт. Такое же превью есть у <code>debug-server stop</code>.</p>
+<h2 class="command-variant" id="op-debug-server-status">debug-server status</h2>
+<pre data-output-command><code>v8-runner debug-server status 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
+<p>Проверяет сеанс файловой базы перед повторным подключением из той же рабочей копии. Раннер сопоставляет PID и время запуска с записью сеанса, проверяет владельца loopback-порта средствами ОС и ждёт ответа <code>rdbg</code>. После ответа ещё раз проверяет процесс и сокет. Команда читает запись сеанса, процессы не запускает и не останавливает.</p>
+<ul><li><code>ready</code> — готовность подтверждена, в ответе есть адрес, PID, порт и псевдоним базы. Обрабатывайте отказ самого подключения: состояние может измениться уже после ответа.</li><li><code>unknown</code> — рабочая копия не знает сеанс.</li><li><code>stale</code> — записанный процесс завершился или его идентичность сменилась.</li><li><code>unverified</code> — готовность подтвердить нельзя. Поле <code>reason</code> уточняет причину. Без подтверждения владельца порта средствами ОС команда возвращает <code>listener_unverified</code>.</li></ul>
+<p>Проверить наличие операции можно командой <code>v8-runner debug-server status --help</code>.</p>
 <h2 class="command-variant" id="op-debug-server-stop">debug-server stop</h2>
 <pre data-output-command><code>v8-runner debug-server stop 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
 <p>Останавливает сервер отладки этого сеанса и ждёт конца его процесса; запись сеанса снимается только после подтверждённого конца. Процесс узнаётся по записи целиком: если сервер уже вышел, а его PID занял другой процесс, раннер его не трогает. Повторный <code>stop</code> того же сеанса безопасен: сеанса больше нет, и команда успешна, ничего не останавливая. Так же отвечает сеанс, запущенный из другой рабочей копии. Сервер отладки кластера и автономного сервера <code>stop</code> не останавливает: он живёт со своим сервером, команда снимает только сеанс.</p>

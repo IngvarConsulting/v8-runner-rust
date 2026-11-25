@@ -117,7 +117,7 @@ fn a_named_file_base_can_plan_publication_without_source_sets() {
     let output = support::v8_runner_command()
         .current_dir(root)
         .env_remove("V8TR_CONFIG")
-        .args(["--json-message", "--dry-run", "publish"])
+        .args(["--json-message", "--dry-run", "web", "publish"])
         .output()
         .unwrap();
     assert!(
