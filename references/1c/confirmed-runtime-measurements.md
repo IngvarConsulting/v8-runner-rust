@@ -6593,6 +6593,32 @@ SHA-256 файлов Configuration.xml и ConfigDumpInfo.xml совпал для
 подключения. Одно чтение не проверяет изменение во время выгрузки. Токены
 разных инструментов для расширений имеют разный смысл (#687).
 
+#### Свойства расширения при загрузке без применения (#687)
+
+Windows, 1С 8.5.4.2028, новая файловая ИБ с синтетическим расширением. Создание:
+`ibcmd infobase --data=<tmp>/ibcmd --db-path=<tmp>/ib create --import=<tmp>/cf --apply --force`.
+Начальное расширение загружено через `DESIGNER /LoadConfigFromFiles <tmp>/ext -Extension Расширение1`
+и применено через `/UpdateDBCfg -Extension Расширение1 -Dynamic-`. Затем изменён комментарий
+параметра сеанса и выполнено `ibcmd infobase --data=… --db-path=… config import --extension=Расширение1 <tmp>/ext1`
+без применения (5,663 с). Последний шаг — `config apply --extension=Расширение1 --force --dynamic=disable`
+через тот же `ibcmd` (2,997 с).
+
+| Наблюдение | До загрузки | Загружено, не применено | После применения |
+| --- | --- | --- | --- |
+| `ibcmd config generation-id --extension=Расширение1` | `dda6da86…` (5,156 с) | `4828cc78…` (4,078 с) | `4828cc78…` (4,589 с) |
+| Агент `config generation-id --extension=Расширение1` | `dda6da86…` (24 мс) | `dda6da86…` (28 мс) | `4828cc78…` (22 мс) |
+| `hash-sum` агента (`config extensions properties get --all-extensions`) и `ibcmd config extension list` | `3abahq8QXKfFBkhhDQNyTZOkJOA=` | тот же | `SCjMeHEr09sQ5fbXsiW8ItNHIxY=` |
+
+Агент опрашивался по loopback после `options set --show-prompt=no --output-format=json`
+и `common connect-ib`. JSON свойств расширения остался тем же до применения. Оба
+`hash-sum` декодируются в соответствующее применённое поколение. Время запроса свойств
+агента не зафиксировано: замерщик получил ответ, но ждал оболочку другого вида.
+На установках 8.3.24.1819, 8.3.27.2342 и 8.5.1.1529 пакетный Конфигуратор
+отказал из-за отсутствия лицензии. Повторная подготовка через `ibcmd config extension create`,
+`config import` и `config apply` прошла, но прямой `/AgentMode` на этих базах не открыл
+слушателя за 12 с и не оставил `/Out`. Строки таблицы относятся к 8.5.4.2028.
+
+
 
 Контроль аутентификации на той же копии КА 8.3.27.2342: сохранён
 /F <copy> и остальные параметры старта, из командной строки убраны
