@@ -3509,6 +3509,8 @@ dependencies = [
  "chrono",
  "clap",
  "getrandom 0.4.2",
+ "hyper",
+ "hyper-util",
  "insta",
  "jsonschema",
  "junction",

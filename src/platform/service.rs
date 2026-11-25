@@ -114,6 +114,15 @@ fn listens_on_ipv4(local: &str, state: &str, port: u16) -> bool {
         && u16::from_str_radix(local_port, 16) == Ok(port)
 }
 
+#[cfg(target_os = "macos")]
+mod macos_listener;
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos_listener::{
+    connection_generation as macos_debug_connection_generation,
+    listens_on as macos_debug_loopback_owner,
+};
+
 #[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn listens_on(_pid: u32, _port: u16) -> bool {
     false

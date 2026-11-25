@@ -8,18 +8,30 @@
 /// process still runs is [`is_process_running`].
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
+    observe_unix_process(pid) == Some(true)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_definitely_gone(pid: u32) -> bool {
+    observe_unix_process(pid) == Some(false)
+}
+
+#[cfg(unix)]
+fn observe_unix_process(pid: u32) -> Option<bool> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
     if pid <= 0 {
         // 0 and negative values address process groups, not one process.
-        return false;
+        return None;
     }
     // SAFETY: signal 0 sends nothing; `kill` only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
+        return Some(true);
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EPERM) => Some(true),
+        Some(libc::ESRCH) => Some(false),
+        _ => None,
+    }
 }
 
 /// Whether a process with `pid` runs on this machine. A process that exists but may not
