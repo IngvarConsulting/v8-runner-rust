@@ -2508,6 +2508,12 @@
     "text": "web publish Создайте веб-публикацию на Apache или IIS. Вывод CLI JSON Примеры ответов; пути и длительность зависят от запуска."
   },
   {
+    "url": "cli-web-publish.html#managed-file-web",
+    "page": "web publish",
+    "section": "Управляемый Apache для файловой базы",
+    "text": "Управляемый Apache для файловой базы На Windows и Linux объявите файловую ИБ в v8project.local.yaml с connection: File=… и web: { managed: true, wsdir: demo } . web start поднимает частный Apache для этой ИБ. Затем web publish публикует базу и возвращает локальный URL. web stop останавливает Apache. После смены каталога базы повторите публикацию."
+  },
+  {
     "url": "cli-web-publish.html#op-web-publish",
     "page": "web publish",
     "section": "web publish",

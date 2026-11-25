@@ -76,6 +76,8 @@
 <p class="lede">Создайте веб-публикацию на Apache или IIS.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <p class="hint">Примеры ответов; пути и длительность зависят от запуска.</p>
+<h2 id="managed-file-web">Управляемый Apache для файловой базы</h2>
+<p>На Windows и Linux объявите файловую ИБ в <code>v8project.local.yaml</code> с <code>connection: File=…</code> и <code>web: { managed: true, wsdir: demo }</code>. <code>web start</code> поднимает частный Apache для этой ИБ. Затем <a href="#op-web-publish"><code>web publish</code></a> публикует базу и возвращает локальный URL. <code>web stop</code> останавливает Apache. После смены каталога базы повторите публикацию.</p>
 <h2 class="command-variant" id="op-web-publish">web publish</h2>
 <pre data-output-command><code>v8-runner web publish</code></pre>
 <p>публикует базу на Apache или IIS <span class="ref">(<a href="platform.html#t69">69</a>)</span>; базу при этом не открывает</p>

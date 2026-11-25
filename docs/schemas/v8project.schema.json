@@ -502,7 +502,7 @@
           ]
         },
         "managed": {
-          "description": "Publish to the local Apache of a managed cluster.",
+          "description": "Publish to a private Apache for a local file infobase or a managed cluster.",
           "type": [
             "boolean",
             "null"

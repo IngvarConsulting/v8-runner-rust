@@ -198,6 +198,34 @@ pub fn load_config_for_managed_cluster(
     )
 }
 
+/// Загрузка для команд `web` без проверки наборов исходников.
+pub fn load_config_for_managed_web(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::ManagedWeb,
+    )
+}
+
+/// Публикация проверяет базу и настройки веб-сервера без проверки исходников.
+pub fn load_config_for_publish(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::Publish,
+    )
+}
+
 /// Загрузка для команд `standalone`: нужна только объявленная база.
 pub fn load_config_for_managed_standalone(
     config_path: Option<&str>,
@@ -302,6 +330,8 @@ enum ConfigValidationMode {
     ManagedDbms,
     ManagedStandalone,
     ManagedCluster,
+    ManagedWeb,
+    Publish,
     InfobaseCreate {
         preview: bool,
     },
@@ -492,6 +522,8 @@ fn build_config(
         ConfigValidationMode::ManagedCluster => {
             crate::config::validate::validate_managed_cluster(&config)?
         }
+        ConfigValidationMode::ManagedWeb => crate::config::validate::validate_managed_web(&config)?,
+        ConfigValidationMode::Publish => crate::config::validate::validate_publish(&config)?,
         ConfigValidationMode::InfobaseCreate { preview: false }
         | ConfigValidationMode::Inspecting { preview: false } => validate(&config)?,
         ConfigValidationMode::InfobaseCreate { preview: true }
@@ -1623,6 +1655,7 @@ fn project_managed_standalone(
         ConfigValidationMode::ManagedStandalone
             | ConfigValidationMode::ManagedDbms
             | ConfigValidationMode::ManagedCluster
+            | ConfigValidationMode::ManagedWeb
     ) {
         return Ok(());
     }
@@ -1693,6 +1726,7 @@ fn project_managed_cluster(
         ConfigValidationMode::ManagedStandalone
             | ConfigValidationMode::ManagedDbms
             | ConfigValidationMode::ManagedCluster
+            | ConfigValidationMode::ManagedWeb
     ) {
         return Ok(());
     }
