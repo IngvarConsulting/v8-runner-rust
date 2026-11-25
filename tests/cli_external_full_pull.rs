@@ -2302,7 +2302,7 @@ fn an_interrupted_merge_baseline_installation_blocks_push_until_retry() {
         failure["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("version file"),
+            .contains("ConfigDumpInfo.xml"),
         "{failure}"
     );
 

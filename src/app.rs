@@ -150,6 +150,17 @@ pub fn run() -> i32 {
         crate::output::events::open(command_name(&cli.command));
     }
     let startup_refusal = startup_refusal.or_else(|| match &cli.command {
+        Command::Dump(args)
+            if args.snapshot_platform_from_sources
+                && !(args.snapshot_only
+                    || args.check_merge_baseline.is_some()
+                    || args.accept_merge_baseline.is_some()) =>
+        {
+            Some(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--snapshot-platform-from-sources requires --snapshot-only or a merge baseline action",
+            ))
+        }
         Command::Dump(args) if args.snapshot_only => {
             let message = match (cli.dry_run, args.publication_stdio.is_some()) {
                 (true, true) => "--snapshot-only preview does not accept --publication-stdio",
@@ -477,14 +488,18 @@ pub(crate) fn load_cli_config(
     let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
     let config_path = cli.config.as_deref();
     let workdir = cli.workdir.as_deref();
-    if matches!(&cli.command, Command::Dump(args)
-        if args.snapshot_only || args.check_merge_baseline.is_some() || args.accept_merge_baseline.is_some())
-    {
-        return crate::config::loader::load_config_for_snapshot_pull(
-            config_path,
-            workdir,
-            &selector,
-        );
+    if let Command::Dump(args) = &cli.command {
+        if args.snapshot_only
+            || args.check_merge_baseline.is_some()
+            || args.accept_merge_baseline.is_some()
+        {
+            return crate::config::loader::load_config_for_snapshot_pull(
+                config_path,
+                workdir,
+                &selector,
+                args.snapshot_platform_from_sources,
+            );
+        }
     }
     if let Command::Tools(crate::cli::args::ToolsArgs {
         command: ToolsCommand::Download(download),

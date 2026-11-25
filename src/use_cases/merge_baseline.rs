@@ -348,7 +348,7 @@ pub(crate) fn accept(
         source_set: set.name().to_owned(),
         generation: current,
         provider: receipt.provider,
-        baseline: if check_only {
+        baseline: if check_only && !already_accepted {
             BaselineState::Ready
         } else {
             BaselineState::Accepted

@@ -952,6 +952,10 @@ pub struct DumpArgs {
     #[arg(long, requires_all = ["snapshot_only", "publication_stdio"])]
     pub prepare_merge_baseline: bool,
 
+    /// Use the sources' platform format when a snapshot or baseline command has no pinned version.
+    #[arg(long)]
+    pub snapshot_platform_from_sources: bool,
+
     /// Recheck the working-configuration generation for a staged baseline without accepting it.
     #[arg(long, value_name = "UUID", requires = "set", conflicts_with_all = ["accept_merge_baseline", "snapshot_only", "discard_uncommitted", "all", "objects", "mode"])]
     pub check_merge_baseline: Option<uuid::Uuid>,
