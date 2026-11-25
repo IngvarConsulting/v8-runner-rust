@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FilesystemObjectIdentity {
     #[cfg(unix)]
     Unix { device: u64, inode: u64 },

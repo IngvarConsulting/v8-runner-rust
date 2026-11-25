@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.FULL-PULL-PUBLICATION
-version: 5
+version: 6
 artifact: docs/schemas/full-pull-publication.schema.json
 check:
   - src/cli/external_pull.rs::generated_publication_schema_is_current
   - tests/cli_external_full_pull.rs::accepted_external_full_pull_remembers_the_original_source_for_the_next_push
+  - tests/cli_external_full_pull.rs::accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_base
   - tests/cli_external_full_pull.rs::invalid_decisions_after_ready_are_unknown_and_do_not_commit_memory
   - tests/cli_external_full_pull.rs::the_terminal_frame_carries_the_code_of_a_base_of_another_copy
 ---
@@ -41,6 +42,15 @@ check:
 неверный ответ или отмена до подтверждения дают `unknown` и `unchanged`.
 Подтверждённая публикация сохраняет `published`, в том числе при ошибке записи
 памяти. Состояние памяти называет результат её локального завершения.
+
+**Что изменила версия 6.** Режим `--snapshot-only` разрешает ответ `rejected`
+на `ready` и оставляет стадию вызывающему, с `publication: not_published` и
+`memory: unchanged` в итоговом кадре. Опциональный `--prepare-merge-baseline`
+добавляет к `ready` поле `merge_baseline`, если исполнитель подтверждает
+одно и то же поколение рабочей конфигурации до и после выгрузки. Поле содержит
+`id` подготовленной памяти, `generation`, `provider` и `base_generation`
+из сравнимой текущей записи, либо `null`, если такой записи нет. Номер кадров
+остаётся 1. Поле добавляется только в явном режиме запроса памяти.
 
 **Что изменила версия 5.** Терминальный кадр использует общий конверт версии 7, включая запись сеанса из `error.sessions.list`. Кадры протокола сохранили формат.
 

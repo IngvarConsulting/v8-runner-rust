@@ -691,6 +691,7 @@ mod tests {
             stage: std::path::Path::new("stage"),
             snapshot_prepared: true,
             snapshot_warning: None,
+            merge_baseline: None,
         };
         super::stamp_prepared_dispatch(&mut ready, &work);
         assert!(!ready.provider_dispatched);

@@ -214,6 +214,23 @@ impl Project {
         )
     }
 
+    fn snapshot_command(&self) -> Command {
+        let mut command = self.command();
+        command
+            .args(["pull", "main", "--force", "--publication-stdio"])
+            .arg(&self.stage)
+            .arg("--snapshot-only");
+        command
+    }
+
+    fn owner(&self) -> Option<Vec<u8>> {
+        match fs::read(self.config.with_file_name(".ib.v8-runner.owners.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read owner: {error}"),
+        }
+    }
+
     fn selected(&self, session: &mut Session) -> Value {
         let selected = session.next("selected");
         assert_eq!(selected["version"], 1);
@@ -237,14 +254,27 @@ impl Project {
     }
 
     fn prepared(&self, session: &mut Session, selected: &Value) -> Value {
+        let ready = self.ready_frame(session, selected);
+        assert_eq!(ready["snapshot"], "prepared");
+        ready
+    }
+
+    fn ready_frame(&self, session: &mut Session, selected: &Value) -> Value {
         let ready = session.next("ready");
         assert_eq!(ready["nonce"], selected["nonce"]);
         assert_eq!(ready["source_set"], "main");
         assert_reported_path(&ready["target_path"], &self.sources);
         assert_reported_path(&ready["stage_path"], &self.stage);
-        assert_eq!(ready["snapshot"], "prepared");
         assert_ready_receipt(&ready, self.extension);
         assert!(self.stage.join("Configuration.xml").is_file());
+        ready
+    }
+
+    fn snapshot_ready(&self, session: &mut Session) -> Value {
+        let selected = self.selected(session);
+        session.decide(&selected, "continue");
+        let ready = self.ready_frame(session, &selected);
+        assert_eq!(ready["snapshot"], "unavailable");
         ready
     }
 
@@ -1137,6 +1167,416 @@ fn a_rejected_ready_tree_stays_in_the_stage_untouched() {
 }
 
 #[test]
+fn snapshot_only_keeps_owner_memory_and_the_ready_tree() {
+    for (decision, seeded) in [("rejected", false), ("rejected", true), ("published", true)] {
+        let project = Project::new("designer", false);
+        if seeded {
+            project.seed_baseline();
+            let owner_path = project.config.with_file_name(".ib.v8-runner.owners.json");
+            let mut marker: Value = serde_json::from_slice(&project.owner().unwrap()).unwrap();
+            marker["version"] = json!(1);
+            marker["owners"][0]["project"] = json!(project.config.with_file_name("gone-copy"));
+            fs::write(owner_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+            fs::write(
+                project.sources.join("ConfigDumpInfo.xml"),
+                b"old description",
+            )
+            .unwrap();
+        }
+        let owner = project.owner();
+        let baseline = project.baseline();
+        let sources = snapshot(&project.sources);
+        let mut session = Session::start(&mut project.snapshot_command());
+        let selected = project.selected(&mut session);
+        assert_eq!(project.owner(), owner);
+        assert_eq!(project.baseline(), baseline);
+        session.decide(&selected, "continue");
+        let ready = project.ready_frame(&mut session, &selected);
+        assert_eq!(ready["snapshot"], "unavailable");
+        let tree = snapshot(&project.stage);
+        assert!(tree.contains_key(Path::new("Module.bsl")));
+        assert_eq!(
+            tree.get(Path::new("ConfigDumpInfo.xml")).map(Vec::as_slice),
+            seeded.then_some(b"old description".as_slice())
+        );
+
+        // A distinct workPath and source tree force the conflict to occur at the IB lock.
+        let competing = Project::new("designer", false);
+        fs::copy(
+            project.config.with_file_name("v8project.local.yaml"),
+            competing.config.with_file_name("v8project.local.yaml"),
+        )
+        .unwrap();
+        let output = competing
+            .command()
+            .args(["--json-message", "pull", "main", "--force"])
+            .output()
+            .expect("run competing ordinary pull");
+        let busy: Value = serde_json::from_slice(&output.stdout).expect("ordinary pull envelope");
+        assert!(!output.status.success(), "{busy}");
+        assert_eq!(busy["error"]["code"], "infobase_busy", "{busy}");
+        assert!(competing.calls().is_empty());
+        assert!(competing.baseline().is_empty());
+
+        session.decide(&ready, decision);
+        let (status, terminal) = session.finish();
+        assert!(!status.success(), "{terminal}");
+        assert_eq!(terminal["memory"], "unchanged");
+        if decision == "published" {
+            assert_eq!(terminal["publication"], "unknown");
+            assert_eq!(terminal["result"]["error"]["code"], "invalid_argument");
+            assert!(terminal["result"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--snapshot-only"));
+        } else {
+            assert_eq!(terminal["publication"], "not_published");
+        }
+        assert_eq!(snapshot(&project.stage), tree);
+        assert_eq!(snapshot(&project.sources), sources);
+        assert_eq!(project.owner(), owner);
+        assert_eq!(project.baseline(), baseline);
+    }
+}
+
+#[test]
+fn snapshot_only_ready_names_the_explicit_extension_and_keeps_memory() {
+    let project = Project::new("designer", true);
+    project.seed_baseline();
+    let owner = project.owner();
+    let baseline = project.baseline();
+    let sources = snapshot(&project.sources);
+    let mut session = Session::start(project.snapshot_command().args([
+        "--infobase",
+        "origin",
+        "--extension",
+        "main",
+    ]));
+    let ready = project.snapshot_ready(&mut session);
+    assert_eq!(ready["source_set"], "main");
+    assert_eq!(ready["extension"], "main");
+    let tree = snapshot(&project.stage);
+    assert!(tree.contains_key(Path::new("Module.bsl")));
+    assert!(!tree.contains_key(Path::new("ConfigDumpInfo.xml")));
+    session.decide(&ready, "rejected");
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert_eq!(snapshot(&project.stage), tree);
+    assert_eq!(snapshot(&project.sources), sources);
+    assert_eq!(project.owner(), owner);
+    assert_eq!(project.baseline(), baseline);
+}
+
+#[test]
+fn snapshot_only_refuses_an_unavailable_base_lock_before_platform() {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let owner = project.owner();
+    let baseline = project.baseline();
+    fs::create_dir(
+        project
+            .config
+            .with_file_name(".ib.v8-runner.infobase.lock.system"),
+    )
+    .unwrap();
+    let (status, terminal) = Session::start(&mut project.snapshot_command()).finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(
+        terminal["result"]["error"]["code"], "runtime_failure",
+        "{terminal}"
+    );
+    assert!(terminal["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("lock"));
+    assert!(project.calls().is_empty());
+    assert_eq!(project.owner(), owner);
+    assert_eq!(project.baseline(), baseline);
+    assert!(snapshot(&project.stage).is_empty());
+}
+
+#[test]
+fn snapshot_only_preview_without_stage_returns_a_read_only_plan() {
+    let project = Project::new("designer", true);
+    let sources = snapshot(&project.sources);
+    let mut command = project.command();
+    let output = command
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--force",
+            "--snapshot-only",
+            "--dry-run",
+            "--extension",
+            "main",
+        ])
+        .output()
+        .expect("run snapshot preview");
+    let plan: Value = serde_json::from_slice(&output.stdout).expect("ordinary pull envelope");
+    assert!(output.status.success(), "{plan}");
+    assert_eq!(plan["command"], "pull");
+    assert_eq!(plan["ok"], true);
+    assert_eq!(plan["data"]["requested_mode"], "FULL");
+    assert_eq!(plan["data"]["mode"], "FULL");
+    assert_eq!(plan["data"]["source_set"], "main");
+    assert_eq!(plan["data"]["extension"], "main");
+    assert_eq!(plan["data"]["provider_dispatched"], false);
+    assert!(plan["data"]["mode_reason"].is_null());
+    let target_path = &plan["data"]["target_path"];
+    assert!(Path::new(target_path.as_str().unwrap()).is_absolute());
+    assert_reported_path(target_path, &project.sources);
+    let ordinary = project.native(&[
+        "pull",
+        "main",
+        "--force",
+        "--dry-run",
+        "--extension",
+        "main",
+    ]);
+    assert_eq!(target_path, &ordinary["data"]["target_path"]);
+    assert!(plan["data"]["losses"].is_null());
+    let text = project
+        .command()
+        .args(["pull", "main", "--force", "--snapshot-only", "--dry-run"])
+        .output()
+        .expect("run text snapshot preview");
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("would export source set 'main'"), "{text}");
+    assert!(
+        !text.contains("output:") && !text.contains("[warning]"),
+        "{text}"
+    );
+    assert_eq!(snapshot(&project.sources), sources);
+    assert!(!project.work.exists());
+    assert!(!project.local().exists());
+    assert!(project.calls().is_empty());
+    assert!(project.owner().is_none());
+}
+
+#[test]
+fn snapshot_only_preview_and_live_refuse_unsupported_bases_before_sources() {
+    for unsupported in ["cluster", "standalone", "ad hoc"] {
+        let project = Project::new("designer", false);
+        fs::rename(&project.sources, project.sources.with_extension("missing")).unwrap();
+        if unsupported != "ad hoc" {
+            let mut origin = json!({"connection": "Srvr=example.invalid;Ref=demo"});
+            if unsupported == "standalone" {
+                origin["standalone"] = json!({});
+            }
+            fs::write(
+                project.config.with_file_name("v8project.local.yaml"),
+                serde_yaml::to_string(&json!({"infobases": {"origin": origin}})).unwrap(),
+            )
+            .unwrap();
+        }
+        let ad_hoc = format!("File={}", project.config.with_file_name("ib").display());
+        let mut preview = project.command();
+        preview.args([
+            "--json-message",
+            "pull",
+            "main",
+            "--force",
+            "--snapshot-only",
+            "--dry-run",
+        ]);
+        let mut live = project.snapshot_command();
+        if unsupported == "ad hoc" {
+            preview.args(["--infobase", &ad_hoc]);
+            live.args(["--infobase", &ad_hoc]);
+        }
+        let preview = preview.output().expect("run snapshot preview");
+        let envelope: Value = serde_json::from_slice(&preview.stdout).expect("ordinary envelope");
+        let (status, terminal) = Session::start(&mut live).finish();
+        assert!(!preview.status.success(), "{envelope}");
+        assert!(!status.success(), "{terminal}");
+        let error = &envelope["error"];
+        assert_eq!(error, &terminal["result"]["error"]);
+        assert_eq!(error["code"], "invalid_argument");
+        assert!(
+            error["message"].as_str().unwrap().contains(unsupported),
+            "{error}"
+        );
+        assert_eq!(terminal["publication"], "not_published");
+        assert_eq!(terminal["memory"], "unchanged");
+        assert!(!project.work.exists());
+        assert!(!project.local().exists());
+        assert!(project.calls().is_empty());
+        assert!(snapshot(&project.stage).is_empty());
+    }
+}
+
+#[test]
+fn snapshot_only_live_requires_a_stage() {
+    let project = Project::new("designer", false);
+    let output = project
+        .command()
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--force",
+            "--snapshot-only",
+        ])
+        .output()
+        .expect("run snapshot without stage");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("ordinary envelope");
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--publication-stdio"));
+    assert!(!project.work.exists());
+    assert!(project.calls().is_empty());
+}
+
+#[test]
+fn snapshot_only_refuses_an_ad_hoc_base_before_workspace_preparation() {
+    let project = Project::new("designer", false);
+    let (status, terminal) = Session::start(project.snapshot_command().arg("--infobase").arg(
+        format!("File={}", project.config.with_file_name("ib").display()),
+    ))
+    .finish();
+    assert!(!status.success(), "{terminal}");
+    assert!(terminal["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("named file infobase"));
+    assert!(!project.work.exists());
+    assert!(!project.local().exists());
+    assert!(project.calls().is_empty());
+    assert!(project.owner().is_none());
+}
+
+#[test]
+fn snapshot_only_refuses_a_mismatched_extension_before_workspace_preparation() {
+    let project = Project::new("designer", true);
+    let (status, terminal) =
+        Session::start(project.snapshot_command().args(["--extension", "other"])).finish();
+    assert!(!status.success(), "{terminal}");
+    assert!(terminal["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match --extension"));
+    assert!(!project.work.exists());
+    assert!(!project.local().exists());
+    assert!(project.calls().is_empty());
+    assert!(project.owner().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_only_refuses_a_stage_redirected_during_authorization() {
+    let project = Project::new("designer", false);
+    let sources = snapshot(&project.sources);
+    let mut session = Session::start(&mut project.snapshot_command());
+    let selected = project.selected(&mut session);
+    fs::rename(&project.stage, project.stage.with_extension("original")).unwrap();
+    std::os::unix::fs::symlink(&project.sources, &project.stage).unwrap();
+    session.decide(&selected, "continue");
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert!(terminal["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("snapshot stage changed"));
+    assert!(project.calls().is_empty());
+    assert_eq!(snapshot(&project.sources), sources);
+    assert!(project.owner().is_none());
+    assert!(project.baseline().is_empty());
+}
+
+#[test]
+fn snapshot_only_platform_failure_preserves_owner_and_memory() {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let owner = project.owner();
+    let baseline = project.baseline();
+    let mut session = Session::start(
+        project
+            .snapshot_command()
+            .env("V8_RUNNER_FAKE_PLATFORM_FAIL_DUMP", "1"),
+    );
+    let selected = project.selected(&mut session);
+    session.decide(&selected, "continue");
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert!(String::from_utf8_lossy(&project.calls()).contains("DumpConfigToFiles"));
+    assert_eq!(
+        terminal["result"]["error"]["code"], "platform_failure",
+        "{terminal}"
+    );
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert_eq!(project.owner(), owner);
+    assert_eq!(project.baseline(), baseline);
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_only_cancellation_at_ready_preserves_owner_and_memory() {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let owner = project.owner();
+    let baseline = project.baseline();
+    let mut session = Session::start(&mut project.snapshot_command());
+    project.snapshot_ready(&mut session);
+    let tree = snapshot(&project.stage);
+    // SAFETY: this session owns the live CLI process.
+    assert_eq!(
+        unsafe { libc::kill(session.child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(
+        terminal["result"]["error"]["code"], "cancelled",
+        "{terminal}"
+    );
+    assert_eq!(terminal["publication"], "unknown");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert_eq!(snapshot(&project.stage), tree);
+    assert_eq!(project.owner(), owner);
+    assert_eq!(project.baseline(), baseline);
+}
+
+#[test]
+fn snapshot_only_eof_after_ready_leaves_publication_unknown() {
+    assert_snapshot_only_unconfirmed_after_ready(Session::close_input);
+}
+
+#[test]
+fn snapshot_only_malformed_reply_after_ready_leaves_publication_unknown() {
+    assert_snapshot_only_unconfirmed_after_ready(|session| {
+        session.raw(b"{invalid\n").expect("send malformed reply");
+    });
+}
+
+fn assert_snapshot_only_unconfirmed_after_ready(reply: impl FnOnce(&mut Session)) {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let owner = project.owner();
+    let baseline = project.baseline();
+    let sources = snapshot(&project.sources);
+    let mut session = Session::start(&mut project.snapshot_command());
+    project.snapshot_ready(&mut session);
+    let tree = snapshot(&project.stage);
+    reply(&mut session);
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(terminal["publication"], "unknown");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert_eq!(snapshot(&project.stage), tree);
+    assert_eq!(snapshot(&project.sources), sources);
+    assert_eq!(project.owner(), owner);
+    assert_eq!(project.baseline(), baseline);
+}
+
+#[test]
 fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push() {
     for provider in ["designer", "ibcmd"] {
         for extension in [false, true] {
@@ -1718,4 +2158,167 @@ fn an_external_stage_inside_the_local_path_is_refused_before_the_platform() {
     );
     assert!(project.calls().is_empty(), "the platform was not started");
     assert!(snapshot(&project.stage).is_empty());
+}
+
+#[test]
+fn accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_base() {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let previous_baseline = project.baseline();
+    let mut command = project.snapshot_command();
+    command.arg("--prepare-merge-baseline");
+    let mut session = Session::start(&mut command);
+    let ready = project.snapshot_ready(&mut session);
+    let id = ready["merge_baseline"]["id"]
+        .as_str()
+        .expect("merge receipt");
+    assert_eq!(ready["merge_baseline"]["provider"], "designer");
+    assert_eq!(ready["merge_baseline"]["generation"], "1".repeat(40));
+    session.decide(&ready, "rejected");
+    session.finish();
+    assert_eq!(project.baseline(), previous_baseline);
+
+    // The caller owns the stage after ready. Updating it to the same local
+    // merge bytes must not remove the outbound change against the original IB.
+    fs::write(
+        project.stage.join("Module.bsl"),
+        "Procedure Merged()\nEndProcedure\n",
+    )
+    .unwrap();
+
+    let checked = project.native(&["pull", "main", "--check-merge-baseline", id]);
+    assert_eq!(checked["data"]["baseline"], "ready");
+    assert_eq!(project.baseline(), previous_baseline);
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Merged()\nEndProcedure\n",
+    )
+    .unwrap();
+
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_GENERATION", "2".repeat(40))
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--accept-merge-baseline",
+            id,
+        ])
+        .output()
+        .unwrap();
+    let failure: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{failure}");
+    assert_eq!(failure["error"]["code"], "non_fast_forward", "{failure}");
+    assert_eq!(project.baseline(), previous_baseline);
+
+    let accepted = project.native(&["pull", "main", "--accept-merge-baseline", id]);
+    assert_eq!(accepted["data"]["baseline"], "accepted");
+    let accepted_baseline = project.baseline();
+    assert_eq!(
+        project.native(&["pull", "main", "--accept-merge-baseline", id])["data"],
+        accepted["data"]
+    );
+    assert_eq!(project.baseline(), accepted_baseline);
+    assert!(fs::read_to_string(project.sources.join("Module.bsl"))
+        .unwrap()
+        .contains("Merged"));
+
+    fs::write(&project.calls, "").unwrap();
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_GENERATION", "2".repeat(40))
+        .args(["--json-message", "push", "main", "--no-apply"])
+        .output()
+        .unwrap();
+    let failure: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{failure}");
+    assert_eq!(failure["error"]["code"], "non_fast_forward", "{failure}");
+    let calls = String::from_utf8(project.calls()).unwrap();
+    assert!(!calls.contains("/LoadConfigFromFiles"), "{calls}");
+
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_GENERATION", "")
+        .args(["--json-message", "push", "main", "--no-apply"])
+        .output()
+        .unwrap();
+    let failure: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{failure}");
+    assert_eq!(failure["error"]["code"], "non_fast_forward", "{failure}");
+    let calls = String::from_utf8(project.calls()).unwrap();
+    assert!(!calls.contains("/LoadConfigFromFiles"), "{calls}");
+
+    fs::write(&project.calls, "").unwrap();
+    let pushed = project.native(&["push", "main", "--no-apply"]);
+    assert!(
+        pushed["data"]["steps"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("partial")),
+        "{pushed}"
+    );
+    let calls = String::from_utf8(project.calls()).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.contains("/LoadConfigFromFiles") && call.contains("-partial")),
+        "{calls}"
+    );
+}
+
+#[test]
+fn an_interrupted_merge_baseline_installation_blocks_push_until_retry() {
+    let project = Project::new("designer", false);
+    project.seed_baseline();
+    let mut command = project.snapshot_command();
+    command.arg("--prepare-merge-baseline");
+    let mut session = Session::start(&mut command);
+    let ready = project.snapshot_ready(&mut session);
+    let id = ready["merge_baseline"]["id"]
+        .as_str()
+        .expect("merge receipt");
+    session.decide(&ready, "rejected");
+    session.finish();
+
+    let version = project
+        .local()
+        .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml");
+    fs::remove_file(&version).unwrap();
+    fs::create_dir(&version).unwrap();
+    let failed = project
+        .command()
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--accept-merge-baseline",
+            id,
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let failure: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("version file"),
+        "{failure}"
+    );
+
+    fs::write(&project.calls, "").unwrap();
+    let refused = project
+        .command()
+        .args(["--json-message", "push", "main", "--no-apply"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "non_fast_forward", "{refusal}");
+    assert!(project.calls().is_empty());
+
+    fs::remove_dir(&version).unwrap();
+    let accepted = project.native(&["pull", "main", "--accept-merge-baseline", id]);
+    assert_eq!(accepted["data"]["baseline"], "accepted");
+    assert!(version.is_file());
 }

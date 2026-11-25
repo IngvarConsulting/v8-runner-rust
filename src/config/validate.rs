@@ -7,7 +7,7 @@ use crate::config::model::{
     names_an_ipv6_host, AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
     ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
-use crate::domain::capability::Operation;
+use crate::domain::capability::{Operation, TargetKind};
 use crate::platform::connection::V8Connection;
 use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, host_of_authority};
@@ -28,6 +28,15 @@ pub enum ConfigValidationError {
 
     #[error("source-set must contain at least one supported entry")]
     NoSupportedSourceSet,
+
+    #[error("--snapshot-only requires a named file infobase; an ad hoc connection is unsupported")]
+    SnapshotPullAdHoc,
+
+    #[error("--snapshot-only requires a named file infobase; '{name}' has target kind '{kind}'")]
+    SnapshotPullServer { name: String, kind: &'static str },
+
+    #[error("--snapshot-only requires DESIGNER format")]
+    SnapshotPullFormat,
 
     #[error("EXTENSION source-set requires at least one CONFIGURATION source-set")]
     ExtensionRequiresConfiguration,
@@ -693,6 +702,25 @@ pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationErro
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_project_checks(config)
+}
+
+/// Called after infobase selection and before provider or source-set validation.
+pub(crate) fn admit_snapshot_pull(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    let name = config
+        .infobase_name
+        .as_deref()
+        .ok_or(ConfigValidationError::SnapshotPullAdHoc)?;
+    let kind = config.target_kind();
+    if kind != TargetKind::File {
+        return Err(ConfigValidationError::SnapshotPullServer {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if config.format != SourceFormat::Designer {
+        return Err(ConfigValidationError::SnapshotPullFormat);
+    }
+    Ok(())
 }
 
 /// Та же проверка проекта для каталога, которого ещё нет на диске: его пишет сама команда.

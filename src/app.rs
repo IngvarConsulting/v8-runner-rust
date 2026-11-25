@@ -149,8 +149,19 @@ pub fn run() -> i32 {
         }
         crate::output::events::open(command_name(&cli.command));
     }
+    let startup_refusal = startup_refusal.or_else(|| match &cli.command {
+        Command::Dump(args) if args.snapshot_only => {
+            let message = match (cli.dry_run, args.publication_stdio.is_some()) {
+                (true, true) => "--snapshot-only preview does not accept --publication-stdio",
+                (false, false) => "--snapshot-only execution requires --publication-stdio",
+                _ => return None,
+            };
+            Some(UseCaseError::new(UseCaseErrorKind::Validation, message))
+        }
+        _ => None,
+    });
     if let Command::Dump(args) = &cli.command {
-        if args.publication_stdio.is_some() {
+        if args.publication_stdio.is_some() && !(args.snapshot_only && cli.dry_run) {
             return crate::cli::external_pull::run(&cli, args, startup_refusal);
         }
     }
@@ -179,6 +190,12 @@ pub fn run() -> i32 {
 
     let color_mode = color_mode(cli.no_color);
     let presenter = Presenter::new(output_format.to_owned(), color_mode);
+
+    if let Command::Dump(args) = &cli.command {
+        if let Some(id) = args.check_merge_baseline.or(args.accept_merge_baseline) {
+            return crate::cli::external_pull::run_merge_baseline(&cli, args, id, &presenter);
+        }
+    }
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &cli, &presenter);
@@ -460,6 +477,15 @@ pub(crate) fn load_cli_config(
     let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
     let config_path = cli.config.as_deref();
     let workdir = cli.workdir.as_deref();
+    if matches!(&cli.command, Command::Dump(args)
+        if args.snapshot_only || args.check_merge_baseline.is_some() || args.accept_merge_baseline.is_some())
+    {
+        return crate::config::loader::load_config_for_snapshot_pull(
+            config_path,
+            workdir,
+            &selector,
+        );
+    }
     if let Command::Tools(crate::cli::args::ToolsArgs {
         command: ToolsCommand::Download(download),
     }) = &cli.command

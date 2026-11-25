@@ -100,6 +100,19 @@ pub fn load_config_for_preview(
     )
 }
 
+pub(crate) fn load_config_for_snapshot_pull(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::SnapshotPull,
+    )
+}
+
 pub fn load_config_for_tools_download(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -353,6 +366,7 @@ enum ConfigValidationMode {
     },
     Full,
     Preview,
+    SnapshotPull,
     Planned,
     InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
@@ -474,6 +488,9 @@ fn build_config(
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
+    if matches!(validation_mode, ConfigValidationMode::SnapshotPull) {
+        crate::config::validate::admit_snapshot_pull(&config)?;
+    }
     config.provider_origins = provider_origins
         .into_iter()
         .filter_map(|(key, file)| {
@@ -513,7 +530,9 @@ fn build_config(
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
-        ConfigValidationMode::Preview => validate_read_only(&config)?,
+        ConfigValidationMode::Preview | ConfigValidationMode::SnapshotPull => {
+            validate_read_only(&config)?
+        }
         ConfigValidationMode::Planned => validate_planned(&config)?,
         ConfigValidationMode::InfobaseExport(operation) => {
             validate_infobase_export(&config, operation)?

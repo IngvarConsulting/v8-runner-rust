@@ -195,7 +195,7 @@ fn check_as(
 ) -> Result<Vec<Warning>, UseCaseError> {
     let writes = match access {
         BaseAccess::Untouched => return Ok(Vec::new()),
-        BaseAccess::Reads => false,
+        BaseAccess::Reads | BaseAccess::ReadsWithLock | BaseAccess::ReadsWithMemory => false,
         BaseAccess::Writes | BaseAccess::Creates => true,
     };
     let Some(base_dir) = file_infobase_dir(config) else {

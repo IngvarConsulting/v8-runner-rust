@@ -375,6 +375,15 @@ pub(crate) fn require_memory(
     contexts: &[SourceSetContext],
     selected_set: Option<&str>,
 ) -> Result<(), UseCaseError> {
+    if let Some(set) = contexts
+        .iter()
+        .find(|set| recorded_generation(set).is_some_and(|record| record.merge_pending()))
+    {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::NonFastForward,
+            format!("the working merge baseline for '{}' was not fully saved; retry acceptance or pull again", set.name()),
+        ));
+    }
     let forgotten: Vec<&SourceSetContext> = contexts
         .iter()
         .filter(|set| !remembers(set, &config.work_path))
@@ -514,7 +523,7 @@ pub(crate) fn token_scope(config: &AppConfig, set: &SourceSetContext) -> TokenSc
 }
 
 /// Имя расширения набора для вопроса о поколении: у набора расширения — его имя.
-fn extension_of<'a>(config: &AppConfig, set: &'a SourceSetContext) -> Option<&'a str> {
+pub(crate) fn extension_of<'a>(config: &AppConfig, set: &'a SourceSetContext) -> Option<&'a str> {
     config
         .source_sets
         .iter()
@@ -674,6 +683,23 @@ impl<'a> GenerationGate<'a> {
         self.compare(set, tool, read)
     }
 
+    pub(crate) fn require_partial_load(
+        &self,
+        set: &SourceSetContext,
+        mode: &crate::domain::build::BuildMode,
+    ) -> Result<(), AppError> {
+        if self.mode != PushMode::Force
+            && matches!(mode, crate::domain::build::BuildMode::Full)
+            && recorded_generation(set).is_some_and(|record| record.merge_baseline.is_some())
+        {
+            return Err(AppError::Refused(Box::new(UseCaseError::new(
+                UseCaseErrorKind::NonFastForward,
+                format!("the working merge for '{}' cannot be loaded partially; review the changes before a full replacement", set.name()),
+            ))));
+        }
+        Ok(())
+    }
+
     fn compare(
         &self,
         set: &SourceSetContext,
@@ -700,6 +726,13 @@ impl<'a> GenerationGate<'a> {
         let Some(record) = record else {
             return Ok(BeforeLoad::Unchecked);
         };
+        if record.merge_pending() {
+            return Err(self.unanswered(
+                set.name(),
+                &record,
+                "the working merge baseline was not fully saved",
+            ));
+        }
         let scope = token_scope(self.config, set);
         if self.foreign(&record, tool, scope) {
             // Сюда доходит только набор, не сверенный первым проходом
@@ -710,8 +743,15 @@ impl<'a> GenerationGate<'a> {
                 &mut PlatformUtilities::from_config(self.config),
             );
         }
+        let unchecked = |why: &str| {
+            if record.merge_baseline.is_some() {
+                Err(self.unanswered(set.name(), &record, why))
+            } else {
+                Ok(BeforeLoad::Unchecked)
+            }
+        };
         if !scope.compares(record.tool, tool) {
-            return Ok(BeforeLoad::Unchecked);
+            return unchecked("the loading tool's generation cannot be compared");
         }
         let Some(token) = read()? else {
             return if extension {
@@ -720,7 +760,7 @@ impl<'a> GenerationGate<'a> {
                     "ibcmd did not report the loaded extension generation",
                 ))
             } else {
-                Ok(BeforeLoad::Unchecked)
+                unchecked("the loading tool gave no generation")
             };
         };
         match predict(Some(&record), Some((tool, &token)), scope) {
@@ -728,7 +768,7 @@ impl<'a> GenerationGate<'a> {
             GenerationVerdict::MovedAhead => Err(self.moved_ahead(set.name(), &token, &record)),
             GenerationVerdict::OtherTool
             | GenerationVerdict::NoRecord
-            | GenerationVerdict::NoAnswer => Ok(BeforeLoad::Unchecked),
+            | GenerationVerdict::NoAnswer => unchecked("the generation could not be confirmed"),
         }
     }
 
@@ -1093,14 +1133,14 @@ pub(crate) fn unchanged_since_the_record(
     let Recorded::Ours(record) = GenerationLedger::of(set)?.read() else {
         return None;
     };
-    (record.compare(tool, token, token_scope(config, set)) == GenerationComparison::Unchanged).then(
-        || {
+    (!record.merge_pending()
+        && record.compare(tool, token, token_scope(config, set)) == GenerationComparison::Unchanged)
+        .then(|| {
             format!(
             "configuration generation {token} is unchanged since the last {} ({}); nothing to dump",
             record.after, record.recorded_at
         )
-        },
-    )
+        })
 }
 
 /// Решает ли что-нибудь поколение после выгрузки набора `set`: его ответ нужен только записи
@@ -1129,15 +1169,7 @@ pub(crate) fn record_after_dump(
     // Выгрузка берёт основную конфигурацию и непринятого не снимает: запись сравнимого
     // инструмента ([`token_scope`]) и того же поколения, загруженная без применения, остаётся
     // непринятой — и тогда, когда выгружает другой инструмент, чем загружал.
-    let mark = match ledger.read() {
-        Recorded::Ours(record)
-            if record.compare(tool, before, token_scope(config, set))
-                == GenerationComparison::Unchanged =>
-        {
-            record.mark()
-        }
-        Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => ApplyMark::Applied,
-    };
+    let mark = dump_apply_mark(config, set, &ledger, tool, before);
     if let Err(error) = ledger.record_as(tool, before, GenerationAfter::Dump, mark) {
         return Some(format!(
             "the configuration generation of source-set '{}' was not recorded: {error}",
@@ -1151,6 +1183,24 @@ pub(crate) fn record_after_dump(
         "the infobase was changed while source-set '{}' was being dumped: its configuration generation was {before} before the dump and {after} after it; the generation from before the dump is remembered, so the next push is refused as non-fast-forward — pull again",
         set.name()
     ))
+}
+
+pub(super) fn dump_apply_mark(
+    config: &AppConfig,
+    set: &SourceSetContext,
+    ledger: &GenerationLedger,
+    tool: Provider,
+    before: &str,
+) -> ApplyMark {
+    match ledger.read() {
+        Recorded::Ours(record)
+            if record.compare(tool, before, token_scope(config, set))
+                == GenerationComparison::Unchanged =>
+        {
+            record.mark()
+        }
+        Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => ApplyMark::Applied,
+    }
 }
 
 /// Память о наборе, из которого раннер собирает созданную базу: дерево набора в формате

@@ -93,6 +93,7 @@ command_data_forms! {
     "test", "test" => crate::command_envelope::TestEnvelopeData;
     "pull", "pull" => crate::domain::dump::DumpResult;
     "pull", "pull-all" => crate::domain::dump::PullAllResult;
+    "pull", "pull-merge-baseline" => crate::use_cases::merge_baseline::MergeBaselineResult;
     "download", "download"
         => crate::domain::infobase_export::ExportConfigurationPackageResult;
     "download", "download-all" => crate::domain::infobase_export::DownloadAllResult;

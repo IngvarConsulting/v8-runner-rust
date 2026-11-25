@@ -1561,6 +1561,7 @@ fn build_prepared_state(
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
     hash_kind: HashKind,

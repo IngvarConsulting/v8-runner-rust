@@ -944,6 +944,22 @@ pub struct DumpArgs {
     #[arg(long, value_name = "STAGE-DIRECTORY", requires = "discard_uncommitted", conflicts_with_all = ["json_message", "all", "objects", "mode"])]
     pub publication_stdio: Option<std::path::PathBuf>,
 
+    /// Export a snapshot of a named file infobase without taking ownership or publishing it.
+    #[arg(long, requires = "discard_uncommitted", conflicts_with_all = ["all", "objects", "mode"])]
+    pub snapshot_only: bool,
+
+    /// Retain the runner's private baseline for a staged working-configuration snapshot.
+    #[arg(long, requires_all = ["snapshot_only", "publication_stdio"])]
+    pub prepare_merge_baseline: bool,
+
+    /// Recheck the working-configuration generation for a staged baseline without accepting it.
+    #[arg(long, value_name = "UUID", requires = "set", conflicts_with_all = ["accept_merge_baseline", "snapshot_only", "discard_uncommitted", "all", "objects", "mode"])]
+    pub check_merge_baseline: Option<uuid::Uuid>,
+
+    /// Remember the staged baseline after a working merge, subject to its generation check.
+    #[arg(long, value_name = "UUID", requires = "set", conflicts_with_all = ["snapshot_only", "discard_uncommitted", "all", "objects", "mode"])]
+    pub accept_merge_baseline: Option<uuid::Uuid>,
+
     /// Previous mode key; hidden from help for one release cycle. `incremental` and
     /// `partial` mean the same as no key; `full` is refused in favour of `--force`.
     #[arg(long, hide = true, value_enum)]

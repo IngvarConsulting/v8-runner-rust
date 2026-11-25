@@ -1803,6 +1803,8 @@ pub(crate) struct GenerationRecord {
     pub tool: Provider,
     /// Что было сделано, когда токен записан.
     pub after: GenerationAfter,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_baseline: Option<MergeBaselineMark>,
     /// Применена ли загрузка к конфигурации базы данных. `false` — загружено без
     /// применения (`push --no-apply` или неудачное применение): поле пишется только тогда,
     /// и запись без него — прежняя запись, она применённая
@@ -1812,6 +1814,13 @@ pub(crate) struct GenerationRecord {
     pub recorded_at: String,
     /// Привязка памяти набора (база, каталог, назначение, имя): запись другой пары чужая.
     pub identity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct MergeBaselineMark {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_generation: Option<String>,
 }
 
 const fn applied_by_default() -> bool {
@@ -1832,6 +1841,12 @@ pub(crate) enum ApplyMark {
 }
 
 impl GenerationRecord {
+    pub(crate) fn merge_pending(&self) -> bool {
+        self.merge_baseline
+            .as_ref()
+            .is_some_and(|merge| merge.pending_generation.is_some())
+    }
+
     /// Признак применения записи.
     pub(crate) const fn mark(&self) -> ApplyMark {
         if self.applied {
@@ -1996,6 +2011,52 @@ impl GenerationLedger {
         after: GenerationAfter,
         mark: ApplyMark,
     ) -> Result<(), AppError> {
+        self.record_with_merge(tool, token, after, mark, None)
+    }
+
+    pub(crate) fn record_merge(
+        &self,
+        receipt: &super::merge_baseline::MergeBaselineReceipt,
+        mark: ApplyMark,
+        pending: bool,
+    ) -> Result<(), AppError> {
+        // The inner generation is deliberately incomparable while local memory
+        // is being installed, including for older readers of this ledger.
+        let token = if pending {
+            "incomplete working merge"
+        } else {
+            &receipt.generation
+        };
+        self.record_with_merge(
+            receipt.provider,
+            token,
+            GenerationAfter::Dump,
+            mark,
+            Some(MergeBaselineMark {
+                id: receipt.id.clone(),
+                pending_generation: pending.then(|| receipt.generation.clone()),
+            }),
+        )
+    }
+
+    pub(crate) fn carry(&self, record: &GenerationRecord, token: &str) -> Result<(), AppError> {
+        self.record_with_merge(
+            record.tool,
+            token,
+            record.after,
+            ApplyMark::Applied,
+            record.merge_baseline.clone(),
+        )
+    }
+
+    fn record_with_merge(
+        &self,
+        tool: Provider,
+        token: &str,
+        after: GenerationAfter,
+        mark: ApplyMark,
+        merge_baseline: Option<MergeBaselineMark>,
+    ) -> Result<(), AppError> {
         let dir = self.file.parent().ok_or_else(|| {
             AppError::Runtime(format!(
                 "the generation ledger '{}' has no parent directory",
@@ -2013,6 +2074,7 @@ impl GenerationLedger {
             tool,
             after,
             applied: mark == ApplyMark::Applied,
+            merge_baseline,
             recorded_at: chrono::Utc::now().to_rfc3339(),
             identity: self.identity.clone(),
         })
