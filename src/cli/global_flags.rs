@@ -220,6 +220,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "web publish",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "web start",
         preview: Preview::Runs,
         base: Base::Resolves,

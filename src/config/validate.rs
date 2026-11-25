@@ -212,8 +212,8 @@ pub enum ConfigValidationError {
     )]
     WebConnectionIsNotAnAdministrativeChannel,
 
-    #[error("infobase.web.managed requires infobase.cluster.managed")]
-    ManagedWebNeedsCluster,
+    #[error("infobase.web.managed requires a local file infobase or infobase.cluster.managed")]
+    ManagedWebNeedsFileOrCluster,
 
     #[error(
         "infobase.web.managed computes server, dir, conf and url and does not support os-auth"
@@ -581,8 +581,12 @@ fn validate_managed_declarations(
         .as_ref()
         .is_some_and(|cluster| cluster.managed.is_some());
     if let Some(web) = infobase.web.as_ref().filter(|web| web.managed) {
-        if !cluster_managed {
-            return Err(ConfigValidationError::ManagedWebNeedsCluster);
+        let file = infobase.standalone.is_none()
+            && V8Connection::from_connection_string(&infobase.connection)
+                .file_path()
+                .is_some();
+        if !cluster_managed && !file {
+            return Err(ConfigValidationError::ManagedWebNeedsFileOrCluster);
         }
         if web.server.is_some()
             || web.dir.is_some()
@@ -640,6 +644,23 @@ pub fn validate_managed_cluster(config: &AppConfig) -> Result<(), ConfigValidati
     validate_platform_version(config)?;
     if ManagedServer::of(&config.infobase) != Some(ManagedServer::Cluster) {
         return Err(ConfigValidationError::ClusterNotManaged);
+    }
+    Ok(())
+}
+
+/// Проверка для `web`: сохраняет правила кластера, файловая база объявляет свой Apache.
+pub fn validate_managed_web(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if ManagedServer::of(&config.infobase) == Some(ManagedServer::Cluster) {
+        return validate_managed_cluster(config);
+    }
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_infobase_form(&config.infobase)?;
+    validate_platform_version(config)?;
+    if !config.infobase.web.as_ref().is_some_and(|web| web.managed)
+        || config.target_kind() != crate::domain::capability::TargetKind::File
+    {
+        return Err(ConfigValidationError::ManagedWebNeedsFileOrCluster);
     }
     Ok(())
 }
@@ -820,6 +841,13 @@ pub(crate) fn validate_infobase_runtime(config: &AppConfig) -> Result<(), Config
     validate_planned_work_path(config)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)
+}
+
+/// Публикация использует базу, платформу и параметры веб-сервера, без исходников.
+pub(crate) fn validate_publish(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_infobase_runtime(config)?;
+    validate_providers(config, &[Operation::Publish])?;
+    validate_web_publication(config)
 }
 
 /// Validate configuration for operations that read only the configured infobase.
