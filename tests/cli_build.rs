@@ -922,6 +922,7 @@ fn build_ibcmd_json_failure_reports_operation_target_and_exit_code() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1607,6 +1608,7 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1671,6 +1673,7 @@ fn build_ibcmd_partial_uses_relative_positional_args_and_base_dir() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1684,7 +1687,12 @@ fn build_ibcmd_partial_uses_relative_positional_args_and_base_dir() {
     fs::write(&changed_file, "procedure Test() // changed endprocedure").expect("change");
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "main",
+        ])
         .output()
         .expect("run command");
 
@@ -1778,6 +1786,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
