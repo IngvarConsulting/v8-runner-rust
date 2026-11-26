@@ -152,11 +152,12 @@ fn inside_a_worktree(dir: &Path) -> bool {
 /// Замерено: нечитаемый подкаталог даёт у `git status` нулевой выход и пустой список
 /// вместо своего содержимого. Предупреждение об этом приходит прозой в stderr, а прозе
 /// решения не доверяются, поэтому полноту ответа проверяет обход самого каталога.
-fn unreadable_directory_in(dir: &Path) -> Option<PathBuf> {
+fn unreadable_directory_in(dir: &Path, interrupted: &mut dyn FnMut() -> bool) -> Option<PathBuf> {
     WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| entry.file_name() != ".git")
+        .take_while(|_| !interrupted())
         .find_map(|entry| match entry {
             Ok(_) => None,
             Err(error) => Some(error.path().unwrap_or(dir).to_path_buf()),
@@ -178,11 +179,29 @@ fn first_line(stderr: &str) -> Option<&str> {
 /// их прежнее содержимое не потеря, а вопрос о них отказывал бы в каждой замене.
 /// Имена сравниваются буквально и только в корне `dir`.
 pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork {
+    uncommitted_work_until(dir, regenerated, None)
+        .expect("an unbounded git status cannot be interrupted")
+}
+
+pub fn uncommitted_work_until(
+    dir: &Path,
+    regenerated: &[&str],
+    mut interrupted: Option<&mut dyn FnMut() -> bool>,
+) -> Option<UncommittedWork> {
+    if interrupted.as_mut().is_some_and(|check| check()) {
+        return None;
+    }
     if !dir.exists() {
-        return UncommittedWork::Nothing;
+        return Some(UncommittedWork::Nothing);
     }
 
-    let output = match git()
+    let mut command = git();
+    if interrupted.is_some() {
+        // A read during a publication retry must not start a long-lived fsmonitor hook
+        // that inherits the output pipes and outlives the interrupted git process.
+        command.args(["-c", "core.fsmonitor=false"]);
+    }
+    command
         .arg("-C")
         .arg(dir)
         .args([
@@ -204,14 +223,26 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
         // Вопрос ничего не пишет: без этого `status` обновляет индекс рабочей копии, а
         // превью следа не оставляет.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .output()
-    {
+        .stdin(Stdio::null());
+    let output = if let Some(check) = interrupted.as_mut() {
+        match git_query_output(command, None, OnCancel::KillTree, check) {
+            Ok(output) => Ok(output),
+            Err(GitQueryError::Interrupted) => return None,
+            Err(error) => Err(error.to_string()),
+        }
+    } else {
+        command.output().map_err(|error| error.to_string())
+    };
+    let mut stopped = || interrupted.as_mut().is_some_and(|check| check());
+    if stopped() {
+        return None;
+    }
+    let output = match output {
         Ok(output) => output,
         Err(error) => {
-            return UncommittedWork::Unknown(NoAnswer::Failed(format!(
+            return Some(UncommittedWork::Unknown(NoAnswer::Failed(format!(
                 "git status failed to run: {error}"
-            )))
+            ))))
         }
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -227,11 +258,11 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
             Some(line) => format!("{exit}: {line}"),
             None => exit,
         };
-        return UncommittedWork::Unknown(if inside_a_worktree(dir) {
+        return Some(UncommittedWork::Unknown(if inside_a_worktree(dir) {
             NoAnswer::Failed(reason)
         } else {
             NoAnswer::OutsideRepository(reason)
-        });
+        }));
     }
 
     // При нулевом выходе ответ получен; предупреждения в stderr (например, о замене концов
@@ -241,15 +272,15 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
     // разбирается, решает обход каталога. Без stderr обход не нужен.
     if let Some(warning) = first_line(&stderr) {
         tracing::debug!(dir = %dir.display(), warning, "git status warning ignored");
-        if let Some(unreadable) = unreadable_directory_in(dir) {
-            return UncommittedWork::Unknown(NoAnswer::Failed(format!(
+        if let Some(unreadable) = unreadable_directory_in(dir, &mut stopped) {
+            return Some(UncommittedWork::Unknown(NoAnswer::Failed(format!(
                 "'{}' could not be read, so git status could not list it",
                 unreadable.display()
-            )));
+            ))));
         }
     }
 
-    UncommittedWork::AtRisk(parse_at_risk(&output.stdout)).normalized()
+    (!stopped()).then(|| UncommittedWork::AtRisk(parse_at_risk(&output.stdout)).normalized())
 }
 
 impl UncommittedWork {
@@ -377,6 +408,8 @@ pub enum Placement {
 enum OnCancel {
     /// Завершить: git ничего не держит.
     Kill,
+    /// A bounded read owns its launcher and helpers until both output streams reach EOF.
+    KillTree,
     /// Дождаться конца: git мог взять `.git/index.lock`, а завершённый принудительно он его
     /// не снимает (#575).
     Finish,
@@ -391,29 +424,62 @@ const GIT_INTERRUPTION_POLL: std::time::Duration = std::time::Duration::from_mil
 /// предупреждения при нулевом выходе ответа не отменяют
 /// (`INV.USE-CASES.A-GIT-WARNING-DOES-NOT-CANCEL-ITS-ANSWER`).
 fn run_git_query(
-    mut command: Command,
+    command: Command,
     stdin: Option<Vec<u8>>,
     on_cancel: OnCancel,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<u8>, GitQueryError> {
+    let output = git_query_output(command, stdin, on_cancel, interrupted)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let exit = match output.status.code() {
+            Some(code) => format!("git exited with {code}"),
+            None => "git was terminated by a signal".to_owned(),
+        };
+        return Err(GitQueryError::Failed {
+            code: output.status.code(),
+            reason: match first_line(&stderr) {
+                Some(line) => format!("{exit}: {line}"),
+                None => exit,
+            },
+        });
+    }
+    if let Some(warning) = first_line(&stderr) {
+        tracing::debug!(warning, "git warning on a successful query");
+    }
+    Ok(output.stdout)
+}
+
+fn git_query_output(
+    mut command: Command,
+    stdin: Option<Vec<u8>>,
+    on_cancel: OnCancel,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<std::process::Output, GitQueryError> {
     use std::io::{Read, Write};
 
     if interrupted() {
         return Err(GitQueryError::Interrupted);
     }
-    let mut child = command
+    command
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    use super::process::{spawn_child, ProcessIoMode};
+    let mode = if on_cancel == OnCancel::KillTree {
+        ProcessIoMode::ManagedWait
+    } else {
+        ProcessIoMode::Captured
+    };
+    let mut child = spawn_child(command, mode)
         .map_err(|error| GitQueryError::Unavailable(format!("git failed to run: {error}")))?;
-    let input = child.stdin.take();
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    let input = child.stdin().take();
+    let mut stdout = child.stdout().take();
+    let mut stderr = child.stderr().take();
     let read_all = |stream: Option<&mut dyn Read>| -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         if let Some(stream) = stream {
@@ -431,23 +497,38 @@ fn run_git_query(
         let mut cancelled = false;
         let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) if !cancelled && interrupted() => {
+                Ok(Some(status))
+                    if on_cancel != OnCancel::KillTree
+                        || (out.is_finished() && err.is_finished()) =>
+                {
+                    break Ok(status)
+                }
+                Ok(_) if !cancelled && interrupted() => {
                     cancelled = true;
-                    if on_cancel == OnCancel::Kill {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                    if on_cancel != OnCancel::Finish {
+                        if on_cancel == OnCancel::Kill {
+                            let _ = child.start_kill();
+                            let _ = child.wait();
+                        }
                         break Err(GitQueryError::Interrupted);
                     }
                 }
-                Ok(None) => std::thread::sleep(GIT_INTERRUPTION_POLL),
+                Ok(_) => std::thread::sleep(GIT_INTERRUPTION_POLL),
                 Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if on_cancel != OnCancel::KillTree {
+                        let _ = child.start_kill();
+                        let _ = child.wait();
+                    }
                     break Err(GitQueryError::failed(format!("git wait failed: {error}")));
                 }
             }
         };
+        if on_cancel == OnCancel::KillTree {
+            // try_wait observes the launcher. A descendant may still own its pipe or survive
+            // a normal launcher exit; terminate this query's entire job before joining readers.
+            let _ = child.start_kill();
+        }
+        drop(child);
         let panicked = || GitQueryError::failed("a thread reading git panicked");
         let written = writer.join().map_err(|_| panicked())?;
         let stdout = out.join().map_err(|_| panicked())?;
@@ -456,25 +537,17 @@ fn run_git_query(
         if cancelled {
             return Err(GitQueryError::Interrupted);
         }
-        let stderr = String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned();
-        if !status.success() {
-            let exit = match status.code() {
-                Some(code) => format!("git exited with {code}"),
-                None => "git was terminated by a signal".to_owned(),
-            };
-            return Err(GitQueryError::Failed {
-                code: status.code(),
-                reason: match first_line(&stderr) {
-                    Some(line) => format!("{exit}: {line}"),
-                    None => exit,
-                },
-            });
-        }
-        if let Some(warning) = first_line(&stderr) {
-            tracing::debug!(warning, "git warning on a successful query");
-        }
-        written.map_err(|error| GitQueryError::failed(format!("git input failed: {error}")))?;
-        stdout.map_err(|error| GitQueryError::failed(format!("git output failed: {error}")))
+        let stdout = if status.success() {
+            written.map_err(|error| GitQueryError::failed(format!("git input failed: {error}")))?;
+            stdout.map_err(|error| GitQueryError::failed(format!("git output failed: {error}")))?
+        } else {
+            stdout.unwrap_or_default()
+        };
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr: stderr.unwrap_or_default(),
+        })
     })
 }
 
@@ -1351,6 +1424,84 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
             "the query did not wait for git to finish on its own"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bounded_status_can_stop_its_live_child_without_waiting_for_its_answer() {
+        use crate::support::machine::is_process_running;
+        use windows_sys::Win32::System::{
+            JobObjects::IsProcessInJob, Threading::GetCurrentProcess,
+        };
+        const TEST: &str = "platform::git::tests::a_bounded_status_can_stop_its_live_child_without_waiting_for_its_answer";
+        let fixture = |root: &Path, role: &str| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST])
+                .env("V8_RUNNER_TEST_GIT_JOB_DIR", root)
+                .env("V8_RUNNER_TEST_GIT_JOB_ROLE", role);
+            command
+        };
+        if let Some(root) = std::env::var_os("V8_RUNNER_TEST_GIT_JOB_DIR") {
+            let root = Path::new(&root);
+            let role = std::env::var("V8_RUNNER_TEST_GIT_JOB_ROLE").unwrap();
+            let mut in_job = 0;
+            // SAFETY: the pseudo-handle is this process, and in_job points to writable storage.
+            assert_ne!(
+                unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) },
+                0
+            );
+            assert_ne!(in_job, 0);
+            fs::write(root.join(&role), std::process::id().to_string()).unwrap();
+            if role == "launcher" {
+                let _child = fixture(root, "descendant").spawn().unwrap();
+            } else {
+                // Keep the launcher's stdout/stderr alive after it exits.
+                std::thread::sleep(std::time::Duration::from_secs(20));
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pid = |role: &str| {
+            fs::read_to_string(dir.path().join(role))
+                .ok()?
+                .parse::<u32>()
+                .ok()
+        };
+        let started = std::time::Instant::now();
+        let result = git_query_output(
+            fixture(dir.path(), "launcher"),
+            None,
+            OnCancel::KillTree,
+            &mut || {
+                started.elapsed() > std::time::Duration::from_secs(10)
+                    || (pid("launcher").is_some_and(|pid| !is_process_running(pid))
+                        && pid("descendant").is_some_and(is_process_running))
+            },
+        );
+        assert!(matches!(result, Err(GitQueryError::Interrupted)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let descendant = pid("descendant").expect("the descendant inherited the capture pipes");
+        // TerminateJobObject can return while the OS is finishing process teardown.
+        let exit_limit = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while is_process_running(descendant) && std::time::Instant::now() < exit_limit {
+            std::thread::sleep(GIT_INTERRUPTION_POLL);
+        }
+        assert!(!is_process_running(descendant));
+
+        let mut queries = 0;
+        let answer = uncommitted_work_until(
+            dir.path(),
+            &[],
+            Some(&mut || {
+                queries += 1;
+                queries > 1
+            }),
+        );
+        assert!(
+            answer.is_none(),
+            "interruption must not become an unknown Git answer"
         );
     }
 

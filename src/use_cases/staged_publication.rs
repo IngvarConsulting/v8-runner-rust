@@ -6,16 +6,23 @@ use chrono::Utc;
 use crate::support::error::AppError;
 use crate::support::fs::{
     ensure_dir, is_known_tool_name, metadata_sidecar_path, move_file, read_temp_dir_metadata,
-    remove_path_if_exists, replace_file_atomically, swap_dir_atomically, write_temp_dir_metadata,
-    ReplaceFileFailureState, SupersededBackup, TempDirKind, TempDirMetadata,
+    remove_path_if_exists, replace_file_atomically, swap_dir_with_recheck, write_temp_dir_metadata,
+    ReplaceFileFailureState, SupersededBackup, TempDirKind, TempDirMetadata, DIRECTORY_RENAME_WAIT,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
 use crate::use_cases::destruction_guard::{
-    guard_replacement, Destruction, DestructionConsent, Losses,
+    guard_replacement_until, Destruction, DestructionConsent, Losses,
 };
 use crate::use_cases::interruption;
 
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[cfg(all(test, windows))]
+thread_local! {
+    // A precomputed guard reply represents the next version of the working tree.
+    static NEXT_GUARD_REPLY: std::cell::RefCell<Option<Result<Losses, AppError>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct StagedPublication {
@@ -200,26 +207,84 @@ impl StagedPublication {
         removal: BackupRemoval<'_>,
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
-        let discarded = guard_replacement(
-            context,
-            &self.target_path,
-            consent,
-            regenerated,
-            Destruction::Replace,
-        )?;
+        #[cfg(windows)]
+        let original_target =
+            crate::support::path::filesystem_object_identity(&self.target_path).ok();
+        #[cfg(windows)]
+        let check_target = || {
+            if original_target.is_none()
+                || crate::support::path::filesystem_object_identity(&self.target_path).ok()
+                    != original_target
+            {
+                return Err(AppError::Validation(format!(
+                    "cannot confirm the original target before retrying publication: {}",
+                    self.target_path.display()
+                )));
+            }
+            Ok(())
+        };
+        let assess_losses = |interrupted: Option<&mut dyn FnMut() -> bool>| {
+            #[cfg(all(test, windows))]
+            if let Some(reply) = NEXT_GUARD_REPLY.with(|slot| slot.take()) {
+                return reply.map(Some);
+            }
+            guard_replacement_until(
+                context,
+                &self.target_path,
+                consent,
+                regenerated,
+                Destruction::Replace,
+                interrupted,
+            )
+        };
+        let mut discarded = assess_losses(None)?.expect("initial guard is unbounded");
         if let Some(error) = interruption_before_publish(context, "staged directory publication") {
             return Err(error);
         }
         tracing::debug!(target = %self.target_path.display(), "replacing the target directory");
         let publish_phase = context.run_no_process_critical_phase(|| {
-            swap_dir_atomically(
+            let mut recheck = |deadline| {
+                let cancelled =
+                    || interruption_before_publish(context, "staged directory publication");
+                if let Some(error) = cancelled() {
+                    return Err(error);
+                }
+                #[cfg(windows)]
+                check_target()?;
+                let mut stopped =
+                    || context.interruption().is_some() || std::time::Instant::now() >= deadline;
+                let fresh = assess_losses(Some(&mut stopped));
+                if let Some(error) = cancelled() {
+                    return Err(error);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                let Some(losses) = fresh? else {
+                    return Ok(false);
+                };
+                discarded = losses;
+                #[cfg(windows)]
+                check_target()?;
+                if let Some(error) =
+                    interruption_before_publish(context, "staged directory publication")
+                {
+                    return Err(error);
+                }
+                Ok(true)
+            };
+            swap_dir_with_recheck(
                 &self.staging_path,
                 &self.target_path,
                 &self.run_id,
                 &self.target_identity,
                 backup_prefix,
+                DIRECTORY_RENAME_WAIT,
+                Some(&mut recheck),
             )
-            .map_err(|error| AppError::Runtime(format!("{error_prefix}: {error}")))
+            .map_err(|error| {
+                error.into_error(|io| AppError::Runtime(format!("{error_prefix}: {io}")))
+            })
         })?;
         let swapped = publish_phase.value;
         let removal_warning = swapped
@@ -627,6 +692,81 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("stale metadata");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_publication_respects_refreshed_consent_and_returns_refreshed_losses() {
+        use crate::use_cases::destruction_guard::{guard_replacement, Destruction, WaysOut};
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        for consent in [
+            DestructionConsent::AskFirst(WaysOut::SameCallWithForce),
+            DestructionConsent::Granted,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let context = ExecutionContext::cli(CommandName::Dump);
+            let target = dir.path().join("target");
+            fs::create_dir(&target).unwrap();
+            let regenerated = "generated.xml";
+            fs::write(target.join(regenerated), b"old").unwrap();
+            let publication = StagedPublication::prepare_dir(&target, "test", ".stage").unwrap();
+            fs::write(publication.staging_path().join("new.txt"), b"new").unwrap();
+            // Obtain a real reply against an independent, unchanged fixture.
+            let model = dir.path().join("guard-fixture");
+            fs::create_dir(&model).unwrap();
+            let edit = model.join("user-edit.bsl");
+            fs::write(&edit, b"edit").unwrap();
+            let refreshed = guard_replacement(
+                &context,
+                &model,
+                &consent,
+                &[regenerated],
+                Destruction::Replace,
+            );
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(target.join(regenerated))
+                .unwrap();
+            crate::support::fs::FIRST_DIR_RENAME_ERROR.with(|slot| {
+                slot.replace(Some((
+                    target.clone(),
+                    Box::new(move |_| {
+                        super::NEXT_GUARD_REPLY.with(|slot| {
+                            slot.replace(Some(refreshed));
+                        });
+                        drop(held);
+                    }),
+                )));
+            });
+            let result = publication.publish_dir(
+                &context,
+                ".backup",
+                "cannot publish",
+                &consent,
+                &[regenerated],
+                super::BackupRemoval::Inline,
+            );
+            assert!(
+                super::NEXT_GUARD_REPLY.with(|slot| slot.take()).is_none(),
+                "a retry must use the fresh guard decision"
+            );
+            match consent {
+                DestructionConsent::AskFirst(_) => {
+                    assert!(matches!(result, Err(AppError::Validation(_))), "{result:?}");
+                    assert_eq!(fs::read(target.join(regenerated)).unwrap(), b"old");
+                    assert!(publication.staging_path().join("new.txt").is_file());
+                }
+                _ => {
+                    assert_eq!(result.unwrap().discarded.into_paths(), vec![edit]);
+                    assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
+                }
+            }
+            let backup = dir.path().join(format!(".backup-{}", publication.run_id()));
+            assert!(!backup.exists() && !metadata_sidecar_path(&backup).exists());
+        }
     }
 
     #[test]

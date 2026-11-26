@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::domain::dump::{DumpLosses, NAMED_LOSS_LIMIT};
-use crate::platform::git::{uncommitted_work_in, NoAnswer, UncommittedWork};
+use crate::platform::git::{
+    uncommitted_work_in, uncommitted_work_until, NoAnswer, UncommittedWork,
+};
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
 
@@ -176,7 +178,21 @@ enum Tense {
 /// опись лежит в игноре, и без исключения отказ стоял бы на каждой выгрузке.
 /// Преобразование и замена проекта EDT описи не пишут — у них исключений нет.
 pub(super) fn losses_in(target: &Path, regenerated: &[&str]) -> Losses {
-    match uncommitted_work_in(target, regenerated) {
+    checked_losses(target, regenerated, None)
+        .expect("an unbounded loss check cannot be interrupted")
+}
+
+fn checked_losses(
+    target: &Path,
+    regenerated: &[&str],
+    mut interrupted: Option<&mut dyn FnMut() -> bool>,
+) -> Option<Losses> {
+    let work = match interrupted.as_mut() {
+        Some(check) => uncommitted_work_until(target, regenerated, Some(check))?,
+        None => uncommitted_work_in(target, regenerated),
+    };
+    let mut stopped = || interrupted.as_mut().is_some_and(|check| check());
+    let losses = match work {
         // Терять нечего: прежнее содержимое система контроля версий вернёт сама.
         UncommittedWork::Nothing => Losses::default(),
         UncommittedWork::AtRisk(paths) => Losses {
@@ -185,24 +201,30 @@ pub(super) fn losses_in(target: &Path, regenerated: &[&str]) -> Losses {
         },
         // Ответа нет — потерять можно всё, что лежит в каталоге.
         UncommittedWork::Unknown(no_answer) => {
-            let paths = every_file_in(target, regenerated);
+            let paths = every_file_in(target, regenerated, &mut stopped);
             Losses {
                 unanswered: (!paths.is_empty()).then_some(no_answer),
                 paths,
             }
         }
-    }
+    };
+    (!stopped()).then_some(losses)
 }
 
 /// Каждый файл под `target`, кроме названных в `regenerated` в его корне. Каталоги сами по
 /// себе потерей не считаются; по ссылкам обход не идёт. То, что прочесть не удалось,
 /// называется своим путём: о его содержимом ответа нет, а терять его так же можно.
-fn every_file_in(target: &Path, regenerated: &[&str]) -> Vec<PathBuf> {
+fn every_file_in(
+    target: &Path,
+    regenerated: &[&str],
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Vec<PathBuf> {
     WalkDir::new(target)
         .min_depth(1)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
+        .take_while(|_| !interrupted())
         .filter_map(|entry| match entry {
             Ok(entry) if entry.file_type().is_dir() => None,
             Ok(entry)
@@ -232,18 +254,32 @@ pub(super) fn guard_replacement(
     regenerated: &[&str],
     how: Destruction,
 ) -> Result<Losses, AppError> {
+    guard_replacement_until(context, target, consent, regenerated, how, None)
+        .map(|losses| losses.expect("an unbounded guard cannot be interrupted"))
+}
+
+pub(super) fn guard_replacement_until(
+    context: &ExecutionContext,
+    target: &Path,
+    consent: &DestructionConsent,
+    regenerated: &[&str],
+    how: Destruction,
+    interrupted: Option<&mut dyn FnMut() -> bool>,
+) -> Result<Option<Losses>, AppError> {
     let ways_out = match consent {
-        DestructionConsent::RunnerOwned => return Ok(Losses::default()),
+        DestructionConsent::RunnerOwned => return Ok(Some(Losses::default())),
         // Попросили уничтожить — уничтожаем, как и обещает имя ключа, и называем что.
         DestructionConsent::Granted => None,
         DestructionConsent::AskFirst(ways_out) => Some(ways_out),
     };
-    let losses = losses_in(target, regenerated);
+    let Some(losses) = checked_losses(target, regenerated, interrupted) else {
+        return Ok(None);
+    };
     match ways_out {
         Some(ways_out) if !losses.is_empty() => Err(AppError::Validation(refusal(
             target, &losses, ways_out, context, how,
         ))),
-        Some(_) | None => Ok(losses),
+        Some(_) | None => Ok(Some(losses)),
     }
 }
 
