@@ -7135,6 +7135,31 @@ HTTP 200 с `result=registered`. Обёртка `request` без простра�
 разработчика позволила загрузить тестовую конфигурацию и запустить
 тонкий клиент. Права на файл лицензии остались прежними.
 
+## Сквозная отладка файловой ИБ на Linux (#778)
+
+26.11.2026, Ubuntu 24.04.5 LTS x86_64, ядро 6.8.0-151-generic, 1С 8.3.27.2490,
+v8-runner 0.19.0 (`1384e890`). Тонкий клиент запущен под обычным пользователем
+`usr1cv8` в Xvfb с отдельной файловой копией БСП 3.1.
+
+- `v8-runner --json-message debug-server start --owner-pid 358662` → 0,
+  `owner: runner`, PID 358666, `infobase_alias: DefAlias`, URL
+  `http://127.0.0.1:17808`. Раннер запустил `dbgs` рядом с `1cv8c` с
+  `--portRange=17808:17839`. Файл `--notify` содержал адрес в UTF-16 LE с BOM.
+  `POST /e1crdbg/rdbg?cmd=getDbgTargets` без регистрации вернул HTTP 400 с
+  исключением `virtual-resource-system`.
+- `attachDebugUI` с `infoBaseAlias=DefAlias` вернул HTTP 200 и `registered`.
+  `v8-runner --json-message launch thin --debug http://127.0.0.1:17808` → 0,
+  PID клиента 358702. Через 14,91 с опрос `getDbgTargets` с тем же алиасом и
+  идентификатором отладчика вернул HTTP 200 с целями `ManagedClient` и
+  `ServerEmulation`. У обеих `infoBaseAlias: DefAlias`.
+- `v8-runner --json-message debug-server stop <session>` → 0,
+  `action: stopped`, `stopped_pid: 358666`. Владелец в этот момент оставался жив.
+- Повторный `debug-server start --owner-pid 358662` → 0, PID 359139 и порт
+  17809. После завершения владельца PID 359139 исчез из `/proc` за 2,8 с.
+  `debug-server stop <session>` → 0, `nothing_to_stop`, `stale_record: true`.
+  Контрольная проверка подтвердила отсутствие обоих PID `dbgs` и слушателей
+  на портах 17808 и 17809.
+
 ## Версии агента кластера и временного RAS (#213)
 
 Замер 16.11.2026 на Windows. Отдельный `ragent` 8.3.27.2074 запущен с `/agent /port 49951
