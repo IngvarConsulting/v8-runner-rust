@@ -51,6 +51,7 @@ case "$CI_SCOPE" in
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
           "use_cases::build_project::tests::partial_load_list_releases_writer_before_reader_and_cleans_up_after_use"
+          "use_cases::build_project::tests::a_managed_agent_refusal_distinguishes_a_held_designer_lock"
           "use_cases::dump_config::tests::a_partial_dump_hands_the_designer_a_closed_object_list"
           "use_cases::dump_config::tests::dump_full_success_replaces_old_target"
           "use_cases::dump_config::tests::dump_full_preserves_old_dump_on_platform_failure"

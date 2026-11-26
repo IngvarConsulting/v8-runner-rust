@@ -1473,6 +1473,66 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_managed_agent_refusal_distinguishes_a_held_designer_lock() {
+        use crate::platform::agent::AgentError;
+        use crate::platform::file_base_hold::DESIGNER_FILE;
+        use crate::support::error::{AppError, EnvironmentLayer};
+        use crate::use_cases::result::UseCaseError;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let base = root.join("ib");
+        fs::create_dir(&base).expect("infobase directory");
+        let lock = base.join(DESIGNER_FILE);
+        fs::write(&lock, "").expect("Designer lock file");
+        let config = AppConfig {
+            infobase: crate::config::model::InfobaseConfig::file("File=ib"),
+            ..build_config(
+                root,
+                &root.join("work"),
+                root,
+                SourceFormat::Designer,
+                Default::default(),
+            )
+        };
+        let context = ExecutionContext::cli(CommandName::Build);
+        let rejected = || {
+            AppError::from(AgentError::AuthenticationRejected {
+                endpoint: "127.0.0.1:1543".to_owned(),
+                user: "Synthetic".to_owned(),
+            })
+        };
+        let loader = super::agent::AgentLoader::new(&config, None);
+        let designer = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&lock)
+            .expect("exclusive Designer handle");
+
+        let refused = UseCaseError::from(loader.opening_refusal(&context, &config, rejected()));
+        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseDesignerBusy);
+        let sessions = refused.sessions().expect("session evidence");
+        assert!(!sessions.terminable);
+        assert!(sessions.list.is_none());
+
+        let other = AppError::environment_at(EnvironmentLayer::AgentStart, "agent did not start");
+        let refused = loader.opening_refusal(&context, &config, other);
+        assert_eq!(
+            refused.environment_layer(),
+            Some(EnvironmentLayer::AgentStart)
+        );
+
+        drop(designer);
+        let refused = loader.opening_refusal(&context, &config, rejected());
+        assert_eq!(
+            refused.environment_layer(),
+            Some(EnvironmentLayer::InfobaseUser)
+        );
+    }
+
     fn build_edt_config(
         base_path: &Path,
         work_path: &Path,
