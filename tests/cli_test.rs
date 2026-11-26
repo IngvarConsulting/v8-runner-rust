@@ -1488,7 +1488,7 @@ fn test_module_build_failure_prevents_enterprise_launch() {
 }
 
 #[test]
-fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
+fn test_module_refuses_unforced_designer_extension_load_before_enterprise_launch() {
     let bases = support::temp_workspace();
     let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
@@ -1578,6 +1578,8 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
     )
     .expect("modify extension");
 
+    fs::remove_file(&build_calls).expect("clear fixture build calls");
+
     let output = v8_runner_command()
         .args([
             "--config",
@@ -1591,21 +1593,12 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
         .output()
         .expect("run");
 
-    assert!(output.status.success());
-    let build_calls_text = fs::read_to_string(&build_calls).expect("build calls");
-    let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-    let test_calls_text = fs::read_to_string(&test_calls).expect("test calls");
+    assert!(!output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-
-    assert!(build_calls_text.contains("-Extension client_mcp"));
-    assert!(!build_calls_text.contains("-partial"));
-    assert!(edt_calls_text.contains("export --project-name client_mcp"));
-    assert!(test_calls_text.contains("RunUnitTests="));
-    assert_eq!(payload["ok"], true);
-    assert_eq!(
-        payload["data"]["target"]["module"]["name"],
-        "ClientMcpSmoke"
-    );
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["error_kind"], "build_failed", "{payload}");
+    assert!(!build_calls.exists(), "no source-set loaded");
+    assert!(!test_calls.exists(), "test client was not started");
 }
 
 #[test]

@@ -344,7 +344,7 @@ fn a_full_dump_travels_through_sftp() {
 fn a_build_travels_through_sftp() {
     let harness = harness_with_channel(Channel::Sftp);
 
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["steps"][0]["mode"], "full", "{payload}");
@@ -375,7 +375,7 @@ fn a_build_travels_through_sftp() {
 #[test]
 fn a_partial_build_through_sftp_ships_only_the_changed_files() {
     let harness = harness_with_channel(Channel::Sftp);
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
     assert_eq!(code, 0, "{payload}");
     let seen_before = commands(&harness).len();
     fs::write(
@@ -387,7 +387,7 @@ fn a_partial_build_through_sftp_ships_only_the_changed_files() {
     )
     .expect("change");
 
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
@@ -829,7 +829,7 @@ fn an_sftp_dump_without_a_readable_prior_description_deletes_nothing() {
 fn a_read_only_sftp_gate_refuses_uploads() {
     let harness = harness_with_channel(Channel::SftpReadOnly);
 
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "platform", "{payload}");
     assert!(
@@ -948,7 +948,7 @@ fn gate_commands_carry_target_side_relative_paths() {
 fn build_through_the_gate_loads_from_the_declared_dir() {
     let harness = harness();
 
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["steps"][0]["mode"], "full", "{payload}");
@@ -1060,7 +1060,7 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
 fn a_gate_session_is_named_in_the_receipt() {
     let harness = harness();
 
-    let (code, payload) = run(&harness, &["build"]);
+    let (code, payload) = run(&harness, &["build", "main"]);
 
     assert_eq!(code, 0, "{payload}");
     let receipt = &payload["data"]["provider"];
@@ -1798,6 +1798,7 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
         &harness.config_path.display().to_string(),
         "--json-message",
         "build",
+        "main",
     ]);
 
     let (code, payload) = support::interrupt_at_hold(

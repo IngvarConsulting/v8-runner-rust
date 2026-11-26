@@ -886,6 +886,7 @@ fn build_json_failure_returns_step_payload() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "--force",
             "--full",
         ])
         .output()
@@ -921,6 +922,7 @@ fn build_ibcmd_json_failure_reports_operation_target_and_exit_code() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -947,6 +949,7 @@ fn build_text_failure_does_not_print_success_footer() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "--force",
             "--full",
         ])
         .output()
@@ -989,6 +992,7 @@ fn build_text_stdout_includes_action_logs() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
         ])
         .output()
         .expect("run command");
@@ -1014,7 +1018,12 @@ fn build_text_highlights_timeline_detail_prefixes() {
     // `FORCE_COLOR` — тот же способ, которым его включает CI.
     let output = v8_runner_command()
         .env("FORCE_COLOR", "1")
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "main",
+        ])
         .output()
         .expect("run designer build");
 
@@ -1131,6 +1140,7 @@ fn build_text_no_changes_collapses_per_source_set_noise() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "--force",
         ])
         .output()
         .expect("first build");
@@ -1173,6 +1183,7 @@ fn build_source_set_json_limits_steps_to_requested_source_set() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "--force",
             "--source-set",
             "ext",
             "--full",
@@ -1329,6 +1340,7 @@ fn build_json_writes_action_log_file_without_polluting_stdout() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "main",
         ])
         .output()
         .expect("run command");
@@ -1541,6 +1553,7 @@ fn build_json_edt_extension_uses_full_load_and_writes_platform_log() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "--force",
         ])
         .output()
         .expect("prime build");
@@ -1564,6 +1577,7 @@ fn build_json_edt_extension_uses_full_load_and_writes_platform_log() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
+            "--force",
         ])
         .output()
         .expect("run command");
@@ -1594,6 +1608,7 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1658,6 +1673,7 @@ fn build_ibcmd_partial_uses_relative_positional_args_and_base_dir() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1671,7 +1687,12 @@ fn build_ibcmd_partial_uses_relative_positional_args_and_base_dir() {
     fs::write(&changed_file, "procedure Test() // changed endprocedure").expect("change");
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "main",
+        ])
         .output()
         .expect("run command");
 
@@ -1765,6 +1786,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
             "--config",
             &config_path.display().to_string(),
             "build",
+            "main",
             "--full",
         ])
         .output()
@@ -1906,7 +1928,6 @@ fn an_edt_set_with_a_skipped_export_is_checked_before_the_first_load() {
     let (dir, config_path, work_path) = setup_edt_extension_project();
     let platform_path = dir.path().join("platform").join("bin").join("1cv8");
     let calls_log = dir.path().join("v8-calls.log");
-    let extension_token = dir.path().join("extension-token");
     write_script(
         &platform_path,
         &format!(
@@ -1918,19 +1939,15 @@ for arg in "$@"; do
   previous="$arg"
 done
 case "$*" in
-  *'/GetConfigGenerationID'*'-Extension client_mcp'*)
-    if [ -f '{extension}' ]; then cat '{extension}' > "$out"; else printf '{zero}\n' > "$out"; fi
-    exit 0 ;;
   *'/GetConfigGenerationID'*) printf '{zero}\n' > "$out"; exit 0 ;;
 esac
 if [ -n "$out" ]; then : > "$out"; fi
 exit 0"#,
             calls = calls_log.display(),
-            extension = extension_token.display(),
             zero = "0".repeat(40),
         ),
     );
-    let push = || {
+    let push = |extra: &[&str]| {
         v8_runner_command()
             .args([
                 "--config",
@@ -1938,10 +1955,11 @@ exit 0"#,
                 "--json-message",
                 "push",
             ])
+            .args(extra)
             .output()
             .expect("run command")
     };
-    let first = push();
+    let first = push(&["--force"]);
     assert!(
         first.status.success(),
         "{}",
@@ -1958,15 +1976,21 @@ exit 0"#,
         assert!(copy.is_dir(), "the Designer copy of {set}");
         fs::write(copy.join("Changed.bsl"), "procedure Changed() endprocedure").expect("copy");
     }
-    fs::write(&extension_token, format!("{}\n", "1".repeat(40))).expect("token");
     fs::remove_file(&calls_log).expect("calls of the first push");
 
-    let refused = push();
+    let refused = push(&[]);
 
     let payload: Value = serde_json::from_slice(&refused.stdout).expect("json");
     assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
     assert_eq!(
         payload["error"]["next"]["source_set"], "client_mcp",
+        "{payload}"
+    );
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("refusal reason")
+            .contains("extension loads with this provider require --force"),
         "{payload}"
     );
     let calls = fs::read_to_string(&calls_log).unwrap_or_default();

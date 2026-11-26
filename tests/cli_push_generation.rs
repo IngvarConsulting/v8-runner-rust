@@ -680,47 +680,72 @@ fn a_generation_of_another_tool_refuses_a_push_into_a_base_that_moved_ahead() {
     assert_eq!(record["token"], FIRST, "{record}");
 }
 
-/// У расширения токены инструментов различаются, поэтому запись Конфигуратора перед
-/// загрузкой `ibcmd` сверяет сам Конфигуратор: расширение ушло вперёд — отказ
-/// `non_fast_forward` до загрузки; то же поколение — отправка проходит, и запись переходит к
-/// `ibcmd`. Смена исполнителя сверку расширения не снимает.
+/// Токен применённого поколения, оставшийся после старой отправки Конфигуратором,
+/// не подтверждает загруженное поколение расширения.
 #[test]
-fn an_extension_generation_of_another_tool_is_checked_by_that_tool_before_a_push() {
+fn a_legacy_designer_extension_record_cannot_authorize_an_ibcmd_push() {
     let project = Project::new("File=ib").with_extension();
-    let root = project.root().to_path_buf();
-    let bin = root.join("platform").join("8.3.27.2074").join("bin");
-    write_shell_script(&bin.join("1cv8"), &platform(&root));
-    write_shell_script(&bin.join("ibcmd"), &ibcmd(&root));
-    let config = |push: &str| {
-        format!(
-            "workPath: work\nformat: DESIGNER\nproviders:\n  push: {push}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
-            root.join("platform").display()
-        )
-    };
-    fs::write(&project.config, config("designer")).expect("config");
+    project.base_generation(FIRST);
+    project.extension_generation(FIRST);
+    succeeded(&project.run(&["push", "ext", "--force"]));
+    assert_eq!(project.ledger()["ext"]["tool"], "designer");
+    push_through_ibcmd(&project);
+    project.edit_extension();
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push", "ext"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("no recorded ibcmd baseline"), "{payload}");
+    assert!(message.contains("push ext --force"), "{payload}");
+    let calls = project.calls();
+    assert!(!calls.contains("/GetConfigGenerationID"), "{calls}");
+    assert!(!calls.contains("config import"), "{calls}");
+
+    succeeded(&project.run(&["push", "ext", "--force"]));
+    assert_eq!(project.ledger()["ext"]["tool"], "ibcmd");
+    assert_eq!(project.ledger()["ext"]["token"], FIRST);
+}
+
+/// Совпадение загруженного поколения разрешает защищённую отправку расширения,
+/// а недоступный токен и чужая загрузка отказывают до импорта.
+#[test]
+fn an_ibcmd_extension_push_requires_an_answer_that_matches_its_baseline() {
+    let project = Project::new("File=ib").with_extension();
+    push_through_ibcmd(&project);
     project.base_generation(FIRST);
     project.extension_generation(FIRST);
     succeeded(&project.run(&["push", "--force"]));
-    assert_eq!(project.ledger()["ext"]["tool"], "designer");
-    fs::write(&project.config, config("ibcmd")).expect("config");
+    assert_eq!(project.ledger()["ext"]["tool"], "ibcmd");
     project.edit_extension();
-    project.extension_generation(SECOND);
-    project.forget_calls();
 
-    let payload = envelope(&project.run(&["push"]));
-
-    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
-    assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
-    assert_eq!(payload["error"]["local_generation"], FIRST, "{payload}");
-    let calls = project.calls();
-    assert!(calls.contains("/GetConfigGenerationID"), "{calls}");
-    assert!(!calls.contains("config import"), "{calls}");
+    for token in ["", SECOND] {
+        project.extension_generation(token);
+        project.forget_calls();
+        let refused = envelope(&project.run(&["push", "ext"]));
+        assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
+        if token == SECOND {
+            assert_eq!(refused["error"]["base_generation"], SECOND, "{refused}");
+            assert_eq!(refused["error"]["local_generation"], FIRST, "{refused}");
+        }
+        let calls = project.calls();
+        assert!(
+            calls.contains("generation-id") && calls.contains("--extension"),
+            "{calls}"
+        );
+        assert!(!calls.contains("config import"), "{calls}");
+        assert_eq!(project.ledger()["ext"]["token"], FIRST);
+    }
 
     project.extension_generation(FIRST);
-    succeeded(&project.run(&["push"]));
-    let record = &project.ledger()["ext"];
-    assert_eq!(record["tool"], "ibcmd", "{record}");
-    assert_eq!(record["token"], FIRST, "{record}");
+    project.forget_calls();
+    succeeded(&project.run(&["push", "ext"]));
+    assert!(
+        project.calls().contains("config import"),
+        "{}",
+        project.calls()
+    );
 }
 
 /// Отправка `ibcmd`, загрузившая без применения, оставляет запись «не применено»; выгрузка
@@ -1291,27 +1316,28 @@ fn a_pull_without_an_answer_or_of_objects_leaves_the_record_as_it_was() {
     assert_eq!(project.ledger(), recorded);
 }
 
-/// База, созданная раннером, помнится: первая отправка в неё проходит без отказа первого
-/// знакомства.
+/// Создание запоминает основную конфигурацию, а первая загрузка расширения
+/// без базового загруженного поколения требует явного согласия.
 #[test]
 fn a_base_created_by_the_runner_takes_the_first_push() {
     let project = Project::new("File=ib").with_extension();
 
     succeeded(&project.run(&["infobase", "create"]));
-    let pushed = succeeded(&project.run(&["push"]));
+    let main = succeeded(&project.run(&["push", "main"]));
+    assert_eq!(main["data"]["steps"][0]["source_set"], "main", "{main}");
+    assert_eq!(main["data"]["steps"][0]["mode"], "skipped", "{main}");
 
-    // Основную конфигурацию база получила при создании, и память её знает; расширение
-    // досылает первая отправка целиком.
-    let steps = pushed["data"]["steps"].as_array().expect("steps");
-    let mode = |name: &str| {
-        steps
-            .iter()
-            .find(|step| step["source_set"] == name)
-            .map(|step| step["mode"].clone())
-            .unwrap_or_else(|| panic!("{name} in {pushed}"))
-    };
-    assert_eq!(mode("main"), "skipped", "{pushed}");
-    assert_eq!(mode("ext"), "full", "{pushed}");
+    project.forget_calls();
+    let refused = envelope(&project.run(&["push", "ext"]));
+    assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
+    assert!(!project.calls().contains("/LoadConfigFromFiles"));
+
+    let extension = succeeded(&project.run(&["push", "ext", "--force"]));
+    assert_eq!(
+        extension["data"]["steps"][0]["source_set"], "ext",
+        "{extension}"
+    );
+    assert_eq!(extension["data"]["steps"][0]["mode"], "full", "{extension}");
 }
 
 /// Поколение всех наборов сверяется до первой загрузки: отказ по расширению приходит раньше,
@@ -1319,6 +1345,7 @@ fn a_base_created_by_the_runner_takes_the_first_push() {
 #[test]
 fn every_set_is_checked_before_the_first_load() {
     let project = Project::new("File=ib").with_extension();
+    push_through_ibcmd(&project);
     project.base_generation(FIRST);
     project.extension_generation(FIRST);
     succeeded(&project.run(&["push", "--force"]));
@@ -1333,7 +1360,7 @@ fn every_set_is_checked_before_the_first_load() {
     assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
     assert_eq!(refused["error"]["next"]["source_set"], "ext", "{refused}");
     assert!(
-        !project.calls().contains("/LoadConfigFromFiles"),
+        !project.calls().contains("config import"),
         "nothing is loaded before the refusal: {}",
         project.calls()
     );

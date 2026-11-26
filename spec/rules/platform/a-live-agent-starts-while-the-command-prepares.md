@@ -17,8 +17,8 @@ check:
   - src/use_cases/dump_config.rs::a_preview_an_extension_and_live_off_raise_no_early_agent
   - tests/agent_keeper.rs::an_agent_started_idle_that_cannot_connect_is_removed
   - src/use_cases/exchange_guard.rs::a_push_knows_before_the_analysis_that_the_record_tool_will_be_asked
-  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens
-  - tests/cli_build_agent.rs::an_extension_recorded_by_ibcmd_that_matches_is_loaded_by_the_agent_connected_after_the_check
+  - tests/cli_build_agent.rs::an_ibcmd_baseline_does_not_allow_an_unforced_agent_extension_load
+  - tests/cli_build_agent.rs::a_forced_extension_push_connects_and_loads_through_the_agent
 ---
 
 # Живой агент поднимается, пока команда готовится

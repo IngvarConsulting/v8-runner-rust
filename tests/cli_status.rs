@@ -64,10 +64,12 @@ fn ibcmd(root: &Path) -> String {
         r#"printf 'ibcmd %s\n' "$*" >> '{calls}'
 case "$*" in
   *'extension list'*) cat '{extensions}'; exit 0 ;;
+  *'config generation-id'*) if [ -f '{token}' ]; then cat '{token}'; fi; exit 0 ;;
 esac
 exit 0"#,
         calls = root.join("calls.log").display(),
         extensions = root.join("extensions").display(),
+        token = root.join("token").display(),
     )
 }
 
@@ -352,6 +354,67 @@ fn status_deep_predicts_the_push_generation_check() {
     .expect("edit");
     let refused = envelope(&project.run(&["push", "--source-set", "main"]));
     assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
+}
+
+#[test]
+fn status_deep_does_not_treat_an_applied_extension_token_as_a_loaded_baseline() {
+    let project = Project::new();
+    project.remember(FIRST);
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    let base = &set(&status["data"]["infobases"][0], "ext")["base"];
+    assert_eq!(base["tool"], "designer", "{status}");
+    assert_eq!(base["comparison"], "no_answer", "{status}");
+    assert!(base["token"].is_null(), "{status}");
+    assert!(
+        base["reason"].as_str().unwrap().contains("ibcmd"),
+        "{status}"
+    );
+
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(
+        &project.config,
+        config.replace(support::DESIGNER_LEADS, "providers:\n  push: ibcmd\n"),
+    )
+    .expect("config");
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    let base = &set(&status["data"]["infobases"][0], "ext")["base"];
+    assert_eq!(base["tool"], "ibcmd", "{status}");
+    assert_eq!(base["comparison"], "no_answer", "{status}");
+    assert!(base["token"].is_null(), "{status}");
+    assert!(
+        base["reason"].as_str().unwrap().contains("baseline"),
+        "{status}"
+    );
+}
+
+#[test]
+fn status_deep_compares_the_loaded_ibcmd_extension_generation() {
+    let project = Project::new();
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(
+        &project.config,
+        config.replace(support::DESIGNER_LEADS, "providers:\n  push: ibcmd\n"),
+    )
+    .expect("config");
+    project.remember(FIRST);
+
+    for (token, verdict) in [
+        (FIRST, "unchanged"),
+        (SECOND, "moved_ahead"),
+        ("unrecognized token", "no_answer"),
+    ] {
+        project.base_generation(token);
+        let status = succeeded(&project.run(&["status", "--deep"]));
+        let base = &set(&status["data"]["infobases"][0], "ext")["base"];
+        assert_eq!(base["tool"], "ibcmd", "{status}");
+        assert_eq!(base["comparison"], verdict, "{status}");
+        if verdict == "no_answer" {
+            assert!(base["token"].is_null(), "{status}");
+            assert!(base["reason"].is_string(), "{status}");
+        } else {
+            assert_eq!(base["token"], token, "{status}");
+        }
+    }
 }
 
 /// BOM и CRLF в серверном /Out разбираются так же, как в файловом.

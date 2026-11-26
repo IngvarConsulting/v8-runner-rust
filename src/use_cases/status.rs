@@ -26,8 +26,8 @@ use crate::domain::extensions::ExtensionInventoryEntry;
 use crate::domain::git_worktree::ChangeDetection;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{
-    BaseGeneration, ExtensionsStatus, InfobaseStatus, InstalledExtensionStatus, MemoryState,
-    RecordedGeneration, SourceSetStatus, StatusResult, StatusScope,
+    BaseGeneration, ExtensionsStatus, GenerationVerdict, InfobaseStatus, InstalledExtensionStatus,
+    MemoryState, RecordedGeneration, SourceSetStatus, StatusResult, StatusScope,
 };
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityType;
@@ -38,7 +38,8 @@ use crate::use_cases::agent_session::{
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::exchange_guard::{
-    memory_of, new_owner_since, predict, recorded_generation, token_scope,
+    extension_generation_blocker, memory_of, new_owner_since, predict, recorded_generation,
+    token_scope,
 };
 use crate::use_cases::extension_inventory::{
     read_in_agent_session, read_installed, InventoryInSession,
@@ -272,10 +273,15 @@ fn deepen(
         let memory = inventory.designer_context(&declared.name);
         let record = memory.and_then(recorded_generation);
         let scope = memory.map_or(TokenScope::OwnTool, |context| token_scope(config, context));
-        set.base = Some(match asker.as_mut() {
-            Ok(asker) => {
-                let phase = Instant::now();
-                let base = base_generation(
+        let extension_refusal = extension
+            .and(tool)
+            .and_then(|tool| extension_generation_blocker(tool, record.as_ref()));
+        let phase = Instant::now();
+        let generation = if let Some(reason) = extension_refusal {
+            unanswered_generation(tool, reason)
+        } else {
+            match asker.as_mut() {
+                Ok(asker) => base_generation(
                     tool,
                     asker
                         .read(context, config, *extension)
@@ -283,20 +289,23 @@ fn deepen(
                         .map(Option::as_deref),
                     record.as_ref(),
                     scope,
-                );
-                tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status generation");
-                let phase = Instant::now();
-                let unapplied = asker
-                    .unapplied(context, config, *extension)
-                    .map_err(|error| error.to_string());
-                tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status unapplied");
-                with_unapplied(base, unapplied)
+                ),
+                Err(error) if extension.is_some() => {
+                    unanswered_generation(tool, &error.to_string())
+                }
+                Err(error) => base_generation(tool, Err(&*error), record.as_ref(), scope),
             }
-            Err(error) => with_unapplied(
-                base_generation(tool, Err(&*error), record.as_ref(), scope),
-                Err(error.to_string()),
-            ),
-        });
+        };
+        tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status generation");
+        let phase = Instant::now();
+        let unapplied = match asker.as_mut() {
+            Ok(asker) => asker
+                .unapplied(context, config, *extension)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status unapplied");
+        set.base = Some(with_unapplied(generation, unapplied));
     }
     // Агент поколения отдаёт и состав расширений в той же сессии, без второго процесса
     // платформы (#631).
@@ -351,6 +360,17 @@ fn with_unapplied(mut base: BaseGeneration, answer: Result<bool, String>) -> Bas
         Err(reason) => (None, Some(reason)),
     };
     base
+}
+
+fn unanswered_generation(tool: Option<Provider>, reason: &str) -> BaseGeneration {
+    BaseGeneration {
+        tool,
+        token: None,
+        comparison: GenerationVerdict::NoAnswer,
+        reason: Some(reason.to_owned()),
+        unapplied: None,
+        unapplied_reason: None,
+    }
 }
 
 /// Ответ о поколении набора и та же сверка с записью, что сделает `push`.

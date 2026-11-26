@@ -1001,7 +1001,13 @@ fn a_push_of_one_set_keeps_the_copy_mark_until_every_set_is_remembered() {
         "the extension has no memory yet: the mark stays"
     );
 
-    let output = run(&worktree, &["push"]);
+    let refused = run(&worktree, &["push"]);
+    assert!(!refused.status.success());
+    let refusal = envelope(&refused);
+    assert_eq!(refusal["error"]["code"], "non_fast_forward", "{refusal}");
+    assert!(mark.exists(), "the refused load keeps the copy mark");
+
+    let output = run(&worktree, &["push", "--force"]);
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
         !text.contains("\"next\"") && !text.contains("untracked_base"),
