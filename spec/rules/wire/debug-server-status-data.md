@@ -8,8 +8,10 @@ check:
   - tests/cli_debug_server.rs::status_reports_an_unknown_session_without_waiting_for_the_work_path
   - src/platform/service/macos_listener.rs::macos_proves_only_an_exact_loopback_listener_held_by_the_pid
   - src/platform/service/macos_listener.rs::macos_finds_the_accepted_socket_by_both_endpoints
-  - src/platform/dbgs/macos.rs::macos_rdbg_requires_the_same_accepted_connection_after_the_reply
-  - src/platform/dbgs/macos.rs::macos_rdbg_does_not_send_a_request_to_an_unattributed_connection
+  - src/platform/service/linux_listener.rs::linux_debug_listener_requires_an_unambiguous_loopback_socket_held_by_the_pid
+  - src/platform/dbgs/owned_rdbg.rs::owned_rdbg_requires_the_same_accepted_connection_after_the_reply
+  - src/platform/dbgs/owned_rdbg.rs::owned_rdbg_does_not_send_a_request_to_an_unattributed_connection
+  - tests/cli_debug_server.rs::start_runs_the_debug_server_beside_the_client_and_stop_ends_it
   - src/use_cases/managed_stand/debug_server.rs::status_confirms_only_the_recorded_listener_without_mutating_the_session
 ---
 
@@ -40,10 +42,12 @@ check:
 
 Проверка ничего не меняет в записи сеанса или кластере и не запускает или завершает
 службы. Для кластера запускается `rac` только на чтение регистрации.
-На macOS раннер убеждается, что записанному процессу принадлежит и слушатель, и
+На Linux и macOS раннер убеждается, что записанному процессу принадлежит и слушатель, и
 принятый сокет конкретного запроса `rdbg`. Принятый сокет проверяется до запроса
 и после ответа по локальному и удалённому адресам, портам и идентификатору TCP-записи.
-При отсутствии доказательства принадлежности действует `unverified`.
+На Linux раннер сверяет точный IPv4 loopback-слушатель и inode принятого сокета с дескрипторами
+записанного процесса. Недоступная таблица TCPv6 или IPv6 wildcard на этом порту оставляют наблюдение
+неоднозначным. При неоднозначном слушателе или отсутствии доказательства принадлежности действует `unverified`.
 
 ## Пример
 

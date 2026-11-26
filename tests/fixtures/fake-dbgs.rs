@@ -4,7 +4,7 @@
 //! `--portRange`, пишет адрес в файл `--notify` в UTF-16 LE с BOM и отвечает на
 //! `POST /e1crdbg/rdbg` с `Content-Type: application/xml` отказом 400 `virtual-resource-system`.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 
 fn main() {
@@ -38,9 +38,20 @@ fn main() {
         let Ok(mut stream) = stream else {
             continue;
         };
-        let mut buffer = [0u8; 8192];
-        let read = stream.read(&mut buffer).unwrap_or(0);
-        let request = String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase();
+        let mut stream = BufReader::new(&mut stream);
+        let mut request = String::new();
+        loop {
+            let previous = request.len();
+            match stream.read_line(&mut request) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if matches!(&request[previous..], "\r\n" | "\n") => break,
+                Ok(_) => {}
+            }
+        }
+        if request.is_empty() {
+            continue;
+        }
+        let request = request.to_ascii_lowercase();
         let rdbg = request.starts_with("post /e1crdbg/rdbg")
             && request.contains("content-type: application/xml");
         let (status, body) = if rdbg {
@@ -51,10 +62,19 @@ fn main() {
         } else {
             ("404 Not found", "")
         };
-        let _ = write!(
-            stream,
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        let close = request.lines().any(|line| line == "connection: close");
+        let connection = if close { "close" } else { "keep-alive" };
+        let written = write!(
+            stream.get_mut(),
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n{body}",
             body.len()
         );
+        if written.is_ok() && !close {
+            // A real dbgs keeps the accepted socket open while status checks its owner.
+            let _ = stream
+                .get_ref()
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let _ = stream.read_line(&mut String::new());
+        }
     }
 }

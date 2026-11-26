@@ -43,7 +43,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `infobase check` | Конфигуратор с прямым адресом файловой или клиент-серверной ИБ | Подтверждает вход без выгрузки. В JSON `command: "infobase.check"`, при успехе `data.platform_version` |
 | `infobase restore` | цепочка `agent` → `designer`, с `--create` и на платформе ниже 8.3.27 агент пропускается; у файловой базы `ibcmd` только по `providers.infobase.restore`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
-| `debug-server` | Файловая база — свой `dbgs` раннера (замерен на Windows; Linux и macOS не замерены, [#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux), автономный сервер раннера с `standalone start --debug` — его `dbgs` (Windows); чужой кластер или автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
+| `debug-server` | Файловая база — свой `dbgs` раннера (замерен на Windows, macOS arm64 и Linux для `start`, `status` и `stop`); кластер раннера с `cluster start --debug` — сервер отладки кластера (Windows, Linux), автономный сервер раннера с `standalone start --debug` — его `dbgs` (Windows); чужой кластер или автономный сервер — отказ `target` | `start` отдаёт адрес готового сервера отладки и сеанс, `stop <session>` гасит только свой `dbgs`; без замка `workPath` ([подробности](#debug-server)) |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr`; у `infobase.web.managed` публикует именованную файловую ИБ или базу кластера раннера в частный Apache: `server`, `dir`, `conf` и `url` раннер вычисляет сам, `webinst` выбирает из настроенного выпуска платформы и сверяет с выпуском работающего кластера, если он используется ([`web`](#web)) |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `localPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Квитанция `data.provider` относится к чтению поколения. Для имён из пакетного Конфигуратора активность имеет значение `null` |
 | `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
@@ -941,8 +941,8 @@ v8-runner debug-server stop <SESSION> [--dry-run]
 ```
 
 - Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows и macOS arm64
-  ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). Linux не замерен
-  ([#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)). Сервер
+  ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). На Linux проверены
+  `start`, `status` и `stop` ([#813](https://github.com/IngvarConsulting/v8-runner-rust/issues/813)). Сервер
   отладки кластера — Windows и Linux (Linux замерен в
   [#768](https://github.com/IngvarConsulting/v8-runner-rust/issues/768)), автономного сервера — Windows. Базу
   команды не открывают и не берут замок `workPath` и стенда: `stop` отвечает и пока идёт другая команда.
@@ -992,8 +992,8 @@ v8-runner debug-server stop <SESSION> [--dry-run]
   проверяет PID и время запуска процесса, подтверждает владельца loopback-порта средствами
   ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
   состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился
-  или сменился), `unverified` (готовность подтвердить нельзя). В 0.19 подтверждение владельца
-  порта доступно на Windows и macOS arm64. На macOS раннер также проверяет, что
+  или сменился), `unverified` (готовность подтвердить нельзя). Подтверждение владельца порта
+  для файловой ИБ доступно на Windows, Linux и macOS arm64. На Linux и macOS раннер также проверяет, что
   запрос `rdbg` прошёл по соединению, принятому записанным процессом.
   Проверка отражает состояние на момент вызова, поэтому отладчик
   обрабатывает также отказ самого подключения. Наличие операции проверяет
