@@ -10,11 +10,30 @@ use std::net::TcpListener;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let key = |name: &str| args.iter().find_map(|arg| arg.strip_prefix(name));
+    #[cfg(target_os = "linux")]
+    if let Some(owner) = key("--ownerPID=") {
+        let owner: u32 = owner.parse().expect("fixture owner PID");
+        let process_stat = format!("/proc/{owner}/stat");
+        let generation = move || {
+            let stat = std::fs::read_to_string(&process_stat).ok()?;
+            let (_, fields) = stat.rsplit_once(") ")?;
+            fields.split_ascii_whitespace().nth(19)?.parse::<u64>().ok()
+        };
+        let started = generation().expect("live fixture owner");
+        std::thread::spawn(move || {
+            while generation() == Some(started) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            std::process::exit(0);
+        });
+    }
     let notify = key("--notify=").expect("--notify");
     let ports: Vec<u16> = match (key("--port="), key("--portRange=")) {
         (Some(port), _) => vec![port.parse().expect("--port")],
         (None, Some(range)) => {
-            let mut bounds = range.split(':').map(|bound| bound.parse::<u16>().expect("range"));
+            let mut bounds = range
+                .split(':')
+                .map(|bound| bound.parse::<u16>().expect("range"));
             let (first, last) = (bounds.next().expect("first"), bounds.next().expect("last"));
             (first..=last).collect()
         }
@@ -28,6 +47,19 @@ fn main() {
         std::process::exit(1);
     };
     let port = listener.local_addr().expect("address").port();
+    #[cfg(target_os = "linux")]
+    let mut events = {
+        let path = std::env::current_exe()
+            .expect("fake dbgs executable")
+            .with_file_name("fake-dbgs.events");
+        let mut events = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("fake dbgs events");
+        writeln!(events, "spawn {} {port}", std::process::id()).expect("record listener");
+        events
+    };
     let mut address = vec![0xFF, 0xFE];
     for unit in format!("127.0.0.1:{port}").encode_utf16() {
         address.extend_from_slice(&unit.to_le_bytes());
@@ -55,6 +87,8 @@ fn main() {
         let rdbg = request.starts_with("post /e1crdbg/rdbg")
             && request.contains("content-type: application/xml");
         let (status, body) = if rdbg {
+            #[cfg(target_os = "linux")]
+            writeln!(events, "rdbg {}", std::process::id()).expect("record RDBG request");
             (
                 "400 Bad request",
                 "{\"#exception\":\"{http://v8.1c.ru/8.2/virtual-resource-system}Exception\"}",

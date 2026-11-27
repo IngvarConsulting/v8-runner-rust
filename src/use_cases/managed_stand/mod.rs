@@ -75,6 +75,10 @@ pub(crate) trait ServiceHost {
     fn can_confirm_debug_endpoint(&self) -> bool {
         cfg!(any(windows, target_os = "macos"))
     }
+    /// Can `prepare` verify the loopback RDBG endpoint of its own dbgs?
+    fn can_confirm_owned_debug_endpoint(&self) -> bool {
+        self.can_confirm_debug_endpoint()
+    }
     fn debug_loopback_owner(&self, _pid: u32, _port: u16) -> bool {
         false
     }
@@ -231,6 +235,10 @@ impl ServiceHost for RealHost {
     }
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
+    }
+    #[cfg(target_os = "linux")]
+    fn can_confirm_owned_debug_endpoint(&self) -> bool {
+        true
     }
     #[cfg(windows)]
     fn debug_loopback_owner(&self, pid: u32, port: u16) -> bool {

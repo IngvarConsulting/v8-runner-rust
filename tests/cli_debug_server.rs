@@ -248,9 +248,9 @@ fn a_session_that_is_not_hex_is_refused_by_the_parser() {
     assert!(stderr.contains("invalid value"), "{stderr}");
 }
 
-/// Платформа с поддельным `dbgs` из `tests/fixtures/fake-dbgs.rs` рядом с тонким клиентом;
-/// возвращает каталог установки.
-fn platform_with_a_fake_debug_server(dir: &Path) -> PathBuf {
+/// Файловый проект с поддельным `dbgs` из `tests/fixtures/fake-dbgs.rs` рядом с тонким
+/// клиентом. Возвращает каталог установки.
+fn project_with_a_fake_debug_server(dir: &Path) -> PathBuf {
     let install = dir.join("platform");
     let bin = install.join("bin");
     fs::create_dir_all(&bin).expect("bin");
@@ -272,6 +272,27 @@ fn platform_with_a_fake_debug_server(dir: &Path) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
+    fs::create_dir_all(dir.join("src")).expect("src");
+    fs::write(dir.join("src/Configuration.xml"), "<MetaDataObject/>").expect("set");
+    fs::write(
+        dir.join("v8project.yaml"),
+        format!(
+            "workPath: work
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src
+infobase:
+  connection: 'File=ib'
+tools:
+  platform:
+    path: '{}'
+",
+            install.display()
+        ),
+    )
+    .expect("project");
     install
 }
 
@@ -300,32 +321,7 @@ Connection: close
 #[test]
 fn start_runs_the_debug_server_beside_the_client_and_stop_ends_it() {
     let dir = temp_workspace();
-    let install = platform_with_a_fake_debug_server(dir.path());
-    fs::create_dir_all(dir.path().join("src")).expect("src");
-    fs::write(
-        dir.path().join("src/Configuration.xml"),
-        "<MetaDataObject/>",
-    )
-    .expect("set");
-    fs::write(
-        dir.path().join("v8project.yaml"),
-        format!(
-            "workPath: work
-format: DESIGNER
-source-set:
-  - name: main
-    type: CONFIGURATION
-    path: src
-infobase:
-  connection: 'File=ib'
-tools:
-  platform:
-    path: '{}'
-",
-            install.display()
-        ),
-    )
-    .expect("project");
+    let _install = project_with_a_fake_debug_server(dir.path());
     let (code, started) = run(dir.path(), &["debug-server", "start"]);
     // `cargo test` на Windows держит тесты в Job, из которого выйти нельзя: сервер умер бы с
     // командой, и раннер отказывает, ничего не оставив. Полный путь идёт на Linux и macOS.
@@ -387,4 +383,159 @@ tools:
             assert_eq!(checked["data"][field], data[field], "{checked}");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn prepare_reuses_and_releases_an_owned_debug_server_on_linux() {
+    // The public prepare receipt carries a lease, not the process ID. Read the process
+    // reported by the independently launched fixture and verify its generation via procfs.
+    fn process_start(pid: u32) -> Option<u64> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let mut fields = fields.split_ascii_whitespace();
+        if matches!(fields.next()?, "Z" | "X") {
+            return None;
+        }
+        fields.nth(18)?.parse().ok() // Field 22, after reading field 3 (state).
+    }
+
+    struct Cleanup<'a> {
+        project: &'a Path,
+        leases: Vec<String>,
+    }
+
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            for lease in &self.leases {
+                let _ = v8_runner_command()
+                    .current_dir(self.project)
+                    .env_remove("V8TR_CONFIG")
+                    .args(["debug-server", "stop", lease])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+
+    let dir = temp_workspace();
+    let install = project_with_a_fake_debug_server(dir.path());
+    let witness = install.join("bin/fake-dbgs.events");
+    let events = || fs::read_to_string(&witness).expect("native fixture events");
+    let owner = std::process::id();
+    let owner_arg = owner.to_string();
+    let mut cleanup = Cleanup {
+        project: dir.path(),
+        leases: Vec::new(),
+    };
+    let mut prepare = || {
+        let (code, receipt) = run(
+            dir.path(),
+            &["debug-server", "prepare", "--owner-pid", &owner_arg],
+        );
+        assert_eq!(code, 0, "{receipt}");
+        let data = &receipt["data"];
+        let lease = data["release"]["session"]
+            .as_str()
+            .expect("prepare lease")
+            .to_owned();
+        cleanup.leases.push(lease);
+        support::command_data::assert_data_matches_its_command_form(&receipt, "Linux lease");
+        assert_eq!(data["action"], "prepared");
+        assert_eq!(data["owner"], "runner");
+        assert_eq!(data["owner_pid"].as_u64(), Some(u64::from(owner)));
+        assert_eq!(data["scope"], "client_and_server");
+        assert_eq!(data["infobase_alias"], "DefAlias");
+        assert_eq!(data["release"]["action"], "stop");
+        receipt
+    };
+
+    let first = prepare();
+    let first_events = events();
+    let (pid, port) = first_events
+        .lines()
+        .find_map(|line| line.strip_prefix("spawn "))
+        .and_then(|address| address.split_once(' '))
+        .map(|(pid, port)| {
+            (
+                pid.parse::<u32>().expect("fixture PID"),
+                port.parse::<u16>().expect("fixture port"),
+            )
+        })
+        .expect("listening fixture");
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).expect("native executable");
+    assert_eq!(
+        executable,
+        install
+            .join("bin/dbgs")
+            .canonicalize()
+            .expect("fixture executable")
+    );
+    let started = process_start(pid).expect("native process birth ticks");
+    let rdbg = format!("rdbg {pid}");
+    let first_requests = first_events.lines().filter(|line| *line == rdbg).count();
+    assert!(first_requests > 0, "{first_events:?}");
+    let url = format!("http://127.0.0.1:{port}");
+    assert_eq!(first["data"]["url"], url);
+
+    let second = prepare();
+    let second_events = events();
+    assert_eq!(
+        second_events
+            .lines()
+            .filter(|line| line.starts_with("spawn "))
+            .count(),
+        1,
+        "{second_events:?}"
+    );
+    assert!(
+        second_events.lines().filter(|line| *line == rdbg).count() > first_requests,
+        "the reused process must answer RDBG again: {second_events:?}"
+    );
+    assert_eq!(second["data"]["url"], url);
+    assert_eq!(process_start(pid), Some(started));
+    let first_token = first["data"]["release"]["session"]
+        .as_str()
+        .expect("first token");
+    let last_token = second["data"]["release"]["session"]
+        .as_str()
+        .expect("second token");
+    assert_ne!(first_token, last_token);
+
+    let stop = |session: &str| {
+        let (code, receipt) = run(dir.path(), &["debug-server", "stop", session]);
+        assert_eq!(code, 0, "{receipt}");
+        support::command_data::assert_data_matches_its_command_form(&receipt, "Linux lease stop");
+        receipt
+    };
+    let first_stop = stop(first_token);
+    assert_eq!(first_stop["data"]["action"], "released");
+    assert_eq!(first_stop["data"]["known_session"], true);
+    assert!(
+        first_stop["data"].get("stopped_pid").is_none(),
+        "{first_stop}"
+    );
+    let repeated = stop(first_token);
+    assert_eq!(repeated["data"]["action"], "nothing_to_stop");
+    assert_eq!(repeated["data"]["known_session"], false);
+    assert_eq!(process_start(pid), Some(started));
+    assert!(
+        rdbg_status(port).is_some_and(|status| status.contains("400")),
+        "the same native debugger must still answer RDBG after one release"
+    );
+
+    let stopped = stop(last_token);
+    assert_eq!(stopped["data"]["action"], "stopped");
+    assert_eq!(
+        stopped["data"]["stopped_pid"].as_u64(),
+        Some(u64::from(pid))
+    );
+    assert_ne!(process_start(pid), Some(started));
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    let repeated = stop(last_token);
+    assert_eq!(repeated["data"]["action"], "nothing_to_stop");
+    assert_eq!(repeated["data"]["known_session"], false);
+    cleanup.leases.clear();
+    println!("linux owned dbgs pid={pid} start_ticks={started} port={port} distinct_leases=2 first_release=released last_release=stopped process_and_listener_gone=true");
 }

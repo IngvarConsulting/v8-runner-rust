@@ -413,7 +413,7 @@ impl DebugServer<'_> {
             pid: owner_pid,
             started: self.host.facts(owner_pid).ok_or_else(owner_exited)?.started,
         };
-        if !self.host.can_confirm_debug_endpoint() {
+        if !self.host.can_confirm_owned_debug_endpoint() {
             return Err(environment(
                 "the operating system does not provide verified debug connections for prepare",
             ));
