@@ -254,8 +254,10 @@ impl StagedPublication {
                 }
                 #[cfg(windows)]
                 check_target()?;
-                let mut stopped =
-                    || context.interruption().is_some() || std::time::Instant::now() >= deadline;
+                let mut stopped = || {
+                    interruption::interruption_pending(context)
+                        || std::time::Instant::now() >= deadline
+                };
                 let fresh = assess_losses(Some(&mut stopped));
                 if let Some(error) = cancelled() {
                     return Err(error);
