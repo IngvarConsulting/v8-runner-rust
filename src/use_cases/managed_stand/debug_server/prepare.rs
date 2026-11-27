@@ -387,10 +387,10 @@ impl DebugServer<'_> {
                 cluster::ExternalDebugProof::NoBinding => {}
                 cluster::ExternalDebugProof::Unavailable => return Err(external_unavailable()),
                 cluster::ExternalDebugProof::Unverified => return Err(external_unverified()),
-                cluster::ExternalDebugProof::Confirmed(binding) => {
+                cluster::ExternalDebugProof::Confirmed { alias } => {
                     return Ok(receipt(
                         url,
-                        binding.alias,
+                        alias,
                         Scope::ClientAndServer,
                         Owner::External,
                         None,

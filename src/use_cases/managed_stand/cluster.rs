@@ -1674,7 +1674,7 @@ pub(super) enum ExternalDebugProof {
     NoBinding,
     Unverified,
     Unavailable,
-    Confirmed(ClusterDebugBinding),
+    Confirmed { alias: String },
 }
 
 /// A named direct local profile can borrow the same live cluster as its managed sibling.
@@ -1755,7 +1755,7 @@ pub(super) fn prepare_external_debug_server(
         return ExternalDebugProof::Unverified;
     }
     match cluster.confirm_prepared_debug(&proof) {
-        Ok(()) => ExternalDebugProof::Confirmed(proof),
+        Ok(()) => ExternalDebugProof::Confirmed { alias: proof.alias },
         Err(DebugReason::RdbgUnavailable) => ExternalDebugProof::Unavailable,
         Err(_) => ExternalDebugProof::Unverified,
     }
