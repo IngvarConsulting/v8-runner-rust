@@ -2346,6 +2346,12 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   пароль не подошли.
   `designer`, `mcp`, ожидаемый `thin --wait-for-exit` и клиент `test` идут с этим ключом
   ([правило](../spec/rules/cli/an-interactive-client-may-show-startup-dialogs.md)).
+- `launch thin|thick|ordinary --interactive-login` оставляет выбор пользователя платформе на
+  один запуск. Сохранённые имя и пароль этого профиля в клиент не передаются. `/WA-` отключает
+  вход через ОС в самой ИБ. Адрес ИБ, платформа и `--debug` сохраняются.
+  Правила 1С для сохранённых платформой токенов и аутентификации публикации действуют.
+  `--dry-run` показывает этот план. Режим требует интерактивного запуска без ожидания,
+  а сырые ключи подключения или аутентификации отклоняются до запуска.
 - `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
 - `launch mcp --mode thick` использует `1cv8`; `launch mcp --mode ordinary` использует `1cv8`

@@ -55,6 +55,126 @@ fn run(dir: &Path, arguments: &[&str]) -> (i32, Value) {
 }
 
 #[test]
+fn interactive_login_withholds_saved_credentials_and_keeps_the_launch_target() {
+    let dir = temp_workspace();
+    project_with(
+        dir.path(),
+        "  enterprise:\n    additional-launch-keys: [/AllowExecuteScheduledJobs, -Off, /DisableStartupDialogs]\n",
+    );
+    let local = dir.path().join("v8project.local.yaml");
+    let saved = b"infobase:\n  user: SyntheticAdmin\n  password: SyntheticSavedSecret\n";
+    fs::write(&local, saved).unwrap();
+
+    for mode in ["thin", "thick", "ordinary"] {
+        let command = ["launch", mode, "--dry-run", "--debug", URL];
+        let (code, plain) = run(dir.path(), &command);
+        assert_eq!(code, 0, "{plain}");
+        let (code, interactive) = run(
+            dir.path(),
+            &[command.as_slice(), &["--interactive-login"]].concat(),
+        );
+        assert_eq!(code, 0, "{interactive}");
+        let plain = &plain["data"];
+        let interactive = &interactive["data"];
+        let mut expected = plain["plan"]["args"].as_array().unwrap().clone();
+        let credentials = expected.iter().position(|arg| arg == "/N").unwrap();
+        assert_eq!(
+            expected
+                .drain(credentials..credentials + 4)
+                .collect::<Vec<_>>(),
+            ["/N", "SyntheticAdmin", "/P", "***"].map(Value::from),
+        );
+        expected.push(Value::from("/WA-"));
+        let actual = interactive["plan"]["args"].as_array().unwrap();
+        assert_eq!(actual, &expected);
+        assert!(!actual.iter().any(|arg| arg == "/DisableStartupDialogs"));
+        for field in [
+            "binary",
+            "platform_resolution",
+            "debug",
+            "via",
+            "provider_dispatched",
+        ] {
+            assert_eq!(plain[field], interactive[field]);
+        }
+        assert_eq!(interactive["debug"]["url"], URL);
+        assert_eq!(interactive["provider_dispatched"], false);
+        assert!(!interactive.to_string().contains("SyntheticAdmin"));
+        assert!(!interactive.to_string().contains("SyntheticSavedSecret"));
+    }
+    assert_eq!(fs::read(local).unwrap(), saved);
+}
+
+#[test]
+fn interactive_login_rejects_unattended_launches_and_native_overrides() {
+    let dir = temp_workspace();
+    project(dir.path());
+    for (mode, rest) in [
+        ("designer", vec![]),
+        ("mcp", vec![]),
+        ("web", vec![]),
+        ("thin", vec!["--wait-for-exit", "--c=script"]),
+        ("thin", vec!["--raw-key=/PSyntheticOverride"]),
+        ("thin", vec!["--raw-key=/@response.txt"]),
+        ("thin", vec!["--raw-key=/URL=http://other.test/base"]),
+        ("thin", vec!["--raw-key=/WA+"]),
+        (
+            "thin",
+            vec!["--raw-key=/DisplayAllFunctions /DisableStartupDialogs"],
+        ),
+    ] {
+        let (code, answer) = run(
+            dir.path(),
+            &[
+                &["launch", mode, "--interactive-login", "--dry-run"][..],
+                &rest,
+            ]
+            .concat(),
+        );
+        assert_ne!(code, 0, "{answer}");
+        assert_eq!(answer["error"]["code"], "invalid_argument", "{answer}");
+        assert!(!answer.to_string().contains("SyntheticOverride"));
+    }
+}
+
+#[test]
+fn interactive_login_refuses_inline_credentials_in_the_selected_address() {
+    let dir = temp_workspace();
+    project(dir.path());
+    let config = dir.path().join("v8project.yaml");
+    let saved = fs::read_to_string(&config).unwrap();
+    for (profile, route) in [
+        (
+            saved.replace("File=ib", "File=ib;Usr=SyntheticInline;Pwd=SyntheticInline"),
+            "connection",
+        ),
+        (
+            saved.replace(
+                "http://localhost/demo",
+                "http://SyntheticInline@localhost/demo",
+            ),
+            "web",
+        ),
+    ] {
+        fs::write(&config, profile).unwrap();
+        let (code, answer) = run(
+            dir.path(),
+            &[
+                "launch",
+                "thin",
+                "--via",
+                route,
+                "--interactive-login",
+                "--dry-run",
+            ],
+        );
+        assert_ne!(code, 0, "{answer}");
+        assert_eq!(answer["error"]["code"], "invalid_argument", "{answer}");
+        assert!(!answer.to_string().contains("SyntheticInline"));
+    }
+}
+
+#[test]
 fn a_web_debug_preview_preserves_the_publication_url_and_replaces_old_debug_keys() {
     let dir = temp_workspace();
     project(dir.path());
