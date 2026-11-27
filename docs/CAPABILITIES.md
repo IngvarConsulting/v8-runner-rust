@@ -260,7 +260,7 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | Род | Коды | Код выхода |
 | --- | --- | --- |
 | `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
-| `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
+| `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `debug_server_external_unavailable` (явный адрес не отвечает по RDBG), `debug_server_external_target_unverified` (привязка явно выбранного сервера к ИБ не подтверждена), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP), `source_set_ignored_by_git` (правило игнорирования git прячет файл набора), `work_path_on_another_volume` (`pull`: каталог набора и `workPath` на разных томах) | 2 |
 | `workspace` | `workspace_busy`, `infobase_busy`, `infobase_sessions` (базу держат чужие сеансы), `infobase_designer_busy` (файловую базу держит чужой Конфигуратор) | 3 |
 | `runtime` | `runtime_failure` | 3 |

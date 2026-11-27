@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 9
+version: 10
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -32,7 +32,10 @@ check:
 цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. Коды рода `environment` тоже отвечают
 кодом выхода 2: `environment_unavailable` (утилиты нет или она не та) и
 `platform_release_missing` (при `tools.platform.version: sources` нет выпуска, который пишет
-формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`). Поле
+формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+`debug_server_external_unavailable` означает, что явно выбранный адрес не ответил по RDBG.
+`debug_server_external_target_unverified` означает, что привязку явно выбранного
+сервера к кластерной ИБ не удалось подтвердить. Поле
 `layer` отказа `environment_unavailable` называет слой из закрытого набора `infobase_user`,
 `agent_endpoint`, `agent_start`, `platform`; без поля слой не определён
 (`INV.WIRE.AN-ENVIRONMENT-REFUSAL-NAMES-ITS-LAYER`). У `platform_release_missing`
@@ -168,3 +171,7 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 **Что изменила версия 8.** Добавлены коды `infobase_not_found` и `connection_failed` для [проверки подключения](infobase-check-data.md).
 
 **Что изменила версия 9.** `infobase check` различает `credentials_rejected` рода `platform` (выход 4) и `infobase_designer_busy` рода `workspace` (выход 3) на обеих целях по [правилу проверки входа](infobase-check-data.md).
+
+**Что изменила версия 10.** `debug-server prepare` различает недоступный внешний
+адрес и ответ без подтверждения выбранной ИБ. Эти отказы относятся к роду
+`environment` и завершаются с выходом 2. См. [контракт подготовки](debug-server-prepare-data.md).

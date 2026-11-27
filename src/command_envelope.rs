@@ -596,6 +596,18 @@ mod schema_tests {
                 "environment",
             ),
             (
+                UseCaseErrorKind::Environment(EnvironmentReason::DebugServerExternalUnavailable),
+                "debug_server_external_unavailable",
+                "environment",
+            ),
+            (
+                UseCaseErrorKind::Environment(
+                    EnvironmentReason::DebugServerExternalTargetUnverified,
+                ),
+                "debug_server_external_target_unverified",
+                "environment",
+            ),
+            (
                 UseCaseErrorKind::WorkspaceBusy,
                 "workspace_busy",
                 "workspace",
