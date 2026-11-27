@@ -14,7 +14,7 @@ check:
   - src/use_cases/managed_stand/cluster.rs::the_cluster_and_its_base_refuse_the_stand_of_another_project
   - src/use_cases/managed_stand/standalone.rs::the_server_and_its_base_refuse_the_stand_of_another_project
   - src/config/loader.rs::a_working_command_names_the_project_owning_a_shared_stand
-  - src/use_cases/managed_stand/debug_server.rs::a_stale_session_leaves_a_process_that_took_its_pid_alone
+  - src/use_cases/managed_stand/debug_server.rs::prepared_stop_does_not_signal_a_recycled_pid
 ---
 
 # Свой процесс определяется по записи целиком

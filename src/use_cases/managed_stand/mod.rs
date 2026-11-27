@@ -11,7 +11,6 @@ pub(crate) use web::{managed_publication_url, publication, ManagedPublication};
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
-pub use debug_server::DebugServerStart;
 pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 pub use standalone::StandaloneCommand;
 
@@ -75,7 +74,7 @@ pub(crate) trait ServiceHost {
     fn can_confirm_debug_endpoint(&self) -> bool {
         cfg!(any(windows, target_os = "macos"))
     }
-    /// Can `prepare` verify the loopback RDBG endpoint of its own dbgs?
+    /// Can `debug-server start` verify the loopback RDBG endpoint of its own dbgs?
     fn can_confirm_owned_debug_endpoint(&self) -> bool {
         self.can_confirm_debug_endpoint()
     }
@@ -1610,43 +1609,14 @@ pub fn execute_standalone(
     )
 }
 
-/// `debug-server start`: сервер отладки для отладчика. Без замка `workPath`
-/// (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
+/// Resolve a verified debug endpoint and issue a lease only for a runner-owned server.
 pub fn debug_server_start(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    request: DebugServerStart,
-    ensure: bool,
-    dry_run: bool,
-) -> UseCaseResult<crate::domain::debug_server::DebugServerResult> {
-    let started = Instant::now();
-    with_debug_server(context, config, |server| {
-        if ensure {
-            server.ensure(request, dry_run)
-        } else {
-            server.start(request, dry_run)
-        }
-    })
-    .map_err(|failure| {
-        if !ensure {
-            return failure;
-        }
-        UseCaseFailure::after_possible_work(failure.error, context.work(), || {
-            let mut result = debug_server::failed_ensure(request);
-            result.duration_ms = crate::support::time::elapsed_ms(started);
-            result
-        })
-    })
-}
-
-/// Prepare a verified debug endpoint and lease it only if the runner owns it.
-pub fn debug_server_prepare(
     context: &ExecutionContext,
     config: &AppConfig,
     owner_pid: u32,
     dry_run: bool,
 ) -> UseCaseResult<crate::domain::debug_server::DebugServerPrepareResult> {
-    with_debug_server(context, config, |server| server.prepare(owner_pid, dry_run))
+    with_debug_server(context, config, |server| server.start(owner_pid, dry_run))
 }
 
 /// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.
@@ -1659,7 +1629,7 @@ pub fn debug_server_stop(
     with_debug_server(context, config, |server| server.stop(session, dry_run))
 }
 
-/// Observe a file-infobase debug session without starting or stopping it.
+/// Observe a runner-owned debug lease without changing state.
 pub fn debug_server_status(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1675,18 +1645,12 @@ fn with_debug_server<T>(
     run: impl FnOnce(&debug_server::DebugServer<'_>) -> Result<T, UseCaseError>,
 ) -> UseCaseResult<T> {
     let locate = || locate_client(config);
-    let cluster_server =
-        || cluster::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
-    let standalone_server =
-        || standalone::debug_server(context, config, &ProcessExecutor, &RealHost::CURRENT);
     run(&debug_server::DebugServer {
         context,
         config,
         runner: &ProcessExecutor,
         host: &RealHost::CURRENT,
         locate_client: &locate,
-        cluster_server: &cluster_server,
-        standalone_server: &standalone_server,
     })
     .map_err(UseCaseFailure::without_payload)
 }

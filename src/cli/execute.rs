@@ -840,9 +840,6 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::DebugServer(args) => match args.command {
             crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
-            crate::cli::args::DebugServerCommandArgs::Prepare { .. } => {
-                CommandName::DebugServerPrepare
-            }
             crate::cli::args::DebugServerCommandArgs::Status { .. } => {
                 CommandName::DebugServerStatus
             }
@@ -1849,7 +1846,7 @@ fn execute_standalone(
     )
 }
 
-/// `debug-server start|prepare|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// `debug-server start|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
 /// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
 fn execute_debug_server(
     config: &AppConfig,
@@ -1861,32 +1858,19 @@ fn execute_debug_server(
     use crate::cli::args::DebugServerCommandArgs as Action;
     use crate::domain::debug_server::{DebugServerPrepareResult, DebugServerRelease};
     use crate::use_cases::managed_stand::{
-        debug_server_prepare, debug_server_start, debug_server_status, debug_server_stop,
-        DebugServerStart,
+        debug_server_start, debug_server_status, debug_server_stop,
     };
 
     let name = match action {
         Action::Start { .. } => CommandName::DebugServerStart,
-        Action::Prepare { .. } => CommandName::DebugServerPrepare,
         Action::Status { .. } => CommandName::DebugServerStatus,
         Action::Stop { .. } => CommandName::DebugServerStop,
     };
     let context = cli_context(config, name, cancellation);
     let outcome = match action {
-        Action::Start {
-            port,
-            owner_pid,
-            ensure,
-        } => debug_server_start(
-            &context,
-            config,
-            DebugServerStart { port, owner_pid },
-            ensure,
-            dry_run,
-        ),
-        Action::Prepare { owner_pid } => {
+        Action::Start { owner_pid } => {
             let started = Instant::now();
-            match debug_server_prepare(&context, config, owner_pid, dry_run) {
+            match debug_server_start(&context, config, owner_pid, dry_run) {
                 Ok(result) => {
                     if presenter.is_json() {
                         presenter.print_envelope(&Envelope::ok(
@@ -1897,7 +1881,7 @@ fn execute_debug_server(
                     } else {
                         match result {
                             DebugServerPrepareResult::Planned => {
-                                presenter.print_bare("debug-server prepare: planned");
+                                presenter.print_bare("debug-server start: planned");
                             }
                             DebugServerPrepareResult::Prepared {
                                 url,
@@ -1975,9 +1959,7 @@ fn execute_debug_server(
                 envelope.warnings = warnings;
                 presenter.print_envelope(&envelope);
             } else {
-                for line in debug_server_text(name, &result) {
-                    presenter.print_bare(&line);
-                }
+                presenter.print_bare(&debug_server_stop_text(&result));
                 for warning in &result.warnings {
                     presenter.print_bare(&format!("warning: {warning}"));
                 }
@@ -2002,54 +1984,21 @@ fn execute_debug_server(
     }
 }
 
-fn debug_server_text(
-    name: CommandName,
-    result: &crate::domain::debug_server::DebugServerResult,
-) -> Vec<String> {
-    use crate::domain::debug_server::{DebugServerAction, DebugServerOwner};
+fn debug_server_stop_text(result: &crate::domain::debug_server::DebugServerResult) -> String {
+    use crate::domain::debug_server::DebugServerAction;
 
-    let owner = match result.owner {
-        Some(DebugServerOwner::Cluster) => "the debug server of the cluster",
-        Some(DebugServerOwner::Standalone) => "the debug server of the standalone server",
-        Some(DebugServerOwner::Runner) | None => "the debug server",
-    };
-    let mut lines = vec![match result.action {
-        DebugServerAction::Started | DebugServerAction::Reused => format!(
-            "{}: {owner} answers at {}",
-            name.as_str(),
-            result.url.as_deref().unwrap_or("?")
-        ),
-        DebugServerAction::Failed => format!("{}: could not prepare {owner}", name.as_str()),
+    match result.action {
         DebugServerAction::Stopped => format!(
-            "{}: {owner} pid {} stopped",
-            name.as_str(),
+            "debug-server stop: the debug server pid {} stopped",
             result.stopped_pid.unwrap_or_default()
         ),
-        DebugServerAction::Released => format!("{}: lease released", name.as_str()),
-        DebugServerAction::Planned => {
-            format!("{}: planned, nothing started or stopped", name.as_str())
+        DebugServerAction::Released => "debug-server stop: lease released".to_owned(),
+        DebugServerAction::Planned => "debug-server stop: planned, nothing stopped".to_owned(),
+        DebugServerAction::NothingToStop if result.known_session == Some(false) => {
+            "debug-server stop: this working copy knows no such lease; nothing to stop".to_owned()
         }
-        DebugServerAction::NothingToStop if result.known_session == Some(false) => format!(
-            "{}: this working copy knows no such session; nothing to stop",
-            name.as_str()
-        ),
-        DebugServerAction::NothingToStop => format!("{}: nothing to stop", name.as_str()),
-    }];
-    if let (DebugServerAction::Started | DebugServerAction::Reused, Some(session)) =
-        (result.action, &result.session)
-    {
-        lines.push(format!("session: {session}"));
+        DebugServerAction::NothingToStop => "debug-server stop: nothing to stop".to_owned(),
     }
-    if let Some(alias) = &result.infobase_alias {
-        lines.push(format!("infobase alias: {alias}"));
-    }
-    if let Some(pid) = result.pid {
-        lines.push(format!("pid: {pid}"));
-    }
-    if let Some(log) = &result.log_path {
-        lines.push(format!("log: {}", log.display()));
-    }
-    lines
 }
 
 fn render_standalone_text(

@@ -1,78 +1,63 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-START-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/debug-server-start.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_debug_server.rs::prepare_preview_reports_the_selected_route_without_creating_state
+  - tests/cli_debug_server.rs::prepare_requires_owner_pid
   - tests/cli_debug_server.rs::start_runs_the_debug_server_beside_the_client_and_stop_ends_it
-  - src/use_cases/managed_stand/debug_server.rs::start_answers_with_the_address_that_answered_as_a_debug_server
-  - src/use_cases/managed_stand/debug_server.rs::a_cluster_infobase_gets_the_debug_server_of_the_cluster
-  - src/use_cases/managed_stand/debug_server.rs::a_standalone_infobase_gets_the_debug_server_of_the_server
-  - src/use_cases/managed_stand/standalone.rs::the_debug_server_of_the_standalone_server_needs_a_debug_start
-  - src/use_cases/managed_stand/debug_server.rs::a_preview_starts_and_writes_nothing
-  - src/use_cases/managed_stand/debug_server.rs::ensure_reuses_and_recovers_its_own_debug_server
-  - src/use_cases/managed_stand/debug_server.rs::ensure_cleans_up_a_new_server_without_a_verified_connection
-  - src/use_cases/managed_stand/debug_server.rs::ensure_keeps_unidentified_attempts_instead_of_starting_duplicates
-  - src/use_cases/managed_stand/debug_server.rs::ensure_never_repairs_a_symlinked_record
-  - src/use_cases/managed_stand/debug_server.rs::ensure_preserves_a_session_with_a_missing_process_record
-  - src/use_cases/managed_stand/debug_server.rs::copying_ensured_state_does_not_grant_access_to_its_live_server
+  - tests/cli_debug_server.rs::prepare_reuses_and_releases_an_owned_debug_server_on_linux
+  - src/use_cases/managed_stand/debug_server.rs::prepared_leases_release_independently_even_after_target_selection_changes
+  - src/use_cases/managed_stand/debug_server.rs::prepare_cancellation_stops_only_the_unpublished_owned_attempt
+  - src/use_cases/managed_stand/debug_server.rs::prepare_uses_client_only_local_debug_for_external_cluster_without_an_address
+  - src/use_cases/managed_stand/debug_server.rs::prepare_borrows_exact_explicit_file_endpoint_without_a_lease
+  - src/use_cases/managed_stand/cluster.rs::external_prepare_borrows_only_the_exact_live_managed_cluster_registration
+  - src/config/loader.rs::a_project_file_cannot_select_an_external_debugger
+  - src/config/schema.rs::native_debugger_endpoint_is_only_in_the_local_schema
+  - tests/cli_debug_server.rs::prepare_refuses_an_explicit_external_cluster_debugger_without_falling_back
 ---
 
 # `data` команды `debug-server start`
 
-`action`: `started` при запуске, `reused` при переиспользовании через `--ensure`,
-`planned` в превью. Если попытка `--ensure` с передачей работы исполнителю
-завершилась ошибкой, ответ содержит `ok: false`, `action: failed` и причину
-в конверте. Адрес в таком ответе отсутствует. `owner` — чей сервер отладки: `runner` — свой `dbgs` раннера для
-файловой базы, `cluster` — сервер отладки управляемого кластера базы (с HTTP-отладкой, Windows и Linux),
-`standalone` — `dbgs` управляемого автономного сервера базы (`standalone start --debug`, Windows).
-`url` — адрес для `/DEBUGGERURL` клиента и для отладчика, `http://127.0.0.1:<порт>`; `port` — тот же порт.
-`session` — сеанс для `debug-server stop`, 32 шестнадцатеричных знака; у превью его нет. `infobase_alias` — имя
-базы для `infoBaseAlias` запросов `rdbg`: `DefAlias` у файловой базы, имя базы в сервере у автономного сервера; у
-кластера алиас равен зарегистрированному имени базы из `Ref`.
+Команда готовит адрес для отладчика и клиента выбранной ИБ. `--owner-pid`
+обязателен. Превью возвращает `action: planned` без действующего адреса и аренды,
+не обращается к сети и не создаёт процессы или записи.
 
-У `owner: runner` ещё `pid` процесса `dbgs`, `owner_pid` — процесс, с концом которого сервер выходит сам
-(`--owner-pid`), `platform_resolution` — путь `dbgs` и установка тонкого клиента, из которой он взят, и `log_path`
-— журнал сервера. У `owner: cluster` и `owner: standalone` процесса раннера нет, и этих полей тоже; ключи `--port`
-и `--owner-pid` к серверу стенда не применяются, о чём говорит `warnings` конверта.
+У результата `action: prepared` есть `url`, `infobase_alias`, `scope`, `owner` и
+`release`. Для собственного `dbgs` также есть `owner_pid` и отдельная аренда
+`release: {action: stop, session: …}`. У заимствованного сервера `release: null`.
+Раннер не управляет жизненным циклом такого процесса.
 
-## Автоматическое восстановление
+Подтверждённый сервер кластера возвращает `client_and_server` с алиасом выбранной
+регистрации. Для явно заданного адреса раннер подтверждает тот же локальный
+кластер по соседнему управляемому профилю этой рабочей копии. Сверяются
+прямой адрес и Ref, заданный `cluster.ras`, порт `dbgs`, поколения процессов,
+UUID кластера и UUID регистрации.
+Такой профиль получает `owner: external` и `release: null`. У файловой ИБ `client_and_server` включает ServerEmulation.
+Для внешней серверной ИБ без настроенного адреса собственный loopback-сервер
+раннера даёт `client`. На Linux для запуска и повторной аренды своего `dbgs`
+обязательно подтверждение через `/proc` владельца IPv4 loopback-слушателя
+и принятого RDBG-соединения. Подтверждение привязки к управляемому кластеру
+поддержано на Windows. У явно указанного недоступного адреса код
+`debug_server_external_unavailable`, у ответившего сервера без подтверждённой
+связи с кластерной целью — `debug_server_external_target_unverified`. Эти отказы завершают
+вызов до локальной подготовки.
 
-`debug-server start --ensure --owner-pid <PID>` готовит сервер файловой базы
-на Windows и macOS. Он принимает автоматически выбранный порт. Сеанс
-принадлежит рабочей копии, файловой базе и живому владельцу с тем же временем
-запуска. Повторный запрос возвращает его токен и PID, если подтверждены
-процесс, принадлежность адреса и ответ `rdbg`. При повторном отказе проверки
-раннер останавливает ранее опознанный собственный процесс, подтверждает
-остановку и пробует запустить замену. Если записанный процесс уже завершился
-или его PID занял другой, раннер запускает замену без сигнала этому PID.
-Новый адрес возвращается только после проверки готовности. Замена получает
-другой токен и свободный порт. Запросы к одному сеансу сериализуются раннером.
-
-Повреждённая запись или недоступная идентичность процесса не дают права
-остановить его или создать дубль. Обычный `start` создаёт отдельный сеанс
-при каждом вызове.
+Внешний адрес выбирает владелец ИБ в `v8project.local.yaml` в
+`infobases.<имя>.debug.url`. Ключ `infobase-alias` задаёт проверенный алиас.
+Проектному файлу запрещено передавать адрес отдельно от локального профиля.
 
 ## Пример
 
 ```json
 {
-  "ok": true,
-  "action": "started",
-  "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
-  "owner": "runner",
+  "action": "prepared",
   "url": "http://127.0.0.1:12961",
-  "port": 12961,
-  "pid": 14820,
-  "owner_pid": 9312,
-  "platform_resolution": {
-    "path": "C:\\Program Files\\1cv8\\8.3.27.2342\\bin\\dbgs.exe",
-    "version": "8.3.27.2342",
-    "source": "default-root",
-    "installation_root": "C:\\Program Files\\1cv8\\8.3.27.2342"
-  },
-  "log_path": "C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log",
-  "duration_ms": 1240
+  "infobase_alias": "DevBase",
+  "scope": "client_and_server",
+  "owner": "cluster",
+  "release": null
 }
 ```

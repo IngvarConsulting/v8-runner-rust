@@ -172,6 +172,6 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 
 **Что изменила версия 9.** `infobase check` различает `credentials_rejected` рода `platform` (выход 4) и `infobase_designer_busy` рода `workspace` (выход 3) на обеих целях по [правилу проверки входа](infobase-check-data.md).
 
-**Что изменила версия 10.** `debug-server prepare` различает недоступный внешний
+**Что изменила версия 10.** `debug-server start` различает недоступный внешний
 адрес и ответ без подтверждения выбранной ИБ. Эти отказы относятся к роду
-`environment` и завершаются с выходом 2. См. [контракт подготовки](debug-server-prepare-data.md).
+`environment` и завершаются с выходом 2. См. [контракт подготовки](debug-server-start-data.md).

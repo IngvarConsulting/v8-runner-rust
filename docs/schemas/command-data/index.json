@@ -49,9 +49,6 @@
     "dbms stop": [
       "dbms-stop"
     ],
-    "debug-server prepare": [
-      "debug-server-prepare"
-    ],
     "debug-server start": [
       "debug-server-start"
     ],

@@ -231,15 +231,9 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             work.clone(),
         ),
         row(
-            &["debug-server", "start"],
+            &["debug-server", "start", "--owner-pid", "1"],
             "debug-server start",
             "debug-server start",
-            work.clone(),
-        ),
-        row(
-            &["debug-server", "prepare", "--owner-pid", "1"],
-            "debug-server prepare",
-            "debug-server prepare",
             work.clone(),
         ),
         row(

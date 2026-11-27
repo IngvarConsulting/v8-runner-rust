@@ -6,7 +6,6 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::debug_server::StandDebugServer;
 use super::{
     await_gone, being_started, block_conflict, environment, first_taken, forget_record, io_failure,
     occupant_of, other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record,
@@ -1436,9 +1435,9 @@ fn debug_mismatch(infobase: &str, running: bool, wanted: bool) -> UseCaseError {
     ))
 }
 
-/// A published debug token identifies the same workPath, agent generation,
-/// listener and registered infobase throughout a status observation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// Evidence that the same cluster, registered infobase, and listener remain
+/// bound together before and after the RDBG probe.
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct ClusterDebugBinding {
     work_path: PathBuf,
     pub(super) alias: String,
@@ -1452,32 +1451,13 @@ pub(super) struct ClusterDebugBinding {
     pub(super) listener_pid: u32,
     listener_started: u64,
     pub(super) port: u16,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PreparedClusterDebugBinding {
-    debug: ClusterDebugBinding,
     manager: (u32, u64),
     agent_port: u16,
     ras: (u32, u64, u16),
 }
 
 impl Cluster<'_> {
-    fn debug_binding(&self) -> Result<ClusterDebugBinding, DebugReason> {
-        self.observe_debug_binding(false)
-            .map(|(binding, _)| binding)
-    }
-
-    fn prepared_debug_binding(&self) -> Result<PreparedClusterDebugBinding, DebugReason> {
-        self.observe_debug_binding(true)?
-            .1
-            .ok_or(DebugReason::RecordUnavailable)
-    }
-
-    fn observe_debug_binding(
-        &self,
-        strict: bool,
-    ) -> Result<(ClusterDebugBinding, Option<PreparedClusterDebugBinding>), DebugReason> {
+    fn prepared_debug_binding(&self) -> Result<ClusterDebugBinding, DebugReason> {
         let pins = self.pins().ok_or(DebugReason::RecordUnavailable)?;
         if pins.previous.is_some() || !pins.registered || !pins.debug {
             return Err(DebugReason::RecordChanged);
@@ -1487,7 +1467,7 @@ impl Cluster<'_> {
             .own_record()
             .ok_or(DebugReason::RecordUnavailable)?;
         if agent.state != RecordState::Running {
-            return Err(DebugReason::Starting);
+            return Err(DebugReason::RecordUnavailable);
         }
         let agent_pid = agent.pid.ok_or(DebugReason::RecordUnavailable)?;
         let agent_started = agent.started.ok_or(DebugReason::RecordUnavailable)?;
@@ -1531,7 +1511,7 @@ impl Cluster<'_> {
             child_listener(pins.ports.regport, MANAGER_IMAGE)
         };
         let (listener_pid, listener_started) = listener()?;
-        let manager = strict.then(manager_listener).transpose()?;
+        let manager = manager_listener()?;
 
         let ras_ready = || {
             self.own_ras().filter(|record| {
@@ -1541,21 +1521,13 @@ impl Cluster<'_> {
             })
         };
         let ras = ras_ready().ok_or(DebugReason::ProcessUnverified)?;
-        let (cluster_id, infobase_id) = if strict {
-            if self.ras.own_record().as_ref() != Some(&ras)
-                || !self.prepared_ras_matches(&agent, &ras, pins.ports)
-            {
-                return Err(DebugReason::RecordUnavailable);
-            }
-            self.confirmed_debug_registration(&agent, &ras, pins.ports.regport)?
-        } else {
-            let registered = read_registration(self, &agent, &ras)
-                .map_err(|_| DebugReason::ProcessUnverified)?;
-            (
-                registered.cluster,
-                registered.infobase.ok_or(DebugReason::RecordChanged)?,
-            )
-        };
+        if self.ras.own_record().as_ref() != Some(&ras)
+            || !self.prepared_ras_matches(&agent, &ras, pins.ports)
+        {
+            return Err(DebugReason::RecordUnavailable);
+        }
+        let (cluster_id, infobase_id) =
+            self.confirmed_debug_registration(&agent, &ras, pins.ports.regport)?;
         if ras_ready().as_ref() != Some(&ras)
             || self.agent.own_record().as_ref() != Some(&agent)
             || self.pins().as_ref() != Some(&pins)
@@ -1569,15 +1541,13 @@ impl Cluster<'_> {
         if listener()? != (listener_pid, listener_started) {
             return Err(DebugReason::ProcessChanged);
         }
-        if strict.then(manager_listener).transpose()? != manager
-            || (strict && !self.prepared_ras_matches(&agent, &ras, pins.ports))
-        {
+        if manager_listener()? != manager || !self.prepared_ras_matches(&agent, &ras, pins.ports) {
             return Err(DebugReason::ProcessChanged);
         }
         let work_path =
             crate::support::path::nearest_existing_canonical_path(&self.config.work_path)
                 .map_err(|_| DebugReason::RecordUnavailable)?;
-        let binding = ClusterDebugBinding {
+        Ok(ClusterDebugBinding {
             work_path,
             alias: self.declared.name.clone(),
             cluster_id,
@@ -1590,9 +1560,6 @@ impl Cluster<'_> {
             listener_pid,
             listener_started,
             port,
-        };
-        let prepared = manager.map(|manager| PreparedClusterDebugBinding {
-            debug: binding.clone(),
             manager,
             agent_port: pins.ports.agent,
             ras: (
@@ -1600,8 +1567,7 @@ impl Cluster<'_> {
                 ras.started.expect("a verified RAS has a start time"),
                 ras.port,
             ),
-        });
-        Ok((binding, prepared))
+        })
     }
 
     fn prepared_ras_matches(
@@ -1663,10 +1629,7 @@ impl Cluster<'_> {
         Ok((cluster.id, infobase.to_string()))
     }
 
-    fn confirm_prepared_debug(
-        &self,
-        proof: &PreparedClusterDebugBinding,
-    ) -> Result<(), DebugReason> {
+    fn confirm_prepared_debug(&self, proof: &ClusterDebugBinding) -> Result<(), DebugReason> {
         let check = || {
             if self.prepared_debug_binding()? == *proof {
                 Ok(())
@@ -1675,52 +1638,12 @@ impl Cluster<'_> {
             }
         };
         check()?;
-        match self
-            .host
-            .debug_rdbg_answers(proof.debug.listener_pid, proof.debug.port)
-        {
+        match self.host.debug_rdbg_answers(proof.listener_pid, proof.port) {
             Some(true) => check(),
             Some(false) => Err(DebugReason::RdbgUnavailable),
             None => Err(DebugReason::ListenerUnverified),
         }
     }
-}
-
-pub(super) fn confirm_debug_server(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    runner: &dyn ProcessRunner,
-    host: &dyn ServiceHost,
-    expected: &ClusterDebugBinding,
-) -> Result<(), DebugReason> {
-    if !host.can_confirm_debug_endpoint() {
-        return Err(DebugReason::ListenerUnverified);
-    }
-    let no_locate = || Err(validation("a running cluster names its own utilities"));
-    let cluster = cluster(config, context, runner, host, &no_locate)
-        .map_err(|_| DebugReason::RecordUnavailable)?;
-    let check = || {
-        let observed = cluster.debug_binding()?;
-        if observed.agent_pid != expected.agent_pid
-            || observed.agent_started != expected.agent_started
-            || observed.machine != expected.machine
-            || observed.listener_pid != expected.listener_pid
-            || observed.listener_started != expected.listener_started
-        {
-            return Err(DebugReason::ProcessChanged);
-        }
-        if &observed != expected {
-            return Err(DebugReason::RecordChanged);
-        }
-        Ok(())
-    };
-    check()?;
-    match host.debug_rdbg_answers(expected.listener_pid, expected.port) {
-        Some(true) => {}
-        Some(false) => return Err(DebugReason::RdbgUnavailable),
-        None => return Err(DebugReason::ListenerUnverified),
-    }
-    check()
 }
 
 /// Prepare borrows only a debug endpoint already tied to this registered infobase.
@@ -1744,14 +1667,14 @@ pub(super) fn prepare_debug_server(
     cluster
         .confirm_prepared_debug(&binding)
         .map_err(unverified)?;
-    Ok(binding.debug)
+    Ok(binding)
 }
 
 pub(super) enum ExternalDebugProof {
     NoBinding,
     Unverified,
     Unavailable,
-    Confirmed(ClusterDebugBinding),
+    Confirmed { alias: String },
 }
 
 /// A named direct local profile can borrow the same live cluster as its managed sibling.
@@ -1815,12 +1738,11 @@ pub(super) fn prepare_external_debug_server(
             return None;
         }
         let proof = cluster.prepared_debug_binding().ok()?;
-        if proof.debug.alias != reference
-            || manager != ras_address(proof.debug.regport)
+        if proof.alias != reference
+            || manager != ras_address(proof.regport)
             || configured_agent.is_some_and(|address| address != ras_address(proof.agent_port))
             || configured_ras != ras_address(proof.ras.2)
-            || DebuggerUrl::parse(&crate::platform::dbgs::url(proof.debug.port)).as_ref()
-                != Some(url)
+            || DebuggerUrl::parse(&crate::platform::dbgs::url(proof.port)).as_ref() != Some(url)
         {
             return None;
         }
@@ -1833,76 +1755,9 @@ pub(super) fn prepare_external_debug_server(
         return ExternalDebugProof::Unverified;
     }
     match cluster.confirm_prepared_debug(&proof) {
-        Ok(()) => ExternalDebugProof::Confirmed(proof.debug),
+        Ok(()) => ExternalDebugProof::Confirmed { alias: proof.alias },
         Err(DebugReason::RdbgUnavailable) => ExternalDebugProof::Unavailable,
         Err(_) => ExternalDebugProof::Unverified,
-    }
-}
-
-/// Порт сервера отладки кластера и имя базы, когда сервер отвечает по `rdbg`: для
-/// `debug-server start`. Кластер не работает или поднят без отладки — отказ с командой,
-/// которая это исправит.
-pub(super) fn debug_server(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    runner: &dyn ProcessRunner,
-    host: &dyn ServiceHost,
-) -> Result<StandDebugServer, UseCaseError> {
-    let no_locate = || Err(validation("a running cluster names its own utilities"));
-    let cluster = cluster(config, context, runner, host, &no_locate)?;
-    let infobase = &cluster.declared.infobase;
-    if !host.supported() || !DEBUG_CLUSTER_SUPPORTED {
-        return Err(environment(format!(
-            "the infobase '{infobase}' is on the managed cluster, and its debug server runs on Windows and Linux only: on this system there is none"
-        )));
-    }
-    let pins = cluster.pins();
-    let Observed::Own(agent) = cluster.observe(&cluster.agent) else {
-        return Err(environment(format!(
-            "the cluster of '{infobase}' is not running: run `cluster start --debug`"
-        )));
-    };
-    let Some(pins) = pins.filter(|pins| pins.debug) else {
-        return Err(environment(format!(
-            "the cluster of '{infobase}' runs without a debug server: run `cluster restart --debug`"
-        )));
-    };
-    let port = pins.ports.debug();
-    let agent_alive =
-        || matches!(cluster.observe(&cluster.agent), Observed::Own(current) if current == agent);
-    match super::await_rdbg(
-        host,
-        context,
-        "waiting for the debug server of the cluster",
-        &|| Some(port),
-        &agent_alive,
-        &|port| host.rdbg_answers(port),
-    ) {
-        super::RdbgWait::Ready(port) => Ok(StandDebugServer {
-            port,
-            infobase_alias: Some(cluster.declared.name.clone()),
-            cluster_binding: host
-                .can_confirm_debug_endpoint()
-                .then(|| cluster.debug_binding().ok())
-                .flatten()
-                .filter(|binding| {
-                    Some(binding.agent_pid) == agent.pid
-                        && Some(binding.agent_started) == agent.started
-                        && binding.port == port
-                }),
-        }),
-        super::RdbgWait::Interrupted(error) => Err(error),
-        super::RdbgWait::Gone => Err(environment(format!(
-            "the cluster of '{infobase}' stopped while its debug server was awaited: run `cluster start --debug`"
-        ))),
-        super::RdbgWait::TimedOut => Err(UseCaseError::new(
-            UseCaseErrorKind::TimedOut,
-            format!(
-                "the debug server of the cluster of '{infobase}' did not answer on port {port} in {} s; log: {}",
-                super::DEBUG_READY_TIMEOUT.as_secs(),
-                cluster.agent.log().display()
-            ),
-        )),
     }
 }
 
@@ -3456,101 +3311,6 @@ pub(super) mod tests {
         assert_eq!(pins.registry, "registry-24001");
     }
 
-    /// `debug-server start` у базы кластера: порт отвечающего сервера отладки или отказ с
-    /// командой, которая его поднимет.
-    #[test]
-    #[cfg(any(windows, target_os = "linux"))]
-    fn the_debug_port_of_the_cluster_needs_a_debug_start() {
-        let setup = setup();
-        let host = Host::default();
-        let context = ExecutionContext::cli(CommandName::DebugServerStart);
-        let error =
-            debug_server(&context, &setup.config, &Runner { host: &host }, &host).unwrap_err();
-        assert!(
-            error.to_string().contains("cluster start --debug"),
-            "{error}"
-        );
-        setup.command(debug_start(DebugChoice::Off), &host).unwrap();
-        let error =
-            debug_server(&context, &setup.config, &Runner { host: &host }, &host).unwrap_err();
-        assert!(
-            error.to_string().contains("cluster restart --debug"),
-            "{error}"
-        );
-        setup
-            .command(
-                ClusterCommand::Restart {
-                    debug: DebugChoice::On,
-                },
-                &host,
-            )
-            .unwrap();
-        let error =
-            debug_server(&context, &setup.config, &Runner { host: &host }, &host).unwrap_err();
-        assert_eq!(error.kind(), UseCaseErrorKind::TimedOut, "{error}");
-        host.rdbg.set(true);
-        let server = debug_server(&context, &setup.config, &Runner { host: &host }, &host).unwrap();
-        assert_eq!(server.port, setup.pins().ports.debug());
-        assert_eq!(server.infobase_alias.as_deref(), Some("demo"));
-    }
-
-    #[test]
-    #[cfg(any(windows, target_os = "linux"))]
-    fn cluster_debug_status_requires_the_same_registration_and_direct_listener() {
-        let setup = setup();
-        let host = Host::default();
-        let runner = Runner { host: &host };
-        let context = ExecutionContext::cli(CommandName::DebugServerStart);
-        setup.command(debug_start(DebugChoice::On), &host).unwrap();
-        // This proof checks the process image as named by the native OS, while
-        // the shared service fixture launches Windows-shaped executables.
-        let agent = setup.agent();
-        let mut record = agent.own_record().unwrap();
-        host.live(AGENT_PID, AGENT_IMAGE);
-        record.image = Some(AGENT_IMAGE.to_owned());
-        write_record(&agent, &record).unwrap();
-        remember_registered(&setup.config).unwrap();
-        host.registered.borrow_mut().push("demo".to_owned());
-        let port = setup.pins().ports.debug();
-        let ras = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Ras)
-            .own_record()
-            .unwrap();
-        host.listeners.borrow_mut().insert(ras.port, RAS_PID);
-        let listener = 7_123;
-        host.live_since(
-            listener,
-            crate::platform::dbgs::executable_name(),
-            STARTED + 1,
-        );
-        host.parents.borrow_mut().insert(listener, AGENT_PID);
-        host.listeners.borrow_mut().insert(port, listener);
-        host.rdbg.set(true);
-
-        let started = debug_server(&context, &setup.config, &runner, &host).unwrap();
-        let binding = started.cluster_binding.unwrap();
-        let status = || confirm_debug_server(&context, &setup.config, &runner, &host, &binding);
-        assert_eq!(binding.alias, "demo");
-        assert_eq!(binding.port, port);
-        assert_eq!(binding.listener_pid, listener);
-        assert_eq!(status(), Ok(()));
-
-        host.debug_registration_id.set(Some("other"));
-        assert_eq!(status(), Err(DebugReason::RecordChanged));
-        host.debug_registration_id.set(None);
-        host.parents.borrow_mut().insert(listener, 1);
-        assert_eq!(status(), Err(DebugReason::ListenerUnverified));
-        host.parents.borrow_mut().insert(listener, AGENT_PID);
-        host.rdbg.set(false);
-        assert_eq!(status(), Err(DebugReason::RdbgUnavailable));
-        host.rdbg.set(true);
-        host.live_since(
-            listener,
-            crate::platform::dbgs::executable_name(),
-            STARTED + 2,
-        );
-        assert_eq!(status(), Err(DebugReason::ProcessChanged));
-    }
-
     #[test]
     #[cfg(any(windows, target_os = "linux"))]
     fn external_prepare_borrows_only_the_exact_live_managed_cluster_registration() {
@@ -3589,6 +3349,25 @@ pub(super) mod tests {
         host.listeners.borrow_mut().insert(ports.debug(), debug_pid);
         host.rdbg.set(true);
 
+        let managed = || prepare_debug_server(&context, &setup.config, &runner, &host);
+        let binding = managed().unwrap();
+        assert_eq!(binding.alias, "demo");
+        assert_eq!(binding.port, ports.debug());
+        assert_eq!(binding.listener_pid, debug_pid);
+
+        host.parents.borrow_mut().insert(debug_pid, 1);
+        assert!(managed()
+            .unwrap_err()
+            .to_string()
+            .contains("ListenerUnverified"));
+        host.parents.borrow_mut().insert(debug_pid, AGENT_PID);
+        host.rdbg.set(false);
+        assert!(managed()
+            .unwrap_err()
+            .to_string()
+            .contains("RdbgUnavailable"));
+        host.rdbg.set(true);
+
         let mut external = setup.config.clone();
         external
             .infobases
@@ -3621,17 +3400,14 @@ pub(super) mod tests {
         };
         let before_spawned = host.spawned.borrow().len();
         let locate = || panic!("borrowed debug preparation cannot locate a local client");
-        let legacy = || panic!("borrowed debug preparation cannot start a legacy cluster session");
         let result = super::super::debug_server::DebugServer {
             context: &context,
             config: &external,
             runner: &runner,
             host: &host,
             locate_client: &locate,
-            cluster_server: &legacy,
-            standalone_server: &legacy,
         }
-        .prepare(43210, false)
+        .start(43210, false)
         .unwrap();
         assert!(matches!(
             result,

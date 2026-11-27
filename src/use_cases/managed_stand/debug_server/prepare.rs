@@ -1,19 +1,24 @@
-//! Resolve a debug route and lease only processes started by prepare.
+//! Resolve a debug route and lease only processes started by the runner.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::model::InfobaseDebugConfig;
+use crate::config::model::{AppConfig, InfobaseDebugConfig};
+use crate::domain::capability::TargetKind;
 use crate::domain::debug_server::{
-    DebugServerPrepareOwner as Owner, DebugServerPrepareResult as Receipt,
-    DebugServerPrepareScope as Scope, DebugServerRelease,
+    DebugServerAction, DebugServerOwner, DebugServerPrepareOwner as Owner,
+    DebugServerPrepareResult as Receipt, DebugServerPrepareScope as Scope, DebugServerRelease,
+    DebugServerResult, DebugServerStatus, DebugServerStatusReason as StatusReason,
+    DebugServerStatusResult, DebugSession,
 };
+use crate::platform::dbgs;
+use crate::platform::service_record::{write_json, RecordState, ServicePaths, ServiceRecord};
 use crate::support::fs::{try_acquire_advisory_lock, AdvisoryLockGuard};
 use crate::support::path::{
     nearest_existing_canonical_path, normalize_windows_verbatim_path, stable_path_identity,
@@ -22,14 +27,12 @@ use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::EnvironmentReason;
 
 use super::super::{
-    await_service_end, cluster, debug_process_ended, environment, io_failure,
-    spawn_recorded_debugger, stop_with_confirmation, DebuggerJournal, POLL,
+    await_rdbg, await_service_end, cluster, debug_process_ended, environment, io_failure,
+    spawn_recorded_debugger, stop_with_confirmation, DebuggerJournal, DebuggerLaunch,
+    DebuggerSpawn, RdbgWait, SpawnedDebugger, POLL,
 };
 use super::{
-    await_rdbg, dbgs, empty, refuse, write_json, AppConfig, DebugServer, DebugServerAction,
-    DebugServerOwner, DebugServerResult, DebugSession, DebuggerLaunch, DebuggerSpawn, RdbgWait,
-    RecordState, ServicePaths, ServiceRecord, SpawnedDebugger, TargetKind, UseCaseError,
-    UseCaseErrorKind, FILE_ALIAS, NOTIFY, SESSIONS,
+    empty, refuse, DebugServer, UseCaseError, UseCaseErrorKind, FILE_ALIAS, NOTIFY, SESSIONS,
 };
 
 const PREPARED: &str = "prepared-v1";
@@ -142,7 +145,7 @@ impl Store {
     }
 
     fn read(&self, file: &Path, allow_copied: bool) -> Result<Option<Run>, UseCaseError> {
-        let Some(run) = super::ensure::read_state_file::<Run>(file)? else {
+        let Some(run) = read_state_file(file)? else {
             return Ok(None);
         };
         let same_location = run.work == self.work && run.project == self.project;
@@ -169,8 +172,13 @@ impl Store {
         Ok(Some(run))
     }
 
-    // A directory scan only locates a token. Its scope is read again under that scope's lock.
-    fn find_lease(&self, session: DebugSession) -> Result<Option<PathBuf>, UseCaseError> {
+    // A scan locates the lease. Stop re-reads under the scope lock, while status confirms the
+    // same run and lease again after probing the endpoint without writing a lock file.
+    fn find_lease(
+        &self,
+        session: DebugSession,
+        require_complete_scan: bool,
+    ) -> Result<Option<PathBuf>, UseCaseError> {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -206,9 +214,9 @@ impl Store {
             }
         }
         match (found, unresolved) {
-            (None, Some(error)) => Err(platform(format!(
-                "the requested lease could not be resolved: {error}"
-            ))),
+            (found, Some(error)) if found.is_none() || require_complete_scan => Err(platform(
+                format!("the requested lease could not be resolved: {error}"),
+            )),
             (found, _) => Ok(found),
         }
     }
@@ -256,7 +264,7 @@ impl Store {
 }
 
 impl DebugServer<'_> {
-    pub(in crate::use_cases::managed_stand) fn prepare(
+    pub(in crate::use_cases::managed_stand) fn start(
         &self,
         owner_pid: u32,
         dry_run: bool,
@@ -310,7 +318,7 @@ impl DebugServer<'_> {
             }
             TargetKind::Cluster => {
                 let (server, reference) = self.config.v8_connection().cluster_address().ok_or_else(|| {
-                    refuse("debug-server prepare requires a direct server infobase identified by its server and Ref")
+                    refuse("debug-server start requires a direct server infobase identified by its server and Ref")
                 })?;
                 if reference.trim().is_empty() || reference.chars().any(char::is_control) {
                     return Err(UseCaseError::new(
@@ -332,7 +340,7 @@ impl DebugServer<'_> {
             TargetKind::File => {
                 let path = crate::use_cases::infobase_owner::file_infobase_dir(self.config)
                     .ok_or_else(|| {
-                        refuse("debug-server prepare requires a resolved file infobase path")
+                        refuse("debug-server start requires a resolved file infobase path")
                     })?;
                 Ok(match external {
                     Some(config) => {
@@ -354,7 +362,7 @@ impl DebugServer<'_> {
                 })
             }
             TargetKind::Standalone => Err(environment(
-                "debug-server prepare has no verified route for a standalone infobase",
+                "debug-server start has no verified route for a standalone infobase",
             )),
         }
     }
@@ -379,10 +387,10 @@ impl DebugServer<'_> {
                 cluster::ExternalDebugProof::NoBinding => {}
                 cluster::ExternalDebugProof::Unavailable => return Err(external_unavailable()),
                 cluster::ExternalDebugProof::Unverified => return Err(external_unverified()),
-                cluster::ExternalDebugProof::Confirmed(binding) => {
+                cluster::ExternalDebugProof::Confirmed { alias } => {
                     return Ok(receipt(
                         url,
-                        binding.alias,
+                        alias,
                         Scope::ClientAndServer,
                         Owner::External,
                         None,
@@ -407,15 +415,28 @@ impl DebugServer<'_> {
         ))
     }
 
-    fn prepare_owned(&self, target: Target, owner_pid: u32) -> Result<Receipt, UseCaseError> {
-        self.check_owner(Some(owner_pid))?;
-        let owner = ProcessOwner {
-            pid: owner_pid,
-            started: self.host.facts(owner_pid).ok_or_else(owner_exited)?.started,
+    fn starting_owner(&self, pid: u32) -> Result<ProcessOwner, UseCaseError> {
+        let why = if pid == std::process::id() {
+            "it is this runner, which exits as soon as it answers"
+        } else if let Some(facts) = self.host.facts(pid).filter(|_| pid != 0) {
+            return Ok(ProcessOwner {
+                pid,
+                started: facts.started,
+            });
+        } else {
+            "there is no such process"
         };
+        Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!("--owner-pid {pid}: {why}"),
+        ))
+    }
+
+    fn prepare_owned(&self, target: Target, owner_pid: u32) -> Result<Receipt, UseCaseError> {
+        let owner = self.starting_owner(owner_pid)?;
         if !self.host.can_confirm_owned_debug_endpoint() {
             return Err(environment(
-                "the operating system does not provide verified debug connections for prepare",
+                "the operating system does not provide verified connections for debug-server start",
             ));
         }
         let machine = self
@@ -458,7 +479,7 @@ impl DebugServer<'_> {
             store.remove_run_files(run.id);
         }
 
-        let port = self.choose_port(None)?;
+        let port = self.choose_port()?;
         self.prepare_safe_point()?;
         let run_id = DebugSession::new();
         let paths = store.run_paths(run_id);
@@ -494,11 +515,7 @@ impl DebugServer<'_> {
             match spawn_recorded_debugger(self.host, self.runner, self.context, launch, journal) {
                 DebuggerSpawn::Spawned(spawned) => *spawned,
                 DebuggerSpawn::ExitedAtOnce => {
-                    return Err(self.exited(
-                        &paths.log(),
-                        port,
-                        "dbgs exited as soon as it started",
-                    ))
+                    return Err(exited(&paths.log(), "dbgs exited as soon as it started"))
                 }
                 DebuggerSpawn::Failed(error) | DebuggerSpawn::Uncertain(error) => {
                     return Err(error)
@@ -514,9 +531,7 @@ impl DebugServer<'_> {
             &|port| self.prepared_endpoint(&record, port),
         ) {
             RdbgWait::Ready(port) => Ok(port),
-            RdbgWait::Gone => {
-                Err(self.exited(&paths.log(), port, "dbgs exited before it answered"))
-            }
+            RdbgWait::Gone => Err(exited(&paths.log(), "dbgs exited before it answered")),
             RdbgWait::TimedOut => Err(UseCaseError::new(
                 UseCaseErrorKind::TimedOut,
                 "the prepared dbgs did not answer on a verified listener",
@@ -550,13 +565,106 @@ impl DebugServer<'_> {
         }
     }
 
+    pub(in crate::use_cases::managed_stand) fn status(
+        &self,
+        session: DebugSession,
+    ) -> Result<DebugServerStatusResult, UseCaseError> {
+        let started = Instant::now();
+        let mut result = DebugServerStatusResult {
+            session,
+            status: DebugServerStatus::Unknown,
+            reason: None,
+            pid: None,
+            port: None,
+            url: None,
+            infobase_alias: None,
+            duration_ms: 0,
+        };
+        match self.confirm_lease(session) {
+            Ok(Some((pid, port, alias))) => {
+                result.status = DebugServerStatus::Ready;
+                result.pid = Some(pid);
+                result.port = Some(port);
+                result.url = Some(dbgs::url(port));
+                result.infobase_alias = Some(alias);
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                result.status = match reason {
+                    StatusReason::ProcessGone | StatusReason::ProcessChanged => {
+                        DebugServerStatus::Stale
+                    }
+                    _ => DebugServerStatus::Unverified,
+                };
+                result.reason = Some(reason);
+            }
+        }
+        result.duration_ms = crate::support::time::elapsed_ms(started);
+        Ok(result)
+    }
+
+    fn confirm_lease(
+        &self,
+        session: DebugSession,
+    ) -> Result<Option<(u32, u16, String)>, StatusReason> {
+        if !session.is_prepare() {
+            return Ok(None);
+        }
+        let locate = || -> Result<_, StatusReason> {
+            let store = Store::new(self.config).map_err(|_| StatusReason::RecordUnavailable)?;
+            let file = store
+                .find_lease(session, true)
+                .map_err(|_| StatusReason::RecordUnavailable)?;
+            Ok((store, file))
+        };
+        let (store, file) = locate()?;
+        let Some(file) = file else {
+            return Ok(None);
+        };
+        let read = |store: &Store, path: &Path| {
+            store
+                .read(path, false)
+                .map_err(|_| StatusReason::RecordUnavailable)?
+                .filter(|run| !run.stopping && run.leases.contains(&session))
+                .ok_or(StatusReason::RecordChanged)
+        };
+        let run = read(&store, &file)?;
+        let pid = run.process.pid.ok_or(StatusReason::RecordUnavailable)?;
+        let port = run.process.port;
+        self.verify_lease_owner(run.owner)?;
+        self.verify_owned_endpoint(&run.process, pid, port)?;
+        let (current_store, current_file) = locate()?;
+        if current_file.as_deref() != Some(file.as_path()) {
+            return Err(StatusReason::RecordChanged);
+        }
+        let current = read(&current_store, &file)?;
+        if current.id != run.id
+            || current.target != run.target
+            || current.owner != run.owner
+            || current.process != run.process
+        {
+            return Err(StatusReason::RecordChanged);
+        }
+        self.verify_lease_owner(run.owner)?;
+        Ok(Some((pid, port, run.target.alias().to_owned())))
+    }
+
+    fn verify_lease_owner(&self, owner: ProcessOwner) -> Result<(), StatusReason> {
+        match self.host.facts(owner.pid) {
+            Some(facts) if facts.started == owner.started => Ok(()),
+            Some(_) => Err(StatusReason::ProcessChanged),
+            None if self.host.debug_process_gone(owner.pid) => Err(StatusReason::ProcessGone),
+            None => Err(StatusReason::ProcessUnverified),
+        }
+    }
+
     pub(super) fn stop_prepared(
         &self,
         session: DebugSession,
         dry_run: bool,
     ) -> Result<Option<DebugServerResult>, UseCaseError> {
         let store = Store::new(self.config)?;
-        let Some(file) = store.find_lease(session)? else {
+        let Some(file) = store.find_lease(session, false)? else {
             return Ok(None);
         };
         let _guard = if dry_run {
@@ -675,6 +783,28 @@ impl DebugServer<'_> {
     }
 }
 
+fn read_state_file(path: &Path) -> Result<Option<Run>, UseCaseError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(platform(format!(
+                "invalid debug state file: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_failure("cannot read", path, &error)),
+    }
+    let bytes = fs::read(path).map_err(|error| io_failure("cannot read", path, &error))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| io_failure("cannot read", path, &std::io::Error::other(error)))
+}
+
+fn exited(log: &Path, message: &str) -> UseCaseError {
+    platform(format!("{message}; log: {}", log.display()))
+}
+
 fn external_unavailable() -> UseCaseError {
     UseCaseError::new(
         UseCaseErrorKind::Environment(EnvironmentReason::DebugServerExternalUnavailable),
@@ -709,7 +839,7 @@ fn checked_directory(path: &Path) -> Result<(), UseCaseError> {
 fn owner_exited() -> UseCaseError {
     UseCaseError::new(
         UseCaseErrorKind::Validation,
-        "the debug server owner exited during prepare",
+        "the owner process exited during debug-server start",
     )
 }
 

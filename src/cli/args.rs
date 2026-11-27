@@ -457,34 +457,21 @@ pub struct DebugServerArgs {
 
 #[derive(Subcommand, Debug, Clone, Copy)]
 pub enum DebugServerCommandArgs {
-    /// Start a debug server, wait until it answers and print its address and session; it outlives
-    /// the command
+    /// Prepare a debug endpoint and determine its scope for the selected infobase
     Start {
-        /// Listen on this port; without it the first free port of the working copy's window
-        #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
-        port: Option<u16>,
-        /// The debugger process: the debug server ends by itself when this process ends
-        #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
-        owner_pid: Option<u32>,
-        /// Reuse or recover the file-infobase session of this owner
-        #[arg(long, requires = "owner_pid", conflicts_with = "port")]
-        ensure: bool,
-    },
-    /// Prepare an endpoint and debugger scope for the selected infobase
-    Prepare {
-        /// Debugger process on this machine; owned leases end with this owner
+        /// Live debugger process on this machine; its own leases end with it
         #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
         owner_pid: u32,
     },
-    /// Check whether a runner-owned debug server is ready for attachment
+    /// Check the debug server behind a lease
     Status {
-        /// The session `debug-server start` answered
+        /// The token from start's release.session
         #[arg(value_name = "SESSION")]
         session: crate::domain::debug_server::DebugSession,
     },
     /// Release the session or stop its owned debug server when no other lease remains
     Stop {
-        /// The session returned by `debug-server start` or `debug-server prepare`
+        /// The token from start's release.session
         #[arg(value_name = "SESSION")]
         session: crate::domain::debug_server::DebugSession,
     },
