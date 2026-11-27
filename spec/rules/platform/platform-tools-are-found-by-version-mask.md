@@ -4,6 +4,7 @@ check:
   - tests/cli_launch.rs::launch_json_exposes_platform_resolution_metadata
   - src/platform/locator.rs::strict_prefix_selects_highest_across_direct_and_versioned_candidates
   - src/platform/locator.rs::version_only_resolution_uses_default_roots_and_path_with_version_filter
+  - tests/cli_platforms_windows.rs::platforms_and_clone_discover_a_windows_user_installation_before_yaml_exists
   - src/platform/locator.rs::the_source_format_chooses_its_release_over_the_newest
   - src/platform/locator.rs::a_release_of_the_source_format_does_not_borrow_a_component_from_another
   - src/platform/locator.rs::without_the_release_of_the_source_format_the_newest_is_chosen
@@ -16,7 +17,8 @@ check:
 
 Пути к `1cv8`, `1cv8c`, `ibcmd` и EDT CLI ищет одно место. Версия задаётся точно,
 `major.minor.patch` или `major.minor`; из подошедших под маску берётся максимальная
-установленная.
+установленная. На Windows к системным корням поиска добавляются корни пользовательской
+установки `%LOCALAPPDATA%\Programs\1cv8` и `%LOCALAPPDATA%\Programs\1cv8_x86`.
 
 Когда версию не задали ни маской, ни путём, её выбирает формат исходников проекта формата
 Конфигуратора — атрибут `version` корня `Configuration.xml` основного набора: берётся

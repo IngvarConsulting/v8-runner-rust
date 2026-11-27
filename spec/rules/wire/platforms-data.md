@@ -5,6 +5,9 @@ artifact: docs/schemas/command-data/platforms.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_platforms.rs::platforms_name_every_installation_and_the_choice_without_starting_anything
+  - tests/cli_platforms_windows.rs::platforms_and_clone_discover_a_windows_user_installation_before_yaml_exists
+  - tests/cli_platforms_windows.rs::a_windows_launcher_directory_leads_to_the_matching_versioned_utility
+  - tests/cli_platforms_windows.rs::platforms_keeps_config_errors_and_names_an_empty_explicit_root
   - tests/cli_platforms.rs::without_a_version_the_sources_format_chooses_the_release
   - tests/cli_platforms.rs::platforms_inventory_includes_the_canonical_path_installation
   - src/platform/locator.rs::installations_merge_components_of_the_same_version_from_default_roots_and_path
@@ -15,6 +18,13 @@ check:
 
 Установленные платформы и выбор раннера для проекта. Команда платформу не запускает и
 ничего не пишет, кроме журнала действий структурного ответа.
+
+Без проектного файла команда показывает опись обычных корней поиска. С `--platform-path`
+она исследует только указанный путь, вне проекта. Для Windows каталог запуска `common` с
+`1cestart.exe` и без собственных версионных установок обозначает родительский корень.
+При поиске вне проекта `source_format` равен `null`, `requirement.version` равен `null`, а
+`requirement.path` называет явно заданную область поиска или равен `null`. При явном пути
+`warnings` включает причину отсутствия каждой ненайденной утилиты.
 
 `installations` — каждая установка, которую видит поиск, новейшие первыми, с составом
 `components`; перечень не обрезается. `requirement` — `tools.platform` проекта вместе с

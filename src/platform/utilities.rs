@@ -63,8 +63,8 @@ impl PlatformUtilities {
                     .unwrap_or_default(),
             ),
         };
-        Self {
-            locator: Locator::new(LocatorOptions {
+        Self::new(
+            LocatorOptions {
                 platform_hint: config.tools.platform.path.clone(),
                 platform_version,
                 platform_policy: if config.tools.platform.strict {
@@ -75,7 +75,24 @@ impl PlatformUtilities {
                 edt_hint,
                 edt_version,
                 source_format,
-            }),
+            },
+            sources_format,
+        )
+    }
+
+    pub(crate) fn for_inventory(platform_hint: Option<std::path::PathBuf>) -> Self {
+        Self::new(
+            LocatorOptions {
+                platform_hint,
+                ..LocatorOptions::default()
+            },
+            None,
+        )
+    }
+
+    fn new(options: LocatorOptions, sources_format: Option<SourcesFormat>) -> Self {
+        Self {
+            locator: Locator::new(options),
             standard_runner: ProcessExecutor,
             sources_format,
             mismatch_logged: false,
