@@ -18,6 +18,7 @@ case "$CI_SCOPE" in
         cargo test --locked --test cli_infobase_cross_platform --test cli_ibcmd_server_guard
         cargo test --locked --test cli_external_full_pull
         cargo test --locked --test cli_config_init --test cli_help --test cli_platforms_windows
+        cargo test --locked --test cli_debug_server prepare_
         cargo test --locked --bin v8-runner 'support::fs::tests::'
         cargo test --locked --bin v8-runner 'config::loader::tests::declared_infobases_'
         cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'

@@ -12,10 +12,11 @@ use super::{
     occupant_of, other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record,
     Database, DebugChoice, MoveCause, ServiceHost, Stand,
 };
-use crate::config::model::{AppConfig, InfobaseDbmsConfig};
+use crate::config::model::{AppConfig, InfobaseConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
 use crate::domain::dbms::{ServiceAction, ServiceState};
 use crate::domain::debug_server::DebugServerStatusReason as DebugReason;
+use crate::domain::launch::DebuggerUrl;
 use crate::platform::process::ProcessRunner;
 use crate::platform::rac::{self, Registration};
 use crate::platform::ragent::{self, ras_address, ClusterPorts};
@@ -39,13 +40,17 @@ const POLL: Duration = Duration::from_millis(200);
 const AGENT_IMAGE: &str = "ragent.exe";
 #[cfg(target_os = "linux")]
 const AGENT_IMAGE: &str = "ragent";
+#[cfg(not(target_os = "linux"))]
+const MANAGER_IMAGE: &str = "rmngr.exe";
+#[cfg(target_os = "linux")]
+const MANAGER_IMAGE: &str = "rmngr";
 /// Процессы агента, которые переживают его конец (замер #534).
 /// `dbgs` — сервер отладки, которого агент с `-debug -http` поднимает сам (замер «Сервер
 /// отладки `dbgs`»).
 #[cfg(not(target_os = "linux"))]
-const REMNANT_IMAGES: [&str; 3] = ["rmngr.exe", "rphost.exe", "dbgs.exe"];
+const REMNANT_IMAGES: [&str; 3] = [MANAGER_IMAGE, "rphost.exe", "dbgs.exe"];
 #[cfg(target_os = "linux")]
-const REMNANT_IMAGES: [&str; 3] = ["rmngr", "rphost", "dbgs"];
+const REMNANT_IMAGES: [&str; 3] = [MANAGER_IMAGE, "rphost", "dbgs"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
 
@@ -89,26 +94,28 @@ struct Declared {
 }
 
 fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
-    let infobase = config.infobase_name.clone().ok_or_else(|| {
+    let infobase = config.infobase_name.as_deref().ok_or_else(|| {
         validation("cluster takes a declared infobase: a connection string has neither a record nor a managed section")
     })?;
-    let managed = config
-        .infobase
+    declared_infobase(infobase, &config.infobase)
+}
+
+fn declared_infobase(name: &str, infobase: &InfobaseConfig) -> Result<Declared, UseCaseError> {
+    let managed = infobase
         .cluster
         .as_ref()
         .and_then(|cluster| cluster.managed.as_ref())
         .ok_or_else(|| {
             validation("infobase.cluster.managed is not declared for this infobase: the cluster commands start only a cluster the runner owns")
         })?;
-    let name = managed.reference(&infobase);
-    let dbms_managed = config
-        .infobase
+    let reference = managed.reference(name);
+    let dbms_managed = infobase
         .dbms
         .as_ref()
         .is_some_and(|dbms| dbms.managed.is_some());
     Ok(Declared {
-        infobase,
-        name,
+        infobase: name.to_owned(),
+        name: reference,
         dbms_managed,
     })
 }
@@ -1351,14 +1358,31 @@ fn cluster<'a>(
     host: &'a dyn ServiceHost,
     locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> Result<Cluster<'a>, UseCaseError> {
-    let declared = declared(config)?;
+    Ok(declared_cluster(
+        config,
+        context,
+        runner,
+        host,
+        locate,
+        declared(config)?,
+    ))
+}
+
+fn declared_cluster<'a>(
+    config: &'a AppConfig,
+    context: &'a ExecutionContext,
+    runner: &'a dyn ProcessRunner,
+    host: &'a dyn ServiceHost,
+    locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
+    declared: Declared,
+) -> Cluster<'a> {
     let agent = ServicePaths::new(
         &config.local_dir(),
         &declared.infobase,
         StandService::Cluster,
     );
     let ras = ServicePaths::new(&config.local_dir(), &declared.infobase, StandService::Ras);
-    Ok(Cluster {
+    Cluster {
         config,
         context,
         runner,
@@ -1369,7 +1393,7 @@ fn cluster<'a>(
         ras,
         started_at: Instant::now(),
         debug: DebugChoice::AsPinned,
-    })
+    }
 }
 
 pub(super) fn run_cluster(
@@ -1430,8 +1454,30 @@ pub(super) struct ClusterDebugBinding {
     pub(super) port: u16,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedClusterDebugBinding {
+    debug: ClusterDebugBinding,
+    manager: (u32, u64),
+    agent_port: u16,
+    ras: (u32, u64, u16),
+}
+
 impl Cluster<'_> {
     fn debug_binding(&self) -> Result<ClusterDebugBinding, DebugReason> {
+        self.observe_debug_binding(false)
+            .map(|(binding, _)| binding)
+    }
+
+    fn prepared_debug_binding(&self) -> Result<PreparedClusterDebugBinding, DebugReason> {
+        self.observe_debug_binding(true)?
+            .1
+            .ok_or(DebugReason::RecordUnavailable)
+    }
+
+    fn observe_debug_binding(
+        &self,
+        strict: bool,
+    ) -> Result<(ClusterDebugBinding, Option<PreparedClusterDebugBinding>), DebugReason> {
         let pins = self.pins().ok_or(DebugReason::RecordUnavailable)?;
         if pins.previous.is_some() || !pins.registered || !pins.debug {
             return Err(DebugReason::RecordChanged);
@@ -1457,7 +1503,7 @@ impl Cluster<'_> {
         }
 
         let port = pins.ports.debug();
-        let listener = || {
+        let child_listener = |port, image| {
             let pid = self
                 .host
                 .listening_pid(port)
@@ -1466,7 +1512,6 @@ impl Cluster<'_> {
                 .host
                 .facts(pid)
                 .ok_or(DebugReason::ListenerUnverified)?;
-            let image = crate::platform::dbgs::executable_name();
             let direct_child = facts.image == image
                 && facts.started >= agent_started
                 && self.host.processes(&[image]).is_some_and(|rows| {
@@ -1478,7 +1523,15 @@ impl Cluster<'_> {
             }
             Ok((pid, facts.started))
         };
+        let listener = || child_listener(port, crate::platform::dbgs::executable_name());
+        let manager_listener = || {
+            if !self.host.debug_loopback_owner(agent_pid, pins.ports.agent) {
+                return Err(DebugReason::ListenerUnverified);
+            }
+            child_listener(pins.ports.regport, MANAGER_IMAGE)
+        };
         let (listener_pid, listener_started) = listener()?;
+        let manager = strict.then(manager_listener).transpose()?;
 
         let ras_ready = || {
             self.own_ras().filter(|record| {
@@ -1488,8 +1541,21 @@ impl Cluster<'_> {
             })
         };
         let ras = ras_ready().ok_or(DebugReason::ProcessUnverified)?;
-        let registered =
-            read_registration(self, &agent, &ras).map_err(|_| DebugReason::ProcessUnverified)?;
+        let (cluster_id, infobase_id) = if strict {
+            if self.ras.own_record().as_ref() != Some(&ras)
+                || !self.prepared_ras_matches(&agent, &ras, pins.ports)
+            {
+                return Err(DebugReason::RecordUnavailable);
+            }
+            self.confirmed_debug_registration(&agent, &ras, pins.ports.regport)?
+        } else {
+            let registered = read_registration(self, &agent, &ras)
+                .map_err(|_| DebugReason::ProcessUnverified)?;
+            (
+                registered.cluster,
+                registered.infobase.ok_or(DebugReason::RecordChanged)?,
+            )
+        };
         if ras_ready().as_ref() != Some(&ras)
             || self.agent.own_record().as_ref() != Some(&agent)
             || self.pins().as_ref() != Some(&pins)
@@ -1503,14 +1569,18 @@ impl Cluster<'_> {
         if listener()? != (listener_pid, listener_started) {
             return Err(DebugReason::ProcessChanged);
         }
-        let infobase_id = registered.infobase.ok_or(DebugReason::RecordChanged)?;
+        if strict.then(manager_listener).transpose()? != manager
+            || (strict && !self.prepared_ras_matches(&agent, &ras, pins.ports))
+        {
+            return Err(DebugReason::ProcessChanged);
+        }
         let work_path =
             crate::support::path::nearest_existing_canonical_path(&self.config.work_path)
                 .map_err(|_| DebugReason::RecordUnavailable)?;
-        Ok(ClusterDebugBinding {
+        let binding = ClusterDebugBinding {
             work_path,
-            alias: registered.name,
-            cluster_id: registered.cluster,
+            alias: self.declared.name.clone(),
+            cluster_id,
             infobase_id,
             registry: pins.registry,
             regport: pins.ports.regport,
@@ -1520,7 +1590,99 @@ impl Cluster<'_> {
             listener_pid,
             listener_started,
             port,
+        };
+        let prepared = manager.map(|manager| PreparedClusterDebugBinding {
+            debug: binding.clone(),
+            manager,
+            agent_port: pins.ports.agent,
+            ras: (
+                ras.pid.expect("a verified RAS has a PID"),
+                ras.started.expect("a verified RAS has a start time"),
+                ras.port,
+            ),
+        });
+        Ok((binding, prepared))
+    }
+
+    fn prepared_ras_matches(
+        &self,
+        agent: &ServiceRecord,
+        ras: &ServiceRecord,
+        ports: ClusterPorts,
+    ) -> bool {
+        let expected_bin = sibling(&agent.bin, "ras");
+        let Some(image) = expected_bin.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Some(pid) = ras.pid else {
+            return false;
+        };
+        if ras.bin != expected_bin
+            || ras.version != agent.version
+            || ras.image.as_deref() != Some(image)
+            || ras
+                .started
+                .zip(agent.started)
+                .is_none_or(|(ras, agent)| ras < agent)
+        {
+            return false;
+        }
+        let keys = [format!("--port={}", ras.port), ports.agent_address()];
+        self.host.processes(&[image]).is_some_and(|rows| {
+            rows.into_iter()
+                .find(|row| row.pid == pid)
+                .is_some_and(|row| first_with_keys(std::slice::from_ref(&row), &keys) == Some(pid))
         })
+    }
+
+    fn confirmed_debug_registration(
+        &self,
+        agent: &ServiceRecord,
+        ras: &ServiceRecord,
+        regport: u16,
+    ) -> Result<(String, String), DebugReason> {
+        use crate::support::authority::host_of_authority;
+
+        let program = sibling(&agent.bin, "rac");
+        let address = ras_address(ras.port);
+        let (cluster, infobase) = rac::probe_confirmed_registration(
+            self.runner,
+            &program,
+            &address,
+            &self.declared.name,
+            &self.probe_policy(),
+        )
+        .map_err(|_| DebugReason::ProcessUnverified)?
+        .ok_or(DebugReason::RecordChanged)?;
+        let host = host_of_authority(&cluster.host).ok_or(DebugReason::RecordChanged)?;
+        let own_name =
+            crate::support::machine::host_name().and_then(|name| host_of_authority(&name));
+        if cluster.port != regport || (!host.is_loopback() && Some(host) != own_name) {
+            return Err(DebugReason::RecordChanged);
+        }
+        Ok((cluster.id, infobase.to_string()))
+    }
+
+    fn confirm_prepared_debug(
+        &self,
+        proof: &PreparedClusterDebugBinding,
+    ) -> Result<(), DebugReason> {
+        let check = || {
+            if self.prepared_debug_binding()? == *proof {
+                Ok(())
+            } else {
+                Err(DebugReason::RecordChanged)
+            }
+        };
+        check()?;
+        match self
+            .host
+            .debug_rdbg_answers(proof.debug.listener_pid, proof.debug.port)
+        {
+            Some(true) => check(),
+            Some(false) => Err(DebugReason::RdbgUnavailable),
+            None => Err(DebugReason::ListenerUnverified),
+        }
     }
 }
 
@@ -1559,6 +1721,122 @@ pub(super) fn confirm_debug_server(
         None => return Err(DebugReason::ListenerUnverified),
     }
     check()
+}
+
+/// Prepare borrows only a debug endpoint already tied to this registered infobase.
+pub(super) fn prepare_debug_server(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<ClusterDebugBinding, UseCaseError> {
+    let no_locate = || Err(validation("a running cluster names its own utilities"));
+    let cluster = cluster(config, context, runner, host, &no_locate)?;
+    let unverified = |reason| {
+        environment(format!(
+            "the managed cluster debug endpoint could not be verified ({reason:?})"
+        ))
+    };
+    if !host.can_confirm_debug_endpoint() {
+        return Err(unverified(DebugReason::ListenerUnverified));
+    }
+    let binding = cluster.prepared_debug_binding().map_err(unverified)?;
+    cluster
+        .confirm_prepared_debug(&binding)
+        .map_err(unverified)?;
+    Ok(binding.debug)
+}
+
+pub(super) enum ExternalDebugProof {
+    NoBinding,
+    Unverified,
+    Unavailable,
+    Confirmed(ClusterDebugBinding),
+}
+
+/// A named direct local profile can borrow the same live cluster as its managed sibling.
+pub(super) fn prepare_external_debug_server(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+    url: &DebuggerUrl,
+    configured_alias: Option<&str>,
+) -> ExternalDebugProof {
+    let Some(profile) = config.infobase_name.as_deref() else {
+        return ExternalDebugProof::NoBinding;
+    };
+    let Some(parts) = crate::platform::connection::declared_parameters(&config.infobase.connection)
+    else {
+        return ExternalDebugProof::NoBinding;
+    };
+    // This route needs one authoritative direct address; raw flags and duplicate keys are ambiguous.
+    if !host.can_confirm_debug_endpoint()
+        || !config.infobases.contains_key(profile)
+        || parts.len() != 2
+        || !parts.iter().any(|(key, _)| key == "srvr")
+        || !parts.iter().any(|(key, _)| key == "ref")
+    {
+        return ExternalDebugProof::NoBinding;
+    }
+    let Some((manager, reference)) = config.v8_connection().cluster_address() else {
+        return ExternalDebugProof::NoBinding;
+    };
+    if configured_alias.is_some_and(|alias| alias != reference) {
+        return ExternalDebugProof::NoBinding;
+    }
+    let configured_cluster = config.infobase.cluster.as_ref();
+    let Some(configured_ras) = configured_cluster.and_then(|cluster| cluster.ras.as_deref()) else {
+        return ExternalDebugProof::NoBinding;
+    };
+    let configured_agent = configured_cluster
+        .and_then(|cluster| cluster.agent.as_ref())
+        .and_then(|agent| agent.address.as_deref());
+    let no_locate = || Err(validation("a running cluster names its own utilities"));
+    let mut candidates = config.infobases.iter().filter_map(|(name, infobase)| {
+        if name == profile || !crate::support::path::is_safe_path_segment(name) {
+            return None;
+        }
+        let declared = declared_infobase(name, infobase).ok()?;
+        if declared.name != reference {
+            return None;
+        }
+        let cluster = declared_cluster(config, context, runner, host, &no_locate, declared);
+        let pins = cluster.pins()?;
+        if manager != ras_address(pins.ports.regport)
+            || configured_agent.is_some_and(|address| address != pins.ports.agent_address())
+            || DebuggerUrl::parse(&crate::platform::dbgs::url(pins.ports.debug())).as_ref()
+                != Some(url)
+        {
+            return None;
+        }
+        let ras = cluster.ras.own_record()?;
+        if configured_ras != ras_address(ras.port) {
+            return None;
+        }
+        let proof = cluster.prepared_debug_binding().ok()?;
+        if proof.debug.alias != reference
+            || manager != ras_address(proof.debug.regport)
+            || configured_agent.is_some_and(|address| address != ras_address(proof.agent_port))
+            || configured_ras != ras_address(proof.ras.2)
+            || DebuggerUrl::parse(&crate::platform::dbgs::url(proof.debug.port)).as_ref()
+                != Some(url)
+        {
+            return None;
+        }
+        Some((cluster, proof))
+    });
+    let Some((cluster, proof)) = candidates.next() else {
+        return ExternalDebugProof::NoBinding;
+    };
+    if candidates.next().is_some() {
+        return ExternalDebugProof::Unverified;
+    }
+    match cluster.confirm_prepared_debug(&proof) {
+        Ok(()) => ExternalDebugProof::Confirmed(proof.debug),
+        Err(DebugReason::RdbgUnavailable) => ExternalDebugProof::Unavailable,
+        Err(_) => ExternalDebugProof::Unverified,
+    }
 }
 
 /// Порт сервера отладки кластера и имя базы, когда сервер отвечает по `rdbg`: для
@@ -2198,7 +2476,21 @@ pub(super) mod tests {
                     if !(alive(AGENT_PID) && alive(RAS_PID)) || host.cluster_silent.get() {
                         exit_code = 1;
                     } else if request.args[..2] == ["cluster", "list"] {
-                        stdout = format!("cluster : {CLUSTER_ID}\nport    : 1\n");
+                        let port = host
+                            .reported_manager_port
+                            .get()
+                            .or_else(|| {
+                                host.agent_args
+                                    .borrow()
+                                    .windows(2)
+                                    .find(|args| {
+                                        args[0].trim_start_matches(['/', '-']) == "regport"
+                                    })
+                                    .and_then(|args| args[1].parse().ok())
+                            })
+                            .unwrap_or(1);
+                        stdout =
+                            format!("cluster : {CLUSTER_ID}\nhost : 127.0.0.1\nport : {port}\n");
                     } else if request.args[..3] == ["infobase", "summary", "list"] {
                         stdout = host
                             .registered
@@ -2296,9 +2588,12 @@ pub(super) mod tests {
         pub(crate) listeners: RefCell<HashMap<u16, u32>>,
         pub(crate) spawned: RefCell<Vec<String>>,
         agent_args: RefCell<Vec<String>>,
+        ras_args: RefCell<Vec<String>>,
+        reported_manager_port: Cell<Option<u16>>,
         agent_exits_at_once: Cell<bool>,
         /// Сервер отладки агента отвечает по `rdbg`.
         rdbg: Cell<bool>,
+        move_manager_during_rdbg: Cell<bool>,
         debug_registration_id: Cell<Option<&'static str>>,
         cluster_silent: Cell<bool>,
         hard_stops: RefCell<HashSet<u32>>,
@@ -2370,6 +2665,12 @@ pub(super) mod tests {
         }
         fn rdbg_answers(&self, _port: u16) -> bool {
             self.rdbg.get()
+        }
+        fn debug_rdbg_answers(&self, _pid: u32, port: u16) -> Option<bool> {
+            if self.move_manager_during_rdbg.get() {
+                self.live_since(RMNGR_PID, MANAGER_IMAGE, STARTED + 10);
+            }
+            Some(self.rdbg_answers(port))
         }
         fn can_start_as_current_user(&self) -> bool {
             !self.root.get()
@@ -2477,7 +2778,11 @@ pub(super) mod tests {
                     Ok(WEB_PID)
                 }
                 "ras" => {
-                    self.live(RAS_PID, "ras.exe");
+                    self.live(
+                        RAS_PID,
+                        request.program.file_name().unwrap().to_str().unwrap(),
+                    );
+                    self.ras_args.replace(request.args.clone());
                     Ok(RAS_PID)
                 }
                 other => panic!("unexpected service {other}"),
@@ -2559,8 +2864,18 @@ pub(super) mod tests {
                         .collect(),
                 );
             }
+            if self
+                .facts(RAS_PID)
+                .is_some_and(|facts| images == [facts.image.as_str()])
+            {
+                return Some(vec![ProcessRow {
+                    pid: RAS_PID,
+                    parent: 1,
+                    command: self.ras_args.borrow().join(" "),
+                }]);
+            }
             let debug = crate::platform::dbgs::executable_name();
-            if images != REMNANT_IMAGES && images != [debug] {
+            if images != REMNANT_IMAGES && images != [debug] && images != [MANAGER_IMAGE] {
                 return Some(Vec::new());
             }
             Some(
@@ -3234,6 +3549,132 @@ pub(super) mod tests {
             STARTED + 2,
         );
         assert_eq!(status(), Err(DebugReason::ProcessChanged));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn external_prepare_borrows_only_the_exact_live_managed_cluster_registration() {
+        use crate::config::model::{InfobaseClusterConfig, InfobaseDebugConfig};
+        use crate::domain::debug_server::{
+            DebugServerPrepareOwner, DebugServerPrepareResult, DebugServerPrepareScope,
+        };
+
+        let setup = setup();
+        let host = Host::default();
+        let runner = Runner { host: &host };
+        let context = ExecutionContext::cli(CommandName::DebugServerStart);
+        setup.command(debug_start(DebugChoice::On), &host).unwrap();
+        let agent = setup.agent();
+        let mut record = agent.own_record().unwrap();
+        host.live(AGENT_PID, AGENT_IMAGE);
+        record.image = Some(AGENT_IMAGE.to_owned());
+        write_record(&agent, &record).unwrap();
+        remember_registered(&setup.config).unwrap();
+        host.registered.borrow_mut().push("demo".to_owned());
+        host.debug_registration_id
+            .set(Some("32bdfbbe-04cb-4069-a227-e46973313ba3"));
+
+        let ports = setup.pins().ports;
+        let ras = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Ras)
+            .own_record()
+            .unwrap();
+        host.listeners.borrow_mut().insert(ras.port, RAS_PID);
+        let debug_pid = 7_123;
+        host.live_since(
+            debug_pid,
+            crate::platform::dbgs::executable_name(),
+            STARTED + 1,
+        );
+        host.parents.borrow_mut().insert(debug_pid, AGENT_PID);
+        host.listeners.borrow_mut().insert(ports.debug(), debug_pid);
+        host.rdbg.set(true);
+
+        let mut external = setup.config.clone();
+        external
+            .infobases
+            .insert("origin".to_owned(), setup.config.infobase.clone());
+        external.infobase = InfobaseConfig::file(ports.connection("demo"));
+        external.infobase.cluster = Some(InfobaseClusterConfig {
+            ras: Some(ras_address(ras.port)),
+            ..Default::default()
+        });
+        let url = crate::platform::dbgs::url(ports.debug());
+        external.infobase.debug = Some(InfobaseDebugConfig {
+            url: DebuggerUrl::parse(&url).unwrap(),
+            infobase_alias: Some("demo".to_owned()),
+        });
+        external.infobase_name = Some("external".to_owned());
+        external
+            .infobases
+            .insert("external".to_owned(), external.infobase.clone());
+
+        let probe = |config: &AppConfig| {
+            let debug = config.infobase.debug.as_ref().unwrap();
+            prepare_external_debug_server(
+                &context,
+                config,
+                &runner,
+                &host,
+                &debug.url,
+                debug.infobase_alias.as_deref(),
+            )
+        };
+        let before_spawned = host.spawned.borrow().len();
+        let locate = || panic!("borrowed debug preparation cannot locate a local client");
+        let legacy = || panic!("borrowed debug preparation cannot start a legacy cluster session");
+        let result = super::super::debug_server::DebugServer {
+            context: &context,
+            config: &external,
+            runner: &runner,
+            host: &host,
+            locate_client: &locate,
+            cluster_server: &legacy,
+            standalone_server: &legacy,
+        }
+        .prepare(43210, false)
+        .unwrap();
+        assert!(matches!(
+            result,
+            DebugServerPrepareResult::Prepared {
+                url: observed, infobase_alias, scope: DebugServerPrepareScope::ClientAndServer,
+                owner: DebugServerPrepareOwner::External, owner_pid: None, release: None,
+            } if observed == url && infobase_alias == "demo"
+        ));
+        assert_eq!(host.spawned.borrow().len(), before_spawned);
+        assert!(!external.work_path.exists());
+
+        let mut bad = external.clone();
+        let connection = &external.infobase.connection;
+        for wrong in [
+            ports.connection("another"),
+            format!("Srvr=127.0.0.1:{};Ref=demo", ports.regport + 1),
+            format!("{connection};Ref=demo"),
+            format!("Srvr=localhost:{};Ref=demo", ports.regport),
+        ] {
+            bad.infobase.connection = wrong;
+            assert!(matches!(probe(&bad), ExternalDebugProof::NoBinding));
+        }
+        bad.infobase.connection.clone_from(connection);
+        bad.infobase.debug.as_mut().unwrap().infobase_alias = Some("another".to_owned());
+        assert!(matches!(probe(&bad), ExternalDebugProof::NoBinding));
+        bad.infobase.debug.clone_from(&external.infobase.debug);
+        bad.infobase.debug.as_mut().unwrap().url =
+            DebuggerUrl::parse(&crate::platform::dbgs::url(ports.debug() + 1)).unwrap();
+        assert!(matches!(probe(&bad), ExternalDebugProof::NoBinding));
+        bad.infobase.debug.clone_from(&external.infobase.debug);
+        bad.infobase.cluster.as_mut().unwrap().ras = Some(ras_address(ras.port + 1));
+        assert!(matches!(probe(&bad), ExternalDebugProof::NoBinding));
+        bad.infobase.cluster.as_mut().unwrap().ras = None;
+        assert!(matches!(probe(&bad), ExternalDebugProof::NoBinding));
+
+        host.reported_manager_port.set(Some(ports.regport + 1));
+        assert!(matches!(probe(&external), ExternalDebugProof::NoBinding));
+        host.reported_manager_port.set(None);
+        host.registered.borrow_mut().push("demo".to_owned());
+        assert!(matches!(probe(&external), ExternalDebugProof::NoBinding));
+        host.registered.borrow_mut().pop();
+        host.move_manager_during_rdbg.set(true);
+        assert!(matches!(probe(&external), ExternalDebugProof::Unverified));
     }
 
     #[test]

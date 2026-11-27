@@ -556,6 +556,10 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "сервер отладки не трогает базу и стенд; гонку команд сеанса решает его запись (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
     ),
     (
+        "crate::use_cases::managed_stand::debug_server_prepare",
+        "читает регистрацию или готовит сервер с замком аренды вместо общего замка (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
+    ),
+    (
         "crate::use_cases::managed_stand::debug_server_status",
         "читает запись и проверяет слушателя без замка (INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK)",
     ),

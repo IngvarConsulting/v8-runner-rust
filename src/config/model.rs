@@ -47,8 +47,9 @@ pub struct AppConfig {
     pub provider_origins: BTreeMap<Operation, String>,
 
     /// Declared infobases by name: the `infobases` map of the local overlay after the
-    /// one-cycle `infobase:` synonym is folded into `origin`. Only the loader and a
-    /// listing command read the map; every use case works with the selected `infobase`.
+    /// one-cycle `infobase:` synonym is folded into `origin`. Use cases normally work
+    /// with the selected `infobase`; debug preparation may prove an external route
+    /// against a managed declaration in the same map.
     #[serde(default)]
     pub infobases: BTreeMap<String, InfobaseConfig>,
 
@@ -163,6 +164,10 @@ pub struct InfobaseConfig {
     #[serde(default)]
     pub web: Option<InfobaseWebConfig>,
 
+    /// Native debugger endpoint chosen in the local profile for this infobase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<InfobaseDebugConfig>,
+
     /// Standalone server (`ibsrv`): the Designer reaches it by the direct gate in
     /// `connection`, the agent by its SSH gate. Its presence declares the target kind; the
     /// runner never starts the server.
@@ -186,6 +191,15 @@ pub struct InfobaseConfig {
     /// «у `cluster.managed` нет `connection`» её не касается.
     #[serde(skip)]
     pub connection_projected: bool,
+}
+
+/// The explicitly selected endpoint for native debugging of one infobase.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct InfobaseDebugConfig {
+    pub url: crate::domain::launch::DebuggerUrl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infobase_alias: Option<String>,
 }
 
 /// The cluster section of a server infobase. Every key is optional: each operation asks
@@ -552,6 +566,7 @@ impl InfobaseConfig {
             password: None,
             dbms: None,
             web: None,
+            debug: None,
             standalone: None,
             cluster: None,
             managed_memory: None,
@@ -624,6 +639,7 @@ impl InfobaseConfig {
             user: None,
             password: None,
             web: None,
+            debug: None,
             standalone: None,
             dbms: Some(dbms),
             cluster: None,

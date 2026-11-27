@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "DebugServerPrepareOwner": {
+      "description": "Who owns the process selected by prepare. External servers are borrowed.",
+      "enum": [
+        "runner",
+        "cluster",
+        "standalone",
+        "external"
+      ],
+      "type": "string"
+    },
+    "DebugServerPrepareScope": {
+      "enum": [
+        "client",
+        "client_and_server"
+      ],
+      "type": "string"
+    },
+    "DebugServerRelease": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "stop",
+              "type": "string"
+            },
+            "session": {
+              "$ref": "#/$defs/DebugSession"
+            }
+          },
+          "required": [
+            "action",
+            "session"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DebugSession": {
+      "description": "Сеанс сервера отладки: его передают в `debug-server stop`.",
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/debug-server-prepare.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "planned",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "prepared",
+          "type": "string"
+        },
+        "infobase_alias": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/DebugServerPrepareOwner"
+        },
+        "owner_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DebugServerRelease"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/DebugServerPrepareScope"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "url",
+        "infobase_alias",
+        "scope",
+        "owner",
+        "release"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "DebugServerPrepareResult"
+}

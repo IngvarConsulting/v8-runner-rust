@@ -237,6 +237,12 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             work.clone(),
         ),
         row(
+            &["debug-server", "prepare", "--owner-pid", "1"],
+            "debug-server prepare",
+            "debug-server prepare",
+            work.clone(),
+        ),
+        row(
             &["debug-server", "stop", "0123456789abcdef0123456789abcdef"],
             "debug-server stop",
             "debug-server stop",

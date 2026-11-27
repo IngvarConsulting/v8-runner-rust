@@ -260,7 +260,7 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | Род | Коды | Код выхода |
 | --- | --- | --- |
 | `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
-| `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
+| `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `debug_server_external_unavailable` (явный адрес не отвечает по RDBG), `debug_server_external_target_unverified` (привязка явно выбранного сервера к ИБ не подтверждена), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP), `source_set_ignored_by_git` (правило игнорирования git прячет файл набора), `work_path_on_another_volume` (`pull`: каталог набора и `workPath` на разных томах) | 2 |
 | `workspace` | `workspace_busy`, `infobase_busy`, `infobase_sessions` (базу держат чужие сеансы), `infobase_designer_busy` (файловую базу держит чужой Конфигуратор) | 3 |
 | `runtime` | `runtime_failure` | 3 |
@@ -950,11 +950,24 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
   `WEBClient` и остановку на точке проверяет отладчик.
 
 ```text
+v8-runner debug-server prepare --owner-pid <PID> [--dry-run]
 v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>]
 v8-runner debug-server start --ensure --owner-pid <PID> [--dry-run]
 v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
+
+- `debug-server prepare --owner-pid <PID>` готовит адрес и алиас для отладчика и
+  тонкого клиента выбранной ИБ. Для файловой ИБ область `client_and_server` включает
+  ServerEmulation. Для работающего управляемого кластера раннер подтверждает
+  сервер отладки и регистрацию выбранной ИБ. Для внешней серверной ИБ без
+  адреса раннер поднимает собственный loopback-`dbgs` с областью `client`.
+  Настроенный внешний адрес даёт раздельные отказы при недоступности и при
+  отсутствии подтверждённой привязки к кластерной ИБ. Оба отказа завершают
+  команду до запуска локального сервера. У заимствованного процесса `release: null`.
+  У собственного каждое обращение получает отдельную аренду для `debug-server stop`.
+  Результат `released` означает, что сервер нужен другим арендам. Превью возвращает
+  `planned` без действующего адреса и аренды.
 
 - Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows и macOS arm64
   ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). На Linux проверены

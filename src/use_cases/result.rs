@@ -22,6 +22,8 @@ pub enum EnvironmentReason {
     /// `tools.platform.version: sources`, а выпуска формата исходников среди установок нет
     /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
     PlatformReleaseMissing,
+    DebugServerExternalUnavailable,
+    DebugServerExternalTargetUnverified,
 }
 
 /// Stable use-case error class used by transport adapters.

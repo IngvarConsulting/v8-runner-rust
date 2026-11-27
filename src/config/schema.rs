@@ -27,6 +27,16 @@ pub fn local_config_schema_url() -> String {
 pub fn main_config_schema_json() -> Value {
     let mut schema = serde_json::to_value(schema_for!(MainConfigSchema)).expect("schema json");
     set_schema_id(&mut schema, &main_config_schema_url());
+    // The deprecated project infobase shares the local syntax except for this machine-local choice.
+    if let Some(properties) = schema_object_mut(&mut schema, &["InfobaseSchema"])
+        .and_then(|definition| definition.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        properties.remove("debug");
+    }
+    if let Some(definitions) = schema.get_mut("$defs").and_then(Value::as_object_mut) {
+        definitions.remove("InfobaseDebugConfig");
+    }
     add_tool_extension_schema_constraints(&mut schema);
     add_numeric_runtime_bounds(&mut schema);
     schema
@@ -646,6 +656,9 @@ struct InfobaseSchema {
     /// Client address and web-server publication settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<InfobaseWebSchema>,
+    /// Native debugger endpoint chosen in the local profile for this infobase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    debug: Option<crate::config::model::InfobaseDebugConfig>,
     /// Standalone server (`ibsrv`); declares the target kind. The Designer reaches it by
     /// `connection` — the direct gate `Srvr=<host>:<port>;Ref=<name>`; the agent by its SSH
     /// `gate`. At least one of the two is declared.
@@ -1605,6 +1618,14 @@ mod tests {
                 assert_no_object_key(&schema, alias);
             }
         }
+    }
+
+    #[test]
+    fn native_debugger_endpoint_is_only_in_the_local_schema() {
+        let main = main_config_schema_json();
+        let local = local_config_schema_json();
+        assert!(main["$defs"]["InfobaseSchema"]["properties"]["debug"].is_null());
+        assert!(local["$defs"]["InfobaseSchema"]["properties"]["debug"].is_object());
     }
 
     /// Синоним помечен в обеих схемах, а карта принимает только имена-идентификаторы

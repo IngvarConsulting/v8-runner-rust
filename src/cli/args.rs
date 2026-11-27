@@ -470,15 +470,21 @@ pub enum DebugServerCommandArgs {
         #[arg(long, requires = "owner_pid", conflicts_with = "port")]
         ensure: bool,
     },
+    /// Prepare an endpoint and debugger scope for the selected infobase
+    Prepare {
+        /// Debugger process on this machine; owned leases end with this owner
+        #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
+        owner_pid: u32,
+    },
     /// Check whether a runner-owned debug server is ready for attachment
     Status {
         /// The session `debug-server start` answered
         #[arg(value_name = "SESSION")]
         session: crate::domain::debug_server::DebugSession,
     },
-    /// Stop the debug server of this session; a repeated or unknown session stops nothing
+    /// Release the session or stop its owned debug server when no other lease remains
     Stop {
-        /// The session `debug-server start` answered
+        /// The session returned by `debug-server start` or `debug-server prepare`
         #[arg(value_name = "SESSION")]
         session: crate::domain::debug_server::DebugSession,
     },

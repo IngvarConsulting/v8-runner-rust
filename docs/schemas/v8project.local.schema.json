@@ -296,6 +296,25 @@
       },
       "type": "object"
     },
+    "InfobaseDebugConfig": {
+      "additionalProperties": false,
+      "description": "The explicitly selected endpoint for native debugging of one infobase.",
+      "properties": {
+        "infobase-alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "$ref": "#/$defs/DebuggerUrl"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "InfobaseSchema": {
       "additionalProperties": false,
       "properties": {
@@ -325,6 +344,17 @@
             }
           ],
           "description": "Optional DBMS settings for server-based infobases."
+        },
+        "debug": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseDebugConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Native debugger endpoint chosen in the local profile for this infobase."
         },
         "password": {
           "description": "Optional infobase password passed to platform utilities.",
