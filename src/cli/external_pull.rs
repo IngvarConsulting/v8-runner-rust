@@ -510,7 +510,9 @@ fn execute(
             format!("external publication stage must exist: {error}"),
         )
     })?;
-    if args.snapshot_only {
+    let file_snapshot =
+        args.snapshot_only && config.target_kind() == crate::domain::capability::TargetKind::File;
+    if file_snapshot {
         let base_dir = config
             .v8_connection()
             .file_infobase_dir(&config.base_path)
@@ -584,8 +586,11 @@ fn execute(
         .with_command_line(command_line)
         .with_external_full_pull(publication);
     let warnings: Vec<Warning> = loaded.warnings.into_iter().map(Warning::Plain).collect();
-    let base_access = if args.snapshot_only {
+    let base_access = if file_snapshot {
         BaseAccess::ReadsWithLock
+    } else if args.snapshot_only {
+        // The batch Designer owns the cluster configuration lock during export.
+        BaseAccess::Reads
     } else {
         BaseAccess::Writes
     };
@@ -622,7 +627,7 @@ fn execute(
             };
             envelope.follow_with(warnings.borrow().iter());
             if args.snapshot_only {
-                // The mandatory base lock covers the terminal frame as well as the dump.
+                // The mandatory file infobase lock covers the dump and the terminal frame.
                 let code = match control.terminal(&envelope) {
                     Ok(()) => exit_code,
                     Err(error) => {

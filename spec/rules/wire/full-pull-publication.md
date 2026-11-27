@@ -7,6 +7,10 @@ check:
   - tests/cli_external_full_pull.rs::accepted_external_full_pull_remembers_the_original_source_for_the_next_push
   - tests/cli_external_full_pull.rs::accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_base
   - tests/cli_external_full_pull.rs::invalid_decisions_after_ready_are_unknown_and_do_not_commit_memory
+  - tests/cli_external_full_pull.rs::a_named_cluster_snapshot_uses_designer_and_leaves_published_memory_alone
+  - tests/cli_external_full_pull.rs::snapshot_only_preview_without_stage_returns_a_read_only_plan
+  - tests/cli_external_full_pull.rs::snapshots_refuse_ambiguous_targets_before_selecting_an_executor
+  - tests/cli_external_full_pull.rs::ordinary_external_publication_records_the_generation_before_a_concurrent_change
   - tests/cli_external_full_pull.rs::the_terminal_frame_carries_the_code_of_a_base_of_another_copy
 ---
 
@@ -50,7 +54,15 @@ check:
 одно и то же поколение рабочей конфигурации до и после выгрузки. Поле содержит
 `id` подготовленной памяти, `generation`, `provider` и `base_generation`
 из сравнимой текущей записи, либо `null`, если такой записи нет. Номер кадров
-остаётся 1. Поле добавляется только в явном режиме запроса памяти.
+остаётся 1. Поле добавляется только в явном режиме запроса памяти для
+объявленной файловой ИБ. Файловый снимок требует `ibcmd`. Если он недоступен,
+вызов завершается до запуска платформы. Настройка `providers.pull` действует
+на обычный `pull`. Прямой кластерный снимок даёт дерево для просмотра
+без `merge_baseline`. `--snapshot-only --dry-run` отвечает обычным
+конвертом с абсолютным `data.target_path`, без JSONL-кадров и запуска
+платформы. Неоднозначный адрес и лишние сырые ключи подключения дают отказ
+до выбора исполнителя. Ответ `published` в режиме снимка завершает вызов с
+`invalid_argument`, `publication: unknown` и `memory: unchanged`.
 
 **Что изменила версия 5.** Терминальный кадр использует общий конверт версии 7, включая запись сеанса из `error.sessions.list`. Кадры протокола сохранили формат.
 

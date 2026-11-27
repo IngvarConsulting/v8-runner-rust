@@ -498,6 +498,9 @@ pub(crate) fn load_cli_config(
                 workdir,
                 &selector,
                 args.snapshot_platform_from_sources,
+                args.prepare_merge_baseline
+                    || args.check_merge_baseline.is_some()
+                    || args.accept_merge_baseline.is_some(),
             );
         }
     }

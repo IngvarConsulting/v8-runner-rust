@@ -1821,6 +1821,15 @@ pub(crate) struct MergeBaselineMark {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<AcceptedMergeBaseline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AcceptedMergeBaseline {
+    pub generation: String,
+    pub provider: Provider,
+    pub binding_sha256: String,
 }
 
 const fn applied_by_default() -> bool {
@@ -2018,8 +2027,9 @@ impl GenerationLedger {
         &self,
         receipt: &super::merge_baseline::MergeBaselineReceipt,
         mark: ApplyMark,
-        pending: bool,
+        accepted_binding: Option<String>,
     ) -> Result<(), AppError> {
+        let pending = accepted_binding.is_none();
         // The inner generation is deliberately incomparable while local memory
         // is being installed, including for older readers of this ledger.
         let token = if pending {
@@ -2035,6 +2045,11 @@ impl GenerationLedger {
             Some(MergeBaselineMark {
                 id: receipt.id.clone(),
                 pending_generation: pending.then(|| receipt.generation.clone()),
+                accepted: accepted_binding.map(|binding_sha256| AcceptedMergeBaseline {
+                    generation: receipt.generation.clone(),
+                    provider: receipt.provider,
+                    binding_sha256,
+                }),
             }),
         )
     }

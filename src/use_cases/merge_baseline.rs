@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::change_detection::analyzer::{self, FullSnapshot};
@@ -14,7 +15,7 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::path::{filesystem_object_identity, FilesystemObjectIdentity};
 
-use super::agent_session::{GenerationLedger, TokenScope};
+use super::agent_session::GenerationLedger;
 use super::context::ExecutionContext;
 use super::exchange_guard;
 use super::generation_reader::{read_with_record_tool, RecordToolAnswer};
@@ -38,8 +39,12 @@ pub(crate) struct MergeBaselineReceipt {
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 struct Binding {
+    #[serde(default)]
+    profile: String,
     identity: String,
     project: PathBuf,
+    #[serde(default)]
+    work_path: PathBuf,
     base_file: FilesystemObjectIdentity,
     owners: Vec<HolderStatus>,
 }
@@ -67,13 +72,26 @@ impl Binding {
             ));
         }
         let project = config.working_copy.as_deref().unwrap_or(&config.base_path);
+        let profile = config.infobase_name.clone().ok_or_else(|| {
+            AppError::Validation("working merge requires a named infobase profile".into())
+        })?;
         Ok(Self {
+            profile,
             identity: identity.to_owned(),
             project: crate::support::path::nearest_existing_canonical_path(project)
+                .map_err(storage_error)?,
+            work_path: crate::support::path::nearest_existing_canonical_path(&config.work_path)
                 .map_err(storage_error)?,
             base_file: filesystem_object_identity(&base.join("1Cv8.1CD")).map_err(storage_error)?,
             owners,
         })
+    }
+
+    fn fingerprint(&self) -> Result<String, AppError> {
+        let encoded = serde_json::to_vec(self)
+            .map_err(std::io::Error::other)
+            .map_err(storage_error)?;
+        Ok(format!("{:x}", Sha256::digest(encoded)))
     }
 }
 
@@ -127,12 +145,7 @@ pub(super) fn prepare(
     generation: &str,
     version: Option<File>,
 ) -> Result<MergeBaselineReceipt, AppError> {
-    if !valid_token(generation)
-        || !TokenScope::measured(provider)
-        || (exchange_guard::token_scope(config, set) == TokenScope::OwnTool
-            && provider != Provider::Ibcmd)
-    {
-        // Only ibcmd is measured to report the loaded extension configuration.
+    if !valid_token(generation) || provider != Provider::Ibcmd {
         return Err(AppError::Validation(
             "the snapshot provider cannot confirm the working configuration generation".into(),
         ));
@@ -237,17 +250,37 @@ pub(crate) fn accept(
     id: Uuid,
     check_only: bool,
 ) -> Result<MergeBaselineResult, AppError> {
+    let recorded = exchange_guard::recorded_generation(set);
+    let requested_id = id.to_string();
+    if let Some((record, proof)) = recorded.as_ref().and_then(|record| {
+        let mark = record.merge_baseline.as_ref()?;
+        if mark.id != requested_id || mark.pending_generation.is_some() {
+            return None;
+        }
+        mark.accepted.as_ref().map(|proof| (record, proof))
+    }) {
+        let binding = Binding::of(config, set)?;
+        if proof.binding_sha256 != binding.fingerprint()? || proof.provider != record.tool {
+            return Err(binding_changed());
+        }
+        if record.token != proof.generation {
+            return Err(generation_changed(record.token.clone(), &proof.generation));
+        }
+        let current = verify_generation(context, config, set, proof.provider, &proof.generation)?;
+        if Binding::of(config, set)? != binding {
+            return Err(binding_changed());
+        }
+        return Ok(MergeBaselineResult {
+            source_set: set.name().to_owned(),
+            generation: current,
+            provider: proof.provider,
+            baseline: BaselineState::Accepted,
+        });
+    }
+
     let root = crate::support::temp::temp_root_path(&config.work_path);
     let path = receipt_path(&root, id);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            AppError::Validation(
-                "working merge baseline is no longer available; fetch again".into(),
-            )
-        } else {
-            storage_error(error)
-        }
-    })?;
+    let metadata = fs::symlink_metadata(&path).map_err(receipt_lookup_error)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata
@@ -256,57 +289,22 @@ pub(crate) fn accept(
             .elapsed()
             .is_ok_and(|age| age > RETENTION)
     {
-        return Err(AppError::Validation(
-            "working merge baseline is no longer available; fetch again".into(),
-        ));
+        return Err(receipt_unavailable());
     }
-    let file = File::open(path.join(RECEIPT_FILE)).map_err(storage_error)?;
+    let file = File::open(path.join(RECEIPT_FILE)).map_err(receipt_lookup_error)?;
     let prepared: PreparedBaseline = serde_json::from_reader(std::io::BufReader::new(file))
         .map_err(|error| {
             AppError::Runtime(format!("cannot read working merge baseline: {error}"))
         })?;
     let receipt = prepared.receipt;
-    if receipt.id != id.to_string() || prepared.binding != Binding::of(config, set)? {
-        return Err(AppError::Validation(
-            "working merge baseline belongs to a different infobase, owner or source set".into(),
-        ));
+    if receipt.id != requested_id || prepared.binding != Binding::of(config, set)? {
+        return Err(binding_changed());
     }
-    let mut utilities = PlatformUtilities::from_config(config);
-    let answer = read_with_record_tool(
-        context,
-        config,
-        &mut utilities,
-        receipt.provider,
-        "working-merge-generation",
-        exchange_guard::extension_of(config, set),
-    )?;
-    let current = match answer {
-        RecordToolAnswer::Token(token) if token == receipt.generation => token,
-        RecordToolAnswer::Token(token) => {
-            return Err(AppError::Refused(Box::new(
-                UseCaseError::new(
-                    UseCaseErrorKind::NonFastForward,
-                    "the working configuration changed after the snapshot; fetch again",
-                )
-                .with_generations(Generations {
-                    base: token,
-                    local: receipt.generation,
-                }),
-            )));
-        }
-        RecordToolAnswer::NoAnswer(why) => {
-            return Err(AppError::Refused(Box::new(UseCaseError::new(
-                UseCaseErrorKind::NonFastForward,
-                format!("cannot confirm the snapshot generation: {why}; fetch again"),
-            ))));
-        }
-    };
-    if let Some(error) =
-        super::interruption::pending_interruption_error(context, "working merge acceptance")
-    {
-        return Err(error);
+    let current = verify_generation(context, config, set, receipt.provider, &receipt.generation)?;
+    if prepared.binding != Binding::of(config, set)? {
+        return Err(binding_changed());
     }
-    let already_accepted = exchange_guard::recorded_generation(set).is_some_and(|record| {
+    let already_accepted = recorded.as_ref().is_some_and(|record| {
         record.tool == receipt.provider
             && record.token == current
             && record
@@ -326,7 +324,7 @@ pub(crate) fn accept(
         let version_file = RunnerVersionFile::of(set).ok_or_else(|| {
             AppError::Validation("working merge requires an infobase version file binding".into())
         })?;
-        let mark = match exchange_guard::recorded_generation(set) {
+        let mark = match recorded.as_ref() {
             Some(record)
                 if record.merge_baseline.as_ref().is_some_and(|merge| {
                     merge.id == receipt.id
@@ -338,11 +336,12 @@ pub(crate) fn accept(
             _ => exchange_guard::dump_apply_mark(config, set, &ledger, receipt.provider, &current),
         };
         // Commit guard first: an interrupted multi-file update cannot authorize a push.
-        ledger.record_merge(&receipt, mark, true)?;
+        let binding_sha256 = prepared.binding.fingerprint()?;
+        ledger.record_merge(&receipt, mark, None)?;
         analyzer::commit_full_snapshot(set, &config.work_path, &prepared.snapshot)
             .map_err(|error| AppError::Runtime(error.to_string()))?;
         version_file.record_prepared(version)?;
-        ledger.record_merge(&receipt, mark, false)?;
+        ledger.record_merge(&receipt, mark, Some(binding_sha256))?;
     }
     Ok(MergeBaselineResult {
         source_set: set.name().to_owned(),
@@ -354,6 +353,75 @@ pub(crate) fn accept(
             BaselineState::Accepted
         },
     })
+}
+
+fn verify_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: &SourceSetContext,
+    provider: Provider,
+    expected: &str,
+) -> Result<String, AppError> {
+    if provider != Provider::Ibcmd {
+        return Err(binding_changed());
+    }
+    let mut utilities = PlatformUtilities::from_config(config);
+    let answer = read_with_record_tool(
+        context,
+        config,
+        &mut utilities,
+        provider,
+        "working-merge-generation",
+        exchange_guard::extension_of(config, set),
+    )?;
+    let token = match answer {
+        RecordToolAnswer::Token(token) if token == expected => token,
+        RecordToolAnswer::Token(token) => return Err(generation_changed(token, expected)),
+        RecordToolAnswer::NoAnswer(why) => {
+            return Err(AppError::Refused(Box::new(UseCaseError::new(
+                UseCaseErrorKind::NonFastForward,
+                format!("cannot confirm the snapshot generation: {why}; fetch again"),
+            ))));
+        }
+    };
+    if let Some(error) =
+        super::interruption::pending_interruption_error(context, "working merge acceptance")
+    {
+        return Err(error);
+    }
+    Ok(token)
+}
+
+fn receipt_unavailable() -> AppError {
+    AppError::Validation("working merge baseline is no longer available; fetch again".into())
+}
+
+fn receipt_lookup_error(error: std::io::Error) -> AppError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        receipt_unavailable()
+    } else {
+        storage_error(error)
+    }
+}
+
+fn binding_changed() -> AppError {
+    AppError::Validation(
+        "working merge baseline belongs to a different infobase, owner or source set; fetch again"
+            .into(),
+    )
+}
+
+fn generation_changed(current: String, expected: &str) -> AppError {
+    AppError::Refused(Box::new(
+        UseCaseError::new(
+            UseCaseErrorKind::NonFastForward,
+            "the working configuration changed after the snapshot; fetch again",
+        )
+        .with_generations(Generations {
+            base: current,
+            local: expected.to_owned(),
+        }),
+    ))
 }
 
 fn storage_error(error: std::io::Error) -> AppError {

@@ -944,11 +944,11 @@ pub struct DumpArgs {
     #[arg(long, value_name = "STAGE-DIRECTORY", requires = "discard_uncommitted", conflicts_with_all = ["json_message", "all", "objects", "mode"])]
     pub publication_stdio: Option<std::path::PathBuf>,
 
-    /// Export a snapshot of a named file infobase without taking ownership or publishing it.
+    /// Export an unpublished snapshot of a named file or direct cluster infobase.
     #[arg(long, requires = "discard_uncommitted", conflicts_with_all = ["all", "objects", "mode"])]
     pub snapshot_only: bool,
 
-    /// Retain the runner's private baseline for a staged working-configuration snapshot.
+    /// Prepare a baseline of a staged working configuration for a named file infobase.
     #[arg(long, requires_all = ["snapshot_only", "publication_stdio"])]
     pub prepare_merge_baseline: bool,
 

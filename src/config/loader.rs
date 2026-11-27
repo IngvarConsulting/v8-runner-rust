@@ -105,6 +105,7 @@ pub(crate) fn load_config_for_snapshot_pull(
     workdir_override: Option<&str>,
     selector: &InfobaseSelector,
     platform_from_sources: bool,
+    merge_baseline: bool,
 ) -> Result<LoadedConfig, ConfigLoadError> {
     load_config_with_mode(
         config_path,
@@ -112,6 +113,7 @@ pub(crate) fn load_config_for_snapshot_pull(
         selector,
         ConfigValidationMode::SnapshotPull {
             platform_from_sources,
+            merge_baseline,
         },
     )
 }
@@ -371,6 +373,7 @@ enum ConfigValidationMode {
     Preview,
     SnapshotPull {
         platform_from_sources: bool,
+        merge_baseline: bool,
     },
     Planned,
     InfobaseExport(crate::domain::capability::Operation),
@@ -495,9 +498,10 @@ fn build_config(
     let mut config: AppConfig = serde_yaml::from_value(root)?;
     if let ConfigValidationMode::SnapshotPull {
         platform_from_sources,
+        merge_baseline,
     } = validation_mode
     {
-        crate::config::validate::admit_snapshot_pull(&config)?;
+        crate::config::validate::admit_snapshot_pull(&config, merge_baseline)?;
         if platform_from_sources {
             config
                 .tools
@@ -4076,6 +4080,7 @@ source-set:
                 None,
                 &InfobaseSelector::Default,
                 from_sources,
+                false,
             )
             .expect("read-only snapshot configuration")
             .config

@@ -202,6 +202,10 @@ impl ExternalFullPull {
         self.control.snapshot_only()
     }
 
+    pub(super) fn tracks_generation(&self) -> bool {
+        !self.snapshot_only() || self.prepare_merge_baseline()
+    }
+
     pub(super) fn prepare_merge_baseline(&self) -> bool {
         self.control.prepare_merge_baseline()
     }

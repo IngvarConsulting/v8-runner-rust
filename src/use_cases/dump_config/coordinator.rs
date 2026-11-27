@@ -1,6 +1,6 @@
 use super::helpers::read_dump_generation;
 use super::*;
-use crate::domain::capability::{Operation, OperationSize, Provider};
+use crate::domain::capability::{Operation, OperationSize, Provider, ProviderPlan, TargetKind};
 use crate::domain::progress::ProgressPhase;
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::agent_session::EarlyAgent;
@@ -131,13 +131,31 @@ fn prepare_and_dump(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let size = dump_size(config, &resolved, &mode, &mut utilities);
-    let selected = match crate::use_cases::provider_selection::select_sized(
-        config,
-        &mut utilities,
-        Operation::Dump,
-        size,
-    ) {
+    use crate::use_cases::provider_selection;
+    let snapshot = context
+        .external_full_pull()
+        .is_some_and(|external| external.snapshot_only());
+    let selection = if snapshot {
+        // File snapshots use the measured read-only path. On a cluster, batch
+        // Designer holds the platform configuration lock during the export.
+        let provider = if config.target_kind() == TargetKind::Cluster {
+            Provider::Designer
+        } else {
+            Provider::Ibcmd
+        };
+        provider_selection::locate_from(
+            config,
+            &mut utilities,
+            Operation::Dump,
+            ProviderPlan::Default {
+                chain: vec![provider],
+            },
+        )
+    } else {
+        let size = dump_size(config, &resolved, &mode, &mut utilities);
+        provider_selection::select_sized(config, &mut utilities, Operation::Dump, size)
+    };
+    let selected = match selection {
         Ok(selected) => selected,
         Err((error, receipt)) => {
             let message = error.to_string();
@@ -512,7 +530,11 @@ fn run_dump_selected(
                 utilities.runner_for(UtilityType::V8)
             }
         };
-        let reads_generation = location.is_some() && !matches!(plan, DumpPlan::Partial);
+        let tracks_generation = context
+            .external_full_pull()
+            .is_none_or(|external| external.tracks_generation());
+        let reads_generation =
+            tracks_generation && location.is_some() && !matches!(plan, DumpPlan::Partial);
         let generation_before = reads_generation
             .then(|| {
                 read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)

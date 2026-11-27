@@ -126,6 +126,47 @@ impl V8Connection {
             .map(|server| format!("server:{}", server.to_lowercase()))
     }
 
+    /// Snapshot operations use one unambiguous target and no extra native switches.
+    pub(crate) fn admits_snapshot_address(&self, file: bool) -> bool {
+        if self.direct_gate {
+            return false;
+        }
+        if self.raw.starts_with(['/', '-']) {
+            let [flag, value] = self.connection_args.as_slice() else {
+                return false;
+            };
+            let expected = if file { "f" } else { "s" };
+            if !flag
+                .get(1..)
+                .is_some_and(|flag| flag.eq_ignore_ascii_case(expected))
+                || value.trim().is_empty()
+            {
+                return false;
+            }
+        } else {
+            let Some(parts) = declared_parameters(&self.raw) else {
+                return false;
+            };
+            let mut seen = std::collections::HashSet::new();
+            if !parts.iter().all(|(key, _)| {
+                seen.insert(key.as_str())
+                    && match key.as_str() {
+                        "file" => file,
+                        "srvr" | "ref" | "usr" | "pwd" | "locale" => !file,
+                        _ => false,
+                    }
+            }) {
+                return false;
+            }
+        }
+        if file {
+            self.file_path()
+                .is_some_and(|value| !unquote_connection_value(value).trim().is_empty())
+        } else {
+            self.cluster_address().is_some() && self.cluster_hosts().len() == 1
+        }
+    }
+
     /// The value of the `/S` switch in the raw argument form.
     fn server_arg(&self) -> Option<&str> {
         self.connection_args

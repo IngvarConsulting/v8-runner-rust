@@ -29,11 +29,17 @@ pub enum ConfigValidationError {
     #[error("source-set must contain at least one supported entry")]
     NoSupportedSourceSet,
 
-    #[error("--snapshot-only requires a named file infobase; an ad hoc connection is unsupported")]
+    #[error("--snapshot-only requires a named infobase; an ad hoc connection is unsupported")]
     SnapshotPullAdHoc,
 
-    #[error("--snapshot-only requires a named file infobase; '{name}' has target kind '{kind}'")]
-    SnapshotPullServer { name: String, kind: &'static str },
+    #[error("--snapshot-only requires a named file or cluster infobase; '{name}' has target kind '{kind}'")]
+    SnapshotPullTarget { name: String, kind: &'static str },
+
+    #[error("--snapshot-only requires one unambiguous {kind} address without extra native switches for '{name}'; for a file target, set user and password as infobase fields")]
+    SnapshotPullAddress { name: String, kind: &'static str },
+
+    #[error("a merge baseline requires a named file infobase; '{name}' has target kind '{kind}'")]
+    MergeBaselineTarget { name: String, kind: &'static str },
 
     #[error("--snapshot-only requires DESIGNER format")]
     SnapshotPullFormat,
@@ -705,14 +711,32 @@ pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationErro
 }
 
 /// Called after infobase selection and before provider or source-set validation.
-pub(crate) fn admit_snapshot_pull(config: &AppConfig) -> Result<(), ConfigValidationError> {
+pub(crate) fn admit_snapshot_pull(
+    config: &AppConfig,
+    merge_baseline: bool,
+) -> Result<(), ConfigValidationError> {
     let name = config
         .infobase_name
         .as_deref()
         .ok_or(ConfigValidationError::SnapshotPullAdHoc)?;
     let kind = config.target_kind();
-    if kind != TargetKind::File {
-        return Err(ConfigValidationError::SnapshotPullServer {
+    if merge_baseline && kind != TargetKind::File {
+        return Err(ConfigValidationError::MergeBaselineTarget {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if !matches!(kind, TargetKind::File | TargetKind::Cluster) {
+        return Err(ConfigValidationError::SnapshotPullTarget {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if !config
+        .v8_connection()
+        .admits_snapshot_address(kind == TargetKind::File)
+    {
+        return Err(ConfigValidationError::SnapshotPullAddress {
             name: name.to_owned(),
             kind: kind.as_str(),
         });

@@ -1095,7 +1095,10 @@ fn run_full_dump_designer(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    if let Some(external) = context.external_full_pull() {
+    if let Some(external) = context
+        .external_full_pull()
+        .filter(|external| external.tracks_generation())
+    {
         external.generation_after(helpers::read_dump_generation(
             context,
             config,
@@ -1245,7 +1248,10 @@ fn run_full_dump_ibcmd(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    if let Some(external) = context.external_full_pull() {
+    if let Some(external) = context
+        .external_full_pull()
+        .filter(|external| external.tracks_generation())
+    {
         external.generation_after(helpers::read_dump_generation(
             context,
             config,
@@ -1882,8 +1888,13 @@ pub(crate) fn preview_snapshot(
 ) -> Result<DumpResult, AppError> {
     let started = Instant::now();
     let target = resolve_snapshot_target(config, args)?;
+    let lock = if config.target_kind() == crate::domain::capability::TargetKind::File {
+        "the file infobase lock is required for execution"
+    } else {
+        "batch Designer holds the platform configuration lock during export"
+    };
     let message = format!(
-        "would export source set '{}' as a full snapshot to a caller-owned stage; the file infobase lock is required for execution",
+        "would export source set '{}' as a full snapshot to a caller-owned stage; {lock}",
         target.source_set_name
     );
     let mut plan = empty_result(

@@ -232,17 +232,17 @@ impl Project {
     }
 
     fn selected(&self, session: &mut Session) -> Value {
+        self.selected_provider(session, self.provider)
+    }
+
+    fn selected_provider(&self, session: &mut Session, provider: &str) -> Value {
         let selected = session.next("selected");
         assert_eq!(selected["version"], 1);
-        assert_eq!(selected["provider"]["selected"], self.provider);
+        assert_eq!(selected["provider"]["selected"], provider);
         assert_eq!(selected["executor"]["kind"], "local");
         let expected_executable = platform().directory.join(format!(
             "{}{}",
-            if self.provider == "ibcmd" {
-                "ibcmd"
-            } else {
-                "1cv8"
-            },
+            if provider == "ibcmd" { "ibcmd" } else { "1cv8" },
             std::env::consts::EXE_SUFFIX
         ));
         assert_reported_path(&selected["executor"]["executable"], &expected_executable);
@@ -271,7 +271,7 @@ impl Project {
     }
 
     fn snapshot_ready(&self, session: &mut Session) -> Value {
-        let selected = self.selected(session);
+        let selected = self.selected_provider(session, "ibcmd");
         session.decide(&selected, "continue");
         let ready = self.ready_frame(session, &selected);
         assert_eq!(ready["snapshot"], "unavailable");
@@ -1187,7 +1187,7 @@ fn snapshot_only_keeps_owner_memory_and_the_ready_tree() {
         let baseline = project.baseline();
         let sources = snapshot(&project.sources);
         let mut session = Session::start(&mut project.snapshot_command());
-        let selected = project.selected(&mut session);
+        let selected = project.selected_provider(&mut session, "ibcmd");
         assert_eq!(project.owner(), owner);
         assert_eq!(project.baseline(), baseline);
         session.decide(&selected, "continue");
@@ -1298,6 +1298,48 @@ fn snapshot_only_refuses_an_unavailable_base_lock_before_platform() {
 }
 
 #[test]
+fn a_file_snapshot_requires_ibcmd_even_when_designer_is_ready() {
+    let project = Project::new("designer", false);
+    let recipe = fs::read_to_string(&project.config).unwrap();
+    let mut recipe: serde_yaml::Value = serde_yaml::from_str(&recipe).unwrap();
+    let only_designer = project
+        .config
+        .with_file_name("platform")
+        .join("8.3.27.2074/bin");
+    fs::create_dir_all(&only_designer).unwrap();
+    let executable = format!("1cv8{}", std::env::consts::EXE_SUFFIX);
+    fs::copy(
+        platform().directory.join(&executable),
+        only_designer.join(&executable),
+    )
+    .unwrap();
+    recipe["tools"]["platform"]["path"] =
+        serde_yaml::to_value(only_designer.join(executable)).unwrap();
+    fs::write(&project.config, serde_yaml::to_string(&recipe).unwrap()).unwrap();
+
+    let (status, terminal) = Session::start(&mut project.snapshot_command()).finish();
+    assert!(!status.success(), "{terminal}");
+    let error = &terminal["result"]["error"];
+    assert_eq!(error["code"], "environment_unavailable", "{terminal}");
+    assert!(
+        error["message"].as_str().unwrap().contains("ibcmd"),
+        "{terminal}"
+    );
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert!(project.calls().is_empty());
+    assert!(snapshot(&project.stage).is_empty());
+    assert!(project.baseline().is_empty());
+    assert!(project.owner().is_none());
+
+    let mut ordinary = project.start();
+    let selected = ordinary.next("selected");
+    assert_eq!(selected["provider"]["selected"], "designer");
+    ordinary.decide(&selected, "reject");
+    ordinary.finish();
+}
+
+#[test]
 fn snapshot_only_preview_without_stage_returns_a_read_only_plan() {
     let project = Project::new("designer", true);
     let sources = snapshot(&project.sources);
@@ -1358,8 +1400,142 @@ fn snapshot_only_preview_without_stage_returns_a_read_only_plan() {
 }
 
 #[test]
+fn a_named_cluster_snapshot_uses_designer_and_leaves_published_memory_alone() {
+    let project = Project::new("designer", false);
+    let local_recipe = project.config.with_file_name("v8project.local.yaml");
+    fs::write(
+        &local_recipe,
+        "infobases:\n  origin:\n    connection: 'Srvr=example.invalid;Ref=demo'\n",
+    )
+    .unwrap();
+    let mut yaml: Value = serde_yaml::from_slice(&fs::read(&project.config).unwrap()).unwrap();
+    yaml["providers"]["pull"] = json!("agent");
+    fs::write(&project.config, serde_yaml::to_string(&yaml).unwrap()).unwrap();
+    let recipe = fs::read(&project.config).unwrap();
+    let overlay = fs::read(&local_recipe).unwrap();
+    let sources = snapshot(&project.sources);
+    let memory = project.baseline();
+    let preview = [
+        "pull",
+        "main",
+        "--force",
+        "--dry-run",
+        "--snapshot-only",
+        "--snapshot-platform-from-sources",
+    ];
+    for _ in 0..2 {
+        let result = project.native(&preview);
+        assert_eq!(result["command"], "pull");
+        assert_reported_path(&result["data"]["target_path"], &project.sources);
+        assert!(
+            result["data"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("platform configuration lock during export"),
+            "{result}"
+        );
+        assert!(!project.work.exists());
+        assert!(project.calls().is_empty());
+    }
+
+    let mut refusal = Session::start(&mut project.snapshot_command());
+    let selected = project.selected(&mut refusal);
+    refusal.decide(&selected, "reject");
+    let (_, terminal) = refusal.finish();
+    assert_eq!(terminal["publication"], "not_published");
+    assert!(project.calls().is_empty());
+    let mut session = Session::start(&mut project.snapshot_command());
+    let selected = project.selected(&mut session);
+    session.decide(&selected, "continue");
+    let ready = project.ready_frame(&mut session, &selected);
+    assert!(ready.get("merge_baseline").is_none(), "{ready}");
+    session.decide(&ready, "rejected");
+    let (status, terminal) = session.finish();
+    assert_eq!(status.code(), Some(2), "{terminal}");
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    let calls = String::from_utf8(project.calls()).unwrap();
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert!(project.stage.join("Configuration.xml").is_file());
+    assert!(!project.stage.join("ConfigDumpInfo.xml").exists());
+    assert_eq!(fs::read(&project.config).unwrap(), recipe);
+    assert_eq!(fs::read(&local_recipe).unwrap(), overlay);
+    assert_eq!(snapshot(&project.sources), sources);
+    assert_eq!(project.baseline(), memory);
+    assert_eq!(project.owner(), None);
+}
+
+#[test]
+fn snapshots_refuse_ambiguous_targets_before_selecting_an_executor() {
+    for connection in [
+        "/F ib /DisableStartupDialogs",
+        r"/S example.invalid\demo /DisableStartupDialogs",
+        "File=ib;File=other-ib",
+        "File=ib;Usr=snapshot-reader;Pwd=fake-password",
+        "File=ib;Locale=ru_RU",
+        "Srvr=example.invalid;Ref=demo;Ref=other-base",
+    ] {
+        let project = Project::new("designer", false);
+        fs::write(
+            project.config.with_file_name("v8project.local.yaml"),
+            serde_yaml::to_string(&json!({"infobases": {"origin": {"connection": connection}}}))
+                .unwrap(),
+        )
+        .unwrap();
+        let (status, terminal) = Session::start(&mut project.snapshot_command()).finish();
+        assert_eq!(status.code(), Some(2), "{terminal}");
+        assert_eq!(
+            terminal["result"]["error"]["code"], "invalid_argument",
+            "{terminal}"
+        );
+        assert!(
+            terminal["result"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("one unambiguous"),
+            "{terminal}"
+        );
+        assert!(project.calls().is_empty());
+        assert!(!project.work.exists());
+        assert!(snapshot(&project.stage).is_empty());
+    }
+}
+
+#[test]
+fn a_cluster_merge_baseline_is_refused_before_source_resolution_or_platform() {
+    let project = Project::new("designer", false);
+    fs::write(
+        project.config.with_file_name("v8project.local.yaml"),
+        "infobases:\n  origin:\n    connection: 'Srvr=example.invalid;Ref=demo'\n",
+    )
+    .unwrap();
+    fs::rename(&project.sources, project.sources.with_extension("missing")).unwrap();
+
+    let mut command = project.snapshot_command();
+    command.arg("--prepare-merge-baseline");
+    let (status, terminal) = Session::start(&mut command).finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    let error = &terminal["result"]["error"];
+    assert_eq!(error["code"], "invalid_argument");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("a merge baseline"),
+        "{error}"
+    );
+    assert!(project.calls().is_empty());
+    assert!(!project.work.exists());
+    assert!(!project.local().exists());
+    assert!(snapshot(&project.stage).is_empty());
+}
+
+#[test]
 fn snapshot_only_preview_and_live_refuse_unsupported_bases_before_sources() {
-    for unsupported in ["cluster", "standalone", "ad hoc"] {
+    for unsupported in ["standalone", "ad hoc"] {
         let project = Project::new("designer", false);
         fs::rename(&project.sources, project.sources.with_extension("missing")).unwrap();
         if unsupported != "ad hoc" {
@@ -1445,7 +1621,7 @@ fn snapshot_only_refuses_an_ad_hoc_base_before_workspace_preparation() {
     assert!(terminal["result"]["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("named file infobase"));
+        .contains("an ad hoc connection is unsupported"));
     assert!(!project.work.exists());
     assert!(!project.local().exists());
     assert!(project.calls().is_empty());
@@ -1474,7 +1650,7 @@ fn snapshot_only_refuses_a_stage_redirected_during_authorization() {
     let project = Project::new("designer", false);
     let sources = snapshot(&project.sources);
     let mut session = Session::start(&mut project.snapshot_command());
-    let selected = project.selected(&mut session);
+    let selected = project.selected_provider(&mut session, "ibcmd");
     fs::rename(&project.stage, project.stage.with_extension("original")).unwrap();
     std::os::unix::fs::symlink(&project.sources, &project.stage).unwrap();
     session.decide(&selected, "continue");
@@ -1501,11 +1677,11 @@ fn snapshot_only_platform_failure_preserves_owner_and_memory() {
             .snapshot_command()
             .env("V8_RUNNER_FAKE_PLATFORM_FAIL_DUMP", "1"),
     );
-    let selected = project.selected(&mut session);
+    let selected = project.selected_provider(&mut session, "ibcmd");
     session.decide(&selected, "continue");
     let (status, terminal) = session.finish();
     assert!(!status.success(), "{terminal}");
-    assert!(String::from_utf8_lossy(&project.calls()).contains("DumpConfigToFiles"));
+    assert!(String::from_utf8_lossy(&project.calls()).contains("\"export\""));
     assert_eq!(
         terminal["result"]["error"]["code"], "platform_failure",
         "{terminal}"
@@ -2026,6 +2202,40 @@ fn the_workspace_lock_is_held_while_waiting_for_both_caller_decisions() {
 }
 
 #[test]
+fn ordinary_external_publication_records_the_generation_before_a_concurrent_change() {
+    for provider in ["designer", "ibcmd"] {
+        let project = Project::new(provider, false);
+        let mut command = project.command();
+        command
+            .env(
+                "V8_RUNNER_FAKE_PLATFORM_GENERATION_AFTER_DUMP",
+                "2".repeat(40),
+            )
+            .args(["pull", "main", "--force", "--publication-stdio"])
+            .arg(&project.stage);
+        let mut session = Session::start(&mut command);
+        let ready = project.ready(&mut session);
+        project.publish();
+        session.decide(&ready, "published");
+        let (status, terminal) = session.finish();
+        assert!(status.success(), "{terminal}");
+        assert_eq!(terminal["publication"], "published");
+        assert_eq!(terminal["memory"], "not_saved");
+        let ledger: Value = serde_json::from_slice(
+            &fs::read(project.local().join("infobases/origin/generation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ledger["main"]["token"], "1".repeat(40), "{ledger}");
+        assert!(
+            terminal["result"]["data"]["message"]
+                .to_string()
+                .contains("was changed while"),
+            "{terminal}"
+        );
+    }
+}
+
+#[test]
 fn an_edit_after_publication_is_not_absorbed_into_the_prepared_baseline() {
     let project = Project::new("designer", false);
     project.seed_baseline();
@@ -2172,7 +2382,7 @@ fn accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_bas
     let id = ready["merge_baseline"]["id"]
         .as_str()
         .expect("merge receipt");
-    assert_eq!(ready["merge_baseline"]["provider"], "designer");
+    assert_eq!(ready["merge_baseline"]["provider"], "ibcmd");
     assert_eq!(ready["merge_baseline"]["generation"], "1".repeat(40));
     session.decide(&ready, "rejected");
     session.finish();
@@ -2264,6 +2474,178 @@ fn accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_bas
             .any(|call| call.contains("/LoadConfigFromFiles") && call.contains("-partial")),
         "{calls}"
     );
+}
+
+fn prepare_merge_receipt(project: &Project, accept: bool) -> String {
+    let mut command = project.snapshot_command();
+    command.arg("--prepare-merge-baseline");
+    let mut session = Session::start(&mut command);
+    let ready = project.snapshot_ready(&mut session);
+    let id = ready["merge_baseline"]["id"].as_str().unwrap().to_owned();
+    session.decide(&ready, "rejected");
+    session.finish();
+    if accept {
+        assert_eq!(
+            project.native(&["pull", "main", "--accept-merge-baseline", &id])["data"]["baseline"],
+            "accepted",
+        );
+    }
+    id
+}
+
+fn merge_receipt_directory(project: &Project, id: &str) -> PathBuf {
+    project
+        .work
+        .join("temp")
+        .join(format!("working-merge-{id}"))
+}
+
+fn prune_merge_receipt(project: &Project, id: &str) {
+    let directory = merge_receipt_directory(project, id);
+    let receipt = directory.join("baseline.json");
+    if receipt.exists() {
+        fs::remove_file(receipt).unwrap();
+    }
+    let version_file = directory.join("ConfigDumpInfo.xml");
+    if version_file.exists() {
+        fs::remove_file(version_file).unwrap();
+    }
+    fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn a_pruned_accepted_merge_is_confirmed_without_rewriting_its_memory() {
+    let project = Project::new("designer", false);
+    let id = prepare_merge_receipt(&project, true);
+    prune_merge_receipt(&project, &id);
+    let memory = project.baseline();
+    fs::write(&project.calls, "").unwrap();
+    for action in ["--check-merge-baseline", "--accept-merge-baseline"] {
+        let answer = project.native(&["pull", "main", action, &id]);
+        assert_eq!(answer["data"]["baseline"], "accepted");
+        assert_eq!(answer["data"]["generation"], "1".repeat(40));
+        assert_eq!(project.baseline(), memory);
+    }
+    let calls = String::from_utf8(project.calls()).unwrap();
+    assert_eq!(calls.matches("\"generation-id\"").count(), 2, "{calls}");
+
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_GENERATION", "2".repeat(40))
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--accept-merge-baseline",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "non_fast_forward", "{envelope}");
+    assert_eq!(project.baseline(), memory);
+
+    let other_work = project.work.with_file_name("other-work");
+    fs::write(&project.calls, "").unwrap();
+    let output = project
+        .command()
+        .arg("--workdir")
+        .arg(&other_work)
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--check-merge-baseline",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "invalid_argument", "{envelope}");
+    assert!(project.calls().is_empty());
+    assert_eq!(project.baseline(), memory);
+
+    let base = project.config.with_file_name("ib").join("1Cv8.1CD");
+    fs::rename(&base, base.with_file_name("previous.1CD")).unwrap();
+    fs::write(&base, "new file identity with the same fake generation").unwrap();
+    fs::write(&project.calls, "").unwrap();
+    let output = project
+        .command()
+        .args([
+            "--json-message",
+            "pull",
+            "main",
+            "--check-merge-baseline",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "invalid_argument", "{envelope}");
+    assert!(project.calls().is_empty());
+    assert_eq!(project.baseline(), memory);
+}
+
+#[test]
+fn a_pruned_unaccepted_merge_requires_a_new_fetch_before_platform() {
+    let project = Project::new("designer", false);
+    let id = prepare_merge_receipt(&project, false);
+    fs::remove_file(merge_receipt_directory(&project, &id).join("baseline.json")).unwrap();
+    assert_unavailable_merge_receipt(&project, &id);
+    prune_merge_receipt(&project, &id);
+    assert_unavailable_merge_receipt(&project, &id);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn an_expired_unaccepted_merge_requires_a_new_fetch_before_platform() {
+    let project = Project::new("designer", false);
+    let id = prepare_merge_receipt(&project, false);
+    let path = merge_receipt_directory(&project, &id);
+    #[cfg(windows)]
+    let directory = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    let directory = fs::File::open(path).unwrap();
+    directory
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 3600))
+        .unwrap();
+    drop(directory);
+    assert_unavailable_merge_receipt(&project, &id);
+}
+
+fn assert_unavailable_merge_receipt(project: &Project, id: &str) {
+    let memory = project.baseline();
+    fs::write(&project.calls, "").unwrap();
+    for action in ["--check-merge-baseline", "--accept-merge-baseline"] {
+        let output = project
+            .command()
+            .args(["--json-message", "pull", "main", action, id])
+            .output()
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(2), "{envelope}");
+        assert_eq!(envelope["error"]["code"], "invalid_argument", "{envelope}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("fetch again"),
+            "{envelope}"
+        );
+        assert_eq!(project.baseline(), memory);
+    }
+    assert!(project.calls().is_empty());
 }
 
 #[test]
