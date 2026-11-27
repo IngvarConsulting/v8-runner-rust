@@ -498,6 +498,11 @@ pub fn mask_url_userinfo(value: &str) -> String {
     mask_userinfo(value, false, Hidden::Secrets)
 }
 
+/// Whether a native client address carries a username or password, with or without a scheme.
+pub(crate) fn has_url_userinfo(value: &str) -> bool {
+    !userinfo_ranges(value, false, Hidden::SecretsAndIdentities).is_empty()
+}
+
 /// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес,
 /// а не целиком — адрес человеку нужен, чтобы понять, куда раннер собрался.
 fn is_client_address_key(arg: &str) -> bool {

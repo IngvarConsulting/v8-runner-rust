@@ -348,6 +348,10 @@ v8-runner infobase create
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
   Launch uses the configured infobase and client settings; no source-set is required.
+- To leave login to 1C for one launch, use `launch thin --interactive-login` (also
+  `thick` and `ordinary` without waiting). The runner omits the saved infobase credentials
+  and disables OS auto-login for that client. 1C decides whether to show a dialog under its
+  own token and publication settings. The selected infobase, platform and `--debug` carry through.
 - Client address: `launch thin`, `launch mcp` and the `test` client go by `infobase.connection`, or by `infobase.web.url` as a ws connection when no connection string is declared; `launch thin --via web|connection` picks one explicitly, and `--via` is accepted only where the client is thin. On a standalone server the connection string is the direct gate (`/S host:port\name`), `launch designer` goes by it too, and `thick`/`ordinary` (also `test --client-mode`) are refused with code `target`. Both `/S` and `/WS` pass `infobase.user`/`infobase.password` as `/N` and `/P`, with the password masked in command output. A `/IBConnectionString` in `tools.enterprise.additional-launch-keys` lands after the runner's address, though the platform wants it before `/S` — declare the address in `infobase.*`, not there.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,

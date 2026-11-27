@@ -865,6 +865,8 @@ pub struct ClientMcpOptionsRequest {
 pub struct LaunchRequest {
     /// Requested launch target.
     pub target: LaunchTargetRequest,
+    /// Leave authentication to the client without forwarding the saved infobase credentials.
+    pub interactive_login: bool,
     /// Shared launch options mapped from CLI/test scenarios.
     pub launch: LaunchOptions,
     /// Client-side MCP launch options. Present only for `LaunchTargetRequest::client_mcp*`.

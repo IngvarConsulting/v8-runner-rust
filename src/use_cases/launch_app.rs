@@ -8,13 +8,16 @@ use crate::domain::launch::{
 use crate::domain::next_step::NextStep;
 use crate::domain::progress::ProgressPhase;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
+use crate::platform::connection::{declared_parameters, split_arg_string, V8Connection};
 use crate::platform::enterprise::{
-    build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
-    StartupDialogs,
+    build_launch_command, normalize_launch_payload_path, ClientAddress, LaunchClientMode,
+    LaunchCommand, StartupDialogs,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
-use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
+use crate::platform::secrets::{
+    connection_masked_key, has_url_userinfo, mask_preview_args, mask_url_userinfo,
+};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_address;
@@ -150,24 +153,37 @@ fn run_launch(
     }
 
     let additional_launch_keys = effective_enterprise_launch_keys(config, args, &launch);
+    let mut connection = config.v8_connection();
+    if args.interactive_login {
+        validate_interactive_login(
+            &address,
+            &connection,
+            &additional_launch_keys,
+            &launch.raw_args,
+        )
+        .map_err(UseCaseFailure::without_payload)?;
+        connection.user = None;
+        connection.password = None;
+    }
     let mut utilities = PlatformUtilities::from_config(config);
     let location = utilities
         .locate(utility)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
-    let connection = config.v8_connection();
-    let process_request = client_process_request(
-        build_launch_command(
-            client_mode,
-            &address,
-            &connection,
-            &additional_launch_keys,
-            &launch,
-            startup_dialogs(args.target, client_wait.as_ref()),
-        ),
-        location.path.clone(),
-        client_wait.as_ref(),
+    let mut command = build_launch_command(
+        client_mode,
+        &address,
+        &connection,
+        &additional_launch_keys,
+        &launch,
+        startup_dialogs(args.target, client_wait.as_ref()),
     );
+    if args.interactive_login {
+        // With no /N or /P, the default can still admit the OS account without a choice.
+        command.args.push("/WA-".to_owned());
+    }
+    let process_request =
+        client_process_request(command, location.path.clone(), client_wait.as_ref());
 
     // Launch the bundled executable through the same owned process path so macOS
     // associates it with the application and the caller can still cancel startup.
@@ -405,6 +421,86 @@ fn run_launch(
         client_wait: None,
         debug: launch_debug(&launch, config, via),
     })
+}
+
+/// Reject opaque native overrides in the opt-in mode. Error messages name only their source.
+fn validate_interactive_login(
+    address: &ClientAddress,
+    connection: &V8Connection,
+    configured: &[String],
+    supplied: &[String],
+) -> Result<(), AppError> {
+    let invalid_address = match address.web_url() {
+        Some(url) => has_url_userinfo(url),
+        None => match connection.infobase_args().as_slice() {
+            [key, value] => match key.to_ascii_lowercase().as_str() {
+                "/f" | "-f" => false,
+                "/s" | "-s" => has_url_userinfo(value.split('\\').next().unwrap_or(value)),
+                "/ws" | "-ws" => has_url_userinfo(value),
+                "/ibconnectionstring" | "-ibconnectionstring" => {
+                    connection_masked_key(value).is_some()
+                        || declared_parameters(value).is_none_or(|fields| {
+                            fields
+                                .iter()
+                                .any(|(key, _)| key.eq_ignore_ascii_case("AccessToken"))
+                        })
+                }
+                _ => true,
+            },
+            _ => true,
+        },
+    };
+    if invalid_address {
+        return Err(AppError::Validation(
+            "--interactive-login requires a selected infobase address without inline credentials or extra startup switches".to_owned(),
+        ));
+    }
+    for (source, keys) in [
+        ("tools.enterprise.additional-launch-keys", configured),
+        ("--raw-key", supplied),
+    ] {
+        if keys
+            .iter()
+            .any(|argument| raw_overrides_interactive_login(argument))
+        {
+            return Err(AppError::Validation(format!(
+                "--interactive-login cannot be combined with authentication, target, or platform overrides in {source}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn raw_overrides_interactive_login(fragment: &str) -> bool {
+    // The existing argument builder discards a leading reserved dialog switch outright.
+    let dialog_switch_is_filtered = launch_key_alias_matches(fragment, "disablestartupdialogs");
+    connection_masked_key(fragment).is_some()
+        || split_arg_string(fragment).iter().any(|arg| {
+            if !arg.starts_with(['/', '-']) {
+                return false;
+            }
+            let key = arg.trim_start_matches(['/', '-']).to_ascii_lowercase();
+            key.starts_with(['@', 'f'])
+                || (key.starts_with('s') && !key.starts_with("slev"))
+                || (!dialog_switch_is_filtered
+                    && launch_key_alias_matches(arg, "disablestartupdialogs"))
+                || [
+                    "wa",
+                    "ws",
+                    "oida",
+                    "emailauth",
+                    "authoff",
+                    "resetsavedauth",
+                    "modifypassword",
+                    "url",
+                    "ibname",
+                    "ibconnectionstring",
+                    "appautocheck",
+                    "apparch",
+                ]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        })
 }
 
 /// Окна при старте разрешены только интерактивному клиенту предприятия, которого раннер не
@@ -895,6 +991,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::Enterprise(
                     crate::use_cases::request::EnterpriseLaunchTarget::ThinClient,
@@ -1050,6 +1147,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
@@ -1080,6 +1178,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
@@ -1121,6 +1220,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
@@ -1154,6 +1254,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
@@ -1187,6 +1288,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::designer(),
                 launch: Default::default(),
@@ -1253,6 +1355,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::ordinary_application(),
                 launch: Default::default(),
@@ -1290,6 +1393,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
@@ -1326,6 +1430,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
@@ -1346,6 +1451,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
@@ -1374,6 +1480,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),

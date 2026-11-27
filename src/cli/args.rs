@@ -1299,6 +1299,9 @@ pub struct LaunchOptionsArgs {
 pub struct DirectLaunchOptionsArgs {
     #[command(flatten)]
     pub common: LaunchOptionsArgs,
+    /// Let 1C handle interactive login without the credentials saved in the project profile
+    #[arg(long)]
+    pub interactive_login: bool,
     /// Capture client stderr to this path while waiting for a thin client to exit
     #[arg(long = "stderr-output")]
     pub stderr_output: Option<String>,

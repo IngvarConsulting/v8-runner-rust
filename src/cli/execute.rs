@@ -5216,7 +5216,24 @@ fn map_designer_modules_request(
 }
 
 fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest, UseCaseError> {
+    use crate::use_cases::request::{EnterpriseLaunchTarget, LaunchTargetRequest};
+
     let mut target = parse_launch_target(&args.target, "mode", LaunchModeAliases::Cli)?;
+    if args.launch.interactive_login
+        && (!matches!(
+            target,
+            LaunchTargetRequest::Enterprise(
+                EnterpriseLaunchTarget::ThinClient
+                    | EnterpriseLaunchTarget::ThickClient
+                    | EnterpriseLaunchTarget::OrdinaryApplication
+            )
+        ) || args.launch.wait_for_exit)
+    {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "--interactive-login requires `launch thin`, `launch thick`, or `launch ordinary` without --wait-for-exit",
+        ));
+    }
     let client_mcp = if matches!(
         target,
         crate::use_cases::request::LaunchTargetRequest::Enterprise(
@@ -5253,6 +5270,7 @@ fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest,
         map_launch_debug(target, args.debug.as_deref())?
     };
     Ok(LaunchRequest {
+        interactive_login: args.launch.interactive_login,
         target,
         launch,
         client_mcp,
@@ -7114,6 +7132,7 @@ mod tests {
             )
             .expect("request"),
             LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: LaunchOptions {
@@ -7188,6 +7207,7 @@ mod tests {
             )
             .expect("request"),
             LaunchRequest {
+                interactive_login: false,
                 via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Ordinary),
                 launch: LaunchOptions {

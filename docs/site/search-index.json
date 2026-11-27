@@ -2640,6 +2640,12 @@
     "text": "Отладка не подходит запуску Отказ до запуска: invalid_argument , выход CLI 2. Так же отвечают launch web --debug , адрес не вида http://<хост>:<порт> (путь, параметры, фрагмент, учётные данные, нет порта или порт 0) и /DEBUG или /DEBUGGERURL в --raw-key или в tools.enterprise.additional-launch-keys рядом с --debug . Отказ не повторяет введённый адрес. ERROR: validation error: --debug is for the 1C:Enterprise client: Designer debugs with its own debugger"
   },
   {
+    "url": "cli-launch.html#launch-interactive-login",
+    "page": "launch",
+    "section": "launch thin --interactive-login",
+    "text": "launch thin --interactive-login v8-runner launch thin --interactive-login Оставляет выбор пользователя платформе 1С на один запуск. Раннер берёт выбранную ИБ и платформу из проекта, опускает сохранённые имя и пароль и отключает автоматический вход через учётную запись ОС внутри ИБ. Показ окна входа зависит от настроек и сохранённых токенов платформы. Профиль и реквизиты пакетных команд сохраняются. Ключ работает с thin , thick и ordinary без --wait-for-exit . Для отладки добавьте --debug <url> . Реквизиты в адресе ИБ и сырые ключи, меняющие вход, адрес или платформу, приводят к invalid_argument до запуска. --dry-run показывает план с теми же параметрами входа."
+  },
+  {
     "url": "cli-launch.html#launch-preview",
     "page": "launch",
     "section": "launch designer --dry-run",

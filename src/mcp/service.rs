@@ -606,6 +606,7 @@ fn map_launch_app_request(
         let config_path = map_mcp_config_path(request.mcp_config.as_deref())?;
         let port = map_mcp_port(request.mcp_port)?;
         return Ok(LaunchRequest {
+            interactive_login: false,
             target: crate::use_cases::request::LaunchTargetRequest::client_mcp_with_mode(mode),
             launch: LaunchOptions::default(),
             client_mcp: Some(ClientMcpOptionsRequest {
@@ -637,6 +638,7 @@ fn map_launch_app_request(
     let target = parse_launch_target(&utility_type, "utilityType", LaunchModeAliases::Mcp)
         .map_err(|error| launch_adapter_business_error(error, "utilityType"))?;
     Ok(LaunchRequest {
+        interactive_login: false,
         target,
         launch: LaunchOptions::default(),
         client_mcp: None,
