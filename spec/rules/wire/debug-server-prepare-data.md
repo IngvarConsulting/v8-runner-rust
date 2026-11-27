@@ -6,9 +6,11 @@ check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_debug_server.rs::prepare_preview_reports_the_selected_route_without_creating_state
   - tests/cli_debug_server.rs::prepare_requires_owner_pid
+  - tests/cli_debug_server.rs::prepare_reuses_and_releases_an_owned_debug_server_on_linux
   - src/use_cases/managed_stand/debug_server.rs::prepared_leases_release_independently_even_after_target_selection_changes
   - src/use_cases/managed_stand/debug_server.rs::prepare_cancellation_stops_only_the_unpublished_owned_attempt
   - src/use_cases/managed_stand/debug_server.rs::prepare_uses_client_only_local_debug_for_external_cluster_without_an_address
+  - src/use_cases/managed_stand/debug_server.rs::prepare_accepts_owned_proof_without_enabling_legacy_ensure
   - src/use_cases/managed_stand/debug_server.rs::prepare_borrows_exact_explicit_file_endpoint_without_a_lease
   - src/use_cases/managed_stand/cluster.rs::external_prepare_borrows_only_the_exact_live_managed_cluster_registration
   - src/config/loader.rs::a_project_file_cannot_select_an_external_debugger
@@ -34,7 +36,10 @@ check:
 UUID кластера и UUID регистрации.
 Такой профиль получает `owner: external` и `release: null`. У файловой ИБ `client_and_server` включает ServerEmulation.
 Для внешней серверной ИБ без настроенного адреса собственный loopback-сервер
-раннера даёт `client`. У явно указанного недоступного адреса код
+раннера даёт `client`. На Linux для запуска и повторной аренды своего `dbgs`
+обязательно подтверждение через `/proc` владельца IPv4 loopback-слушателя
+и принятого RDBG-соединения. Подтверждение привязки к управляемому кластеру
+поддержано на Windows. У явно указанного недоступного адреса код
 `debug_server_external_unavailable`, у ответившего сервера без подтверждённой
 связи с кластерной целью — `debug_server_external_target_unverified`. Эти отказы завершают
 вызов до локальной подготовки.

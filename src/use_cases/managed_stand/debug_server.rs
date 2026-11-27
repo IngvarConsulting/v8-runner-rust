@@ -1023,6 +1023,7 @@ mod tests {
         replace_listener_during_probe: Cell<bool>,
         process_inaccessible: Cell<bool>,
         proof_unavailable: Cell<bool>,
+        only_prepared_endpoint_proof: Cell<bool>,
         exit_pending: Cell<bool>,
         /// Порт из файла адреса слушает чужой процесс.
         foreign_listener: Cell<bool>,
@@ -1057,6 +1058,10 @@ mod tests {
 
     impl ServiceHost for Host {
         fn can_confirm_debug_endpoint(&self) -> bool {
+            !self.only_prepared_endpoint_proof.get()
+        }
+
+        fn can_confirm_owned_debug_endpoint(&self) -> bool {
             true
         }
 
@@ -2225,6 +2230,7 @@ mod tests {
         let mut setup = setup();
         setup.config.infobase = InfobaseConfig::file("Srvr=external;Ref=demo".to_owned());
         let host = Host::with_owner();
+        host.only_prepared_endpoint_proof.set(true);
         let ctx = context();
         let locate = || Ok(setup.resolution());
         let receipt = setup
@@ -2240,6 +2246,39 @@ mod tests {
         ));
         assert!(host.external_probes.borrow().is_empty());
         assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn prepare_accepts_owned_proof_without_enabling_legacy_ensure() {
+        let setup = setup();
+        let host = Host::with_owner();
+        host.only_prepared_endpoint_proof.set(true);
+        let ctx = context();
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        let legacy = server.ensure(ensure_request(), false).unwrap_err();
+        assert_eq!(
+            legacy.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
+        assert_eq!(host.spawned.get(), 0);
+
+        let first = prepared_lease(server.prepare(OWNER, false).unwrap());
+        host.proof_unavailable.set(true);
+        let failure = server.prepare(OWNER, false).unwrap_err();
+        assert_eq!(failure.kind(), UseCaseErrorKind::Platform);
+        assert_eq!(host.spawned.get(), 1);
+        assert!(host.alive(PID));
+        host.proof_unavailable.set(false);
+        let second = prepared_lease(server.prepare(OWNER, false).unwrap());
+        assert_ne!(first, second);
+        assert_eq!(host.spawned.get(), 1);
+        assert_eq!(
+            server.stop(first, false).unwrap().action,
+            DebugServerAction::Released
+        );
+        assert_eq!(server.stop(second, false).unwrap().stopped_pid, Some(PID));
+        assert!(!host.alive(PID));
     }
 
     #[test]
