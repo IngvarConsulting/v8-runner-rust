@@ -13,6 +13,7 @@ use crate::change_detection::runner_dirs::RunnerDirs;
 use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
+use crate::support::error::EnvironmentLayer;
 use crate::use_cases::agent_session::{
     argument, collect_into_dir, connect, generation_id, make_output_dir, run_critical, run_id,
     stage_dir, stage_dir_partially, tidy, transcript_log, unstage, wait_policy, write_bytes,
@@ -139,7 +140,8 @@ impl AgentLoader {
                 transcript,
                 &wait,
                 self.early.take(),
-            )?;
+            )
+            .map_err(|error| self.opening_refusal(context, config, error))?;
             self.session = Some((handle, wait));
         }
         let (handle, wait) = self
@@ -147,6 +149,21 @@ impl AgentLoader {
             .as_mut()
             .expect("agent session was just opened");
         Ok((handle, wait.clone()))
+    }
+
+    pub(super) fn opening_refusal(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        error: AppError,
+    ) -> AppError {
+        // The local agent returns the same SSH rejection when a Designer holds the file base.
+        // Check the OS lock after the failed launch, when that agent can no longer hold it.
+        if self.managed && error.environment_layer() == Some(EnvironmentLayer::InfobaseUser) {
+            crate::use_cases::apply::sessions::designer_busy_at_load(context, config, error)
+        } else {
+            error
+        }
     }
 }
 
