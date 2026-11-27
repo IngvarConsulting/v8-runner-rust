@@ -1023,6 +1023,7 @@ mod tests {
         replace_listener_during_probe: Cell<bool>,
         process_inaccessible: Cell<bool>,
         proof_unavailable: Cell<bool>,
+        exit_pending: Cell<bool>,
         /// Порт из файла адреса слушает чужой процесс.
         foreign_listener: Cell<bool>,
         /// Порт, который захватывает чужой процесс между проверкой и запуском.
@@ -1137,7 +1138,7 @@ mod tests {
             !self.proof_unavailable.get() && self.listening_pid(port) == Some(pid)
         }
         fn debug_process_gone(&self, pid: u32) -> bool {
-            !self.process_inaccessible.get() && !self.alive(pid)
+            !self.process_inaccessible.get() && !self.exit_pending.get() && !self.alive(pid)
         }
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
@@ -1164,9 +1165,16 @@ mod tests {
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
-        fn sleep(&self, _duration: Duration) {}
+        fn sleep(&self, _duration: Duration) {
+            self.exit_pending.set(false);
+        }
+
         fn patience(&self, _default: Duration) -> Duration {
-            Duration::ZERO
+            if self.exit_pending.get() {
+                Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            }
         }
         fn rdbg_answers(&self, port: u16) -> bool {
             if self.replace_listener_during_probe.get() {
@@ -2112,6 +2120,24 @@ mod tests {
             .is_err());
         assert!(!setup.config.work_path.exists());
         assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn prepared_stop_waits_for_death_after_identity_becomes_unavailable() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let context = context();
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&context, &host, &locate);
+        let session = prepared_lease(server.prepare(OWNER, false).unwrap());
+        host.exit_pending.set(true);
+
+        let stopped = server.stop(session, false).unwrap();
+
+        assert_eq!(stopped.action, DebugServerAction::Stopped);
+        assert_eq!(stopped.stopped_pid, Some(PID));
+        assert!(!host.exit_pending.get());
+        assert!(host.hard_stops.borrow().is_empty());
     }
 
     #[test]

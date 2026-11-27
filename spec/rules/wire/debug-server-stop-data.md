@@ -11,6 +11,7 @@ check:
   - tests/cli_debug_server.rs::stop_answers_while_another_command_holds_the_work_path
   - src/use_cases/managed_stand/debug_server.rs::prepared_leases_release_independently_even_after_target_selection_changes
   - src/use_cases/managed_stand/debug_server.rs::prepared_stop_does_not_signal_a_recycled_pid
+  - src/use_cases/managed_stand/debug_server.rs::prepared_stop_waits_for_death_after_identity_becomes_unavailable
   - src/use_cases/managed_stand/debug_server.rs::copied_prepared_scope_cannot_stop_the_original_debug_server
   - src/use_cases/managed_stand/debug_server.rs::unresolved_prepared_scope_cannot_confirm_absence_of_a_lease
 ---

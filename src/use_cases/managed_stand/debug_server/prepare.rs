@@ -22,14 +22,14 @@ use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::EnvironmentReason;
 
 use super::super::{
-    cluster, debug_process_ended, environment, io_failure, spawn_recorded_debugger,
-    DebuggerJournal, POLL,
+    await_service_end, cluster, debug_process_ended, environment, io_failure,
+    spawn_recorded_debugger, stop_with_confirmation, DebuggerJournal, POLL,
 };
 use super::{
-    await_rdbg, dbgs, empty, refuse, stop_confirmed, write_json, AppConfig, DebugServer,
-    DebugServerAction, DebugServerOwner, DebugServerResult, DebugSession, DebuggerLaunch,
-    DebuggerSpawn, RdbgWait, RecordState, ServicePaths, ServiceRecord, SpawnedDebugger, TargetKind,
-    UseCaseError, UseCaseErrorKind, FILE_ALIAS, NOTIFY, SESSIONS,
+    await_rdbg, dbgs, empty, refuse, write_json, AppConfig, DebugServer, DebugServerAction,
+    DebugServerOwner, DebugServerResult, DebugSession, DebuggerLaunch, DebuggerSpawn, RdbgWait,
+    RecordState, ServicePaths, ServiceRecord, SpawnedDebugger, TargetKind, UseCaseError,
+    UseCaseErrorKind, FILE_ALIAS, NOTIFY, SESSIONS,
 };
 
 const PREPARED: &str = "prepared-v1";
@@ -641,15 +641,15 @@ impl DebugServer<'_> {
         let pid = self.confirmed_prepare_process(record).ok_or_else(|| {
             platform("the previous prepared dbgs could not be identified; its recovery record was retained")
         })?;
-        if stop_confirmed(
+        if stop_with_confirmation(
             self.host,
             self.runner,
             self.context,
             pid,
             record.started,
             Duration::ZERO,
-        ) && self.process_ended(record)
-        {
+            |timeout| await_service_end(self.host, timeout, || self.process_ended(record)),
+        ) {
             Ok(())
         } else {
             Err(platform(format!(

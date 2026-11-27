@@ -432,12 +432,16 @@ fn forget_record(paths: &ServicePaths) {
 
 /// Конец процесса: pid исчез или занят процессом с другим временем старта.
 fn await_gone(host: &dyn ServiceHost, pid: u32, started: Option<u64>, timeout: Duration) -> bool {
+    await_service_end(host, timeout, || {
+        host.facts(pid)
+            .is_none_or(|facts| Some(facts.started) != started)
+    })
+}
+
+fn await_service_end(host: &dyn ServiceHost, timeout: Duration, ended: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        let same = host
-            .facts(pid)
-            .is_some_and(|facts| Some(facts.started) == started);
-        if !same {
+        if ended() {
             return true;
         }
         if Instant::now() >= deadline {
@@ -631,16 +635,30 @@ fn stop_confirmed(
     started: Option<u64>,
     grace: Duration,
 ) -> bool {
+    stop_with_confirmation(host, runner, context, pid, started, grace, |timeout| {
+        await_gone(host, pid, started, timeout)
+    })
+}
+
+fn stop_with_confirmation(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    pid: u32,
+    started: Option<u64>,
+    grace: Duration,
+    wait_for_exit: impl Fn(Duration) -> bool,
+) -> bool {
     let patience = host.patience(DEBUGGER_STOP_TIMEOUT);
-    if !grace.is_zero() && await_gone(host, pid, started, host.patience(grace)) {
+    if !grace.is_zero() && wait_for_exit(host.patience(grace)) {
         return true;
     }
     host.soft_stop(runner, pid, started, context);
-    if await_gone(host, pid, started, patience) {
+    if wait_for_exit(patience) {
         return true;
     }
     host.hard_stop(runner, pid, started, context);
-    await_gone(host, pid, started, patience)
+    wait_for_exit(patience)
 }
 
 fn debug_process_ended(host: &dyn ServiceHost, record: &ServiceRecord, pid: u32) -> bool {

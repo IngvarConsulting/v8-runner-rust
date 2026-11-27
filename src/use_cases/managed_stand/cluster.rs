@@ -1620,10 +1620,10 @@ impl Cluster<'_> {
         if ras.bin != expected_bin
             || ras.version != agent.version
             || ras.image.as_deref() != Some(image)
-            || !ras
+            || ras
                 .started
                 .zip(agent.started)
-                .is_some_and(|(ras, agent)| ras >= agent)
+                .is_none_or(|(ras, agent)| ras < agent)
         {
             return false;
         }
