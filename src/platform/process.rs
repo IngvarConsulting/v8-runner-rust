@@ -821,7 +821,7 @@ fn decode_legacy_output(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ProcessIoMode {
+pub(super) enum ProcessIoMode {
     Detached,
     #[cfg(any(unix, windows))]
     UnicaOwnedDetached,
@@ -908,7 +908,7 @@ struct SpawnedChild {
     io_mode: ProcessIoMode,
 }
 
-enum ChildHandle {
+pub(super) enum ChildHandle {
     Standard(std::process::Child),
     #[cfg(windows)]
     Wrapped(Box<dyn process_wrap::std::ChildWrapper>),
@@ -923,7 +923,7 @@ impl ChildHandle {
         }
     }
 
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+    pub(super) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match self {
             Self::Standard(child) => child.try_wait(),
             #[cfg(windows)]
@@ -931,7 +931,7 @@ impl ChildHandle {
         }
     }
 
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub(super) fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match self {
             Self::Standard(child) => child.wait(),
             #[cfg(windows)]
@@ -957,8 +957,7 @@ impl ChildHandle {
         }
     }
 
-    #[cfg(not(unix))]
-    fn start_kill(&mut self) -> std::io::Result<()> {
+    pub(super) fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
             Self::Standard(child) => child.kill(),
             #[cfg(windows)]
@@ -966,7 +965,7 @@ impl ChildHandle {
         }
     }
 
-    fn stdin(&mut self) -> &mut Option<std::process::ChildStdin> {
+    pub(super) fn stdin(&mut self) -> &mut Option<std::process::ChildStdin> {
         match self {
             Self::Standard(child) => &mut child.stdin,
             #[cfg(windows)]
@@ -974,7 +973,7 @@ impl ChildHandle {
         }
     }
 
-    fn stdout(&mut self) -> &mut Option<std::process::ChildStdout> {
+    pub(super) fn stdout(&mut self) -> &mut Option<std::process::ChildStdout> {
         match self {
             Self::Standard(child) => &mut child.stdout,
             #[cfg(windows)]
@@ -982,7 +981,7 @@ impl ChildHandle {
         }
     }
 
-    fn stderr(&mut self) -> &mut Option<std::process::ChildStderr> {
+    pub(super) fn stderr(&mut self) -> &mut Option<std::process::ChildStderr> {
         match self {
             Self::Standard(child) => &mut child.stderr,
             #[cfg(windows)]
@@ -1187,7 +1186,10 @@ fn isolate_inherited_standard_handles() -> std::io::Result<()> {
     Ok(())
 }
 
-fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<ChildHandle> {
+pub(super) fn spawn_child(
+    mut cmd: Command,
+    io_mode: ProcessIoMode,
+) -> std::io::Result<ChildHandle> {
     #[cfg(windows)]
     {
         if matches!(

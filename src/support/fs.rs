@@ -21,6 +21,9 @@ pub fn is_known_tool_name(tool: &str) -> bool {
 
 #[cfg(test)]
 thread_local! {
+    #[cfg(windows)]
+    pub(crate) static FIRST_DIR_RENAME_ERROR: std::cell::RefCell<Option<(PathBuf, Box<dyn FnOnce(Instant)>)>> =
+        const { std::cell::RefCell::new(None) };
     /// Runs after moving the old directory and before publishing the stage.
     pub(crate) static AFTER_DIR_BACKUP_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -1261,6 +1264,50 @@ pub fn swap_dir_atomically(
     target_identity: &str,
     backup_prefix: &str,
 ) -> std::io::Result<SwappedDir> {
+    swap_dir_with_recheck(
+        staging_dir,
+        target_dir,
+        run_id,
+        target_identity,
+        backup_prefix,
+        DIRECTORY_RENAME_WAIT,
+        None,
+    )
+    .map_err(|error| error.into_error(|io| io))
+}
+
+pub const DIRECTORY_RENAME_WAIT: Duration = Duration::from_secs(20);
+
+#[derive(Debug)]
+pub enum DirectorySwapError<E> {
+    Filesystem(std::io::Error),
+    Recheck(E),
+}
+
+impl<E> From<std::io::Error> for DirectorySwapError<E> {
+    fn from(error: std::io::Error) -> Self {
+        Self::Filesystem(error)
+    }
+}
+
+impl<E> DirectorySwapError<E> {
+    pub fn into_error(self, filesystem: impl FnOnce(std::io::Error) -> E) -> E {
+        match self {
+            Self::Filesystem(error) => filesystem(error),
+            Self::Recheck(error) => error,
+        }
+    }
+}
+
+pub fn swap_dir_with_recheck<E>(
+    staging_dir: &Path,
+    target_dir: &Path,
+    run_id: &str,
+    target_identity: &str,
+    backup_prefix: &str,
+    wait: Duration,
+    before_backup_retry: Option<&mut dyn FnMut(Instant) -> Result<bool, E>>,
+) -> Result<SwappedDir, DirectorySwapError<E>> {
     let parent = parent_dir(target_dir).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1269,9 +1316,12 @@ pub fn swap_dir_atomically(
     })?;
     let backup_dir = parent.join(format!("{backup_prefix}-{run_id}"));
     let stage_metadata_path = metadata_sidecar_path(staging_dir);
+    // Both forward moves share their time limit. A rollback gets its own, even if the stage
+    // could not be installed before that limit expired.
+    let forward_deadline = Instant::now() + wait;
 
     if !target_dir.exists() {
-        rename_directory(staging_dir, target_dir)?;
+        rename_directory_checked(staging_dir, target_dir, forward_deadline, None)?;
         let fsync_result = best_effort_fsync_dir(parent);
         let _ = remove_path_if_exists(&stage_metadata_path);
         fsync_result?;
@@ -1283,7 +1333,12 @@ pub fn swap_dir_atomically(
 
     // Leave a recoverable backup even if the process stops at the first rename.
     let backup_marker = reserve_directory_backup(&backup_dir, run_id, target_dir, target_identity)?;
-    if let Err(error) = rename_directory(target_dir, &backup_dir) {
+    if let Err(error) = rename_directory_checked(
+        target_dir,
+        &backup_dir,
+        forward_deadline,
+        before_backup_retry,
+    ) {
         let _ = std::fs::remove_file(&backup_marker);
         return Err(error);
     }
@@ -1294,8 +1349,8 @@ pub fn swap_dir_atomically(
         }
     });
 
-    let restore_previous_tree = || {
-        rename_directory(&backup_dir, target_dir)?;
+    let restore_previous_tree = |deadline| {
+        rename_directory(&backup_dir, target_dir, deadline)?;
         best_effort_fsync_dir(parent)?;
         let _ = std::fs::remove_file(&backup_marker);
         Ok(())
@@ -1303,27 +1358,31 @@ pub fn swap_dir_atomically(
     if let Err(error) = best_effort_fsync_dir(parent) {
         return Err(with_rollback_context(
             error,
-            restore_previous_tree().err(),
+            restore_previous_tree(Instant::now() + wait).err(),
             "failed to fsync parent after moving target to backup",
-        ));
+        )
+        .into());
     }
 
-    if let Err(error) = rename_directory(staging_dir, target_dir) {
+    if let Err(error) = rename_directory(staging_dir, target_dir, forward_deadline) {
         return Err(with_rollback_context(
             error,
-            restore_previous_tree().err(),
+            restore_previous_tree(Instant::now() + wait).err(),
             "failed to install staged directory",
-        ));
+        )
+        .into());
     }
 
     if let Err(error) = best_effort_fsync_dir(parent) {
-        let rollback_result =
-            rename_directory(target_dir, staging_dir).and_then(|()| restore_previous_tree());
+        let rollback_deadline = Instant::now() + wait;
+        let rollback_result = rename_directory(target_dir, staging_dir, rollback_deadline)
+            .and_then(|()| restore_previous_tree(rollback_deadline));
         return Err(with_rollback_context(
             error,
             rollback_result.err(),
             "failed to fsync parent after publishing staged dump",
-        ));
+        )
+        .into());
     }
 
     let _ = remove_path_if_exists(&stage_metadata_path);
@@ -1348,17 +1407,68 @@ pub fn swap_dir_atomically(
     })
 }
 
-fn rename_directory(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to).map_err(|error| {
+fn rename_directory(from: &Path, to: &Path, deadline: Instant) -> std::io::Result<()> {
+    rename_directory_checked(from, to, deadline, Some(&mut |_| Ok(true)))
+        .map_err(|error| error.into_error(|io| io))
+}
+
+fn rename_directory_checked<E>(
+    from: &Path,
+    to: &Path,
+    deadline: Instant,
+    mut before_retry: Option<&mut dyn FnMut(Instant) -> Result<bool, E>>,
+) -> Result<(), DirectorySwapError<E>> {
+    let describe = |error: std::io::Error, context: &str| {
         std::io::Error::new(
             error.kind(),
             format!(
-                "failed to rename '{}' to '{}': {error}",
+                "failed to rename '{}' to '{}': {error}{context}",
                 from.display(),
                 to.display()
             ),
         )
-    })
+    };
+    let mut delay = Duration::from_millis(10);
+    while let Err(error) = std::fs::rename(from, to) {
+        let Some(recheck) = before_retry
+            .as_mut()
+            .filter(|_| retryable_directory_rename(&error))
+        else {
+            return Err(describe(error, "").into());
+        };
+        #[cfg(all(test, windows))]
+        FIRST_DIR_RENAME_ERROR.with(|slot| {
+            if slot.borrow().as_ref().is_some_and(|(path, _)| path == from) {
+                let (_, release) = slot.take().expect("matched rename");
+                release(deadline);
+            }
+        });
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(delay.min(remaining));
+        }
+        let expired = || describe(error, " (rename retry limit reached)");
+        // Let the caller report a pending cancellation even when the retry time just ran out.
+        if !recheck(deadline).map_err(DirectorySwapError::Recheck)? || Instant::now() >= deadline {
+            return Err(expired().into());
+        }
+        delay = (delay * 2).min(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn retryable_directory_rename(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn retryable_directory_rename(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+    matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+    )
 }
 
 /// Removes `backup` when its metadata names it a runner backup of a finished replacement: the
@@ -2542,11 +2652,311 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn a_locked_child_reports_the_failed_target_rename_and_leaves_both_trees() {
+    fn hold_child(path: &Path) -> fs::File {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(path)
+            .expect("open child without delete sharing")
+    }
 
+    #[cfg(windows)]
+    fn after_rename_conflict(from: &Path, hook: impl FnOnce(std::time::Instant) + 'static) {
+        super::FIRST_DIR_RENAME_ERROR.with(|slot| {
+            assert!(slot
+                .replace(Some((from.to_owned(), Box::new(hook))))
+                .is_none());
+        });
+    }
+
+    #[cfg(windows)]
+    fn checked_swap(
+        stage: &Path,
+        target: &Path,
+        wait: Duration,
+    ) -> std::io::Result<super::SwappedDir> {
+        super::swap_dir_with_recheck(
+            stage,
+            target,
+            "run",
+            "identity",
+            ".backup",
+            wait,
+            Some(&mut |_| Ok(true)),
+        )
+        .map_err(|error| error.into_error(|io| io))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_rename_retries_only_windows_access_and_sharing_conflicts() {
+        for (code, expected) in [(5, true), (32, true), (2, false)] {
+            assert_eq!(
+                super::retryable_directory_rename(&std::io::Error::from_raw_os_error(code)),
+                expected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expired_recheck_preserves_the_denied_rename_and_original_target() {
+        let dir = tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let target = dir.path().join("target");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&stage).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("old"), b"old").unwrap();
+        fs::write(stage.join("new"), b"new").unwrap();
+        let held = hold_child(&target.join("old"));
+        after_rename_conflict(&target, move |_| drop(held));
+        let error = super::swap_dir_with_recheck(
+            &stage,
+            &target,
+            "run",
+            "identity",
+            ".backup",
+            super::DIRECTORY_RENAME_WAIT,
+            Some(&mut |_| -> std::io::Result<bool> { Ok(false) }),
+        )
+        .unwrap_err()
+        .into_error(|io| io);
+        assert!(
+            error.to_string().contains("rename retry limit reached")
+                && error.to_string().contains("(os error 5)"),
+            "{error}"
+        );
+        assert_eq!(fs::read(target.join("old")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("new")).unwrap(), b"new");
+        assert!(!backup.exists() && !super::metadata_sidecar_path(&backup).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_wins_over_the_first_rename_retry_deadline() {
+        let dir = tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let target = dir.path().join("target");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&stage).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("old"), b"old").unwrap();
+        fs::write(stage.join("new"), b"new").unwrap();
+        let _held = hold_child(&target.join("old"));
+
+        let error = super::swap_dir_with_recheck(
+            &stage,
+            &target,
+            "run",
+            "identity",
+            ".backup",
+            Duration::ZERO,
+            Some(&mut |deadline| {
+                assert!(std::time::Instant::now() >= deadline);
+                Err("cancelled")
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, super::DirectorySwapError::Recheck("cancelled")),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(target.join("old")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("new")).unwrap(), b"new");
+        assert!(!backup.exists() && !super::metadata_sidecar_path(&backup).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_first_move_without_a_recheck_and_the_install_to_a_new_target_try_once() {
+        let dir = tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let target = dir.path().join("target");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("new"), b"new").unwrap();
+        let staged = hold_child(&stage.join("new"));
+        let error = super::swap_dir_with_recheck(
+            &stage,
+            &target,
+            "run",
+            "identity",
+            ".backup",
+            Duration::ZERO,
+            Some(&mut |_| -> std::io::Result<bool> { panic!("absent target") }),
+        )
+        .unwrap_err()
+        .into_error(|io| io);
+        assert!(error.to_string().contains("(os error 5)"), "{error}");
+        assert!(!error.to_string().contains("retry limit"), "{error}");
+        assert!(!target.exists());
+        drop(staged);
+
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("old"), b"old").unwrap();
+        let _held = hold_child(&target.join("old"));
+        let error =
+            super::swap_dir_atomically(&stage, &target, "run", "identity", ".backup").unwrap_err();
+        assert!(error.to_string().contains("(os error 5)"), "{error}");
+        assert!(!error.to_string().contains("retry limit"), "{error}");
+        assert_eq!(fs::read(target.join("old")).unwrap(), b"old");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publishing_retries_when_the_old_tree_is_released() {
+        publish_after_releasing_a_child(true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publishing_retries_when_the_stage_is_released() {
+        publish_after_releasing_a_child(false);
+    }
+
+    #[cfg(windows)]
+    fn publish_after_releasing_a_child(hold_old: bool) {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let stage = dir.path().join(".stage-run");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&target).expect("target");
+        fs::create_dir(&stage).expect("stage");
+        let old = target.join("old.txt");
+        let new = stage.join("new.txt");
+        fs::write(&old, "old").expect("old file");
+        fs::write(&new, "new").expect("staged file");
+        let held = hold_child(if hold_old { &old } else { &new });
+        let (release, signal) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            signal
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release signal");
+            drop(held);
+        });
+        let next_stage = stage.clone();
+        after_rename_conflict(if hold_old { &target } else { &stage }, move |deadline| {
+            release.send(()).expect("signal holder");
+            holder.join().expect("child closed");
+            if hold_old {
+                let staged_child = hold_child(&new);
+                after_rename_conflict(&next_stage, move |install_deadline| {
+                    assert_eq!(
+                        install_deadline, deadline,
+                        "both forward moves share the same deadline"
+                    );
+                    drop(staged_child);
+                });
+            }
+        });
+
+        let result = checked_swap(&stage, &target, super::DIRECTORY_RENAME_WAIT);
+        let unused_signal = super::FIRST_DIR_RENAME_ERROR.with(|slot| slot.take());
+        if let Some((_, release)) = unused_signal {
+            release(std::time::Instant::now());
+            panic!("the filesystem allowed renaming a directory with its child held");
+        }
+        let swapped = result.expect("published after the child was released");
+        assert_eq!(fs::read_to_string(target.join("new.txt")).unwrap(), "new");
+        assert!(!target.join("old.txt").exists());
+        assert!(!stage.exists());
+        assert_eq!(fs::read_to_string(backup.join("old.txt")).unwrap(), "old");
+        assert!(swapped
+            .backup
+            .expect("superseded backup")
+            .remove()
+            .is_none());
+        assert!(!backup.exists());
+        assert!(!super::metadata_sidecar_path(&backup).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_persistently_locked_stage_restores_the_old_tree() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let stage = dir.path().join(".stage-run");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&target).expect("target");
+        fs::create_dir(&stage).expect("stage");
+        fs::write(target.join("old.txt"), "old").expect("old file");
+        fs::write(stage.join("new.txt"), "new").expect("staged file");
+        let held = hold_child(&stage.join("new.txt"));
+        let backup_to_hold = backup.clone();
+        super::AFTER_DIR_BACKUP_TEST_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                let old = hold_child(&backup_to_hold.join("old.txt"));
+                after_rename_conflict(&backup_to_hold, move |_| drop(old));
+            })));
+        });
+
+        let error = checked_swap(&stage, &target, Duration::from_millis(200))
+            .expect_err("cannot publish the locked stage");
+        drop(held);
+        assert!(
+            super::FIRST_DIR_RENAME_ERROR
+                .with(|hook| hook.take())
+                .is_none(),
+            "rollback encountered the open backup child"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "failed to install staged directory: failed to rename '{}' to '{}'",
+                stage.display(),
+                target.display()
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("(os error 5)") && message.contains("rename retry limit reached"),
+            "{message}"
+        );
+        assert_eq!(fs::read_to_string(target.join("old.txt")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(stage.join("new.txt")).unwrap(), "new");
+        assert!(!target.join("new.txt").exists());
+        assert!(!backup.exists());
+        assert!(!super::metadata_sidecar_path(&backup).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_rollback_leaves_the_only_old_tree_with_its_recovery_marker() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        let stage = dir.path().join(".stage-run");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&stage).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        fs::write(stage.join("new.txt"), b"new").unwrap();
+        let _staged_child = hold_child(&stage.join("new.txt"));
+        let (hold, held) = mpsc::channel();
+        let old_child = backup.join("old.txt");
+        super::AFTER_DIR_BACKUP_TEST_HOOK.with(|slot| {
+            slot.replace(Some(Box::new(move || {
+                hold.send(hold_child(&old_child)).unwrap()
+            })));
+        });
+        let error = checked_swap(&stage, &target, Duration::from_millis(100)).unwrap_err();
+        let _old_child = held.try_recv().unwrap();
+        assert!(error.to_string().contains("rollback failed"), "{error}");
+        assert!(!target.exists());
+        assert_eq!(fs::read(backup.join("old.txt")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("new.txt")).unwrap(), b"new");
+        let marker = super::read_temp_dir_metadata(&backup).unwrap();
+        assert!(matches!(marker.kind, super::TempDirKind::Backup));
+        assert!(!marker.superseded);
+        assert_eq!(marker.run_id, "run");
+        assert_eq!(marker.target_path, target);
+        assert_eq!(marker.target_identity, "identity");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_child_reports_the_failed_target_rename_and_leaves_both_trees() {
         let dir = tempdir().expect("tempdir");
         let target = dir.path().join("target");
         let stage = dir.path().join(".stage-run");
@@ -2557,13 +2967,9 @@ mod tests {
         let new_file = stage.join("new.txt");
         fs::write(&old_file, "old").expect("old file");
         fs::write(&new_file, "new").expect("new file");
-        let held = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(&old_file)
-            .expect("open child without delete sharing");
+        let held = hold_child(&old_file);
 
-        let error = super::swap_dir_atomically(&stage, &target, "run", "identity", ".backup")
+        let error = checked_swap(&stage, &target, Duration::from_millis(100))
             .expect_err("the open child blocks the target rename");
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs::read_to_string(&old_file).expect("old file"), "old");
@@ -2581,6 +2987,7 @@ mod tests {
             )),
             "{message}"
         );
+        assert!(message.contains("rename retry limit reached"), "{message}");
         assert!(message.contains("(os error 5)"), "{message}");
     }
 
