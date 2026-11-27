@@ -17,13 +17,6 @@ use crate::use_cases::interruption;
 
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[cfg(all(test, windows))]
-thread_local! {
-    // A precomputed guard reply represents the next version of the working tree.
-    static NEXT_GUARD_REPLY: std::cell::RefCell<Option<Result<Losses, AppError>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct StagedPublication {
     staging_path: PathBuf,
@@ -224,10 +217,6 @@ impl StagedPublication {
             Ok(())
         };
         let assess_losses = |interrupted: Option<&mut dyn FnMut() -> bool>| {
-            #[cfg(all(test, windows))]
-            if let Some(reply) = NEXT_GUARD_REPLY.with(|slot| slot.take()) {
-                return reply.map(Some);
-            }
             guard_replacement_until(
                 context,
                 &self.target_path,
@@ -702,7 +691,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn directory_publication_respects_refreshed_consent_and_returns_refreshed_losses() {
-        use crate::use_cases::destruction_guard::{guard_replacement, Destruction, WaysOut};
+        use crate::use_cases::destruction_guard::WaysOut;
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
@@ -718,30 +707,18 @@ mod tests {
             fs::write(target.join(regenerated), b"old").unwrap();
             let publication = StagedPublication::prepare_dir(&target, "test", ".stage").unwrap();
             fs::write(publication.staging_path().join("new.txt"), b"new").unwrap();
-            // Obtain a real reply against an independent, unchanged fixture.
-            let model = dir.path().join("guard-fixture");
-            fs::create_dir(&model).unwrap();
-            let edit = model.join("user-edit.bsl");
-            fs::write(&edit, b"edit").unwrap();
-            let refreshed = guard_replacement(
-                &context,
-                &model,
-                &consent,
-                &[regenerated],
-                Destruction::Replace,
-            );
+            let edit = target.join("user-edit.bsl");
             let held = fs::OpenOptions::new()
                 .read(true)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(target.join(regenerated))
                 .unwrap();
+            let new_edit = edit.clone();
             crate::support::fs::FIRST_DIR_RENAME_ERROR.with(|slot| {
                 slot.replace(Some((
                     target.clone(),
                     Box::new(move |_| {
-                        super::NEXT_GUARD_REPLY.with(|slot| {
-                            slot.replace(Some(refreshed));
-                        });
+                        fs::write(new_edit, b"edit").unwrap();
                         drop(held);
                     }),
                 )));
@@ -754,14 +731,11 @@ mod tests {
                 &[regenerated],
                 super::BackupRemoval::Inline,
             );
-            assert!(
-                super::NEXT_GUARD_REPLY.with(|slot| slot.take()).is_none(),
-                "a retry must use the fresh guard decision"
-            );
             match consent {
                 DestructionConsent::AskFirst(_) => {
                     assert!(matches!(result, Err(AppError::Validation(_))), "{result:?}");
                     assert_eq!(fs::read(target.join(regenerated)).unwrap(), b"old");
+                    assert_eq!(fs::read(&edit).unwrap(), b"edit");
                     assert!(publication.staging_path().join("new.txt").is_file());
                 }
                 _ => {
