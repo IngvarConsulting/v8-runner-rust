@@ -840,6 +840,9 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::DebugServer(args) => match args.command {
             crate::cli::args::DebugServerCommandArgs::Start { .. } => CommandName::DebugServerStart,
+            crate::cli::args::DebugServerCommandArgs::Prepare { .. } => {
+                CommandName::DebugServerPrepare
+            }
             crate::cli::args::DebugServerCommandArgs::Status { .. } => {
                 CommandName::DebugServerStatus
             }
@@ -1846,7 +1849,7 @@ fn execute_standalone(
     )
 }
 
-/// `debug-server start|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
+/// `debug-server start|prepare|status|stop`: без замка `workPath` — `stop` отвечает и пока идёт другая
 /// команда (`INV.USE-CASES.DEBUG-SERVER-COMMANDS-TAKE-NO-LOCK`).
 fn execute_debug_server(
     config: &AppConfig,
@@ -1856,12 +1859,15 @@ fn execute_debug_server(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::DebugServerCommandArgs as Action;
+    use crate::domain::debug_server::{DebugServerPrepareResult, DebugServerRelease};
     use crate::use_cases::managed_stand::{
-        debug_server_start, debug_server_status, debug_server_stop, DebugServerStart,
+        debug_server_prepare, debug_server_start, debug_server_status, debug_server_stop,
+        DebugServerStart,
     };
 
     let name = match action {
         Action::Start { .. } => CommandName::DebugServerStart,
+        Action::Prepare { .. } => CommandName::DebugServerPrepare,
         Action::Status { .. } => CommandName::DebugServerStatus,
         Action::Stop { .. } => CommandName::DebugServerStop,
     };
@@ -1878,6 +1884,48 @@ fn execute_debug_server(
             ensure,
             dry_run,
         ),
+        Action::Prepare { owner_pid } => {
+            let started = Instant::now();
+            match debug_server_prepare(&context, config, owner_pid, dry_run) {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            name.as_str(),
+                            crate::support::time::elapsed_ms(started),
+                            result,
+                        ));
+                    } else {
+                        match result {
+                            DebugServerPrepareResult::Planned => {
+                                presenter.print_bare("debug-server prepare: planned");
+                            }
+                            DebugServerPrepareResult::Prepared {
+                                url,
+                                infobase_alias,
+                                scope,
+                                owner,
+                                release,
+                                ..
+                            } => {
+                                presenter.print_bare(&format!("url: {url}"));
+                                presenter.print_bare(&format!("infobase alias: {infobase_alias}"));
+                                presenter.print_bare(&format!("scope: {}", scope.as_str()));
+                                presenter.print_bare(&format!("owner: {}", owner.as_str()));
+                                if let Some(DebugServerRelease::Stop { session }) = release {
+                                    presenter.print_bare(&format!("session: {session}"));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    print_command_use_case_error(presenter, name, &error);
+                    return Err(error);
+                }
+            }
+        }
         Action::Status { session } => match debug_server_status(&context, config, session) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -1977,6 +2025,7 @@ fn debug_server_text(
             name.as_str(),
             result.stopped_pid.unwrap_or_default()
         ),
+        DebugServerAction::Released => format!("{}: lease released", name.as_str()),
         DebugServerAction::Planned => {
             format!("{}: planned, nothing started or stopped", name.as_str())
         }

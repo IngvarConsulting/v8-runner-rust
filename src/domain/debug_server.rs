@@ -18,6 +18,16 @@ impl DebugSession {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4().as_u128())
     }
+
+    /// Leases keep the existing token shape, with a version nibble reserved for prepare.
+    pub(crate) fn new_prepare() -> Self {
+        let random = uuid::Uuid::new_v4().as_u128();
+        Self((random & !(0xf << 76)) | (8 << 76))
+    }
+
+    pub(crate) fn is_prepare(self) -> bool {
+        (self.0 >> 76) & 0xf == 8
+    }
 }
 
 impl Default for DebugSession {
@@ -97,6 +107,8 @@ pub enum DebugServerAction {
     Failed,
     /// `stop`: свой `dbgs` сеанса остановлен.
     Stopped,
+    /// `stop`: одна lease освобождена, остальные ещё используют процесс.
+    Released,
     /// `stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.
     NothingToStop,
     /// Предварительный просмотр: ничего не запущено и не остановлено.
@@ -146,6 +158,71 @@ pub struct DebugServerResult {
     /// Предупреждения идут только в `warnings` конверта: форма `data` их не несёт.
     #[serde(skip)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerPrepareScope {
+    Client,
+    ClientAndServer,
+}
+
+impl DebugServerPrepareScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::ClientAndServer => "client_and_server",
+        }
+    }
+}
+
+/// Who owns the process selected by prepare. External servers are borrowed.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugServerPrepareOwner {
+    Runner,
+    Cluster,
+    // Reserved by the prepare wire contract until standalone ownership can be confirmed.
+    #[allow(dead_code)]
+    Standalone,
+    External,
+}
+
+impl DebugServerPrepareOwner {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Runner => "runner",
+            Self::Cluster => "cluster",
+            Self::Standalone => "standalone",
+            Self::External => "external",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DebugServerRelease {
+    Stop { session: DebugSession },
+}
+
+fn nullable_debug_server_release(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    generator.subschema_for::<Option<DebugServerRelease>>()
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DebugServerPrepareResult {
+    Planned,
+    Prepared {
+        url: String,
+        infobase_alias: String,
+        scope: DebugServerPrepareScope,
+        owner: DebugServerPrepareOwner,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_pid: Option<u32>,
+        #[schemars(required, schema_with = "nullable_debug_server_release")]
+        release: Option<DebugServerRelease>,
+    },
 }
 
 /// Read-only observation of a recorded file-infobase debug server.

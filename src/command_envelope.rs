@@ -46,6 +46,8 @@ pub enum ErrorCode {
     /// Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет
     /// формат исходников, среди установок нет.
     PlatformReleaseMissing,
+    DebugServerExternalUnavailable,
+    DebugServerExternalTargetUnverified,
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
@@ -128,6 +130,8 @@ impl ErrorCode {
             Self::ConnectionFailed => "connection_failed",
             Self::CredentialsRejected => "credentials_rejected",
             Self::PlatformReleaseMissing => "platform_release_missing",
+            Self::DebugServerExternalUnavailable => "debug_server_external_unavailable",
+            Self::DebugServerExternalTargetUnverified => "debug_server_external_target_unverified",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InfobaseSessions => "infobase_sessions",
@@ -162,6 +166,8 @@ impl ErrorCode {
         Self::ConnectionFailed,
         Self::CredentialsRejected,
         Self::PlatformReleaseMissing,
+        Self::DebugServerExternalUnavailable,
+        Self::DebugServerExternalTargetUnverified,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
         Self::InfobaseSessions,

@@ -24,6 +24,11 @@
           "type": "string"
         },
         {
+          "const": "released",
+          "description": "`stop`: одна lease освобождена, остальные ещё используют процесс.",
+          "type": "string"
+        },
+        {
           "const": "nothing_to_stop",
           "description": "`stop`: гасить нечего — сеанс неизвестен, сервер вышел сам или принадлежит стенду.",
           "type": "string"

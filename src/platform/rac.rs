@@ -357,6 +357,39 @@ pub fn checked_infobase_id(answer: &str, name: &str) -> Option<Option<Uuid>> {
     Some(found)
 }
 
+/// Registration decisions need one well-formed cluster and an unambiguous base UUID.
+pub(crate) fn confirmed_single_cluster(answer: &ProcessResult) -> Option<Cluster> {
+    if !complete_response(answer) || !unique_keys(&answer.stdout, &["cluster", "host", "port"]) {
+        return None;
+    }
+    let [cluster]: [Cluster; 1] = clusters(&answer.stdout).try_into().ok()?;
+    Some(cluster)
+}
+
+pub(crate) fn confirmed_infobase_id(answer: &ProcessResult, name: &str) -> Option<Uuid> {
+    if !complete_response(answer) || !unique_keys(&answer.stdout, &["infobase", "name"]) {
+        return None;
+    }
+    checked_infobase_id(&answer.stdout, name)?
+}
+
+/// Read one cluster and its registered base using cancellable, read-only RAC requests.
+pub(crate) fn probe_confirmed_registration(
+    runner: &dyn ProcessRunner,
+    rac: &Path,
+    address: &str,
+    reference: &str,
+    policy: &ProcessExecutionPolicy,
+) -> Result<Option<(Cluster, Uuid)>, ProcessError> {
+    let policy = policy.without_work();
+    let answer = runner.run_with_policy(&cluster_list(rac, address), &policy)?;
+    let Some(cluster) = confirmed_single_cluster(&answer) else {
+        return Ok(None);
+    };
+    let answer = runner.run_with_policy(&infobase_list(rac, address, &cluster.id), &policy)?;
+    Ok(confirmed_infobase_id(&answer, reference).map(|infobase| (cluster, infobase)))
+}
+
 /// Идентификатор базы с этим именем из ответа `infobase summary list`; имена сравниваются, как
 /// у [`lists_infobase`].
 pub fn infobase_id(answer: &str, name: &str) -> Option<String> {
@@ -426,10 +459,7 @@ impl ManagedSessionTarget {
             complete_response(&answer).then_some(answer)
         };
         let answer = run(cluster_list(&program, &address))?;
-        let [cluster]: [Cluster; 1] = clusters(&answer.stdout).try_into().ok()?;
-        if !unique_keys(&answer.stdout, &["cluster", "host", "port"]) {
-            return None;
-        }
+        let cluster = confirmed_single_cluster(&answer)?;
         if cluster.port != pins.ports.regport {
             return None;
         }
@@ -441,10 +471,7 @@ impl ManagedSessionTarget {
             infobase_list(&program, &address, &cluster.id),
             auth,
         ))?;
-        if !unique_keys(&answer.stdout, &["infobase", "name"]) {
-            return None;
-        }
-        let infobase = checked_infobase_id(&answer.stdout, &self.reference)??;
+        let infobase = confirmed_infobase_id(&answer, &self.reference)?;
         let answer = run(with_cluster_auth(
             session_list(&program, &address, &cluster.id, &infobase.to_string()),
             auth,

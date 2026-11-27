@@ -950,11 +950,24 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
   `WEBClient` и остановку на точке проверяет отладчик.
 
 ```text
+v8-runner debug-server prepare --owner-pid <PID> [--dry-run]
 v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>]
 v8-runner debug-server start --ensure --owner-pid <PID> [--dry-run]
 v8-runner debug-server status <SESSION>
 v8-runner debug-server stop <SESSION> [--dry-run]
 ```
+
+- `debug-server prepare --owner-pid <PID>` готовит адрес и алиас для отладчика и
+  тонкого клиента выбранной ИБ. Для файловой ИБ область `client_and_server` включает
+  ServerEmulation. Для работающего управляемого кластера раннер подтверждает
+  сервер отладки и регистрацию выбранной ИБ. Для внешней серверной ИБ без
+  адреса раннер поднимает собственный loopback-`dbgs` с областью `client`.
+  Настроенный внешний адрес даёт раздельные отказы при недоступности и при
+  отсутствии подтверждённой привязки к кластерной ИБ. Оба отказа завершают
+  команду до запуска локального сервера. У заимствованного процесса `release: null`.
+  У собственного каждое обращение получает отдельную аренду для `debug-server stop`.
+  Результат `released` означает, что сервер нужен другим арендам. Превью возвращает
+  `planned` без действующего адреса и аренды.
 
 - Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows и macOS arm64
   ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). На Linux проверены

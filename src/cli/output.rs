@@ -87,6 +87,12 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
             match reason {
                 EnvironmentReason::Unavailable => ErrorCode::EnvironmentUnavailable,
                 EnvironmentReason::PlatformReleaseMissing => ErrorCode::PlatformReleaseMissing,
+                EnvironmentReason::DebugServerExternalUnavailable => {
+                    ErrorCode::DebugServerExternalUnavailable
+                }
+                EnvironmentReason::DebugServerExternalTargetUnverified => {
+                    ErrorCode::DebugServerExternalTargetUnverified
+                }
             },
             ErrorKind::Environment,
         ),

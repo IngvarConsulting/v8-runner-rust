@@ -364,6 +364,8 @@
             "infobase_not_found",
             "connection_failed",
             "credentials_rejected",
+            "debug_server_external_unavailable",
+            "debug_server_external_target_unverified",
             "workspace_busy",
             "invalid_output",
             "cancelled",

@@ -296,6 +296,19 @@ pub fn load_config_for_infobase_runtime(
     )
 }
 
+/// Ending a prepared lease needs workspace paths, even when the infobase was removed.
+pub fn load_config_for_debug_lease_stop(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        &InfobaseSelector::Default,
+        ConfigValidationMode::DebugLeaseStop,
+    )
+}
+
 /// Два документа проекта одним значением: подряд идущие `&str` переставляются молча, а
 /// перестановка меняет и проверки границы, и итоговые настройки.
 pub struct ProjectText<'a> {
@@ -347,6 +360,7 @@ enum ConfigValidationMode {
     VanessaDownload,
     Launch,
     InfobaseRuntime,
+    DebugLeaseStop,
     /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
     WithoutInfobase {
         operation: crate::domain::capability::Operation,
@@ -407,7 +421,7 @@ fn build_config(
     // `make` и `convert` базу проекта не выбирают: о синониме её секции им говорить нечего.
     let reads_the_base = !matches!(
         validation_mode,
-        ConfigValidationMode::WithoutInfobase { .. }
+        ConfigValidationMode::WithoutInfobase { .. } | ConfigValidationMode::DebugLeaseStop
     );
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
     warnings.extend(
@@ -441,7 +455,7 @@ fn build_config(
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
     let has_selected_infobase = if matches!(
         validation_mode,
-        ConfigValidationMode::WithoutInfobase { .. }
+        ConfigValidationMode::WithoutInfobase { .. } | ConfigValidationMode::DebugLeaseStop
     ) {
         select_no_infobase(&mut root)?;
         false
@@ -510,6 +524,7 @@ fn build_config(
             validate_vanessa_download(&config, has_selected_infobase.then_some(&config.infobase))?
         }
         ConfigValidationMode::Launch => validate_launch(&config)?,
+        ConfigValidationMode::DebugLeaseStop => {}
         ConfigValidationMode::InfobaseRuntime => {
             crate::config::validate::validate_infobase_runtime(&config)?
         }
@@ -565,6 +580,13 @@ fn reject_local_keys_in_project_file(
     }
     if mapping_contains_key(mapping, "working-copy") {
         return Err(ConfigValidationError::WorkingCopyBelongsToTheLocalLayer);
+    }
+    if mapping
+        .get(yaml_key("infobase"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|infobase| mapping_contains_key(infobase, "debug"))
+    {
+        return Err(ConfigValidationError::InfobaseDebugBelongsToTheLocalLayer);
     }
     Ok(())
 }
@@ -4171,6 +4193,20 @@ source-set:
             .config;
 
         assert_eq!(config.project_file, "other.yaml");
+    }
+
+    #[test]
+    fn a_project_file_cannot_select_an_external_debugger() {
+        let project = serde_yaml::from_str(
+            "infobase: {connection: 'File=ib', debug: {url: 'http://127.0.0.1:15000'}}",
+        )
+        .unwrap();
+        assert!(matches!(
+            super::reject_local_keys_in_project_file(&project),
+            Err(
+                crate::config::validate::ConfigValidationError::InfobaseDebugBelongsToTheLocalLayer
+            )
+        ));
     }
 
     #[cfg(unix)]

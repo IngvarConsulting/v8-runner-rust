@@ -424,6 +424,9 @@ pub enum ConfigValidationError {
     )]
     WorkingCopyBelongsToTheLocalLayer,
 
+    #[error("declare the infobase debugger in v8project.local.yaml under infobases.<name>.debug")]
+    InfobaseDebugBelongsToTheLocalLayer,
+
     #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
     )]
@@ -3467,6 +3470,7 @@ mod tests {
                 password: None,
                 dbms: None,
                 web: None,
+                debug: None,
                 standalone: None,
                 cluster: None,
             },

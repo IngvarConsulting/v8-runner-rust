@@ -11,6 +11,7 @@
 //! запись: её `starting` при живом запускающем — отказ «запускается».
 
 mod ensure;
+mod prepare;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -641,6 +642,21 @@ impl DebugServer<'_> {
             return Err(Reason::RecordUnavailable);
         }
 
+        self.verify_owned_endpoint(&record, pid, port)?;
+        if read_record().as_ref() != Ok(&record) || self.read_scope(paths).ok() != Some(scope) {
+            return Err(Reason::RecordChanged);
+        }
+        Ok(Some((pid, port)))
+    }
+
+    fn verify_owned_endpoint(
+        &self,
+        record: &ServiceRecord,
+        pid: u32,
+        port: u16,
+    ) -> Result<(), DebugServerStatusReason> {
+        use DebugServerStatusReason as Reason;
+
         let verify_process = || {
             let machine = self.host.machine().ok_or(Reason::ProcessUnverified)?;
             if record.machine.as_deref() != Some(machine.as_str()) {
@@ -668,11 +684,7 @@ impl DebugServer<'_> {
             None => return Err(Reason::ListenerUnverified),
         }
         verify_listener()?;
-        verify_process()?;
-        if read_record().as_ref() != Ok(&record) || self.read_scope(paths).ok() != Some(scope) {
-            return Err(Reason::RecordChanged);
-        }
-        Ok(Some((pid, port)))
+        verify_process()
     }
 
     pub fn stop(
@@ -682,11 +694,26 @@ impl DebugServer<'_> {
     ) -> Result<DebugServerResult, UseCaseError> {
         let started = Instant::now();
         let paths = session_paths(self.config, session);
-        let guard = self.lock_ensured_session(&paths, dry_run)?;
-        let mut result = if guard.is_some() {
-            self.stop_ensured_session(&paths)?
+        let prepared = if session.is_prepare() {
+            self.stop_prepared(session, dry_run)?
         } else {
-            self.stop_session(&paths, dry_run)?
+            None
+        };
+        let mut result = match prepared {
+            Some(result) => result,
+            None if session.is_prepare() => {
+                let mut result = empty(DebugServerAction::NothingToStop);
+                result.known_session = Some(false);
+                result
+            }
+            None => {
+                let guard = self.lock_ensured_session(&paths, dry_run)?;
+                if guard.is_some() {
+                    self.stop_ensured_session(&paths)?
+                } else {
+                    self.stop_session(&paths, dry_run)?
+                }
+            }
         };
         result.session = Some(session);
         result.duration_ms = crate::support::time::elapsed_ms(started);
@@ -991,6 +1018,8 @@ mod tests {
         exits_before_ready: Cell<bool>,
         /// Назвал адрес, но не отвечает по `rdbg`.
         never_answers: Cell<bool>,
+        answers_external: Cell<bool>,
+        external_probes: RefCell<Vec<String>>,
         replace_listener_during_probe: Cell<bool>,
         process_inaccessible: Cell<bool>,
         proof_unavailable: Cell<bool>,
@@ -1144,6 +1173,10 @@ mod tests {
                 self.listeners.borrow_mut().insert(port, OWNER);
             }
             !self.never_answers.get() && self.listeners.borrow().contains_key(&port)
+        }
+        fn external_rdbg_answers(&self, address: &str) -> bool {
+            self.external_probes.borrow_mut().push(address.to_owned());
+            self.answers_external.get()
         }
     }
 
@@ -2003,6 +2036,281 @@ mod tests {
             "{error}"
         );
         assert_eq!(host.spawned.get(), 0);
+    }
+
+    fn prepared_lease(
+        receipt: crate::domain::debug_server::DebugServerPrepareResult,
+    ) -> DebugSession {
+        use crate::domain::debug_server::{DebugServerPrepareResult, DebugServerRelease};
+        let DebugServerPrepareResult::Prepared {
+            release: Some(DebugServerRelease::Stop { session }),
+            ..
+        } = receipt
+        else {
+            panic!("expected an owned debug server with a release token");
+        };
+        session
+    }
+
+    #[test]
+    fn prepared_leases_release_independently_even_after_target_selection_changes() {
+        let mut setup = setup();
+        let host = Host::with_owner();
+        let (first, second) = {
+            let ctx = context();
+            let locate = || Ok(setup.resolution());
+            let server = setup.server(&ctx, &host, &locate);
+            (
+                prepared_lease(server.prepare(OWNER, false).unwrap()),
+                prepared_lease(server.prepare(OWNER, false).unwrap()),
+            )
+        };
+        assert_ne!(first, second);
+        assert_eq!(host.spawned.get(), 1);
+        setup.config.infobase = InfobaseConfig::file("Srvr=other;Ref=another".to_owned());
+        let release = setup.stop(first, &host).unwrap();
+        assert_eq!(release.action, DebugServerAction::Released);
+        assert_eq!(release.known_session, Some(true));
+        assert_eq!(release.session, Some(first));
+        assert_eq!(release.stopped_pid, None);
+        assert!(host.alive(PID));
+        assert_eq!(
+            setup.stop(first, &host).unwrap().action,
+            DebugServerAction::NothingToStop
+        );
+        let last = setup.stop(second, &host).unwrap();
+        assert_eq!(last.action, DebugServerAction::Stopped);
+        assert_eq!(last.stopped_pid, Some(PID));
+        assert!(!host.alive(PID));
+    }
+
+    #[test]
+    fn prepare_preview_does_not_locate_resolve_owner_or_write_state() {
+        use crate::domain::debug_server::DebugServerPrepareResult;
+        let setup = setup();
+        let host = Host::default();
+        let ctx = context();
+        let locate = || panic!("preview must not locate the client");
+        let receipt = setup
+            .server(&ctx, &host, &locate)
+            .prepare(OWNER, true)
+            .unwrap();
+        assert!(matches!(receipt, DebugServerPrepareResult::Planned));
+        assert!(!setup.config.work_path.exists());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn managed_prepare_refuses_rdbg_without_a_matching_cluster_binding() {
+        let setup = setup().on_managed_cluster();
+        let host = Host::with_owner();
+        let ctx = context();
+        let locate = || panic!("managed prepare must not locate a local dbgs");
+        assert!(setup
+            .server(&ctx, &host, &locate)
+            .prepare(OWNER, false)
+            .is_err());
+        assert!(!setup.config.work_path.exists());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn prepared_stop_does_not_signal_a_recycled_pid() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let ctx = context();
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        let session = prepared_lease(server.prepare(OWNER, false).unwrap());
+        host.processes.borrow_mut().get_mut(&PID).unwrap().started += 1;
+        let stale = server.stop(session, false).unwrap();
+        assert_eq!(stale.action, DebugServerAction::NothingToStop);
+        assert!(stale.stale_record);
+        assert!(host.alive(PID));
+        assert!(host.soft_stops.borrow().is_empty());
+        assert!(host.hard_stops.borrow().is_empty());
+    }
+
+    #[test]
+    fn prepare_distinguishes_unavailable_and_unverified_external_cluster() {
+        use crate::config::model::InfobaseDebugConfig;
+        use crate::domain::launch::DebuggerUrl;
+
+        let mut setup = setup();
+        setup.config.infobase = InfobaseConfig::file("Srvr=external;Ref=demo".to_owned());
+        let address = "http://debug.example:1548";
+        setup.config.infobase.debug = Some(InfobaseDebugConfig {
+            url: DebuggerUrl::parse(address).unwrap(),
+            infobase_alias: Some("demo".to_owned()),
+        });
+        let host = Host::default();
+        let ctx = context();
+        let locate = || panic!("configured external route must not locate a local dbgs");
+        let server = setup.server(&ctx, &host, &locate);
+        assert_eq!(
+            server.prepare(OWNER, false).unwrap_err().kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::DebugServerExternalUnavailable)
+        );
+        host.answers_external.set(true);
+        assert_eq!(
+            server.prepare(OWNER, false).unwrap_err().kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::DebugServerExternalTargetUnverified)
+        );
+        assert_eq!(host.external_probes.borrow().as_slice(), [address, address]);
+        assert!(!setup.config.work_path.exists());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn prepare_borrows_exact_explicit_file_endpoint_without_a_lease() {
+        use crate::config::model::InfobaseDebugConfig;
+        use crate::domain::debug_server::{
+            DebugServerPrepareOwner, DebugServerPrepareResult, DebugServerPrepareScope,
+        };
+        use crate::domain::launch::DebuggerUrl;
+
+        let mut setup = setup();
+        setup.config.infobase.debug = Some(InfobaseDebugConfig {
+            url: DebuggerUrl::parse("http://debug.example:1548").unwrap(),
+            infobase_alias: None,
+        });
+        let host = Host::default();
+        host.answers_external.set(true);
+        let ctx = context();
+        let locate = || panic!("external file route must not locate a local dbgs");
+        let server = setup.server(&ctx, &host, &locate);
+        assert!(matches!(
+            server.prepare(OWNER, false).unwrap(),
+            DebugServerPrepareResult::Prepared {
+                url, infobase_alias, owner: DebugServerPrepareOwner::External,
+                scope: DebugServerPrepareScope::ClientAndServer, owner_pid: None, release: None,
+            } if url == "http://debug.example:1548" && infobase_alias == FILE_ALIAS
+        ));
+        assert!(!setup.config.work_path.exists());
+        assert_eq!(host.spawned.get(), 0);
+    }
+
+    #[test]
+    fn prepare_uses_client_only_local_debug_for_external_cluster_without_an_address() {
+        use crate::domain::debug_server::{
+            DebugServerPrepareOwner, DebugServerPrepareResult, DebugServerPrepareScope,
+        };
+
+        let mut setup = setup();
+        setup.config.infobase = InfobaseConfig::file("Srvr=external;Ref=demo".to_owned());
+        let host = Host::with_owner();
+        let ctx = context();
+        let locate = || Ok(setup.resolution());
+        let receipt = setup
+            .server(&ctx, &host, &locate)
+            .prepare(OWNER, false)
+            .unwrap();
+        assert!(matches!(
+            receipt,
+            DebugServerPrepareResult::Prepared {
+                url, infobase_alias, scope: DebugServerPrepareScope::Client,
+                owner: DebugServerPrepareOwner::Runner, owner_pid: Some(OWNER), release: Some(_),
+            } if url.starts_with("http://127.0.0.1:") && infobase_alias == "demo"
+        ));
+        assert!(host.external_probes.borrow().is_empty());
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn legacy_unknown_stop_ignores_an_unreadable_prepared_namespace() {
+        let setup = setup();
+        let host = Host::default();
+        let sessions = sessions_root(&setup.config);
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("prepared-v1"), "invalid directory").unwrap();
+        let old_token = DebugSession::new();
+        let result = setup.stop(old_token, &host).unwrap();
+        assert_eq!(result.action, DebugServerAction::NothingToStop);
+        assert_eq!(result.known_session, Some(false));
+    }
+
+    #[test]
+    fn unresolved_prepared_scope_cannot_confirm_absence_of_a_lease() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let ctx = context();
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        let session = prepared_lease(server.prepare(OWNER, false).unwrap());
+        let prepared = sessions_root(&setup.config).join("prepared-v1");
+        let project = std::fs::read_dir(&prepared)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let invalid = project.join(format!("{}.json", "0".repeat(64)));
+        std::fs::write(invalid, "broken state").unwrap();
+        let unresolved = server.stop(DebugSession::new_prepare(), false).unwrap_err();
+        assert_eq!(unresolved.kind(), UseCaseErrorKind::Platform);
+        assert!(host.alive(PID));
+        assert_eq!(server.stop(session, false).unwrap().stopped_pid, Some(PID));
+        assert!(!host.alive(PID));
+    }
+
+    #[test]
+    fn copied_prepared_scope_cannot_stop_the_original_debug_server() {
+        let mut setup = setup();
+        let host = Host::with_owner();
+        let session = {
+            let ctx = context();
+            let locate = || Ok(setup.resolution());
+            let server = setup.server(&ctx, &host, &locate);
+            prepared_lease(server.prepare(OWNER, false).unwrap())
+        };
+        let original = setup.config.work_path.clone();
+        let project = std::fs::read_dir(sessions_root(&setup.config).join("prepared-v1"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        setup.config.work_path = setup.config.base_path.join("copied-work");
+        let copy = sessions_root(&setup.config)
+            .join("prepared-v1")
+            .join(project.file_name());
+        std::fs::create_dir_all(&copy).unwrap();
+        let record = std::fs::read_dir(project.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        std::fs::copy(record.path(), copy.join(record.file_name())).unwrap();
+
+        assert_eq!(
+            setup.stop(session, &host).unwrap().action,
+            DebugServerAction::NothingToStop
+        );
+        assert!(host.alive(PID));
+        setup.config.work_path = original;
+        assert_eq!(setup.stop(session, &host).unwrap().stopped_pid, Some(PID));
+    }
+
+    #[test]
+    fn prepare_cancellation_stops_only_the_unpublished_owned_attempt() {
+        let setup = setup();
+        let host = Host::with_owner();
+        let token = tokio_util::sync::CancellationToken::new();
+        host.cancel_on_spawn.replace(Some(token.clone()));
+        let ctx = context().with_cancellation(token);
+        let locate = || Ok(setup.resolution());
+        let server = setup.server(&ctx, &host, &locate);
+        assert!(matches!(
+            server.prepare(OWNER, false).unwrap_err().kind(),
+            UseCaseErrorKind::Cancelled(_)
+        ));
+        assert!(!host.alive(PID));
+        assert_eq!(host.spawned.get(), 1);
+        host.cancel_on_spawn.replace(None);
+        let ctx = context();
+        let server = setup.server(&ctx, &host, &locate);
+        assert!(server.prepare(OWNER, false).is_ok());
+        assert!(host.alive(PID));
+        assert_eq!(host.spawned.get(), 2);
     }
 
     /// Окна портов не задевают полосу закреплённых портов стенда (20000 и выше), порты сервера 1С

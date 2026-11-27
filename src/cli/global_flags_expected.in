@@ -67,6 +67,7 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "web stop",
     "web restart",
     "debug-server start",
+    "debug-server prepare",
     "debug-server stop",
     "extensions",
     "extensions list",

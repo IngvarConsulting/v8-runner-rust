@@ -117,6 +117,9 @@ pub(crate) trait ServiceHost {
     fn rdbg_answers(&self, _port: u16) -> bool {
         false
     }
+    fn external_rdbg_answers(&self, _address: &str) -> bool {
+        false
+    }
     /// Мягкий перезапуск процесса с этой идентичностью: Apache перечитывает конфиг, не
     /// закрывая порт. Где его нет — отказ.
     fn graceful_reload(&self, _pid: u32, _started: Option<u64>) -> std::io::Result<()> {
@@ -201,6 +204,10 @@ impl RealHost {
 }
 
 impl ServiceHost for RealHost {
+    fn external_rdbg_answers(&self, address: &str) -> bool {
+        crate::platform::dbgs::probe_rdbg(address)
+    }
+
     fn supported(&self) -> bool {
         self.system.services
     }
@@ -473,6 +480,12 @@ struct DebuggerLaunch<'a> {
     protect_unidentified: bool,
 }
 
+enum DebuggerJournal<'a> {
+    Save(&'a ServiceRecord),
+    Recover(&'a ServiceRecord),
+    Forget,
+}
+
 /// Единственный запуск своего `dbgs` с записью — для сеанса `debug-server` и для автономного
 /// сервера: запись `starting` до запуска, pid и время старта сразу после. Не запустился или
 /// запись не легла — процесс гасится, запись снимается. Готовность проверяет вызывающий.
@@ -481,6 +494,24 @@ fn spawn_debugger(
     runner: &dyn ProcessRunner,
     context: &ExecutionContext,
     launch: DebuggerLaunch<'_>,
+) -> DebuggerSpawn {
+    let paths = launch.paths;
+    spawn_recorded_debugger(host, runner, context, launch, |record| {
+        match record {
+            DebuggerJournal::Save(record) => return write_record(paths, record),
+            DebuggerJournal::Recover(_) => {}
+            DebuggerJournal::Forget => forget_record(paths),
+        }
+        Ok(())
+    })
+}
+
+fn spawn_recorded_debugger(
+    host: &dyn ServiceHost,
+    runner: &dyn ProcessRunner,
+    context: &ExecutionContext,
+    launch: DebuggerLaunch<'_>,
+    mut store: impl FnMut(DebuggerJournal<'_>) -> Result<(), UseCaseError>,
 ) -> DebuggerSpawn {
     use crate::platform::dbgs::DebugPort;
 
@@ -505,7 +536,7 @@ fn spawn_debugger(
         agent: None,
         location: launch.paths.location(),
     };
-    if let Err(error) = write_record(launch.paths, &record) {
+    if let Err(error) = store(DebuggerJournal::Save(&record)) {
         return DebuggerSpawn::Failed(error);
     }
     let request = crate::platform::dbgs::start_request(
@@ -518,46 +549,71 @@ fn spawn_debugger(
     let pid = match host.spawn(&request, context.work()) {
         Ok(pid) => pid,
         Err(error) => {
-            forget_record(launch.paths);
             // Job, из которого нельзя выйти, — дело окружения: сервер умер бы с командой.
-            return DebuggerSpawn::Failed(match error {
+            let error = match error {
                 ServiceSpawnError::Io(_) => UseCaseError::new(
                     UseCaseErrorKind::Platform,
                     format!("dbgs did not start: {error}"),
                 ),
                 _ => environment(format!("dbgs did not start: {error}")),
+            };
+            return DebuggerSpawn::Failed(match store(DebuggerJournal::Forget) {
+                Ok(()) => error,
+                Err(cleanup) => error.followed_by(cleanup.to_string()),
             });
         }
     };
     let Some(facts) = host.facts(pid) else {
         if launch.protect_unidentified && !host.debug_process_gone(pid) {
-            return DebuggerSpawn::Uncertain(UseCaseError::new(
+            record.pid = Some(pid);
+            let error = UseCaseError::new(
                 UseCaseErrorKind::Platform,
-                format!("dbgs pid {pid} started, but the system could not identify it; its record was retained for recovery"),
-            ));
+                format!(
+                    "dbgs pid {pid} started, but the system could not identify it; its record was retained for recovery"
+                ),
+            );
+            return DebuggerSpawn::Uncertain(retain_debug_launch(&mut store, &record, error));
         }
-        forget_record(launch.paths);
-        return DebuggerSpawn::ExitedAtOnce;
+        return match store(DebuggerJournal::Forget) {
+            Ok(()) => DebuggerSpawn::ExitedAtOnce,
+            Err(error) => DebuggerSpawn::Failed(error),
+        };
     };
     if launch.protect_unidentified && facts.image != crate::platform::dbgs::executable_name() {
-        return DebuggerSpawn::Uncertain(UseCaseError::new(
+        record.pid = Some(pid);
+        let error = UseCaseError::new(
             UseCaseErrorKind::Platform,
             format!("pid {pid} no longer belongs to dbgs; its record was retained for recovery"),
-        ));
+        );
+        return DebuggerSpawn::Uncertain(retain_debug_launch(&mut store, &record, error));
     }
     record.pid = Some(pid);
     record.started = Some(facts.started);
     record.image = Some(facts.image);
-    if let Err(error) = write_record(launch.paths, &record) {
+    if let Err(error) = store(DebuggerJournal::Save(&record)) {
         if stop_confirmed(host, runner, context, pid, record.started, Duration::ZERO)
             && (!launch.protect_unidentified || debug_process_ended(host, &record, pid))
         {
-            forget_record(launch.paths);
-            return DebuggerSpawn::Failed(error);
+            return DebuggerSpawn::Failed(match store(DebuggerJournal::Forget) {
+                Ok(()) => error,
+                Err(cleanup) => error.followed_by(cleanup.to_string()),
+            });
         }
-        return DebuggerSpawn::Uncertain(error.followed_by(format!("dbgs pid {pid} did not stop")));
+        let error = error.followed_by(format!("dbgs pid {pid} did not stop"));
+        return DebuggerSpawn::Uncertain(retain_debug_launch(&mut store, &record, error));
     }
     DebuggerSpawn::Spawned(Box::new(SpawnedDebugger { record, pid }))
+}
+
+fn retain_debug_launch(
+    store: &mut impl FnMut(DebuggerJournal<'_>) -> Result<(), UseCaseError>,
+    record: &ServiceRecord,
+    error: UseCaseError,
+) -> UseCaseError {
+    match store(DebuggerJournal::Recover(record)) {
+        Ok(()) => error,
+        Err(save) => error.followed_by(format!("cannot update the recovery record: {save}")),
+    }
 }
 
 /// Сколько ждать конца процесса после каждого шага остановки.
@@ -1555,6 +1611,16 @@ pub fn debug_server_start(
             result
         })
     })
+}
+
+/// Prepare a verified debug endpoint and lease it only if the runner owns it.
+pub fn debug_server_prepare(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    owner_pid: u32,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::debug_server::DebugServerPrepareResult> {
+    with_debug_server(context, config, |server| server.prepare(owner_pid, dry_run))
 }
 
 /// `debug-server stop`: гасит сервер отладки сеанса; повторный вызов безопасен.

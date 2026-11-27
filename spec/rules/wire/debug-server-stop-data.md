@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DEBUG-SERVER-STOP-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/debug-server-stop.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -9,6 +9,10 @@ check:
   - src/use_cases/managed_stand/debug_server.rs::a_wrong_session_leaves_the_server_alone
   - src/use_cases/managed_stand/debug_server.rs::a_stale_session_leaves_a_process_that_took_its_pid_alone
   - tests/cli_debug_server.rs::stop_answers_while_another_command_holds_the_work_path
+  - src/use_cases/managed_stand/debug_server.rs::prepared_leases_release_independently_even_after_target_selection_changes
+  - src/use_cases/managed_stand/debug_server.rs::prepared_stop_does_not_signal_a_recycled_pid
+  - src/use_cases/managed_stand/debug_server.rs::copied_prepared_scope_cannot_stop_the_original_debug_server
+  - src/use_cases/managed_stand/debug_server.rs::unresolved_prepared_scope_cannot_confirm_absence_of_a_lease
 ---
 
 # `data` команды `debug-server stop`
@@ -24,6 +28,12 @@ check:
 `action` — `nothing_to_stop`: сервер отладки живёт со своим кластером или автономным сервером, `stop` снимает
 только сеанс. `url` и `port` у такого сеанса нет: порты стенда могли смениться, его живой адрес называет
 `cluster status` или `standalone status`.
+
+Для аренды из `debug-server prepare` есть также `action: released`: раннер снял
+только переданную аренду. `known_session` равен `true`, `session` совпадает с
+запросом, `stopped_pid` отсутствует. При последней аренде `stopped` означает
+подтверждённое завершение своего `dbgs` и содержит его PID. Повтор освобождения
+возвращает `nothing_to_stop` и не трогает остальные аренды.
 
 ## Пример
 
