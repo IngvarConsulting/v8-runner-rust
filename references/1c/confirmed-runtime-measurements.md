@@ -5540,6 +5540,12 @@ Computer: w11p-igor, session: 1, started: 11/11/2026 at 2:49:59 AM, application:
 блокировок, которые на macOS видит `F_GETLK`, проба `LockFileEx` на Windows не видит. Проба с
 `share=0` на время открытия сама не пускает в базу других.
 
+### Отказ SSH управляемого агента при занятом Конфигураторе
+
+Windows, файловая ИБ, 1С 8.3.27.2490. В замере [v8-runner #818](https://github.com/IngvarConsulting/v8-runner-rust/pull/818) для [Unica #2902](https://github.com/IngvarConsulting/unica/issues/2902) агент вернул одинаковый отказ SSH с неверным тестовым паролем и с верными реквизитами при открытом Конфигураторе. Во втором случае пакетный `DESIGNER /GetConfigGenerationID` сообщил о блокировке, а чтение `1Cv8.cgr` вернуло Win32 `ERROR_SHARING_VIOLATION` (32).
+
+На кандидате `5f2cc7e` команда `push main` через `agent` при открытом Конфигураторе вернула `infobase_designer_busy` (выход 3) до передачи исходников. С теми же реквизитами после закрытия Конфигуратора правка применилась (выход 0). При свободной базе и неверном пароле сохранился `environment_unavailable/infobase_user` (выход 2). Выгрузка `/DumpDBCfg` подтвердила, что отвергнутая правка в конфигурацию базы не попала.
+
 ### `1Cv8.cdn` на Windows
 
 | случай | исход |

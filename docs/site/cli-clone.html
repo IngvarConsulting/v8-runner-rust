@@ -57,7 +57,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#managed-web">web</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -140,6 +140,9 @@ Project clone planned, nothing written</code></pre>
 <p>Превью тоже отказывает, если утилиту выгрузки найти не удалось. В ошибке указан искомый инструмент; файлов проекта после такого запуска нет.</p>
 
 <h2 id="clone-options">Параметры подключения и выгрузки</h2>
+<p>Установки можно найти до создания <code>v8project.yaml</code>. На Windows поиск включает <code>%LOCALAPPDATA%\Programs\1cv8</code> и <code>%LOCALAPPDATA%\Programs\1cv8_x86</code>. Если платформа установлена в другом месте, укажите каталог поиска.</p>
+<pre><code>v8-runner --json-message platforms --platform-path &lt;PATH&gt;</code></pre>
+<p>Если в каталоге запуска <code>common</code> есть <code>1cestart.exe</code> и нет версионных установок, раннер ищет версии в соседних каталогах. Возьмите <code>version</code> и <code>installation_root</code> из <code>selected.ibcmd</code> или <code>selected.designer</code> для нужной утилиты. Передайте их в <code>clone</code> как <code>--platform-version</code> и <code>--platform-path</code>.</p>
 <ul class="opts">
 <li><code>--connection</code> и <code>--platform-version</code> обязательны. Глобальный <code>--infobase</code> у <code>clone</code> не используется и отклоняется.</li>
 <li><code>--platform-path</code> задаёт путь к утилите, каталогу bin или установленной платформе.</li>
