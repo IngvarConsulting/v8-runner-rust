@@ -73,7 +73,7 @@
 
 <main class="page">
 <h1>dbms</h1>
-<p class="lede">Команды <code>dbms</code> запускают и останавливают PostgreSQL для базы, объявленной <code>dbms.managed</code>, на машине раннера Windows, без службы и без прав администратора. Вашу СУБД раннер только использует и не трогает её процессы.</p>
+<p class="lede">Команды <code>dbms</code> запускают и останавливают PostgreSQL для базы, объявленной <code>dbms.managed</code>, на машине раннера с Windows или Linux, без службы и без прав администратора. Вашу СУБД раннер только использует и не трогает её процессы.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-dbms-start">dbms start</h2>
 <pre data-output-command><code>v8-runner dbms start</code></pre>
@@ -115,7 +115,7 @@
 <tr data-response-class="outcome"><td>Состояние</td><td><code>dbms status</code> называет свой PostgreSQL или говорит, что он не запущен. <a href="#dbms-status-own">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>PostgreSQL остановлен</td><td><code>dbms stop</code> завершил свои процессы. <a href="#dbms-stopped">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Сервер ещё работает</td><td><code>dbms stop</code> при работающем своём сервере отказывает и называет его: <code>invalid_argument</code>, выход CLI 2. <a href="#dbms-server-running">Пример</a></td></tr>
-<tr data-response-class="outcome"><td>Условия запуска не выполнены</td><td>Если сборка <code>tools.postgres.path</code> не найдена, запуск вызван на неподдерживаемой ОС или от root на Linux, раннер возвращает <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Условия запуска не выполнены</td><td>Если <code>tools.postgres.path</code> не задан, сборка не найдена либо запуск вызван на неподдерживаемой ОС или от root на Linux, раннер возвращает <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
