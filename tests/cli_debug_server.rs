@@ -211,6 +211,11 @@ tools:
     let status = rdbg_status(port).expect("the server outlived the command");
     assert!(status.contains("400"), "{status}");
     let session = data["session"].as_str().expect("session").to_owned();
+    #[cfg(target_os = "linux")]
+    let checks = [
+        run(dir.path(), &["debug-server", "status", &session]),
+        run(dir.path(), &["debug-server", "status", &session]),
+    ];
 
     let (code, stopped) = run(dir.path(), &["debug-server", "stop", &session]);
     assert_eq!(code, 0, "{stopped}");
@@ -222,4 +227,13 @@ tools:
     assert_eq!(code, 0, "{again}");
     assert_eq!(again["data"]["action"], "nothing_to_stop");
     assert_eq!(again["data"]["known_session"], false);
+
+    #[cfg(target_os = "linux")]
+    for (code, checked) in checks {
+        assert_eq!(code, 0, "{checked}");
+        assert_eq!(checked["data"]["status"], "ready", "{checked}");
+        for field in ["pid", "port", "url"] {
+            assert_eq!(checked["data"][field], data[field], "{checked}");
+        }
+    }
 }

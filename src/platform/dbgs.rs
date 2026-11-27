@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use crate::platform::service::ServiceRequest;
 
-#[cfg(target_os = "macos")]
-mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod owned_rdbg;
 
 const RDBG_PATH: &str = "/e1crdbg/rdbg?cmd=getDbgTargets";
 const RDBG_TIMEOUT: Duration = Duration::from_secs(2);
@@ -138,14 +138,14 @@ pub(crate) fn probe_rdbg(address: &str) -> bool {
     response.text().is_ok_and(|body| is_rdbg_refusal(&body))
 }
 
-/// On macOS bind the protocol response to an accepted socket of the recorded PID.
-#[cfg(target_os = "macos")]
+/// Bind the protocol response to an accepted socket of the recorded PID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn owned_rdbg_answers(pid: u32, port: u16) -> Option<bool> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .ok()?
-        .block_on(macos::owned_rdbg_answers(pid, port))
+        .block_on(owned_rdbg::owned_rdbg_answers(pid, port))
 }
 
 /// Отказ обработчика `rdbg`: исключение `virtual-resource-system`. С `Accept: application/json`

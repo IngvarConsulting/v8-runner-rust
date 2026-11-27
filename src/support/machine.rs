@@ -11,9 +11,9 @@ pub fn is_process_alive(pid: u32) -> bool {
     observe_unix_process(pid) == Some(true)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn process_definitely_gone(pid: u32) -> bool {
-    observe_unix_process(pid) == Some(false)
+    observe_unix_process(pid) == Some(false) || has_ended_unreaped(pid)
 }
 
 #[cfg(unix)]

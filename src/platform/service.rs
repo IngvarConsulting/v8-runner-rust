@@ -67,52 +67,10 @@ pub(crate) fn listens_on(pid: u32, port: u16) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn listens_on(pid: u32, port: u16) -> bool {
-    let Ok(tcp) = std::fs::read_to_string(format!("/proc/{pid}/net/tcp")) else {
-        return false;
-    };
-    let sockets: Vec<_> = tcp
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let local = fields.nth(1)?;
-            let state = fields.nth(1)?;
-            let inode = fields.nth(5)?;
-            listens_on_ipv4(local, state, port).then(|| format!("socket:[{inode}]"))
-        })
-        .collect();
-    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    fds.flatten().any(|fd| {
-        std::fs::read_link(fd.path()).is_ok_and(|link| {
-            sockets
-                .iter()
-                .any(|socket| link.as_os_str() == std::ffi::OsStr::new(socket))
-        })
-    })
-}
+mod linux_listener;
 
 #[cfg(target_os = "linux")]
-fn listens_on_ipv4(local: &str, state: &str, port: u16) -> bool {
-    // /proc/net/tcp encodes IPv4 as eight native-order hex digits, then ':' and four port digits.
-    let Some((address, port_field)) = local.split_at_checked(8) else {
-        return false;
-    };
-    let Some(local_port) = port_field
-        .strip_prefix(':')
-        .filter(|field| field.len() == 4)
-    else {
-        return false;
-    };
-    let Ok(address) = u32::from_str_radix(address, 16) else {
-        return false;
-    };
-    let address = Ipv4Addr::from(address.to_ne_bytes());
-    state == "0A"
-        && matches!(address, Ipv4Addr::UNSPECIFIED | Ipv4Addr::LOCALHOST)
-        && u16::from_str_radix(local_port, 16) == Ok(port)
-}
+pub(crate) use linux_listener::{debug_connection_generation, debug_loopback_owner, listens_on};
 
 #[cfg(target_os = "macos")]
 mod macos_listener;
@@ -1831,18 +1789,9 @@ mod imp {
             .into_iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())
             .flat_map(|table| {
-                table
-                    .lines()
-                    .skip(1)
-                    .filter_map(|line| {
-                        let columns: Vec<_> = line.split_whitespace().take(10).collect();
-                        // The kernel supplies a fixed-width hex port (tcp and tcp6).
-                        let address = columns.get(1)?;
-                        let hex_port = address.get(address.len().checked_sub(4)?..)?;
-                        (columns.get(3) == Some(&"0A")
-                            && u16::from_str_radix(hex_port, 16).ok() == Some(port))
-                        .then(|| format!("socket:[{}]", columns[9]))
-                    })
+                super::linux_listener::tcp_entries(&table)
+                    .filter(|row| row.is_listener() && row.local_port() == Some(port))
+                    .map(|row| format!("socket:[{}]", row.inode))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -1853,11 +1802,10 @@ mod imp {
             .ok()?
             .filter_map(Result::ok)
             .filter_map(|pid| {
-                let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
-                let owns_socket = descriptors
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
-                    .any(|target| listeners.contains(target.to_string_lossy().as_ref()));
+                let owns_socket =
+                    super::linux_listener::process_fd_links(std::path::Path::new("/proc"), pid)
+                        .ok()?
+                        .any(|target| listeners.contains(target.to_string_lossy().as_ref()));
                 owns_socket
                     .then(|| process_facts(pid).map(|facts| (facts.started, pid)))
                     .flatten()

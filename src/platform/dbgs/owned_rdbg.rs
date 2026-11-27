@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout_at, Instant};
 
 use super::{is_rdbg_refusal, RDBG_PATH, RDBG_TIMEOUT};
-use crate::platform::service::macos_debug_connection_generation;
+use crate::platform::service;
 
 pub(super) async fn owned_rdbg_answers(pid: u32, port: u16) -> Option<bool> {
     let deadline = Instant::now() + RDBG_TIMEOUT;
@@ -22,19 +22,29 @@ pub(super) async fn owned_rdbg_answers(pid: u32, port: u16) -> Option<bool> {
         return None;
     }
     let client_port = client.port();
-    let peer_generation = || macos_debug_connection_generation(pid, port, client_port);
+    #[cfg(target_os = "linux")]
+    let peer_generation = || service::debug_connection_generation(pid, port, client_port);
+    #[cfg(target_os = "macos")]
+    let peer_generation = || {
+        Ok::<_, std::io::Error>(service::macos_debug_connection_generation(
+            pid,
+            port,
+            client_port,
+        ))
+    };
     // connect() can finish before dbgs has accepted the connection. Wait for
     // the reverse tuple to appear in its descriptor table before sending HTTP.
     let generation = timeout_at(deadline, async {
         loop {
-            if let Some(generation) = peer_generation() {
-                break generation;
+            match peer_generation() {
+                Ok(Some(generation)) => break Some(generation),
+                Ok(None) => sleep(Duration::from_millis(10)).await,
+                Err(_) => break None,
             }
-            sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .ok()?;
+    .ok()??;
     if Instant::now() >= deadline {
         return None;
     }
@@ -70,7 +80,8 @@ pub(super) async fn owned_rdbg_answers(pid: u32, port: u16) -> Option<bool> {
     let proof = if !answers {
         Some(false)
     } else {
-        (peer_generation() == Some(generation) && Instant::now() < deadline).then_some(true)
+        (peer_generation().ok() == Some(Some(generation)) && Instant::now() < deadline)
+            .then_some(true)
     };
     driver.abort();
     proof
@@ -83,7 +94,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn macos_rdbg_requires_the_same_accepted_connection_after_the_reply() {
+    async fn owned_rdbg_requires_the_same_accepted_connection_after_the_reply() {
         for stays_open in [true, false] {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -120,7 +131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn macos_rdbg_does_not_send_a_request_to_an_unattributed_connection() {
+    async fn owned_rdbg_does_not_send_a_request_to_an_unattributed_connection() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {

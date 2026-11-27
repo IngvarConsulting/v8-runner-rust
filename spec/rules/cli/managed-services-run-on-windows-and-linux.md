@@ -18,12 +18,13 @@ check:
 `environment_unavailable` до запуска процессов.
 
 Запуск своего `dbgs` через `debug-server start` раннер не ограничивает по ОС. Свой `dbgs`
-раннера для файловой базы вживую замерен на Windows и macOS arm64 (#809). Linux не замерен (#778). Сервер
+раннера для файловой базы вживую замерен на Windows и macOS arm64 (#809).
+На Linux проверены `start`, `status` и `stop` (#813). Сервер
 отладки кластера (`cluster start --debug`) есть там же, где управляемый кластер, — на Windows и Linux (Linux
 замерен в #768); на остальных платформах `--debug` отвечает `environment_unavailable`. Сервер отладки
 автономного сервера — только на Windows: `debug-server start` у его базы на других системах отвечает
 `environment_unavailable`, как `standalone start`.
 
 Проверка файлового сеанса через `debug-server status` требует доказательства принадлежности
-loopback-сокета процессу. В 0.19 раннер получает его на Windows и macOS arm64. При отсутствии такого доказательства
+loopback-сокета процессу. Раннер получает его на Windows, Linux и macOS arm64. При отсутствии такого доказательства
 адрес для подключения не выдаётся, см. `CTR.WIRE.DEBUG-SERVER-STATUS-DATA`.

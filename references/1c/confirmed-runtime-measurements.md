@@ -6984,7 +6984,7 @@ OEM 866: см. замер #219. С 0.17.5 раннер снимает такой
   /DEBUGGERURL http://127.0.0.1:<порт>` к `dbgs`, который поднял `debug-server start`,
   регистрирует на нём две цели файловой базы: `getDbgTargets` отвечает JSON со списком `id`,
   где `targetType` — `ManagedClient` и `ServerEmulation`, `infoBaseAlias` — `DefAlias`.
-- Не мерено: `dbgs` на Linux и macOS (наличие в установке, `--notify`, `--ownerPID`).
+- Дополнительные замеры файлового `dbgs` приведены в разделах macOS arm64 (#809) и Linux (#813).
 
 ### Веб-клиент с HTTP-отладкой (#790)
 
@@ -7474,3 +7474,28 @@ Rosetta. Два параллельных `debug-server start --ensure --owner-pi
 вернул новый PID 65634 через 15,75 с. Владелец оставался жив. Порт 18000
 освободился и подошёл новому процессу, а токен сеанса изменился. Второй
 управляемый и отдельный внешний `dbgs` продолжили отвечать по `rdbg`.
+
+## Принадлежность соединения `rdbg` на Linux (#813)
+
+26.11.2026, Ubuntu 24.04.5 LTS x86_64, ядро 6.8.0-151-generic, `dbgs` 1С 8.3.27.2490.
+Файловая ИБ — отдельная копия БСП 3.1. Команды раннера запускались с `--json-message`.
+
+- Выпуск v8-runner 0.19.0 из `1384e890`: `debug-server start --owner-pid 332602` запустил PID
+  332625 на `127.0.0.1:15696`. `ss` подтвердил слушателя, проба `rdbg` вернула HTTP 400 с
+  исключением `virtual-resource-system`. `debug-server status <session>` вернул
+  `unverified/listener_unverified` без адреса.
+- Прямой запуск `dbgs --addr=127.0.0.1 --portRange=12000:12020 --notify=<file> --ownerPID=<pid>`
+  записал `127.0.0.1:12000` в `--notify`. Для PID 328396 запись принятого соединения в
+  `/proc/self/net/tcp` с inode 365707 соответствовала дескриптору процесса до запроса
+  и после чтения полного HTTP 400 ответа `rdbg`.
+- Сборка с исправлением: `debug-server start --owner-pid 339800` запустил PID 339805
+  на `127.0.0.1:14160`. Два `debug-server status <session>` вернули `ready` с теми же PID,
+  портом и `DefAlias`. Содержимое и время изменения записи сеанса совпали до и после обоих вызовов.
+- После `kill -KILL 339805` вызов
+  `dbgs --addr=127.0.0.1 --port=14160 --notify=foreign.notify --ownerPID=339800`
+  поднял внешний PID 339839. Старый `debug-server status <session>` вернул
+  `stale/process_gone` без адреса, а `debug-server stop <session>` — `nothing_to_stop`
+  с `stale_record: true`. До и после старого `stop` вывод `ss -H -ltnp 'sport = :14160'`
+  показал PID 339839, а `POST /e1crdbg/rdbg?cmd=getDbgTargets` с
+  `Content-Type: application/xml` и `Accept: application/json` вернул HTTP 400
+  с исключением `virtual-resource-system`.
