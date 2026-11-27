@@ -3,6 +3,7 @@
 //! Выбор считает тот же поиск, что и рабочие команды (`PlatformUtilities`), поэтому ответ не
 //! расходится с тем, что команда запустит.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::model::AppConfig;
@@ -15,12 +16,48 @@ use crate::platform::locator::{
 };
 use crate::platform::utilities::{sources_format, PlatformUtilities};
 
+pub(crate) enum PlatformsScope<'a> {
+    Project(&'a AppConfig),
+    Inventory(Option<PathBuf>),
+}
+
 /// Отвечает, что установлено и что раннер выбрал бы, и предупреждения конверта: расхождение
 /// формата исходников с выбранной платформой. Платформу не запускает.
-pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
+pub(crate) fn execute(scope: PlatformsScope<'_>) -> (PlatformsResult, Vec<String>) {
     let started = Instant::now();
-    // Расхождение формата ответ называет в `warnings`; журнал его не повторяет.
-    let mut utilities = PlatformUtilities::from_config(config).without_mismatch_log();
+    let (mut utilities, requirement, source_format, warn_missing) = match scope {
+        PlatformsScope::Project(config) => (
+            // Расхождение формата ответ называет в `warnings`; журнал его не повторяет.
+            PlatformUtilities::from_config(config).without_mismatch_log(),
+            PlatformRequirement {
+                version: config
+                    .tools
+                    .platform
+                    .version
+                    .as_ref()
+                    .map(ToString::to_string),
+                path: config.tools.platform.path.clone(),
+                strict: config.tools.platform.strict,
+            },
+            sources_format(config).map(|format| format.info()),
+            false,
+        ),
+        PlatformsScope::Inventory(path) => {
+            let path = path.map(crate::platform::locator::inventory_search_path);
+            let utilities = PlatformUtilities::for_inventory(path.clone());
+            let warn_missing = path.is_some();
+            (
+                utilities,
+                PlatformRequirement {
+                    version: None,
+                    path,
+                    strict: false,
+                },
+                None,
+                warn_missing,
+            )
+        }
+    };
     let installations = utilities
         .installations()
         .iter()
@@ -36,10 +73,10 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
             }
             Some(selected(&location))
         }
-        // Утилиты нет ни в одной подходящей установке: это и значит `null`.
-        Err(LocatorError::NotFound { .. }) => None,
-        // Утилита есть, но выбрать её нельзя, или при `sources` нет выпуска формата
-        // исходников: причина нужна вызывающему. Отказ выпуска один на все утилиты.
+        // При обычном поиске отсутствие утилиты показано самим значением `null`.
+        Err(LocatorError::NotFound { .. }) if !warn_missing => None,
+        // Для явного CLI-пути сообщаем также об отсутствии утилиты. Прочие причины
+        // отказа показываем всегда. Отказ выпуска при `sources` один на все утилиты.
         Err(error) => {
             let warning = error.to_string();
             if !warnings.contains(&warning) {
@@ -55,17 +92,8 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
     };
     let result = PlatformsResult {
         installations,
-        requirement: PlatformRequirement {
-            version: config
-                .tools
-                .platform
-                .version
-                .as_ref()
-                .map(ToString::to_string),
-            path: config.tools.platform.path.clone(),
-            strict: config.tools.platform.strict,
-        },
-        source_format: sources_format(config).map(|format| format.info()),
+        requirement,
+        source_format,
         selected,
         duration_ms: started.elapsed().as_millis() as u64,
     };

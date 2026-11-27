@@ -2048,13 +2048,13 @@ fn resolve_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadE
     }
 
     let path = Path::new(DEFAULT_CONFIG_FILE_NAME);
-    if path.exists() {
-        return Ok(path.to_path_buf());
+    match path.symlink_metadata() {
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            ConfigLoadError::NotFound(format!("{DEFAULT_CONFIG_FILE_NAME} (default config file)")),
+        ),
+        Err(error) => Err(error.into()),
     }
-
-    Err(ConfigLoadError::NotFound(format!(
-        "{DEFAULT_CONFIG_FILE_NAME} (default config file)"
-    )))
 }
 
 #[cfg(test)]

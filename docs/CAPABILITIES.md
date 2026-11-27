@@ -636,6 +636,22 @@ v8-runner init [--force] [--output <FILE>] [--infobase <CONNECTION>] [--format <
   При `--force` проектный файл переписывается без этого ключа, а действующая секция переезжает в местный
   слой. Карта `infobases` в проектном файле — отказ загрузчика.
 
+### Выбор платформы перед `clone`
+
+`v8-runner platforms` работает в каталоге без `v8project.yaml`. На Windows он также видит
+установки для текущего пользователя в `%LOCALAPPDATA%\Programs\1cv8` и `1cv8_x86`.
+`v8-runner --json-message platforms --platform-path <PATH>` исследует указанный путь независимо
+от проектных настроек. Этот режим несовместим с `--config` и `V8TR_CONFIG`.
+Указывайте корень с версиями или каталог нужной версии. Если на Windows
+путь указывает на каталог запуска `common` с `1cestart.exe` и без собственных версионных установок,
+поиск идёт в его родительском каталоге. Отсутствующие компоненты указаны в `warnings`.
+
+Для файловой базы возьмите точные `version` и `installation_root` из `selected.designer`
+или `selected.ibcmd` и передайте их как `clone --platform-version` и `--platform-path`.
+Для кластера используйте `selected.designer`. Чтобы выбрать другой выпуск из `installations`,
+укажите его каталог в `platforms --platform-path` и проверьте, что там есть нужная утилита.
+В существующем проекте известный путь задаётся в `tools.platform.path`.
+
 ### `clone`
 
 ```bash

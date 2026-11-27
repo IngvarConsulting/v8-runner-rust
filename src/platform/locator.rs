@@ -1853,13 +1853,41 @@ fn executable_name_for(base: &'static str) -> &'static str {
     }
 }
 
+/// Interpret a Windows shared launcher directory only when inspecting a CLI search hint.
+pub(crate) fn inventory_search_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(parent) = path.parent() {
+        if path
+            .file_name()
+            .is_some_and(|name| executable_component_matches(name, "common"))
+            && path.join("1cestart.exe").is_file()
+            && hinted_installations(&path)
+                .iter()
+                .all(|installation| installation.components.is_empty())
+        {
+            return parent.to_path_buf();
+        }
+    }
+    path
+}
+
 fn default_platform_roots() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
-        vec![
+        let mut roots = Vec::new();
+        if let Some(local) = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            let programs = local.join("Programs");
+            roots.extend([programs.join("1cv8"), programs.join("1cv8_x86")]);
+        }
+        // The last candidate wins a version tie. Keep the prior system/PATH choice.
+        roots.extend([
             PathBuf::from(r"C:\Program Files\1cv8"),
             PathBuf::from(r"C:\Program Files (x86)\1cv8"),
-        ]
+        ]);
+        roots
     }
 
     #[cfg(target_os = "linux")]

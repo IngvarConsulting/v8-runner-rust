@@ -1228,7 +1228,9 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 
 Относительный путь нормализуется относительно каталога primary `v8project.yaml`.
 Если `path` задан, поиск platform utilities ограничивается этим путём и не переходит к default
-roots или `PATH`, независимо от `strict`.
+roots или `PATH`, независимо от `strict`. Для установки Windows с каталогом запуска `common`
+указывайте каталог выбранной версии. Найти его до создания проекта можно через
+[`platforms --platform-path`](CAPABILITIES.md#выбор-платформы-перед-clone).
 
 ### `tools.platform.strict`
 

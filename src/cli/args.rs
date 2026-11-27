@@ -138,9 +138,12 @@ pub enum Command {
     Publish(PublishArgs),
     /// List or end sessions and manage a cluster maintenance window
     Sessions(SessionCommands),
-    /// List the installed 1C platforms and the utilities the runner would choose for this
-    /// project; starts nothing
-    Platforms,
+    /// List the installed 1C platforms and selected utilities, with or without a project
+    Platforms {
+        /// Inspect this installation path without loading project settings
+        #[arg(long, value_name = "PATH")]
+        platform_path: Option<std::path::PathBuf>,
+    },
     /// Show how the sources and the infobase relate: from the runner's memory, or with
     /// --deep by asking the platform
     Status(StatusArgs),

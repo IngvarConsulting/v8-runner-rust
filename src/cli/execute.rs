@@ -249,7 +249,13 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
-        Command::Platforms => execute_platforms(config, presenter),
+        Command::Platforms { .. } => {
+            execute_platforms(
+                crate::use_cases::platforms::PlatformsScope::Project(config),
+                presenter,
+            );
+            Ok(())
+        }
         Command::Standalone(args) => execute_standalone(
             config,
             args.command,
@@ -320,8 +326,11 @@ pub fn execute_command(
 
 /// `platforms`: установки платформы и выбор раннера. Ничего не пишет и платформу не запускает,
 /// поэтому ни рабочего каталога, ни базы не занимает.
-fn execute_platforms(config: &AppConfig, presenter: &Presenter) -> Result<(), UseCaseError> {
-    let (result, warnings) = crate::use_cases::platforms::execute(config);
+pub(crate) fn execute_platforms(
+    scope: crate::use_cases::platforms::PlatformsScope<'_>,
+    presenter: &Presenter,
+) {
+    let (result, warnings) = crate::use_cases::platforms::execute(scope);
     if presenter.is_json() {
         let mut envelope =
             Envelope::ok(CommandName::Platforms.as_str(), result.duration_ms, result);
@@ -330,7 +339,6 @@ fn execute_platforms(config: &AppConfig, presenter: &Presenter) -> Result<(), Us
     } else {
         render_platforms_text(&result, &warnings, presenter);
     }
-    Ok(())
 }
 
 fn render_platforms_text(
@@ -816,7 +824,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
-        Command::Platforms => CommandName::Platforms,
+        Command::Platforms { .. } => CommandName::Platforms,
         Command::Standalone(args) => match args.command.service() {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
             crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,

@@ -15,7 +15,7 @@ use crate::command_envelope::Envelope;
 use crate::config::loader::{
     load_config, load_config_for_infobase_export, load_config_for_launch,
     load_config_for_prepared_test, load_config_for_preview, load_config_for_tools_download,
-    load_config_for_vanessa_download, resolve_primary_config_path,
+    load_config_for_vanessa_download, resolve_primary_config_path, ConfigLoadError,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -24,6 +24,7 @@ use crate::use_cases::config_init::{
     ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin, OriginKey,
 };
 use crate::use_cases::context::{AdvisedInfobase, CommandLineTarget, CommandName};
+use crate::use_cases::platforms::PlatformsScope;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Новые имена команд словаря, у которых внутри остался прежний путь разбора: `init` —
@@ -82,6 +83,33 @@ fn render_startup_refusal(
     // сообщения, где он и нужен читателю.
     print_command_error(&presenter, command_name(command), &error, &message);
     error.exit_code()
+}
+
+fn platform_inventory_refusal(presenter: &Presenter, message: &str) -> i32 {
+    let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+    print_command_error(presenter, CommandName::Platforms.as_str(), &error, message);
+    error.exit_code()
+}
+
+fn run_platform_inventory(cli: &Cli, path: Option<&std::path::Path>, presenter: &Presenter) -> i32 {
+    if cli.infobase.is_some() || cli.workdir.is_some() || cli.clean_before_execution {
+        return platform_inventory_refusal(
+            presenter,
+            "platforms without a project cannot use --infobase, --workdir or --clean-before-execution",
+        );
+    }
+    let path = match path
+        .map(crate::support::path::absolute_from_current_dir)
+        .transpose()
+    {
+        Ok(path) => path,
+        Err(error) => {
+            let message = format!("cannot resolve the platform path: {error}");
+            return platform_inventory_refusal(presenter, &message);
+        }
+    };
+    execute::execute_platforms(PlatformsScope::Inventory(path), presenter);
+    0
 }
 
 const BOOTSTRAP_COMMAND: &str = "clone";
@@ -171,6 +199,19 @@ pub fn run() -> i32 {
         return run_bootstrap(args, &cli, &presenter);
     }
 
+    if let Command::Platforms {
+        platform_path: Some(path),
+    } = &cli.command
+    {
+        if cli.config.is_some() {
+            return platform_inventory_refusal(
+                &presenter,
+                "--platform-path cannot be combined with --config or V8TR_CONFIG",
+            );
+        }
+        return run_platform_inventory(&cli, Some(path), &presenter);
+    }
+
     if let Command::Infobase(args) = &cli.command {
         if let Err(error) = execute::validate_infobase_request(args) {
             let error =
@@ -218,6 +259,11 @@ pub fn run() -> i32 {
                 &loaded.warnings,
             );
             loaded.config
+        }
+        Err(ConfigLoadError::NotFound(_))
+            if matches!(&cli.command, Command::Platforms { .. }) && cli.config.is_none() =>
+        {
+            return run_platform_inventory(&cli, None, &presenter);
         }
         Err(e) => {
             let message = e.to_string();
@@ -354,7 +400,7 @@ pub fn run() -> i32 {
         | Command::Syntax(_)
         | Command::Launch(_)
         | Command::Publish(_)
-        | Command::Platforms
+        | Command::Platforms { .. }
         | Command::Agent(_)
         | Command::Status(_) => execute::execute_command(
             &config,
@@ -460,7 +506,7 @@ pub(crate) fn load_cli_config(
         // `agent status` и `agent stop` только говорят со сторожами: из проекта им нужен ключ
         // агента, а рабочего каталога они не готовят.
         crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
-    } else if matches!(&cli.command, Command::Platforms) {
+    } else if matches!(&cli.command, Command::Platforms { .. }) {
         // `platforms` только читает: рабочего каталога он не готовит.
         crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
     } else if matches!(&cli.command, Command::Status(args) if !args.deep) {
