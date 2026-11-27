@@ -477,7 +477,7 @@ pub mod account {
             return Ok(dir);
         }
         let system = if cfg!(windows) {
-            absolute_env(env, "LOCALAPPDATA").map(|dir| dir.join("v8-runner"))
+            windows_local_app_data(env).map(|dir| dir.join("v8-runner"))
         } else {
             absolute_env(env, "XDG_STATE_HOME")
                 .or_else(|| absolute_env(env, "HOME").map(|home| home.join(".local").join("state")))
@@ -510,6 +510,13 @@ pub mod account {
                 dir.display()
             ),
         ))
+    }
+
+    /// Location of the Windows account's local application data, without creating it.
+    pub(crate) fn windows_local_app_data(
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<PathBuf> {
+        absolute_env(env, "LOCALAPPDATA")
     }
 
     /// An absolute path from the environment variable `name`; a relative one names no

@@ -1875,12 +1875,14 @@ fn default_platform_roots() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         let mut roots = Vec::new();
-        if let Some(local) = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
+        if let Some(local) =
+            crate::support::machine::account::windows_local_app_data(&|name| std::env::var_os(name))
         {
-            let programs = local.join("Programs");
-            roots.extend([programs.join("1cv8"), programs.join("1cv8_x86")]);
+            roots.extend(
+                ["Programs/1cv8", "Programs/1cv8_x86"].map(|relative| {
+                    crate::support::path::resolve_from(&local, Path::new(relative))
+                }),
+            );
         }
         // The last candidate wins a version tie. Keep the prior system/PATH choice.
         roots.extend([
