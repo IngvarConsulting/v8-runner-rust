@@ -1448,9 +1448,7 @@ fn rename_directory_checked<E>(
             thread::sleep(delay.min(remaining));
         }
         let expired = || describe(error, " (rename retry limit reached)");
-        if Instant::now() >= deadline {
-            return Err(expired().into());
-        }
+        // Let the caller report a pending cancellation even when the retry time just ran out.
         if !recheck(deadline).map_err(DirectorySwapError::Recheck)? || Instant::now() >= deadline {
             return Err(expired().into());
         }
@@ -2730,6 +2728,41 @@ mod tests {
             error.to_string().contains("rename retry limit reached")
                 && error.to_string().contains("(os error 5)"),
             "{error}"
+        );
+        assert_eq!(fs::read(target.join("old")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("new")).unwrap(), b"new");
+        assert!(!backup.exists() && !super::metadata_sidecar_path(&backup).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_wins_over_the_first_rename_retry_deadline() {
+        let dir = tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let target = dir.path().join("target");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir(&stage).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("old"), b"old").unwrap();
+        fs::write(stage.join("new"), b"new").unwrap();
+        let _held = hold_child(&target.join("old"));
+
+        let error = super::swap_dir_with_recheck(
+            &stage,
+            &target,
+            "run",
+            "identity",
+            ".backup",
+            Duration::ZERO,
+            Some(&mut |deadline| {
+                assert!(std::time::Instant::now() >= deadline);
+                Err("cancelled")
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, super::DirectorySwapError::Recheck("cancelled")),
+            "{error:?}"
         );
         assert_eq!(fs::read(target.join("old")).unwrap(), b"old");
         assert_eq!(fs::read(stage.join("new")).unwrap(), b"new");

@@ -249,6 +249,9 @@ impl StagedPublication {
                 if let Some(error) = cancelled() {
                     return Err(error);
                 }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(false);
+                }
                 #[cfg(windows)]
                 check_target()?;
                 let mut stopped =
