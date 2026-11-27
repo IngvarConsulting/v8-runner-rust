@@ -73,177 +73,136 @@
 
 <main class="page">
 <h1>debug-server</h1>
-<p class="lede">Команды <code>debug-server</code> поднимают, проверяют и останавливают сервер отладки 1С, к которому подключаются отладчик и отлаживаемый клиент. Для файловой базы раннер запускает свой <a href="glossary.html#tool-dbgs"><code>dbgs</code></a>; для базы на <a href="cli-cluster.html#op-cluster-debug">кластере раннера</a> или <a href="cli-standalone.html#op-standalone-debug">автономном сервере раннера</a>, с включённой HTTP-отладкой, отдаёт адрес их сервера отладки.</p>
+<p class="lede"><code>debug-server start</code> подбирает сервер отладки 1С для выбранной базы. Используйте его адрес для отладчика и клиента. <code>stop</code> освобождает аренду собственного <a href="glossary.html#tool-dbgs"><code>dbgs</code></a>.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-debug-server-start">debug-server start</h2>
-<pre data-output-command><code>v8-runner debug-server start</code></pre>
-<p>Для файловой базы запускает <code>dbgs</code> из той установки, из которой запускается тонкий клиент (<a href="cli-launch.html#op-launch"><code>launch thin</code></a>): сервер и клиент одной версии. Сервер слушает только <code>127.0.0.1</code> и запускается без пароля. Ответ приходит, когда сервер назвал свой адрес и по нему ответил обработчик протокола <code>rdbg</code>: запущенный процесс или открытый порт готовности не подтверждают. Ответ называет адрес <code>url</code>, порт, PID процесса, имя базы для отладчика <code>infobase_alias</code> и сеанс <code>session</code> — 32 шестнадцатеричных знака для <a href="#op-debug-server-stop"><code>debug-server stop</code></a>. Обычный вызов поднимает новый сервер со своим сеансом. Сервер переживает команду. Запись сеанса, файл адреса и журнал сервера лежат в <code>workPath/debug-server/&lt;сеанс&gt;/</code>. Сеансы, чей сервер уже вышел, убирает следующий <code>debug-server start</code>.</p>
-<p>Без <code>--port</code> сервер берёт первый свободный порт окна из 32 портов в полосе 10000–19999. Окно выводится из пути <code>workPath</code>; если оно занято целиком, берётся следующее. Полоса не задевает порты сервера 1С по умолчанию (1540–1591), закреплённые порты стенда раннера (20000 и выше) и динамический диапазон.</p>
-<p>Для базы на кластере раннера, запущенном <a href="cli-cluster.html#op-cluster-debug">с HTTP-отладкой</a>, команда ничего не запускает: сервер отладки поднимает сам агент кластера. Команда дожидается, пока этот сервер ответит по <code>rdbg</code>, и отдаёт его адрес с <code>owner: "cluster"</code>.</p>
-<p>Для базы на автономном сервере раннера, поднятом <a href="cli-standalone.html#op-standalone-debug"><code>standalone start --debug</code></a>, команда тоже ничего не запускает: <code>dbgs</code> рядом с <code>ibsrv</code> поднял <code>standalone start</code>. Команда дожидается, пока он ответит по <code>rdbg</code>, и отдаёт его адрес с <code>owner: "standalone"</code>. Сервер не поднят — отказ называет <code>standalone start --debug</code>, поднят без отладки — <code>standalone restart --debug</code>, его <code>dbgs</code> уже нет — <code>standalone restart</code>. Автономный сервер, который поднимали не раннер, — отказ <code>target</code>: адрес его сервера отладки знает только администратор. Сервер отладки кластера есть на Windows и Linux, автономного сервера — только на Windows. Свой <code>dbgs</code> раннера для файловой базы вживую замерен на Windows и macOS arm64 (<a href="https://github.com/IngvarConsulting/v8-runner-rust/issues/809">#809</a>). На Linux проверены <code>start</code>, <code>status</code> и <code>stop</code> (<a href="https://github.com/IngvarConsulting/v8-runner-rust/issues/813">#813</a>).</p>
-<p id="infobase-alias">Отладчик просит предметы отладки базы по её имени на сервере отладки: <code>infoBaseAlias</code> запросов <code>rdbg</code>. Это имя ответ называет в <code>infobase_alias</code>: у файловой базы — <code>DefAlias</code>, у автономного сервера — имя базы в сервере, ключ <code>--name</code> у <code>ibsrv</code> (<code>standalone.managed.name</code>). С другим именем сервер отладки отвечает пустым списком. У управляемого кластера это зарегистрированное имя базы из <code>Ref</code>.</p>
-<pre data-output-command id="op-debug-server-owner"><code>v8-runner debug-server start --owner-pid 9312</code></pre>
-<p>Передаёт PID процесса отладчика серверу: с концом этого процесса <code>dbgs</code> выходит сам, даже если отладчик упал и не вызвал <code>debug-server stop</code>. Мёртвый или неизвестный PID — отказ до запуска. Без ключа сервер живёт до <code>debug-server stop</code>. К серверу отладки кластера и автономного сервера ключ не применяется: ответ предупреждает об этом в <code>warnings</code>.</p>
-<pre data-output-command id="op-debug-server-ensure"><code>v8-runner debug-server start --ensure --owner-pid 9312</code></pre>
-<p>Для автозапуска отладки файловой базы на Windows и macOS. Команда возвращает подтверждённый адрес и токен сеанса. Если свой сервер перестал отвечать, раннер сам подтверждает его остановку и запускает замену на свободном порту. Токен замены новый. Одновременные вызовы одной рабочей копии для той же базы и владельца работают с одним сеансом. Ключ <code>--port</code> вместе с <code>--ensure</code> не применяется.</p>
-<pre data-output-command id="op-debug-server-port"><code>v8-runner debug-server start --port 12961</code></pre>
-<p>Сервер слушает этот порт. Если порт занят другим процессом, команда отказывает до запуска, а слушающий процесс остаётся работать; если порт заняли между проверкой и запуском, отказ тот же. К серверу отладки кластера и автономного сервера ключ не применяется: у него порт из их закреплённого блока.</p>
-<pre data-output-command id="op-debug-server-preview"><code>v8-runner debug-server start --dry-run</code></pre>
-<p>Показывает, чей сервер будет поднят и из какой установки взят <code>dbgs</code>. Ничего не запускает и не записывает, сеанса не выдаёт. Такое же превью есть у <code>debug-server stop</code>.</p>
+<pre data-output-command><code>v8-runner debug-server start --owner-pid 9312</code></pre>
+<p>Команда возвращает подтверждённый <code>url</code>, имя базы для отладчика <code>infobase_alias</code>, область <code>scope</code>, владельца <code>owner</code> и поле <code>release</code>. Область <code>client</code> позволяет отлаживать клиент. Область <code>client_and_server</code> охватывает также серверный код, в том числе ServerEmulation у файловой базы.</p>
+<p>Свой <code>dbgs</code> берётся из установки тонкого клиента и слушает <code>127.0.0.1</code>. Раннер проверяет процесс, принадлежность слушателя и ответ <code>rdbg</code>. У таких ответов есть <code>owner_pid</code> и <code>release.session</code>. Повторный вызов для той же рабочей копии, базы и владельца может использовать тот же процесс и выдаёт отдельную аренду. Существующий сервер кластера или явно выбранный внешний сервер возвращает <code>release: null</code>.</p>
+<p>Для внешней кластерной базы укажите адрес в <a href="project.html#debug-endpoint"><code>infobases.&lt;имя&gt;.debug.url</code></a> локального файла проекта. Раннер подтверждает связь с выбранной регистрацией. Недоступный адрес даёт <code>debug_server_external_unavailable</code>, отсутствие подтверждённой связи с кластером — <code>debug_server_external_target_unverified</code>. В обоих случаях команда завершает подготовку с отказом. Для внешней кластерной базы без заданного адреса раннер готовит свой <code>dbgs</code> с областью <code>client</code>.</p>
+<p id="infobase-alias"><code>infobase_alias</code> передают в <code>infoBaseAlias</code> запросов <code>rdbg</code>. Для файловой базы это <code>DefAlias</code>, для кластера — зарегистрированное имя из <code>Ref</code>.</p>
+<pre data-output-command id="op-debug-server-preview"><code>v8-runner debug-server start --owner-pid 9312 --dry-run</code></pre>
+<p>Превью возвращает <code>action: planned</code> без действующего адреса и аренды. Оно обходится без обращения к серверу и записи состояния. <code>--owner-pid</code> задаёт процесс-владелец и требуется и для превью.</p>
 <h2 class="command-variant" id="op-debug-server-status">debug-server status</h2>
 <pre data-output-command><code>v8-runner debug-server status 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
-<p>Проверяет сеанс файловой базы перед повторным подключением из той же рабочей копии. Раннер сопоставляет PID и время запуска с записью сеанса, на Windows, Linux и macOS arm64 проверяет владельца loopback-порта средствами ОС и ждёт ответа <code>rdbg</code>. На Linux и macOS проверяет и владельца соединения, по которому пришёл ответ. После ответа ещё раз проверяет процесс и сокет. Команда читает запись сеанса и не управляет службами.</p>
-<p>Для управляемого кластера команда сверяет регистрацию базы через <code>rac</code>, идентичность <code>ragent</code>, владельца loopback-порта и ответ дочернего <code>dbgs</code> по <code>rdbg</code>. Только <code>ready</code> возвращает адрес и <code>infobase_alias</code> из <code>Ref</code>.</p>
-<ul><li><code>ready</code> — готовность подтверждена, в ответе есть адрес, PID, порт и псевдоним базы. Обрабатывайте отказ самого подключения: состояние может измениться уже после ответа.</li><li><code>unknown</code> — рабочая копия не знает сеанс.</li><li><code>stale</code> — записанный процесс завершился или его идентичность сменилась.</li><li><code>unverified</code> — готовность подтвердить нельзя. Поле <code>reason</code> уточняет причину. Без подтверждения владельца порта средствами ОС команда возвращает <code>listener_unverified</code>.</li></ul>
-<p>Проверить наличие операции можно командой <code>v8-runner debug-server status --help</code>.</p>
+<p>Передайте <code>release.session</code> из <code>start</code>. Команда проверяет аренду в той же рабочей копии и читает состояние без управления процессом или изменения аренды. Для адреса с <code>release: null</code> токена нет.</p>
+<p>Раннер проверяет PID, время запуска, владельца loopback-порта и ответ <code>rdbg</code>. На Linux и macOS он проверяет и владельца соединения, по которому пришёл ответ. После ответа раннер ещё раз проверяет процесс и сокет.</p>
+<ul><li><code>ready</code> — готовность подтверждена. В ответе есть адрес, PID, порт и <code>infobase_alias</code>. Обрабатывайте отказ самого подключения: состояние может измениться уже после ответа.</li><li><code>unknown</code> — действующая аренда в этой рабочей копии не найдена.</li><li><code>stale</code> — записанный процесс завершился или его идентичность сменилась.</li><li><code>unverified</code> — готовность подтвердить не удалось. Поле <code>reason</code> уточняет причину. Например, <code>listener_unverified</code> означает, что ОС не подтвердила владельца порта.</li></ul>
+<pre data-output-example="debug-server-status-ready" data-output-schema="debug-server-status"><code>debug-server status: ready
+url: http://127.0.0.1:12961
+pid: 14820</code></pre>
 <h2 class="command-variant" id="op-debug-server-stop">debug-server stop</h2>
-<pre data-output-command><code>v8-runner debug-server stop 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
-<p>Останавливает сервер отладки этого сеанса и ждёт конца его процесса; запись сеанса снимается только после подтверждённого конца. Процесс узнаётся по записи целиком: если сервер уже вышел, а его PID занял другой процесс, раннер его не трогает. Повторный <code>stop</code> того же сеанса безопасен: сеанса больше нет, и команда успешна, ничего не останавливая. Так же отвечает сеанс, запущенный из другой рабочей копии. Сервер отладки кластера и автономного сервера <code>stop</code> не останавливает: он живёт со своим сервером, команда снимает только сеанс.</p>
-<p>Перед удалением <code>workPath</code> остановите его серверы: <code>debug-server stop</code> по каждому сеансу.</p>
+<pre data-output-command><code>v8-runner debug-server stop 5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10</code></pre>
+<p>Передайте <code>release.session</code> из ответа <code>start</code>. Действие <code>released</code> означает, что аренда освобождена, а процесс ещё нужен другому сеансу. При последней аренде раннер ждёт конца своего процесса и возвращает <code>stopped</code> и <code>stopped_pid</code>.</p>
+<p>Повторный <code>stop</code> возвращает <code>nothing_to_stop</code>. Процесс узнаётся по записи сеанса и времени запуска, чтобы сохранить другой процесс с тем же PID. Для заимствованного адреса <code>release: null</code> завершение отладки не требует <code>stop</code>.</p>
+<p>Перед удалением <code>workPath</code> освободите свои аренды.</p>
 <h3 id="no-lock">Без замка рабочей копии</h3>
-<p><code>debug-server start</code> и <code>debug-server stop</code> не ждут замка <code>workPath</code> и замка стенда и базу не открывают: отладчик гасит сервер при отсоединении, даже если в это время идёт <code>push</code>. Сеанс, который прямо сейчас запускает другая команда, <code>stop</code> не трогает и отказывает <code>workspace_busy</code>.</p>
+<p><code>start</code>, <code>status</code> и <code>stop</code> не ждут замка <code>workPath</code> и замка стенда и базу не открывают: отладчик может освободить аренду при отсоединении, даже если в это время идёт <code>push</code>.</p>
 <h3 id="client">Клиент под отладкой</h3>
-<p>Адрес из ответа передают отладчику и клиенту: <a href="cli-launch.html#launch-debug"><code>launch thin --debug &lt;url&gt;</code></a> запускает клиент с ключами <code>/DEBUG -http -attach /DEBUGGERURL &lt;url&gt;</code>, и отладчик сам подключает его предметы отладки, зарегистрированные на сервере <span class="ref">(<a href="platform.html#t112">112</a>)</span>. Обычный порядок работы отладчика:</p>
+<p>Адрес из ответа передают отладчику и клиенту: <a href="cli-launch.html#launch-debug"><code>launch thin --debug &lt;url&gt;</code></a> запускает клиент с ключами <code>/DEBUG -http -attach /DEBUGGERURL &lt;url&gt;</code>, и отладчик сам подключает его предметы отладки, зарегистрированные на сервере <span class="ref">(<a href="platform.html#t112">112</a>)</span>. В примере ниже <code>start</code> выдал свой сервер с арендой. Последней команде передают именно токен из <code>release.session</code>.</p>
 <pre class="sh"><code>v8-runner debug-server start --owner-pid 9312
 v8-runner launch thin --debug http://127.0.0.1:12961
-v8-runner debug-server stop 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10</code></pre>
+v8-runner debug-server stop 5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10</code></pre>
 <h3 id="launch-debug">launch --debug</h3>
 <p><a href="cli-launch.html#launch-debug"><code>launch --debug &lt;url&gt;</code></a> передаёт адрес сервера отладки клиенту предприятия: <code>thin</code>, <code>thick</code>, <code>ordinary</code> или <code>mcp</code>. Ответ <code>launch</code> называет его в <code>debug.url</code>. Перед запуском раннер сервер не проверяет: адрес подтвердил <code>debug-server start</code>, а если сервера уже нет, клиент работает без отладки. <code>launch designer --debug</code> и <code>launch web --debug</code>, адрес не вида <code>http://&lt;хост&gt;:&lt;порт&gt;</code> и ключи отладки в <code>--raw-key</code> рядом с <code>--debug</code> — отказ <code>invalid_argument</code>.</p>
 <h3 id="who">Кто поднимает сервер отладки</h3>
 <div class="tablewrap"><table>
 <thead><tr><th>База</th><th>Сервер отладки</th><th><code>owner</code></th></tr></thead>
 <tbody>
-<tr><td>Файловая база</td><td>свой <code>dbgs</code> раннера: <code>debug-server start</code> поднимает, <code>debug-server stop</code> или конец <code>--owner-pid</code> гасит</td><td><code>runner</code></td></tr>
-<tr><td>База на кластере раннера (Windows, Linux)</td><td>агент кластера с HTTP-отладкой; живёт с кластером до <code>cluster restart --no-debug</code> или <code>cluster stop</code></td><td><code>cluster</code></td></tr>
-<tr><td>База на кластере, который запускали не раннер</td><td>адрес знает только администратор кластера: отказ <code>target</code></td><td>—</td></tr>
-<tr><td>База на автономном сервере раннера (Windows)</td><td>свой <code>dbgs</code> рядом с <code>ibsrv</code>, поднятый <code>standalone start --debug</code>; выходит вместе с <code>ibsrv</code> при <code>standalone stop</code> или <code>standalone restart --no-debug</code></td><td><code>standalone</code></td></tr>
-<tr><td>База на автономном сервере, который поднимали не раннер</td><td>адрес знает только администратор сервера: отказ <code>target</code></td><td>—</td></tr>
+<tr><td>Файловая база</td><td>Свой <code>dbgs</code> с областью <code>client_and_server</code> или подтверждённый внешний адрес с алиасом <code>DefAlias</code>.</td><td><code>runner</code> или <code>external</code></td></tr>
+<tr><td>База на кластере раннера</td><td>Сервер агента кластера с HTTP-отладкой. Автоматическая проверка привязки к управляемому кластеру доступна на Windows.</td><td><code>cluster</code></td></tr>
+<tr><td>Внешняя кластерная база с заданным адресом</td><td>Явный адрес с подтверждённой связью с регистрацией выбранной базы. Область <code>client_and_server</code>.</td><td><code>external</code></td></tr>
+<tr><td>Внешняя кластерная база без заданного адреса</td><td>Свой локальный <code>dbgs</code> для отладки клиента.</td><td><code>runner</code></td></tr>
+<tr><td>База на автономном сервере раннера</td><td>Для явно запускаемой отладки адрес выдаёт <a href="cli-standalone.html#op-standalone-debug"><code>standalone status</code></a> с включённой HTTP-отладкой.</td><td>—</td></tr>
 <tr><td>Отладка из Конфигуратора</td><td>Конфигуратор поднимает свой сервер сам; раннер не участвует</td><td>—</td></tr>
 </tbody></table></div>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="success"><td>Сервер поднят</td><td><code>debug-server start</code> поднял свой <code>dbgs</code>, сервер ответил по <code>rdbg</code>: <code>action: started</code>, <code>owner: runner</code>. <a href="#debug-server-started">Пример</a></td></tr>
-<tr data-response-class="success"><td>Адрес сервера кластера</td><td>База на кластере раннера с отладкой: процесс не запускается, <code>owner: cluster</code>, без <code>pid</code>. <a href="#debug-server-cluster">Пример</a></td></tr>
-<tr data-response-class="success"><td>Адрес сервера автономного сервера</td><td>База на автономном сервере раннера с отладкой: процесс не запускается, <code>owner: standalone</code>, без <code>pid</code>, имя базы в сервере — в <code>infobase_alias</code>. <a href="#debug-server-standalone">Пример</a></td></tr>
+<tbody>
+<tr data-response-class="success"><td>Подтверждённый адрес с арендой</td><td>Подготовка своего <code>dbgs</code> возвращает <code>action: prepared</code> и <code>release.session</code>. <a href="#debug-server-prepared-local">Пример</a></td></tr>
+<tr data-response-class="success"><td>Подтверждённый заимствованный адрес</td><td>Выбор подтверждённого сервера кластера возвращает <code>action: prepared</code> и <code>release: null</code>. <a href="#debug-server-prepared-borrowed">Пример</a></td></tr>
 <tr data-response-class="preview"><td>Превью</td><td><code>--dry-run</code>: <code>action: planned</code>, ничего не запущено, сеанса нет. <a href="#debug-server-preview">Пример</a></td></tr>
-<tr data-response-class="success"><td>Сервер остановлен</td><td><code>debug-server stop</code> подтвердил конец процесса: <code>action: stopped</code>, <code>stopped_pid</code>. <a href="#debug-server-stopped">Пример</a></td></tr>
-<tr data-response-class="success"><td>Сеанс неизвестен</td><td>Повторный <code>stop</code> или сеанс другой рабочей копии: <code>nothing_to_stop</code>, <code>known_session: false</code>, ничего не тронуто. <a href="#debug-server-unknown">Пример</a></td></tr>
+<tr data-response-class="success"><td>Аренда освобождена</td><td><code>action: released</code>. У процесса остаются другие аренды. <a href="#debug-server-released">Пример</a></td></tr>
+<tr data-response-class="success"><td>Сервер остановлен</td><td><code>debug-server stop</code> освободил последнюю аренду и подтвердил завершение процесса. Ответ содержит <code>action: stopped</code> и <code>stopped_pid</code>. <a href="#debug-server-stopped">Пример</a></td></tr>
+<tr data-response-class="success"><td>Аренда не найдена</td><td>Повторный <code>stop</code> или аренда другой рабочей копии: <code>nothing_to_stop</code>, <code>known_session: false</code>, ничего не тронуто. <a href="#debug-server-unknown">Пример</a></td></tr>
 <tr data-response-class="success"><td>Сервер уже вышел</td><td>Запись была, процесса нет — например, сервер вышел с концом владельца: <code>nothing_to_stop</code>, <code>stale_record: true</code>. <a href="#debug-server-stale">Пример</a></td></tr>
-<tr data-response-class="success"><td>Сеанс сервера стенда снят</td><td><code>stop</code> по сеансу с <code>owner: cluster</code> или <code>owner: standalone</code>: <code>nothing_to_stop</code>, сервер работает; адреса в ответе нет — его называет <code>cluster status</code> или <code>standalone status</code>. <a href="#debug-server-cluster-stop">Пример</a></td></tr>
 <tr data-response-class="refusal"><td>Нет <code>dbgs</code> рядом с клиентом</td><td>В установке тонкого клиента нет сервера отладки: <code>environment_unavailable</code> со слоем <code>platform</code>, выход CLI 2; отказ называет версию и путь клиента, процесс не запускается. <a href="#debug-server-no-dbgs">Пример</a></td></tr>
-<tr data-response-class="refusal"><td>Порт занят</td><td>Явный <code>--port</code> держит другой процесс: <code>environment_unavailable</code>, выход CLI 2; он остаётся работать. Тот же отказ, если заняты все окна полосы. <a href="#debug-server-port-taken">Пример</a></td></tr>
-<tr data-response-class="refusal"><td>У кластера нет сервера отладки</td><td>Кластер раннера не запущен или запущен без <code>--debug</code>: <code>environment_unavailable</code>, выход CLI 2; отказ называет нужную команду <code>cluster</code>. <a href="#debug-server-no-cluster-debug">Пример</a></td></tr>
-<tr data-response-class="refusal"><td>У автономного сервера нет сервера отладки</td><td>Автономный сервер раннера не поднят, поднят без <code>--debug</code> или его <code>dbgs</code> уже нет: <code>environment_unavailable</code>, выход CLI 2; отказ называет нужную команду <code>standalone</code>. <a href="#debug-server-no-standalone-debug">Пример</a></td></tr>
-<tr data-response-class="refusal"><td>Чужой кластер</td><td>База на кластере, который запускали не раннер: <code>target</code>, выход CLI 2. <a href="#debug-server-foreign-cluster">Пример</a></td></tr>
-<tr data-response-class="refusal"><td>Чужой автономный сервер</td><td>База на автономном сервере, который поднимали не раннер: <code>target</code>, выход CLI 2. <a href="#debug-server-foreign-standalone">Пример</a></td></tr>
+<tr data-response-class="refusal"><td>Явно выбранный адрес недоступен</td><td><code>debug_server_external_unavailable</code>, выход CLI 2. <a href="#debug-server-external-unavailable">Пример</a></td></tr>
+<tr data-response-class="refusal"><td>Связь с выбранной ИБ не подтверждена</td><td><code>debug_server_external_target_unverified</code>, выход CLI 2. <a href="#debug-server-external-unverified">Пример</a></td></tr>
 <tr data-response-class="refusal"><td>Владелец не найден</td><td>Процесса из <code>--owner-pid</code> нет: <code>invalid_argument</code>, выход CLI 2, ничего не запущено. <a href="#debug-server-dead-owner">Пример</a></td></tr>
-<tr data-response-class="failure"><td>Сервер не стал готов</td><td><code>dbgs</code> вышел до ответа по <code>rdbg</code>: <code>platform_failure</code>, выход CLI 4, в сообщении — журнал сервера. Процесса попытки и записи сеанса не остаётся. <a href="#debug-server-not-ready">Пример</a></td></tr>
-<tr data-response-class="interruption"><td>Срок готовности истёк</td><td>Сервер не ответил по <code>rdbg</code> за 60 с: <code>timed_out</code>, выход CLI 4; процесс попытки остановлен, запись снята. <a href="#debug-server-timeout">Пример</a></td></tr>
-<tr data-response-class="interruption"><td>Команда отменена</td><td>Отмена во время ожидания готовности: <code>cancelled</code>, выход CLI 4; процесс попытки остановлен, запись снята.</td></tr>
-<tr data-response-class="refusal"><td>Сеанс ещё запускается</td><td><code>stop</code> по сеансу, который сейчас запускает другая команда: <code>workspace_busy</code>, выход CLI 3; сервер не тронут. <a href="#debug-server-starting">Пример</a></td></tr>
+<tr data-response-class="failure"><td>Сервер не стал готов</td><td><code>dbgs</code> вышел до ответа по <code>rdbg</code>: <code>platform_failure</code>, выход CLI 4, в сообщении — журнал сервера. Аренда не выдаётся. <a href="#debug-server-not-ready">Пример</a></td></tr>
+<tr data-response-class="interruption"><td>Срок готовности истёк</td><td>За 60 с не получен ответ <code>rdbg</code> с подтверждённого слушателя: <code>timed_out</code>, выход CLI 4. Раннер подтвердил остановку процесса попытки. <a href="#debug-server-timeout">Пример</a></td></tr>
+<tr data-response-class="interruption"><td>Команда отменена</td><td>Отмена во время ожидания готовности: <code>cancelled</code>, выход CLI 4. Раннер подтвердил остановку процесса попытки.</td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
-<h4 id="debug-server-started">Сервер поднят</h4>
-<pre data-output-example="debug-server-started" data-output-schema="debug-server-start"><code>debug-server start: the debug server answers at http://127.0.0.1:12961
-session: 5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10
+<h4 id="debug-server-prepared-local">Подтверждённый адрес с арендой</h4>
+<pre data-output-example="debug-server-prepared-local" data-output-schema="debug-server-start"><code>url: http://127.0.0.1:12961
 infobase alias: DefAlias
-pid: 14820
-log: C:\work\debug-server\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log</code></pre>
-<h4 id="debug-server-cluster">Адрес сервера кластера</h4>
-<pre data-output-example="debug-server-cluster" data-output-schema="debug-server-start"><code>debug-server start: the debug server of the cluster answers at http://127.0.0.1:46778
-session: 9a41c07e2d5b4f6e8c3a1b2d4e6f8a0c</code></pre>
-<h4 id="debug-server-standalone">Адрес сервера автономного сервера</h4>
-<pre data-output-example="debug-server-standalone" data-output-schema="debug-server-start"><code>debug-server start: the debug server of the standalone server answers at http://127.0.0.1:24660
-session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
+scope: client_and_server
+owner: runner
+session: 5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10</code></pre>
+<h4 id="debug-server-prepared-borrowed">Подтверждённый заимствованный адрес</h4>
+<pre data-output-example="debug-server-prepared-borrowed" data-output-schema="debug-server-start"><code>url: http://127.0.0.1:46778
+infobase alias: demo
+scope: client_and_server
+owner: cluster</code></pre>
 <h4 id="debug-server-preview">Превью</h4>
-<pre data-output-example="debug-server-preview" data-output-schema="debug-server-start"><code>debug-server start: planned, nothing started or stopped</code></pre>
+<pre data-output-example="debug-server-preview" data-output-schema="debug-server-start"><code>debug-server start: planned</code></pre>
+<h4 id="debug-server-released">Аренда освобождена</h4>
+<pre data-output-example="debug-server-released" data-output-schema="debug-server-stop"><code>debug-server stop: lease released</code></pre>
 <h4 id="debug-server-stopped">Сервер остановлен</h4>
 <pre data-output-example="debug-server-stopped" data-output-schema="debug-server-stop"><code>debug-server stop: the debug server pid 14820 stopped</code></pre>
-<h4 id="debug-server-unknown">Сеанс неизвестен</h4>
-<pre data-output-example="debug-server-unknown" data-output-schema="debug-server-stop"><code>debug-server stop: this working copy knows no such session; nothing to stop</code></pre>
+<h4 id="debug-server-unknown">Аренда не найдена</h4>
+<pre data-output-example="debug-server-unknown" data-output-schema="debug-server-stop"><code>debug-server stop: this working copy knows no such lease; nothing to stop</code></pre>
 <h4 id="debug-server-stale">Сервер уже вышел</h4>
 <pre data-output-example="debug-server-stale" data-output-schema="debug-server-stop"><code>debug-server stop: nothing to stop</code></pre>
-<h4 id="debug-server-cluster-stop">Сеанс сервера стенда снят</h4>
-<pre data-output-example="debug-server-cluster-stop" data-output-schema="debug-server-stop"><code>debug-server stop: nothing to stop</code></pre>
 <h4 id="debug-server-no-dbgs">Нет dbgs рядом с клиентом</h4>
 <pre data-output-example="debug-server-no-dbgs" data-output-schema="refusal"><code>ERROR: environment unavailable: there is no dbgs.exe in the installation 8.3.27.2342 of the thin client C:\Program Files\1cv8\8.3.27.2342\bin\1cv8c.exe: the debug server comes with the client it debugs</code></pre>
-<h4 id="debug-server-port-taken">Порт занят</h4>
-<pre data-output-example="debug-server-port-taken" data-output-schema="refusal"><code>ERROR: environment unavailable: port 12961 is taken by process 9008: the debug server did not start; pass another --port or none</code></pre>
-<h4 id="debug-server-no-cluster-debug">У кластера нет сервера отладки</h4>
-<pre data-output-example="debug-server-no-cluster-debug" data-output-schema="refusal"><code>ERROR: environment unavailable: the cluster of 'origin' runs without a debug server: run `cluster restart --debug`</code></pre>
-<h4 id="debug-server-no-standalone-debug">У автономного сервера нет сервера отладки</h4>
-<pre data-output-example="debug-server-no-standalone-debug" data-output-schema="refusal"><code>ERROR: environment unavailable: the standalone server of 'origin' runs without a debug server: run `standalone restart --debug`</code></pre>
-<h4 id="debug-server-foreign-cluster">Чужой кластер</h4>
-<pre data-output-example="debug-server-foreign-cluster" data-output-schema="refusal"><code>ERROR: capability unavailable: the infobase is on a cluster the runner did not start: the address of its debug server is known only to its administrator; a file infobase or cluster.managed is needed</code></pre>
-<h4 id="debug-server-foreign-standalone">Чужой автономный сервер</h4>
-<pre data-output-example="debug-server-foreign-standalone" data-output-schema="refusal"><code>ERROR: capability unavailable: the infobase is on a standalone server the runner did not start: the address of its debug server is known only to its administrator; a file infobase, cluster.managed or standalone.managed is needed</code></pre>
+<h4 id="debug-server-external-unavailable">Явно выбранный адрес недоступен</h4>
+<pre data-output-example="debug-server-external-unavailable" data-output-schema="refusal"><code>ERROR: environment unavailable: the configured debug endpoint did not answer as an RDBG server</code></pre>
+<h4 id="debug-server-external-unverified">Связь с выбранной ИБ не подтверждена</h4>
+<pre data-output-example="debug-server-external-unverified" data-output-schema="refusal"><code>ERROR: environment unavailable: the configured RDBG endpoint could not be confirmed for the selected cluster infobase</code></pre>
 <h4 id="debug-server-dead-owner">Владелец не найден</h4>
 <pre data-output-example="debug-server-dead-owner" data-output-schema="refusal"><code>ERROR: validation error: --owner-pid 9312: there is no such process</code></pre>
 <h4 id="debug-server-not-ready">Сервер не стал готов</h4>
-<pre data-output-example="debug-server-not-ready" data-output-schema="refusal"><code>ERROR: platform error: dbgs exited before it answered as a debug server; log: C:\work\debug-server\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log</code></pre>
+<pre data-output-example="debug-server-not-ready" data-output-schema="refusal"><code>ERROR: platform error: dbgs exited as soon as it started; log: C:\work\debug-server\prepared-v1\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\run-5a193ca4f5de4cb28d9377025e79fe64\run-5a193ca4f5de4cb28d9377025e79fe64.log</code></pre>
 <h4 id="debug-server-timeout">Срок готовности истёк</h4>
-<pre data-output-example="debug-server-timeout" data-output-schema="refusal"><code>ERROR: timed out: dbgs did not answer as a debug server in 60 s; log: C:\work\debug-server\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log</code></pre>
-<h4 id="debug-server-starting">Сеанс ещё запускается</h4>
-<pre data-output-example="debug-server-starting" data-output-schema="refusal"><code>ERROR: workspace busy: the debug server of this session is being started by another running command</code></pre>
+<pre data-output-example="debug-server-timeout" data-output-schema="refusal"><code>ERROR: timed out: the prepared dbgs did not answer on a verified listener; log: C:\work\debug-server\prepared-v1\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\run-5a193ca4f5de4cb28d9377025e79fe64\run-5a193ca4f5de4cb28d9377025e79fe64.log</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
-  "debug-server-started": {
+  "debug-server-prepared-local": {
     "ok": true,
     "command": "debug-server start",
     "duration_ms": 1240,
     "data": {
-      "ok": true,
-      "action": "started",
-      "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
-      "owner": "runner",
+      "action": "prepared",
       "url": "http://127.0.0.1:12961",
-      "port": 12961,
-      "pid": 14820,
       "infobase_alias": "DefAlias",
-      "platform_resolution": {
-        "path": "C:\\Program Files\\1cv8\\8.3.27.2342\\bin\\dbgs.exe",
-        "version": "8.3.27.2342",
-        "source": "default-root",
-        "installation_root": "C:\\Program Files\\1cv8\\8.3.27.2342"
-      },
-      "log_path": "C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log",
-      "duration_ms": 1240
+      "scope": "client_and_server",
+      "owner": "runner",
+      "owner_pid": 9312,
+      "release": {
+        "action": "stop",
+        "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10"
+      }
     },
     "warnings": [],
     "steps": []
   },
-  "debug-server-cluster": {
+  "debug-server-prepared-borrowed": {
     "ok": true,
     "command": "debug-server start",
     "duration_ms": 210,
     "data": {
-      "ok": true,
-      "action": "started",
-      "session": "9a41c07e2d5b4f6e8c3a1b2d4e6f8a0c",
-      "owner": "cluster",
+      "action": "prepared",
       "url": "http://127.0.0.1:46778",
-      "port": 46778,
-      "duration_ms": 210
-    },
-    "warnings": [],
-    "steps": []
-  },
-  "debug-server-standalone": {
-    "ok": true,
-    "command": "debug-server start",
-    "duration_ms": 190,
-    "data": {
-      "ok": true,
-      "action": "started",
-      "session": "3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b",
-      "owner": "standalone",
       "infobase_alias": "demo",
-      "url": "http://127.0.0.1:24660",
-      "port": 24660,
-      "duration_ms": 190
+      "scope": "client_and_server",
+      "owner": "cluster",
+      "release": null
     },
     "warnings": [],
     "steps": []
@@ -251,17 +210,39 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
   "debug-server-preview": {
     "ok": true,
     "command": "debug-server start",
+    "duration_ms": 0,
+    "data": {
+      "action": "planned"
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "debug-server-status-ready": {
+    "ok": true,
+    "command": "debug-server status",
+    "duration_ms": 8,
+    "data": {
+      "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10",
+      "status": "ready",
+      "pid": 14820,
+      "port": 12961,
+      "url": "http://127.0.0.1:12961",
+      "infobase_alias": "DefAlias",
+      "duration_ms": 8
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "debug-server-released": {
+    "ok": true,
+    "command": "debug-server stop",
     "duration_ms": 15,
     "data": {
       "ok": true,
-      "action": "planned",
+      "action": "released",
+      "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10",
       "owner": "runner",
-      "platform_resolution": {
-        "path": "C:\\Program Files\\1cv8\\8.3.27.2342\\bin\\dbgs.exe",
-        "version": "8.3.27.2342",
-        "source": "default-root",
-        "installation_root": "C:\\Program Files\\1cv8\\8.3.27.2342"
-      },
+      "known_session": true,
       "duration_ms": 15
     },
     "warnings": [],
@@ -274,10 +255,8 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
     "data": {
       "ok": true,
       "action": "stopped",
-      "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+      "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10",
       "owner": "runner",
-      "url": "http://127.0.0.1:12961",
-      "port": 12961,
       "known_session": true,
       "stopped_pid": 14820,
       "duration_ms": 310
@@ -292,7 +271,7 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
     "data": {
       "ok": true,
       "action": "nothing_to_stop",
-      "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+      "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10",
       "known_session": false,
       "duration_ms": 5
     },
@@ -306,26 +285,11 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
     "data": {
       "ok": true,
       "action": "nothing_to_stop",
-      "session": "5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10",
+      "session": "5f0c2a9d4e3b8c1f8a7d6e5c4b3a2f10",
       "owner": "runner",
       "known_session": true,
       "stale_record": true,
       "duration_ms": 20
-    },
-    "warnings": [],
-    "steps": []
-  },
-  "debug-server-cluster-stop": {
-    "ok": true,
-    "command": "debug-server stop",
-    "duration_ms": 5,
-    "data": {
-      "ok": true,
-      "action": "nothing_to_stop",
-      "session": "9a41c07e2d5b4f6e8c3a1b2d4e6f8a0c",
-      "owner": "cluster",
-      "known_session": true,
-      "duration_ms": 5
     },
     "warnings": [],
     "steps": []
@@ -346,79 +310,34 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
       "layer": "platform"
     }
   },
-  "debug-server-port-taken": {
+  "debug-server-external-unavailable": {
     "ok": false,
     "command": "debug-server start",
     "duration_ms": 0,
     "data": {
-      "message": "port 12961 is taken by process 9008: the debug server did not start; pass another --port or none"
+      "message": "the configured debug endpoint did not answer as an RDBG server"
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "environment",
-      "code": "environment_unavailable",
-      "message": "port 12961 is taken by process 9008: the debug server did not start; pass another --port or none"
+      "code": "debug_server_external_unavailable",
+      "message": "the configured debug endpoint did not answer as an RDBG server"
     }
   },
-  "debug-server-no-cluster-debug": {
+  "debug-server-external-unverified": {
     "ok": false,
     "command": "debug-server start",
     "duration_ms": 0,
     "data": {
-      "message": "the cluster of 'origin' runs without a debug server: run `cluster restart --debug`"
+      "message": "the configured RDBG endpoint could not be confirmed for the selected cluster infobase"
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "environment",
-      "code": "environment_unavailable",
-      "message": "the cluster of 'origin' runs without a debug server: run `cluster restart --debug`"
-    }
-  },
-  "debug-server-no-standalone-debug": {
-    "ok": false,
-    "command": "debug-server start",
-    "duration_ms": 0,
-    "data": {
-      "message": "the standalone server of 'origin' runs without a debug server: run `standalone restart --debug`"
-    },
-    "warnings": [],
-    "steps": [],
-    "error": {
-      "kind": "environment",
-      "code": "environment_unavailable",
-      "message": "the standalone server of 'origin' runs without a debug server: run `standalone restart --debug`"
-    }
-  },
-  "debug-server-foreign-cluster": {
-    "ok": false,
-    "command": "debug-server start",
-    "duration_ms": 0,
-    "data": {
-      "message": "the infobase is on a cluster the runner did not start: the address of its debug server is known only to its administrator; a file infobase or cluster.managed is needed"
-    },
-    "warnings": [],
-    "steps": [],
-    "error": {
-      "kind": "capability",
-      "code": "target",
-      "message": "the infobase is on a cluster the runner did not start: the address of its debug server is known only to its administrator; a file infobase or cluster.managed is needed"
-    }
-  },
-  "debug-server-foreign-standalone": {
-    "ok": false,
-    "command": "debug-server start",
-    "duration_ms": 0,
-    "data": {
-      "message": "the infobase is on a standalone server the runner did not start: the address of its debug server is known only to its administrator; a file infobase, cluster.managed or standalone.managed is needed"
-    },
-    "warnings": [],
-    "steps": [],
-    "error": {
-      "kind": "capability",
-      "code": "target",
-      "message": "the infobase is on a standalone server the runner did not start: the address of its debug server is known only to its administrator; a file infobase, cluster.managed or standalone.managed is needed"
+      "code": "debug_server_external_target_unverified",
+      "message": "the configured RDBG endpoint could not be confirmed for the selected cluster infobase"
     }
   },
   "debug-server-dead-owner": {
@@ -441,14 +360,14 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
     "command": "debug-server start",
     "duration_ms": 0,
     "data": {
-      "message": "dbgs exited before it answered as a debug server; log: C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log"
+      "message": "dbgs exited as soon as it started; log: C:\\work\\debug-server\\prepared-v1\\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\\run-5a193ca4f5de4cb28d9377025e79fe64\\run-5a193ca4f5de4cb28d9377025e79fe64.log"
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "platform",
       "code": "platform_failure",
-      "message": "dbgs exited before it answered as a debug server; log: C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log"
+      "message": "dbgs exited as soon as it started; log: C:\\work\\debug-server\\prepared-v1\\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\\run-5a193ca4f5de4cb28d9377025e79fe64\\run-5a193ca4f5de4cb28d9377025e79fe64.log"
     }
   },
   "debug-server-timeout": {
@@ -456,29 +375,14 @@ session: 3c7e1a9b5d2f4e60a8b1c3d5e7f90a2b</code></pre>
     "command": "debug-server start",
     "duration_ms": 0,
     "data": {
-      "message": "dbgs did not answer as a debug server in 60 s; log: C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log"
+      "message": "the prepared dbgs did not answer on a verified listener; log: C:\\work\\debug-server\\prepared-v1\\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\\run-5a193ca4f5de4cb28d9377025e79fe64\\run-5a193ca4f5de4cb28d9377025e79fe64.log"
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "interruption",
       "code": "timed_out",
-      "message": "dbgs did not answer as a debug server in 60 s; log: C:\\work\\debug-server\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10\\5f0c2a9d4e3b4c1f8a7d6e5c4b3a2f10.log"
-    }
-  },
-  "debug-server-starting": {
-    "ok": false,
-    "command": "debug-server stop",
-    "duration_ms": 0,
-    "data": {
-      "message": "the debug server of this session is being started by another running command"
-    },
-    "warnings": [],
-    "steps": [],
-    "error": {
-      "kind": "workspace",
-      "code": "workspace_busy",
-      "message": "the debug server of this session is being started by another running command"
+      "message": "the prepared dbgs did not answer on a verified listener; log: C:\\work\\debug-server\\prepared-v1\\50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c\\run-5a193ca4f5de4cb28d9377025e79fe64\\run-5a193ca4f5de4cb28d9377025e79fe64.log"
     }
   }
 }</script>

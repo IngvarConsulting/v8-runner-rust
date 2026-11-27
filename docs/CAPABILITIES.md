@@ -930,108 +930,35 @@ v8-runner cluster restart [--dry-run] [--debug | --no-debug]
 
 ### `debug-server`
 
-Веб-клиент запускается в два шага. Выполните `web publish --prepare-debug <IDE_URL>`,
-подключите отладчик IDE по `data.debug.ide_url` и включите автоподключение `WEBClient`.
-Затем выполните `launch web --web-debug <DEBUGGER_URL>` с адресом `data.debug.debugger_url`.
-Раннер сохраняет путь, параметры и фрагмент URL публикации и добавляет `Debug=http,attach`
-и `DebuggerURL`. Обычный `launch web` открывает исходный URL.
-
-- Управляемый Apache получает параметр `debug` в `default.vrd` из `infobase.web.debugger-url`.
-  При неизменной настройке повторная подготовка обходится без перезагрузки. Повторный `publish`
-  снова включает настройку.
-- Встроенная публикация управляемого `ibsrv` использует URL из `standalone start --debug`.
-- Для внешней публикации запустите подготовку на хосте веб-сервера. Укажите `infobase.web.dir`
-  с действующим `default.vrd`, `infobase.web.url` для браузера и `infobase.web.debugger-url`
-  для прямой проверки `rdbg`. Ответ `external_route_verified` подтверждает файл и сетевой
-  маршрут с этого хоста. Владелец внешнего сервера включает HTTP-отладку и активирует изменения.
-  Для повторной внешней публикации с отладкой он использует `webinst -descriptor`.
-- `data.debug.state: route_unavailable` позволяет IDE показать причину и действие отдельно.
-  Результат запуска браузера подтверждает передачу URL системному обработчику. Подключение
-  `WEBClient` и остановку на точке проверяет отладчик.
-
 ```text
-v8-runner debug-server prepare --owner-pid <PID> [--dry-run]
-v8-runner debug-server start [--port <PORT>] [--owner-pid <PID>]
-v8-runner debug-server start --ensure --owner-pid <PID> [--dry-run]
-v8-runner debug-server status <SESSION>
-v8-runner debug-server stop <SESSION> [--dry-run]
+v8-runner debug-server start --owner-pid <PID> [--dry-run]
+v8-runner debug-server status <LEASE>
+v8-runner debug-server stop <LEASE> [--dry-run]
 ```
 
-- `debug-server prepare --owner-pid <PID>` готовит адрес и алиас для отладчика и
-  тонкого клиента выбранной ИБ. Для файловой ИБ область `client_and_server` включает
-  ServerEmulation. Для работающего управляемого кластера раннер подтверждает
-  сервер отладки и регистрацию выбранной ИБ. Для внешней серверной ИБ без
-  адреса раннер поднимает собственный loopback-`dbgs` с областью `client`.
-  На Linux собственный `dbgs` доступен, когда раннер может подтвердить через
-  `/proc` владельца IPv4 loopback-слушателя и принятого RDBG-соединения.
-  Привязка к серверу отладки управляемого кластера, в том числе через внешний
-  профиль той же ИБ, поддержана на Windows.
-  Настроенный внешний адрес даёт раздельные отказы при недоступности и при
-  отсутствии подтверждённой привязки к кластерной ИБ. Оба отказа завершают
-  команду до запуска локального сервера. У заимствованного процесса `release: null`.
-  У собственного каждое обращение получает отдельную аренду для `debug-server stop`.
-  Результат `released` означает, что сервер нужен другим арендам. Превью возвращает
-  `planned` без действующего адреса и аренды.
-
-- Сервер отладки 1С для отладчика. Свой `dbgs` раннера вживую замерен на Windows и macOS arm64
-  ([#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)). На Linux проверены
-  `start`, `status` и `stop` ([#813](https://github.com/IngvarConsulting/v8-runner-rust/issues/813)). Сервер
-  отладки кластера — Windows и Linux (Linux замерен в
-  [#768](https://github.com/IngvarConsulting/v8-runner-rust/issues/768)), автономного сервера — Windows. Базу
-  команды не открывают и не берут замок `workPath` и стенда: `stop` отвечает и пока идёт другая команда.
-- Файловая база: `start` запускает `dbgs` из установки тонкого клиента (той же, что у `launch thin`) на `127.0.0.1`, без
-  пароля, и отвечает, когда сервер назвал адрес и ответил по протоколу `rdbg`. Ответ: `url`
-  (`http://127.0.0.1:<порт>`), `port`, `pid`, `session` (32 hex), `owner: "runner"`, `platform_resolution`,
-  `log_path`. Сервер переживает команду; запись сеанса и журнал — в `workPath/debug-server/<session>/`. Каждый `start` —
-  новый сервер и новый сеанс, кроме вызова с `--ensure`.
-- Для автозапуска отладки файловой базы на Windows и macOS используйте
-  `debug-server start --ensure --owner-pid <PID>`. Раннер сам проверяет, переиспользует
-  или восстанавливает принадлежащий владельцу сеанс. Запросы одной рабочей
-  копии к одному сеансу сериализуются. Используйте адрес из этого ответа для
-  подключения. После замены раннер выдаёт новый токен. Сохраните последний
-  полученный токен для `debug-server stop`, если отладку нужно закрыть до выхода владельца.
-- Порт без `--port`: первый свободный в окне из 32 портов в полосе 10000–19999, окно выводится из пути `workPath`.
-  Занятый явный `--port` — `environment_unavailable` до запуска, слушающий процесс не тронут. Нет `dbgs` рядом с
-  клиентом — `environment_unavailable` с `layer: platform`, называющий версию и путь клиента.
-- `--owner-pid <PID>` передаётся в `dbgs --ownerPID`: с концом процесса отладчика сервер выходит сам. Мёртвый pid —
-  `invalid_argument` до запуска. Сеансы вышедших серверов убирает следующий `start`.
-- Выход `dbgs` до готовности — `platform_failure`, срок готовности (60 с) — `timed_out`, отмена — `cancelled`; во всех
-  трёх случаях процесс попытки и запись сеанса снимаются.
-- `stop <session>` гасит только сервер этого сеанса, подтверждая конец процесса: `action: stopped`, `stopped_pid`.
-  Неизвестный, уже остановленный или чужой рабочей копии сеанс — `nothing_to_stop`, `known_session: false`; вышедший
-  сам сервер — `stale_record: true`; процесс, занявший pid сервера, раннер не трогает. Сеанс, который сейчас запускает
-  другая команда, — `workspace_busy`.
-- База на кластере раннера (`cluster.managed`, Windows и Linux) с HTTP-отладкой: новый кластер запускается с ней по умолчанию. `--no-debug` явно выключает отладку и сохраняет режим. `debug-server start` ничего не запускает и
-  отдаёт адрес сервера отладки кластера с `owner: "cluster"`, без `pid`; `--port` и `--owner-pid` игнорируются с
-  предупреждением в `warnings`. Кластер не работает или без `--debug` — `environment_unavailable` с нужной командой.
-  `stop` такого сеанса кластер не трогает (`nothing_to_stop`). Кластер, запущенный не раннером, — `target`.
-- База на автономном сервере раннера (`standalone.managed`, Windows), поднятом `standalone start --debug`: `start`
-  ничего не запускает и отдаёт адрес его `dbgs` с `owner: "standalone"`, без `pid`; `--port` и `--owner-pid`
-  игнорируются с предупреждением. На Linux и macOS — `environment_unavailable`, как у `standalone start`. Сервер
-  не поднят, поднят без отладки или его `dbgs` уже нет — `environment_unavailable` с `standalone start --debug`,
-  `standalone restart --debug` или `standalone restart`. `stop` такого сеанса сервер не трогает (`nothing_to_stop`,
-  `owner: "standalone"`). Автономный сервер без `managed` — `target`.
-- `infobase_alias` в ответе `start` — имя базы, которое отладчик передаёт как `infoBaseAlias` в запросах `rdbg`: `DefAlias`
-  у файловой базы, имя базы в сервере (`ibsrv --name`, `standalone.managed.name`) у автономного сервера; с другим именем
-  сервер отладки отвечает пустым списком. У управляемого кластера алиас равен имени базы из `Ref`.
-  `debug-server status <SESSION>` для управляемого кластера подтверждает ту же регистрацию
-  ИБ и тот же `ragent`, принадлежность loopback-порта дочернему `dbgs` и ответ `rdbg`.
-  Если этих доказательств нет, адрес для подключения не выдаётся. Прямой `launch --debug`
-  в управляемый кластер называет зарегистрированное имя в `debug.infobase_alias`.
-- Клиент под отладкой запускает `launch thin --debug <url>` (также `thick`, `ordinary`, `mcp`): ключи
-  `/DEBUG -http -attach /DEBUGGERURL <url>`. Порядок: `debug-server start --owner-pid <PID отладчика>` →
-  `launch thin --debug <url>` → `debug-server stop <session>`. Чтобы отдельно проверить
-  существующий сеанс, вызовите `debug-server status <session>` из той же рабочей копии. Для файловой ИБ команда
-  проверяет PID и время запуска процесса, подтверждает владельца loopback-порта средствами
-  ОС и проверяет ответ `rdbg`. Адрес выдаётся только при `status: ready`. Остальные
-  состояния: `unknown` (сеанс неизвестен этой копии), `stale` (записанный процесс завершился
-  или сменился), `unverified` (готовность подтвердить нельзя). Подтверждение владельца порта
-  для файловой ИБ доступно на Windows, Linux и macOS arm64. На Linux и macOS раннер также проверяет, что
-  запрос `rdbg` прошёл по соединению, принятому записанным процессом.
-  Проверка отражает состояние на момент вызова, поэтому отладчик
-  обрабатывает также отказ самого подключения. Наличие операции проверяет
-  `v8-runner debug-server status --help`. Перед удалением `workPath` —
-  `debug-server stop` по каждому сеансу.
+- `start` готовит адрес для отладчика и клиента выбранной ИБ. Результат
+  `prepared` содержит `url`, `infobase_alias`, `scope`, `owner` и `release`.
+  У собственного сервера каждый вызов получает отдельный `release.session`.
+  У заимствованного сервера `release: null`. Превью возвращает `planned`.
+- Файловая ИБ получает область `client_and_server`, включая ServerEmulation.
+  Для внешней серверной ИБ без настроенного адреса раннер поднимает свой
+  loopback-`dbgs` с областью `client`. На Linux проверяются владелец
+  слушателя и принятый RDBG-сокет.
+- Для управляемого кластера на Windows раннер проверяет принадлежность
+  `dbgs` и алиас регистрации. Явно настроенный внешний профиль может
+  заимствовать тот же кластерный сервер по данным соседнего управляемого
+  профиля. Недоступный адрес возвращает `debug_server_external_unavailable`,
+  а неподтверждённая привязка — `debug_server_external_target_unverified`.
+- `status <LEASE>` читает состояние собственной аренды. `ready` подтверждает
+  процесс, принадлежащий ему порт и ответ RDBG. Остальные состояния —
+  `unknown`, `stale` и `unverified`.
+- `stop <LEASE>` освобождает аренду. Пока остались аренды, команда возвращает
+  `released`. При последней аренде она подтверждает завершение процесса
+  действием `stopped`. Повтор возвращает `nothing_to_stop`.
+- Передайте один `url` отладчику и в `launch thin --debug <URL>`.
+  Используйте `infobase_alias` как `infoBaseAlias` в RDBG. Адрес отладчика
+  управляемого автономного сервера указан в `standalone status` при запущенной
+  отладке.
 
 ### `web`
 
@@ -1068,6 +995,25 @@ v8-runner web restart [--dry-run]
   перечня процессов; `environment_unavailable` — нет сборки Apache или модуля 1С, нет свободного порта, запуск от
   root на Linux, другая ОС, `sudo -n` не разрешён для `webinst`.
 - `status` работает без замка `workPath`.
+
+Веб-клиент запускается в два шага. Выполните `web publish --prepare-debug <IDE_URL>`,
+подключите отладчик IDE по `data.debug.ide_url` и включите автоподключение `WEBClient`.
+Затем выполните `launch web --web-debug <DEBUGGER_URL>` с адресом `data.debug.debugger_url`.
+Раннер сохраняет путь, параметры и фрагмент URL публикации и добавляет `Debug=http,attach`
+и `DebuggerURL`. Обычный `launch web` открывает исходный URL.
+
+- Управляемый Apache получает параметр `debug` в `default.vrd` из `infobase.web.debugger-url`.
+  При неизменной настройке повторная подготовка обходится без перезагрузки. Повторный `publish`
+  снова включает настройку.
+- Встроенная публикация управляемого `ibsrv` использует URL из `standalone start --debug`.
+- Для внешней публикации запустите подготовку на хосте веб-сервера. Укажите `infobase.web.dir`
+  с действующим `default.vrd`, `infobase.web.url` для браузера и `infobase.web.debugger-url`
+  для прямой проверки `rdbg`. Ответ `external_route_verified` подтверждает файл и сетевой
+  маршрут с этого хоста. Владелец внешнего сервера включает HTTP-отладку и активирует изменения.
+  Для повторной внешней публикации с отладкой он использует `webinst -descriptor`.
+- `data.debug.state: route_unavailable` позволяет IDE показать причину и действие отдельно.
+  Результат запуска браузера подтверждает передачу URL системному обработчику. Подключение
+  `WEBClient` и остановку на точке проверяет отладчик.
 
 
 ### `agent`

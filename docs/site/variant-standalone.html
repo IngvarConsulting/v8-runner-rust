@@ -255,9 +255,9 @@ v8-runner push
 v8-runner test
 v8-runner standalone stop
 v8-runner dbms stop</code></pre>
-<p id="d-standalone-managed-debug">Для отладки сервер поднимают с <a href="cli-standalone.html#op-standalone-debug"><code>--debug</code></a>: рядом с <code>ibsrv</code> раннер запускает свой сервер отладки <code>dbgs</code>, а <a href="cli-debug-server.html#op-debug-server-start"><code>debug-server start</code></a> отдаёт его адрес и имя базы в сервере для отладчика. Признак держится до <code>standalone restart --no-debug</code>.</p>
+<p id="d-standalone-managed-debug">Для отладки сервер поднимают с <a href="cli-standalone.html#op-standalone-debug"><code>--debug</code></a>: рядом с <code>ibsrv</code> раннер запускает свой сервер отладки <code>dbgs</code>, а <code>standalone status</code> отдаёт его адрес в <code>debug_url</code>. Для отладчика используйте имя базы из <code>standalone.managed.name</code>. Признак держится до <code>standalone restart --no-debug</code>.</p>
 <pre class="sh"><code>v8-runner standalone start --debug
-v8-runner debug-server start
+v8-runner standalone status
 v8-runner launch thin --debug http://127.0.0.1:24660</code></pre>
 <p>Прямой шлюз <code>ibsrv</code> и его диапазон слушают все интерфейсы машины, ключей ограничить их адресом нет; HTTP и SSH-шлюз слушают только <code>127.0.0.1</code>. База без пользователей открывается по прямому шлюзу без учётных данных. Закройте порты брандмауэром, если машина доступна из сети.</p>
 <p>При <code>dbms.managed</code> данные лежат под <code>localPath/infobases/&lt;база&gt;/managed/</code> (по умолчанию <code>.local/</code> рядом с <code>v8project.yaml</code>): удаление <code>workPath</code> их не трогает. Команды удаления данных у раннера нет.</p>

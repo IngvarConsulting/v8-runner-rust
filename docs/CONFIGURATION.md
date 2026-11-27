@@ -903,7 +903,7 @@ infobases:
 
 #### `infobase.debug`
 
-Для нативного `debug-server prepare` у выбранной ИБ в `v8project.local.yaml`
+Для нативного `debug-server start` у выбранной ИБ в `v8project.local.yaml`
 можно задать `infobases.<имя>.debug.url` и `infobase-alias`. Адрес имеет форму
 `http://<хост>:<порт>`. При ответе сервера раннер проверяет возможность привязки
 к выбранной кластерной ИБ. Профиль с прямым адресом локального кластера

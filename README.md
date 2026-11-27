@@ -102,7 +102,7 @@ Mac на Intel не поддерживается с 0.17.2: соберите и�
 | Стенд | `dbms`, `standalone`, `cluster`, `web`, `agent`, `publish` | PostgreSQL, автономный сервер, кластер и агент Конфигуратора раннера, веб-публикация |
 | Прямой запуск | `launch <designer\|thin\|thick\|ordinary>` | `--debug <url>` подключает клиент к серверу отладки. `--interactive-login` оставляет вход штатному клиенту 1С без сохранённых в профиле реквизитов |
 | Веб-клиент с отладкой | `web publish --prepare-debug`, затем `launch web --web-debug` | Между подготовкой и открытием браузера IDE подключает отладчик к серверу HTTP-отладки |
-| Отладка | `debug-server prepare`, `debug-server start`, `debug-server status`, `debug-server stop` | Поднимает сервер отладки 1С и отдаёт его адрес: свой `dbgs` для файловой базы с автоматическим восстановлением через `start --ensure --owner-pid` (замерен на Windows и macOS arm64, [#809](https://github.com/IngvarConsulting/v8-runner-rust/issues/809)), сервер кластера раннера с HTTP-отладкой (Windows и Linux), `dbgs` автономного сервера раннера после `standalone start --debug` (Windows). Для файловой базы на Linux замерены запуск `dbgs` с владельцем, подключение тонкого клиента и остановка ([#778](https://github.com/IngvarConsulting/v8-runner-rust/issues/778)) |
+| Отладка | `debug-server start`, `debug-server status`, `debug-server stop` | Готовит `dbgs` выбранной ИБ, сообщает область отладки и управляет арендой собственного процесса. |
 
 Полный каталог команд, исполнители, коды отказов и ограничения —
 [docs/CAPABILITIES.md](docs/CAPABILITIES.md). Прежние имена команд и ключей принимаются один

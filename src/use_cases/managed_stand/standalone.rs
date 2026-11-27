@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::debug_server::StandDebugServer;
 use super::{
     await_gone, await_rdbg, being_started, block_conflict, cluster_over, environment, first_taken,
     forget_record, io_failure, owned_by_a_cluster, port_offsets, spawn_debugger, stop_confirmed,
@@ -1019,91 +1018,6 @@ fn server<'a>(
     })
 }
 
-/// Сервер отладки автономного сервера этой базы для `debug-server start`: порт его `dbgs`,
-/// когда тот отвечает по `rdbg`, и имя базы, под которым отладчик видит её цели. Сервер не
-/// работает, поднят без отладки или его `dbgs` уже нет — отказ сразу, с командой, которая это
-/// исправит.
-pub(super) fn debug_server(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    runner: &dyn ProcessRunner,
-    host: &dyn ServiceHost,
-) -> Result<StandDebugServer, UseCaseError> {
-    let no_locate = || Err(validation("a running server names its own utilities"));
-    let server = server(
-        config,
-        context,
-        runner,
-        host,
-        &no_locate,
-        DebugChoice::AsPinned,
-    )?;
-    let infobase = &server.declared.infobase;
-    if !host.standalone_supported() {
-        return Err(environment(format!(
-            "the infobase '{infobase}' is on the managed standalone server, and it runs on Windows only"
-        )));
-    }
-    match server.observe() {
-        Observed::Own(_) => {}
-        Observed::Starting(_) => return Err(being_started("the server", infobase)),
-        Observed::Stale | Observed::Nothing => {
-            return Err(environment(format!(
-            "the standalone server of '{infobase}' is not running: run `standalone start --debug`"
-        )))
-        }
-    }
-    let Some(pinned) = server.pinned().filter(|pinned| pinned.debug) else {
-        return Err(environment(format!(
-            "the standalone server of '{infobase}' runs without a debug server: run `standalone restart --debug`"
-        )));
-    };
-    let debugger = match server.observe_debugger() {
-        Observed::Own(debugger) => debugger,
-        Observed::Starting(_) => return Err(being_started("the debug server", infobase)),
-        Observed::Stale | Observed::Nothing => {
-            return Err(environment(format!(
-                "the debug server of the standalone server of '{infobase}' is gone: run `standalone restart`"
-            )))
-        }
-    };
-    let port = debugger.port;
-    let ours = || {
-        Some(port).filter(|port| {
-            host.listening_pid(*port)
-                .is_none_or(|listener| Some(listener) == debugger.pid)
-        })
-    };
-    let alive = || matches!(server.observe_debugger(), Observed::Own(_));
-    let wait = await_rdbg(
-        host,
-        context,
-        "waiting for the debug server of the standalone server",
-        &ours,
-        &alive,
-        &|port| host.rdbg_answers(port),
-    );
-    let infobase_alias = Some(pinned.name.unwrap_or_else(|| server.declared.name.clone()));
-    match wait {
-        RdbgWait::Ready(port) => Ok(StandDebugServer {
-            port,
-            infobase_alias,
-            cluster_binding: None,
-        }),
-        RdbgWait::Interrupted(error) => Err(error),
-        RdbgWait::Gone => Err(environment(format!(
-            "the debug server of the standalone server of '{infobase}' stopped while it was awaited: run `standalone restart`"
-        ))),
-        RdbgWait::TimedOut => Err(UseCaseError::new(
-            UseCaseErrorKind::TimedOut,
-            format!(
-                "the debug server of the standalone server of '{infobase}' did not answer on port {port} in {} s",
-                DEBUG_READY_TIMEOUT.as_secs()
-            ),
-        )),
-    }
-}
-
 /// Сколько ждать ответа `ibcmd session list`: на замере он отвечает за 0,1–0,2 с.
 const SESSIONS_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -1947,43 +1861,6 @@ mod tests {
         assert!(host.facts(DBGS_PID).is_some());
     }
 
-    /// `debug-server start` у базы на автономном сервере: адрес его `dbgs` и имя базы в сервере;
-    /// не работает, без отладки, без `dbgs` — отказ с командой, которая это исправит.
-    #[test]
-    fn the_debug_server_of_the_standalone_server_needs_a_debug_start() {
-        let setup = setup();
-        let host = Host::default();
-        let context = ExecutionContext::cli(CommandName::DebugServerStart);
-        let ask = || debug_server(&context, &setup.config, &Runner { host: &host }, &host);
-        let error = ask().err().unwrap();
-        assert!(
-            error.to_string().contains("standalone start --debug"),
-            "{error}"
-        );
-        setup
-            .command(debug_start(DebugChoice::AsPinned), &host)
-            .unwrap();
-        let error = ask().err().unwrap();
-        assert!(
-            error.to_string().contains("standalone restart --debug"),
-            "{error}"
-        );
-        setup
-            .command(
-                StandaloneCommand::Restart {
-                    debug: DebugChoice::On,
-                },
-                &host,
-            )
-            .unwrap();
-        let server = ask().unwrap();
-        assert_eq!(server.port, pinned_debug(&setup).ports.debug());
-        assert_eq!(server.infobase_alias.as_deref(), Some("demo"));
-        host.processes.borrow_mut().remove(&DBGS_PID);
-        let error = ask().err().unwrap();
-        assert!(error.to_string().contains("standalone restart`"), "{error}");
-    }
-
     #[test]
     fn start_runs_the_server_and_names_its_addresses() {
         let setup = setup();
@@ -2458,36 +2335,6 @@ mod tests {
         assert_eq!(witness.spawned.get(), 0);
         assert!(witness.calls.borrow().is_empty());
         assert!(!setup.paths().root().exists());
-    }
-
-    /// `debug-server start` у базы автономного сервера на Linux — тот же отказ «только Windows»,
-    /// что у `standalone start`, без обращения к процессам.
-    #[test]
-    fn linux_refuses_the_debug_server_of_the_standalone_server() {
-        let setup = setup();
-        let witness = Host::default();
-        let linux = super::super::RealHost {
-            system: super::super::System {
-                privileged: || false,
-                ..super::super::System::LINUX
-            },
-        };
-        let refused = debug_server(
-            &ExecutionContext::cli(CommandName::DebugServerStart),
-            &setup.config,
-            &Runner { host: &witness },
-            &linux,
-        )
-        .err()
-        .unwrap();
-        assert_eq!(
-            refused.kind(),
-            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
-            "{refused}"
-        );
-        assert!(refused.to_string().contains("Windows only"), "{refused}");
-        assert_eq!(witness.spawned.get(), 0);
-        assert!(witness.calls.borrow().is_empty());
     }
 
     #[test]

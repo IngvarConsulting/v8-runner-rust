@@ -1,7 +1,7 @@
 {
   "$defs": {
     "DebugServerStatus": {
-      "description": "Read-only observation of a recorded file-infobase debug server.",
+      "description": "Read-only observation of a runner-owned debug lease.",
       "enum": [
         "ready",
         "unknown",
@@ -15,8 +15,6 @@
         "process_changed",
         "process_gone",
         "record_unavailable",
-        "starting",
-        "unsupported_owner",
         "process_unverified",
         "listener_unverified",
         "rdbg_unavailable",

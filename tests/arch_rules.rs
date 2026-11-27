@@ -987,6 +987,7 @@ fn a_command_form_is_named_after_its_command() {
 /// команду. `INIT` здесь же: прежнее имя формы `infobase create` форме `init` не
 /// достаётся (#224).
 const RETIRED_FORM_NAMES: &[&str] = &[
+    "DEBUG-SERVER-PREPARE",
     "BUILD",
     "SYNTAX",
     "BOOTSTRAP",

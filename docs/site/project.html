@@ -147,8 +147,10 @@ v8-runner push --infobase test                   # в именованную б�
 v8-runner apply --infobase prod --sessions force
 v8-runner pull --infobase "Srvr=ci;Ref=job-417"  # адрес без правки файла
 v8-runner status --all                           # все объявленные базы</code></pre>
+<h3 id="debug-endpoint">Адрес сервера отладки</h3>
+<p>Для файловой или внешней кластерной базы можно задать HTTP-адрес её сервера отладки в <code>infobases.&lt;имя&gt;.debug.url</code> в <code>v8project.local.yaml</code>. Поле <code>debug.infobase-alias</code> необязательно. Если оно указано, для файловой базы это <code>DefAlias</code>, для кластерной — зарегистрированное имя из <code>Ref</code>. <a href="cli-debug-server.html#op-debug-server-start"><code>debug-server start</code></a> проверяет выбранный адрес перед использованием.</p>
 <h3 id="web">HTTP-адрес базы</h3>
-<p>У базы два адреса: <code>connection</code> нужен для операций с базой, <code>web.url</code> — для открытия опубликованной базы в браузере или тонком клиенте.</p>
+<p><code>connection</code> нужен для операций с базой, <code>web.url</code> — для открытия опубликованной базы в браузере или тонком клиенте.</p>
 <pre data-config-example="local"><code># Фрагмент v8project.local.yaml
 infobases:
   origin:

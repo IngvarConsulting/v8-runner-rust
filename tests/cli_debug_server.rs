@@ -79,14 +79,14 @@ fn prepare_preview_reports_the_selected_route_without_creating_state() {
                 "--infobase",
                 selected,
                 "debug-server",
-                "prepare",
+                "start",
                 "--owner-pid",
                 &owner,
                 "--dry-run",
             ],
         );
         assert_eq!(code, 0, "{selected}: {answer}");
-        assert_eq!(answer["command"], "debug-server prepare");
+        assert_eq!(answer["command"], "debug-server start");
         support::command_data::assert_data_matches_its_command_form(&answer, selected);
         let data = &answer["data"];
         assert_eq!(data["action"], "planned", "{selected}: {answer}");
@@ -110,13 +110,30 @@ fn prepare_requires_owner_pid() {
     let output = v8_runner_command()
         .current_dir(dir.path())
         .env_remove("V8TR_CONFIG")
-        .args(["debug-server", "prepare"])
+        .args(["debug-server", "start"])
         .output()
         .expect("run");
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("required arguments"), "{stderr}");
     assert!(!dir.path().join("work/debug-server").exists());
+
+    for args in [
+        &["prepare", "--owner-pid", "1"][..],
+        &["start", "--owner-pid", "1", "--manual"][..],
+        &["start", "--owner-pid", "1", "--ensure"][..],
+        &["start", "--owner-pid", "1", "--port", "12961"][..],
+    ] {
+        let old = v8_runner_command()
+            .current_dir(dir.path())
+            .env_remove("V8TR_CONFIG")
+            .arg("debug-server")
+            .args(args)
+            .arg("--dry-run")
+            .output()
+            .expect("run after removing the legacy interface");
+        assert_eq!(old.status.code(), Some(2), "{args:?}");
+    }
 }
 
 #[test]
@@ -132,13 +149,13 @@ fn prepare_refuses_an_explicit_external_cluster_debugger_without_falling_back() 
                 "--infobase",
                 "external",
                 "debug-server",
-                "prepare",
+                "start",
                 "--owner-pid",
                 &owner,
             ],
         );
         assert_ne!(code, 0, "{answer}");
-        assert_eq!(answer["command"], "debug-server prepare");
+        assert_eq!(answer["command"], "debug-server start");
         assert_eq!(answer["ok"], false, "{answer}");
         assert_eq!(answer["error"]["code"], expected, "{answer}");
         for field in ["url", "release", "pid", "session", "port"] {
@@ -322,67 +339,68 @@ Connection: close
 fn start_runs_the_debug_server_beside_the_client_and_stop_ends_it() {
     let dir = temp_workspace();
     let _install = project_with_a_fake_debug_server(dir.path());
-    let (code, started) = run(dir.path(), &["debug-server", "start"]);
-    // `cargo test` на Windows держит тесты в Job, из которого выйти нельзя: сервер умер бы с
-    // командой, и раннер отказывает, ничего не оставив. Полный путь идёт на Linux и macOS.
+    let owner = std::process::id().to_string();
+    let (code, started) = run(
+        dir.path(),
+        &["debug-server", "start", "--owner-pid", &owner],
+    );
+    // A restrictive Windows job cannot detach a service beyond the first command.
     if cfg!(windows)
         && started["error"]["message"]
             .as_str()
-            .is_some_and(|m| m.contains("Job"))
+            .is_some_and(|message| message.contains("Job"))
     {
         assert_eq!(
             started["error"]["code"], "environment_unavailable",
             "{started}"
         );
-        let sessions = dir.path().join("work").join("debug-server");
-        let left = fs::read_dir(&sessions)
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        assert_eq!(left, 0, "a refused start leaves no session");
+        let sessions = dir.path().join("work/debug-server/prepared-v1");
+        let retained = fs::read_dir(sessions)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|project| fs::read_dir(project.path()).ok())
+            .flatten()
+            .flatten()
+            .any(|record| {
+                record
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            });
+        assert!(!retained, "a refused start leaves no active lease");
         return;
     }
     assert_eq!(code, 0, "{started}");
+    support::command_data::assert_data_matches_its_command_form(&started, "owned start");
     let data = &started["data"];
-    assert_eq!(data["action"], "started", "{started}");
+    assert_eq!(data["action"], "prepared", "{started}");
     assert_eq!(data["owner"], "runner");
-    let port = u16::try_from(data["port"].as_u64().expect("port")).expect("u16");
+    let lease = data["release"]["session"].as_str().expect("release token");
+    let (code, checked) = run(dir.path(), &["debug-server", "status", lease]);
+    assert_eq!(code, 0, "{checked}");
+    support::command_data::assert_data_matches_its_command_form(&checked, "owned lease status");
+    assert_eq!(checked["data"]["status"], "ready", "{checked}");
+    assert_eq!(checked["data"]["session"], lease);
+    assert_eq!(checked["data"]["url"], data["url"]);
+    assert_eq!(checked["data"]["infobase_alias"], data["infobase_alias"]);
+    let port = u16::try_from(checked["data"]["port"].as_u64().expect("port")).expect("u16");
     assert!((10_000..20_000).contains(&port), "{port}");
     assert_eq!(data["url"], format!("http://127.0.0.1:{port}"));
-    assert!(
-        data["platform_resolution"]["path"]
-            .as_str()
-            .is_some_and(|path| path.contains("dbgs")),
-        "{started}"
-    );
-    // Команда вышла, сервер работает.
-    let status = rdbg_status(port).expect("the server outlived the command");
-    assert!(status.contains("400"), "{status}");
-    let session = data["session"].as_str().expect("session").to_owned();
-    #[cfg(target_os = "linux")]
-    let checks = [
-        run(dir.path(), &["debug-server", "status", &session]),
-        run(dir.path(), &["debug-server", "status", &session]),
-    ];
 
-    let (code, stopped) = run(dir.path(), &["debug-server", "stop", &session]);
+    let (code, stopped) = run(dir.path(), &["debug-server", "stop", lease]);
     assert_eq!(code, 0, "{stopped}");
     assert_eq!(stopped["data"]["action"], "stopped", "{stopped}");
-    assert_eq!(stopped["data"]["stopped_pid"], data["pid"]);
+    assert_eq!(stopped["data"]["stopped_pid"], checked["data"]["pid"]);
     assert!(rdbg_status(port).is_none(), "the server is stopped");
 
-    let (code, again) = run(dir.path(), &["debug-server", "stop", &session]);
+    let (code, gone) = run(dir.path(), &["debug-server", "status", lease]);
+    assert_eq!(code, 0, "{gone}");
+    assert_eq!(gone["data"]["status"], "unknown");
+    let (code, again) = run(dir.path(), &["debug-server", "stop", lease]);
     assert_eq!(code, 0, "{again}");
     assert_eq!(again["data"]["action"], "nothing_to_stop");
     assert_eq!(again["data"]["known_session"], false);
-
-    #[cfg(target_os = "linux")]
-    for (code, checked) in checks {
-        assert_eq!(code, 0, "{checked}");
-        assert_eq!(checked["data"]["status"], "ready", "{checked}");
-        for field in ["pid", "port", "url"] {
-            assert_eq!(checked["data"][field], data[field], "{checked}");
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -432,7 +450,7 @@ fn prepare_reuses_and_releases_an_owned_debug_server_on_linux() {
     let mut prepare = || {
         let (code, receipt) = run(
             dir.path(),
-            &["debug-server", "prepare", "--owner-pid", &owner_arg],
+            &["debug-server", "start", "--owner-pid", &owner_arg],
         );
         assert_eq!(code, 0, "{receipt}");
         let data = &receipt["data"];

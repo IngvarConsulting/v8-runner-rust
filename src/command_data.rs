@@ -124,8 +124,7 @@ command_data_forms! {
     "web status", "web-status" => crate::domain::web::WebResult;
     "web stop", "web-stop" => crate::domain::web::WebResult;
     "web restart", "web-restart" => crate::domain::web::WebResult;
-    "debug-server start", "debug-server-start" => crate::domain::debug_server::DebugServerResult;
-    "debug-server prepare", "debug-server-prepare" => crate::domain::debug_server::DebugServerPrepareResult;
+    "debug-server start", "debug-server-start" => crate::domain::debug_server::DebugServerPrepareResult;
     "debug-server status", "debug-server-status" => crate::domain::debug_server::DebugServerStatusResult;
     "debug-server stop", "debug-server-stop" => crate::domain::debug_server::DebugServerResult;
     "agent hold", "agent-hold" => crate::domain::live_agent::AgentHoldResult;
@@ -162,16 +161,6 @@ pub fn command_data_index() -> Value {
 
 pub(crate) fn generated_schema(schema: schemars::Schema, slug: &str) -> Value {
     let mut value = serde_json::to_value(schema).expect("schema json");
-    if slug == "debug-server-start" {
-        // The shared result also carries stop's prepared-lease outcome.
-        let released =
-            serde_json::to_value(crate::domain::debug_server::DebugServerAction::Released)
-                .expect("debug server action is serializable");
-        value["$defs"]["DebugServerAction"]["oneOf"]
-            .as_array_mut()
-            .expect("debug server action schema lists its outcomes")
-            .retain(|action| action.get("const") != Some(&released));
-    }
     inline_tagged_variants(&mut value);
     close_every_object(&mut value);
     let object = value.as_object_mut().expect("root schema object");

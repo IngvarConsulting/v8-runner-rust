@@ -6,7 +6,6 @@ check:
   - tests/cli_dbms.rs::linux_start_reaches_postgres_build_discovery
   - src/use_cases/managed_stand/cluster.rs::other_systems_refuse_the_cluster
   - src/use_cases/managed_stand/standalone.rs::linux_refuses_the_standalone_server_before_any_process
-  - src/use_cases/managed_stand/standalone.rs::linux_refuses_the_debug_server_of_the_standalone_server
   - src/use_cases/managed_stand/cluster.rs::under_root_no_service_of_the_stand_starts
 ---
 
@@ -17,14 +16,12 @@ check:
 `standalone start|restart` на Linux и запуск этих служб на остальных платформах отвечают
 `environment_unavailable` до запуска процессов.
 
-Запуск своего `dbgs` через `debug-server start` раннер не ограничивает по ОС. Свой `dbgs`
-раннера для файловой базы вживую замерен на Windows и macOS arm64 (#809).
-На Linux проверены `start`, `status` и `stop` (#813). Сервер
-отладки кластера (`cluster start --debug`) есть там же, где управляемый кластер, — на Windows и Linux (Linux
-замерен в #768); на остальных платформах `--debug` отвечает `environment_unavailable`. Сервер отладки
-автономного сервера — только на Windows: `debug-server start` у его базы на других системах отвечает
-`environment_unavailable`, как `standalone start`.
+Подготовка собственного `dbgs` командой `debug-server start` использует
+проверку владения адресом и ответ RDBG на Windows, Linux и macOS arm64.
+Кластер запускает свой сервер отладки через `cluster start --debug` на Windows
+и Linux. На Windows `debug-server start` может подтвердить принадлежность
+кластерного `dbgs` выбранной регистрации. Управляемый автономный сервер
+публикует адрес в `standalone status`.
 
-Проверка файлового сеанса через `debug-server status` требует доказательства принадлежности
-loopback-сокета процессу. Раннер получает его на Windows, Linux и macOS arm64. При отсутствии такого доказательства
-адрес для подключения не выдаётся, см. `CTR.WIRE.DEBUG-SERVER-STATUS-DATA`.
+`debug-server status` проверяет процесс и адрес собственного `dbgs`
+по аренде, см. `CTR.WIRE.DEBUG-SERVER-STATUS-DATA`.

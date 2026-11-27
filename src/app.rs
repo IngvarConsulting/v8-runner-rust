@@ -519,19 +519,22 @@ pub(crate) fn load_cli_config(
     } else if matches!(
         &cli.command,
         Command::DebugServer(crate::cli::args::DebugServerArgs {
-            command: crate::cli::args::DebugServerCommandArgs::Stop { session }
-        }) if session.is_prepare()
+            command: crate::cli::args::DebugServerCommandArgs::Stop { .. }
+                | crate::cli::args::DebugServerCommandArgs::Status { .. }
+        })
     ) {
         crate::config::loader::load_config_for_debug_lease_stop(config_path, workdir)
     } else if matches!(
         &cli.command,
         Command::Sessions(_)
-            | Command::DebugServer(crate::cli::args::DebugServerArgs {
-                command: crate::cli::args::DebugServerCommandArgs::Prepare { .. }
-            })
             | Command::Infobase(InfobaseArgs {
                 command: InfobaseCommand::Check
             })
+    ) || matches!(
+        &cli.command,
+        Command::DebugServer(crate::cli::args::DebugServerArgs {
+            command: crate::cli::args::DebugServerCommandArgs::Start { .. }
+        })
     ) {
         crate::config::loader::load_config_for_infobase_runtime(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Publish(_)) {
