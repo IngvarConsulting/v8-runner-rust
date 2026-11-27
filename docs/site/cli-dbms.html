@@ -57,7 +57,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#managed-web">web</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -73,11 +73,11 @@
 
 <main class="page">
 <h1>dbms</h1>
-<p class="lede">Команды <code>dbms</code> запускают и останавливают PostgreSQL для базы, объявленной <code>dbms.managed</code>, на машине раннера Windows, без службы и без прав администратора. Вашу СУБД раннер только использует и не трогает её процессы.</p>
+<p class="lede">Команды <code>dbms</code> запускают и останавливают PostgreSQL для базы, объявленной <code>dbms.managed</code>, на машине раннера с Windows или Linux, без службы и без прав администратора. Вашу СУБД раннер только использует и не трогает её процессы.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-dbms-start">dbms start</h2>
 <pre data-output-command><code>v8-runner dbms start</code></pre>
-<p>Запускает PostgreSQL из каталога <code>tools.postgres.path</code> и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только <code>127.0.0.1</code>, вход — <code>scram-sha-256</code>. Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. На Linux и macOS команда отказывает.</p>
+<p>Запускает PostgreSQL из каталога <code>tools.postgres.path</code> и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только <code>127.0.0.1</code>, вход — <code>scram-sha-256</code>. Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. Команда работает на Windows и Linux. На Linux запускайте PostgreSQL от обычного пользователя.</p>
 <p>Если PostgreSQL уже запущен, команда ничего не запускает, но считает его явным: <code>stop</code> сервера его больше не трогает.</p>
 <pre data-output-command><code>v8-runner dbms start --dry-run</code></pre>
 <p>Показывает каталог данных, журнал и закреплённый порт, если PostgreSQL уже запускался. Ничего не запускает.</p>
@@ -115,7 +115,7 @@
 <tr data-response-class="outcome"><td>Состояние</td><td><code>dbms status</code> называет свой PostgreSQL или говорит, что он не запущен. <a href="#dbms-status-own">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>PostgreSQL остановлен</td><td><code>dbms stop</code> завершил свои процессы. <a href="#dbms-stopped">Пример</a></td></tr>
 <tr data-response-class="outcome"><td>Сервер ещё работает</td><td><code>dbms stop</code> при работающем своём сервере отказывает и называет его: <code>invalid_argument</code>, выход CLI 2. <a href="#dbms-server-running">Пример</a></td></tr>
-<tr data-response-class="outcome"><td>Нет сборки или другая ОС</td><td><code>tools.postgres.path</code> не объявлен, в нём нет сборки или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Условия запуска не выполнены</td><td>Если <code>tools.postgres.path</code> не задан, сборка не найдена либо запуск вызван на неподдерживаемой ОС или от root на Linux, раннер возвращает <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>

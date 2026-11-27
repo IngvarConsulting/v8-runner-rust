@@ -48,7 +48,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#managed-web">web</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -264,7 +264,7 @@ source-set:
 <p>Запустите сервер перед командой раннера и оставьте консоль открытой до её завершения. Файл проекта не управляет запуском и остановкой кластера; чтобы его поднимал раннер, объявите <a href="#d-cluster-managed">кластер под управлением раннера</a>.</p>
 
 <h3 id="d-cluster-managed">Кластер под управлением раннера</h3>
-<p>Кластер нужен для разработки и тестов на своей машине Windows, а запускать сервер 1С руками не хочется. Раннер запускает его как приложение, а не службой, — <code>ragent</code> с <code>rmngr</code> и рабочими процессами <code>rphost</code> — командой <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> и останавливает командой <a href="cli-cluster.html#op-cluster-stop"><code>cluster stop</code></a>. Каталог данных кластера раннер держит под <code>localPath</code>, порты агента, менеджера и диапазон рабочих процессов выбирает свободными и отдаёт ответ после того, как агент принял соединение. Кластер живёт между командами, пока его не остановит <code>cluster stop</code>. Данные базы хранит ваша СУБД или <a href="#d-cluster-managed-dbms">PostgreSQL, который поднимает раннер</a>. На Linux и macOS раннер кластер не запускает: команда отказывает.</p>
+<p>Кластер нужен для разработки и тестов на своей машине с Windows или Linux, а запускать сервер 1С руками не хочется. Раннер запускает его как приложение, а не службой, — <code>ragent</code> с <code>rmngr</code> и рабочими процессами <code>rphost</code> — командой <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> и останавливает командой <a href="cli-cluster.html#op-cluster-stop"><code>cluster stop</code></a>. Каталог данных кластера раннер держит под <code>localPath</code>, порты агента, менеджера и диапазон рабочих процессов выбирает свободными и отдаёт ответ после того, как агент принял соединение. Кластер живёт между командами, пока его не остановит <code>cluster stop</code>. Данные базы хранит ваша СУБД или <a href="#d-cluster-managed-dbms">PostgreSQL, который поднимает раннер</a>. На Linux запускайте кластер от обычного пользователя. На macOS раннер возвращает <code>environment_unavailable</code> до запуска процессов.</p>
 <!-- diagram:d-cluster-managed -->
 <div class="diagram" role="img" aria-label="Кластер под управлением раннера: сервер 1С запущен раннером как приложение на его машине">
 <svg viewBox="-69.0 -48.0 1443.0 494.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1443px">

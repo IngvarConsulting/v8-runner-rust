@@ -57,7 +57,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#managed-web">web</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -95,6 +95,7 @@
 <h2 class="command-variant" id="push-variant-4">push --force <span class="plan-badge">План</span> <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner push --force</code></pre>
 <p>Разрешает перезапись основной конфигурации, если база ушла вперёд или памяти обмена ещё нет. Непринятые изменения на стороне базы теряются.</p>
+<p>Для набора расширения <code>push</code> без <code>--force</code>, в том числе с <code>--no-apply</code>, требует <code>ibcmd</code> и совпадения сохранённого и текущего поколений загруженного расширения от <code>ibcmd</code>. Другой исполнитель, отсутствие сравнимого поколения или расхождение дают <code>non_fast_forward</code> до загрузки. <code>--force</code> пропускает сверку у всех исполнителей, включая <code>ibcmd</code>. Проверки доступа и замки действуют.</p>
 <p class="hint">Результат: <a href="#push-variant-4-outcome">Конфигурация перезаписана</a>. Отказы и сбои — в <a href="#refusals">разделе ошибок</a>.</p>
 <h2 class="command-variant" id="push-variant-5">push --delete &lt;ссылка&gt; <span class="plan-badge">План</span> <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner push --delete my-ext</code></pre>
@@ -150,6 +151,7 @@ my-ext: удалён</code></pre>
 <pre data-output-example="push-example" data-output-schema="push"><code>Build completed successfully</code></pre>
 <h2 id="refusals">Ошибки и отказы</h2>
 <p class="hint">Общие формы и диагностика парсера — в <a href="glossary.html#command-responses">словаре ответов</a>. Ошибка не означает откат; код выхода CLI отличается от кода внешней утилиты.</p>
+<p>При подтверждённой блокировке файловой базы Конфигуратором загрузка останавливается с <a href="glossary.html#response-infobase_designer_busy"><code>infobase_designer_busy</code></a>. Закройте Конфигуратор и повторите команду.</p>
 <h4 id="push-ahead" data-response-class="planned">База ушла вперёд</h4>
 <p>Для <a href="#op-push">обычного push</a>, <a href="#push-variant-2">--no-apply</a> и <a href="#push-variant-3">--full</a> без <code>--force</code>. <span class="plan-badge">План</span> <code>non_fast_forward</code>: загрузка не начата, база не изменена. Сначала получите и разберите изменения через <code>pull</code>; перезапись допустима только при осознанном выборе <code>--force</code>.</p>
 <pre data-output-example="push-ahead-refusal" data-output-schema="planned"><code>$ v8-runner push
