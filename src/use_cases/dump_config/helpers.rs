@@ -113,16 +113,7 @@ fn validate_publish_target_path(
     canonical_base_path: &Path,
     canonical_work_path: &Path,
 ) -> Result<(), AppError> {
-    if canonical_target_path
-        != nearest_existing_canonical_path(target_path).map_err(|error| {
-            AppError::Runtime(format!("failed to re-canonicalize target path: {error}"))
-        })?
-    {
-        return Err(AppError::Validation(format!(
-            "target path changed during dump resolution: {}",
-            target_path.display()
-        )));
-    }
+    validate_target_identity(target_path, canonical_target_path)?;
 
     if canonical_target_path == canonical_base_path {
         return Err(AppError::Validation(
@@ -138,6 +129,46 @@ fn validate_publish_target_path(
         return Err(AppError::Validation(
             "dump target must not equal filesystem root".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// A snapshot reads the set and writes only to a separate, caller-owned directory.
+pub(super) fn validate_snapshot_target(
+    resolved: &ResolvedDumpTarget,
+    stage: &Path,
+) -> Result<(), AppError> {
+    let source = &resolved.canonical_target_path;
+    validate_target_identity(&resolved.target_path, source)?;
+    if std::fs::canonicalize(stage).map_err(|error| {
+        AppError::Runtime(format!("failed to re-canonicalize snapshot stage: {error}"))
+    })? != stage
+    {
+        return Err(AppError::Validation(
+            "snapshot stage changed during the dump".into(),
+        ));
+    }
+    if stage.starts_with(source) || source.starts_with(stage) {
+        return Err(AppError::Validation(
+            "external stage must not overlap source set".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_identity(
+    target_path: &Path,
+    canonical_target_path: &Path,
+) -> Result<(), AppError> {
+    if canonical_target_path
+        != nearest_existing_canonical_path(target_path).map_err(|error| {
+            AppError::Runtime(format!("failed to re-canonicalize target path: {error}"))
+        })?
+    {
+        return Err(AppError::Validation(format!(
+            "target path changed during dump resolution: {}",
+            target_path.display()
+        )));
     }
     Ok(())
 }

@@ -2841,6 +2841,32 @@ fn execute_dump(
 ) -> Result<(), UseCaseError> {
     let request = map_dump_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?;
+    if args.snapshot_only {
+        if !dry_run {
+            let error = UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--snapshot-only execution requires the external publication protocol",
+            );
+            return Err(render_pre_dispatch_error(
+                presenter,
+                CommandName::Dump,
+                error,
+            ));
+        }
+        let plan = dump_config::preview_snapshot(config, &request).map_err(|error| {
+            render_pre_dispatch_error(presenter, CommandName::Dump, UseCaseError::from(error))
+        })?;
+        return present_outcome(
+            presenter,
+            CommandName::Dump,
+            Ok(plan),
+            |plan, presenter, _| {
+                if let Some(message) = &plan.message {
+                    presenter.print_bare(message);
+                }
+            },
+        );
+    }
     // Совет отказа сторожа называет `pull <SET> --force` с глобальными ключами этого вызова.
     let context = cli_context(config, CommandName::Dump, cancellation)
         .with_command_line(command_line.clone());
@@ -7072,6 +7098,11 @@ mod tests {
             map_dump_request(
                 &DumpArgs {
                     publication_stdio: None,
+                    snapshot_only: false,
+                    prepare_merge_baseline: false,
+                    snapshot_platform_from_sources: false,
+                    check_merge_baseline: None,
+                    accept_merge_baseline: None,
                     discard_uncommitted: false,
                     mode: Some(PreviousDumpMode::Incremental),
                     source_set: SourceSetArg::named("main"),
@@ -7089,6 +7120,11 @@ mod tests {
             map_dump_request(
                 &DumpArgs {
                     publication_stdio: None,
+                    snapshot_only: false,
+                    prepare_merge_baseline: false,
+                    snapshot_platform_from_sources: false,
+                    check_merge_baseline: None,
+                    accept_merge_baseline: None,
                     discard_uncommitted: false,
                     mode: None,
                     source_set: SourceSetArg::named("main"),
@@ -7316,6 +7352,11 @@ mod tests {
     fn a_previous_pull_mode_means_no_key_and_full_names_force() {
         let args = |mode: Option<PreviousDumpMode>, objects: &[&str], force: bool| DumpArgs {
             publication_stdio: None,
+            snapshot_only: false,
+            prepare_merge_baseline: false,
+            snapshot_platform_from_sources: false,
+            check_merge_baseline: None,
+            accept_merge_baseline: None,
             mode,
             source_set: SourceSetArg::named("main"),
             extension: None,

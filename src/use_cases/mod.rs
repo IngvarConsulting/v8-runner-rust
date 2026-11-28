@@ -75,6 +75,7 @@ pub mod live_agent;
 pub mod load_artifact;
 /// Managed stand: services the runner starts and stops.
 pub mod managed_stand;
+pub(crate) mod merge_baseline;
 /// `platforms`: установленные платформы и выбор раннера для проекта.
 pub mod platforms;
 /// Text-mode live progress events shared by CLI-facing use cases.

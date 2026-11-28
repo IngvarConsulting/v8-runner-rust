@@ -516,9 +516,19 @@ fn publish_full_dump(
 ) -> Result<DumpNotes, AppError> {
     use crate::change_detection::analyzer::commit_full_snapshot;
 
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    validate_full_dump_work_path(config, resolved)
-        .map_err(|error| publication.cleanup_failure(error))?;
+    let snapshot_only = context
+        .external_full_pull()
+        .is_some_and(|external| external.snapshot_only());
+    let validate_target = || {
+        if snapshot_only {
+            helpers::validate_snapshot_target(resolved, publication.staging_path())
+        } else {
+            validate_platform_target(resolved)
+                .and_then(|()| validate_full_dump_work_path(config, resolved))
+        }
+        .map_err(|error| publication.cleanup_failure(error))
+    };
+    validate_target()?;
     // Hashing a large staging tree takes seconds; honour a cancellation that came first.
     if let Some(error) = interruption_before_publish(context, "dump publication") {
         return Err(publication.cleanup_failure(error));
@@ -533,7 +543,7 @@ fn publish_full_dump(
         })
         .transpose()?;
 
-    let snapshot = if config.format == SourceFormat::Designer {
+    let snapshot = if config.format == SourceFormat::Designer && !snapshot_only {
         SourceSetInventory::new(config)
             .designer_context(&resolved.source_set_name)
             .filter(|source| source.persists_snapshot())
@@ -547,9 +557,7 @@ fn publish_full_dump(
         None
     };
     // Hashing may take seconds: re-check right before replacing, not only before hashing.
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    validate_full_dump_work_path(config, resolved)
-        .map_err(|error| publication.cleanup_failure(error))?;
+    validate_target()?;
 
     // Опись платформы в каталог набора не попадает (#646): она уходит из стадии до публикации
     // и становится копией раннера только после удачной публикации. `ConfigDumpInfo.xml`,
@@ -571,18 +579,43 @@ fn publish_full_dump(
                 &resolved.source_set_name,
                 binding.canonical_target(),
             );
+        let merge_baseline = if external.prepare_merge_baseline() {
+            external.stable_generation().and_then(|(provider, generation)| {
+                let inventory = SourceSetInventory::new(config);
+                let source = inventory.designer_context(&resolved.source_set_name)?;
+                let prepared = version_snapshot.as_ref().map(std::fs::File::try_clone)
+                    .transpose()
+                    .map_err(|error| AppError::Runtime(format!("cannot preserve snapshot version file: {error}")))
+                    .and_then(|version| super::merge_baseline::prepare(
+                        config, source, publication.staging_path(), provider, &generation, version,
+                    ));
+                match prepared {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => {
+                        tracing::warn!(%error, "the snapshot cannot prepare a working merge baseline");
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
         let snapshot_prepared = snapshot.as_ref().is_some_and(|prepared| prepared.is_ok());
         let snapshot_warning = snapshot.as_ref().and_then(|prepared| prepared.as_ref().err()).map(|error| format!("hash memory preparation failed: {error}; published sources will need a repeated full pull"));
         // Каталог заменяет вызывающий, но уничтожает замена то же, что и своя: сторож
         // спрашивает до кадра `ready`, пока каталог не тронут, и ответ называет
         // уничтоженное так же (`INV.USE-CASES.FORCE-NAMES-WHAT-IT-DESTROYED`).
-        let discarded = guard_replacement(
-            context,
-            &resolved.platform_target_path,
-            resolved.platform_consent(),
-            &[VERSION_FILE_NAME],
-            Destruction::Replace,
-        )?;
+        let discarded = if snapshot_only {
+            Losses::default()
+        } else {
+            guard_replacement(
+                context,
+                &resolved.platform_target_path,
+                resolved.platform_consent(),
+                &[VERSION_FILE_NAME],
+                Destruction::Replace,
+            )?
+        };
         let mut ready = super::full_pull_publication::FullPullReady {
             command: context.command(),
             requested_mode: DumpMode::Full,
@@ -595,6 +628,7 @@ fn publish_full_dump(
             stage: publication.staging_path(),
             snapshot_prepared,
             snapshot_warning: snapshot_warning.as_deref(),
+            merge_baseline: merge_baseline.as_ref(),
         };
         super::result::stamp_prepared_dispatch(&mut ready, context.work());
         external.publish(&ready)?;
@@ -1070,7 +1104,10 @@ fn run_full_dump_designer(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    if let Some(external) = context.external_full_pull() {
+    if let Some(external) = context
+        .external_full_pull()
+        .filter(|external| external.tracks_generation())
+    {
         external.generation_after(helpers::read_dump_generation(
             context,
             config,
@@ -1220,7 +1257,10 @@ fn run_full_dump_ibcmd(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    if let Some(external) = context.external_full_pull() {
+    if let Some(external) = context
+        .external_full_pull()
+        .filter(|external| external.tracks_generation())
+    {
         external.generation_after(helpers::read_dump_generation(
             context,
             config,
@@ -1843,7 +1883,66 @@ fn cleanup_staging_on_interruption(staging_dir: &Path, error: AppError) -> AppEr
     cleanup_staging_on_platform_failure(staging_dir, error)
 }
 
+/// Resolve the same target the dump will use, before the snapshot boundary writes anything.
+pub(crate) fn snapshot_source_path(
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<PathBuf, AppError> {
+    resolve_snapshot_target(config, args).map(|target| target.canonical_target_path)
+}
+
+pub(crate) fn preview_snapshot(
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<DumpResult, AppError> {
+    let started = Instant::now();
+    let target = resolve_snapshot_target(config, args)?;
+    let lock = if config.target_kind() == crate::domain::capability::TargetKind::File {
+        "the file infobase lock is required for execution"
+    } else {
+        "batch Designer holds the platform configuration lock during export"
+    };
+    let message = format!(
+        "would export source set '{}' as a full snapshot to a caller-owned stage; {lock}",
+        target.source_set_name
+    );
+    let mut plan = empty_result(
+        DumpMode::Full,
+        started,
+        Some(target.source_set_name),
+        target.extension,
+        None,
+        Some(target.target_path),
+        Some(message),
+    );
+    plan.ok = true;
+    Ok(plan)
+}
+
+fn resolve_snapshot_target(
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<ResolvedDumpTarget, AppError> {
+    if args.source_set.is_none() {
+        return Err(AppError::Validation(
+            "--snapshot-only requires one explicit source set".into(),
+        ));
+    }
+    resolve_dump_target(config, args)
+}
+
 fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTarget, AppError> {
+    let resolved = resolve_dump_target(config, args)?;
+    if matches!(args.mode, DumpModeRequest::Full) {
+        validate_full_dump_work_path(config, &resolved)?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_dump_target(
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<ResolvedDumpTarget, AppError> {
     let inventory = SourceSetInventory::new(config);
 
     let (source_set, extension) = match (args.source_set.as_deref(), args.extension.as_deref()) {
@@ -1946,7 +2045,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
     let lock_path = hashed_lock_path(&canonical_target_path, "dump")
         .map_err(|error| AppError::Runtime(format!("failed to resolve dump lock path: {error}")))?;
 
-    let resolved = ResolvedDumpTarget {
+    Ok(ResolvedDumpTarget {
         source_set_name: source_set.name.clone(),
         source_set_purpose: source_set.purpose,
         extension,
@@ -1977,11 +2076,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
                 },
             })
         },
-    };
-    if matches!(args.mode, DumpModeRequest::Full) {
-        validate_full_dump_work_path(config, &resolved)?;
-    }
-    Ok(resolved)
+    })
 }
 
 #[cfg(test)]

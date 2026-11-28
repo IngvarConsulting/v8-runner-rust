@@ -7,7 +7,7 @@ use crate::config::model::{
     names_an_ipv6_host, AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
     ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
-use crate::domain::capability::Operation;
+use crate::domain::capability::{Operation, TargetKind};
 use crate::platform::connection::V8Connection;
 use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, host_of_authority};
@@ -28,6 +28,21 @@ pub enum ConfigValidationError {
 
     #[error("source-set must contain at least one supported entry")]
     NoSupportedSourceSet,
+
+    #[error("--snapshot-only requires a named infobase; an ad hoc connection is unsupported")]
+    SnapshotPullAdHoc,
+
+    #[error("--snapshot-only requires a named file or cluster infobase; '{name}' has target kind '{kind}'")]
+    SnapshotPullTarget { name: String, kind: &'static str },
+
+    #[error("--snapshot-only requires one unambiguous {kind} address without extra native switches for '{name}'; for a file target, set user and password as infobase fields")]
+    SnapshotPullAddress { name: String, kind: &'static str },
+
+    #[error("a merge baseline requires a named file infobase; '{name}' has target kind '{kind}'")]
+    MergeBaselineTarget { name: String, kind: &'static str },
+
+    #[error("--snapshot-only requires DESIGNER format")]
+    SnapshotPullFormat,
 
     #[error("EXTENSION source-set requires at least one CONFIGURATION source-set")]
     ExtensionRequiresConfiguration,
@@ -693,6 +708,43 @@ pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationErro
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_project_checks(config)
+}
+
+/// Called after infobase selection and before provider or source-set validation.
+pub(crate) fn admit_snapshot_pull(
+    config: &AppConfig,
+    merge_baseline: bool,
+) -> Result<(), ConfigValidationError> {
+    let name = config
+        .infobase_name
+        .as_deref()
+        .ok_or(ConfigValidationError::SnapshotPullAdHoc)?;
+    let kind = config.target_kind();
+    if merge_baseline && kind != TargetKind::File {
+        return Err(ConfigValidationError::MergeBaselineTarget {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if !matches!(kind, TargetKind::File | TargetKind::Cluster) {
+        return Err(ConfigValidationError::SnapshotPullTarget {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if !config
+        .v8_connection()
+        .admits_snapshot_address(kind == TargetKind::File)
+    {
+        return Err(ConfigValidationError::SnapshotPullAddress {
+            name: name.to_owned(),
+            kind: kind.as_str(),
+        });
+    }
+    if config.format != SourceFormat::Designer {
+        return Err(ConfigValidationError::SnapshotPullFormat);
+    }
+    Ok(())
 }
 
 /// Та же проверка проекта для каталога, которого ещё нет на диске: его пишет сама команда.

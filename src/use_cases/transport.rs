@@ -191,7 +191,10 @@ fn acquire(
     };
     // Память базы пишет только команда, которая пишет базу; чтение замка не берёт
     // (`INV.CLI.THE-MEMORY-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
-    let memory_lock = if matches!(base, BaseAccess::Writes | BaseAccess::Creates) {
+    let memory_lock = if matches!(
+        base,
+        BaseAccess::Writes | BaseAccess::Creates | BaseAccess::ReadsWithMemory
+    ) {
         acquire_memory_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::WorkspaceLock,
             error: error.into(),

@@ -26,6 +26,10 @@ pub enum BaseAccess {
     Untouched,
     /// Открывает базу, но командой записи на ней не является: без замка идёт дальше.
     Reads,
+    /// Reads the database only while holding its lock.
+    ReadsWithLock,
+    /// Read while also locking the selected infobase's local exchange memory.
+    ReadsWithMemory,
     /// Создаёт, меняет или заменяет базу либо работает в ней: без замка отказывает.
     Writes,
     /// Takes writer locks, but records ownership only after a new file base is created.
@@ -59,16 +63,33 @@ pub(crate) fn acquire_infobase_lock(
 ) -> Result<InfobaseLock, AppError> {
     let writes = match access {
         BaseAccess::Untouched => return Ok(InfobaseLock::default()),
-        BaseAccess::Reads => false,
+        BaseAccess::Reads | BaseAccess::ReadsWithLock | BaseAccess::ReadsWithMemory => false,
         BaseAccess::Writes | BaseAccess::Creates => true,
     };
     let Some(base_dir) = config.v8_connection().file_infobase_dir(&config.base_path) else {
+        if matches!(
+            access,
+            BaseAccess::ReadsWithLock | BaseAccess::ReadsWithMemory
+        ) {
+            return Err(AppError::Validation(format!(
+                "{command_name} requires a file infobase lock"
+            )));
+        }
         return Ok(InfobaseLock::default());
     };
     // Чтение каталогов не создаёт: нет родителя — нет и базы, беречь нечего, и отказ о
     // несуществующей базе остаётся за сценарием и платформой. Команда записи родителя
     // создаёт: `infobase create` заводит базу там, где её ещё нет.
     if !writes && base_dir.parent().is_some_and(|parent| !parent.exists()) {
+        if matches!(
+            access,
+            BaseAccess::ReadsWithLock | BaseAccess::ReadsWithMemory
+        ) {
+            return Err(AppError::Runtime(format!(
+                "cannot start {command_name}: the parent directory of '{}' is missing and cannot hold the required infobase lock",
+                base_dir.display()
+            )));
+        }
         return Ok(InfobaseLock::default());
     }
     let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
@@ -111,6 +132,14 @@ pub(crate) fn acquire_infobase_lock(
         },
     };
     let beside = base_dir.parent().unwrap_or(&base_dir).display().to_string();
+    if matches!(
+        access,
+        BaseAccess::ReadsWithLock | BaseAccess::ReadsWithMemory
+    ) {
+        return Err(AppError::Runtime(format!(
+            "cannot start {command_name}: the required infobase lock cannot be taken next to '{beside}': {error}"
+        )));
+    }
     if writes {
         return Err(AppError::Runtime(format!(
             "cannot start {command_name}: the infobase lock cannot be taken next to '{beside}': {error}; a command that writes the infobase '{}' does not run without its lock",

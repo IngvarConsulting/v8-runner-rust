@@ -439,8 +439,9 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         unused.is_empty(),
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
+    // Проверка и принятие baseline делят один новый вызов под замком.
     assert_eq!(
-        report.accepted, 40,
+        report.accepted, 41,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -586,6 +587,14 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
         "crate::use_cases::bootstrap_project::plan",
         "план клона ничего не пишет; замок берётся по нему",
+    ),
+    (
+        "crate::use_cases::dump_config::preview_snapshot",
+        "превью внешнего снимка читает описание набора, не открывает ИБ и не пишет workPath",
+    ),
+    (
+        "crate::use_cases::dump_config::snapshot_source_path",
+        "проверка пути внешней стадии до замка; сама выгрузка проходит под обычной границей команды",
     ),
     (
         "crate::use_cases::configure_extensions::resolve_targets",

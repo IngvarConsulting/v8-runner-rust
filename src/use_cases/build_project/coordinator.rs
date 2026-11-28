@@ -396,6 +396,15 @@ fn run_build_with(
                 partial_paths,
                 commit,
             } => {
+                gate.require_partial_load(&source_context, &mode)
+                    .map_err(|error| {
+                        refused_before_the_loads(
+                            started,
+                            &ordered_source_sets,
+                            source_context.name(),
+                            error,
+                        )
+                    })?;
                 debug!(
                     source_set = source_set.name.as_str(),
                     mode = ?mode,
@@ -730,6 +739,15 @@ pub(super) fn run_build_ibcmd(
                 partial_paths,
                 commit,
             } => {
+                gate.require_partial_load(&source_context, &mode)
+                    .map_err(|error| {
+                        refused_before_the_loads(
+                            started,
+                            &ordered_source_sets,
+                            source_context.name(),
+                            error,
+                        )
+                    })?;
                 debug!(
                     source_set = source_set.name.as_str(),
                     mode = ?mode,

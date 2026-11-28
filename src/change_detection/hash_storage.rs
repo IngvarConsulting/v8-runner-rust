@@ -30,7 +30,7 @@ const RAW_BLOB_KIND: u64 = 2;
 
 /// How the hashes of one memory were taken. One memory holds one kind (#575): ids of two
 /// hashers never meet in one memory, and a memory of another kind compares with nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HashKind {
     /// Written before #575: SHA-256 of the bytes, or a kind this runner does not know. The
     /// runner no longer compares with such memory: it is no memory of the base
@@ -64,7 +64,7 @@ impl HashKind {
 }
 
 /// Persisted state for one file entry inside the storage snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredFileState {
     pub mtime_ns: u64,
     pub hash: String,

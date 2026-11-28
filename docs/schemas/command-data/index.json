@@ -99,7 +99,8 @@
     ],
     "pull": [
       "pull",
-      "pull-all"
+      "pull-all",
+      "pull-merge-baseline"
     ],
     "push": [
       "push"

@@ -145,6 +145,7 @@ pub struct FullPullReady<'a> {
     pub stage: &'a Path,
     pub snapshot_prepared: bool,
     pub snapshot_warning: Option<&'a str>,
+    pub merge_baseline: Option<&'a super::merge_baseline::MergeBaselineReceipt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +158,14 @@ pub enum MemoryCommit {
 /// only after the caller has published. An uncertain outcome is an error; it
 /// never authorizes a baseline write.
 pub trait FullPullControl: std::fmt::Debug + Send + Sync {
+    fn snapshot_only(&self) -> bool {
+        false
+    }
+
+    fn prepare_merge_baseline(&self) -> bool {
+        false
+    }
+
     fn authorize(&self, executor: &FullPullExecutor<'_>) -> Result<(), AppError>;
     fn publish(&self, ready: &FullPullReady<'_>) -> Result<(), AppError>;
     fn memory_finished(&self, outcome: MemoryCommit);
@@ -189,8 +198,52 @@ impl ExternalFullPull {
         &self.stage
     }
 
+    pub(super) fn snapshot_only(&self) -> bool {
+        self.control.snapshot_only()
+    }
+
+    pub(super) fn tracks_generation(&self) -> bool {
+        !self.snapshot_only() || self.prepare_merge_baseline()
+    }
+
+    pub(super) fn prepare_merge_baseline(&self) -> bool {
+        self.control.prepare_merge_baseline()
+    }
+
+    pub(super) fn stable_generation(&self) -> Option<(Provider, String)> {
+        let observed = self
+            .generation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let observation = observed.as_ref()?;
+        let before = observation
+            .before
+            .as_deref()
+            .filter(|token| !token.is_empty())?;
+        (observation.after.as_deref() == Some(before))
+            .then(|| (observation.provider, before.to_owned()))
+    }
+
     pub fn authorize(&self, executor: &FullPullExecutor<'_>) -> Result<(), AppError> {
-        self.control.authorize(executor)
+        if !self.snapshot_only() {
+            return self.control.authorize(executor);
+        }
+        let stage = open_directory(&self.stage).map_err(publication_binding_error)?;
+        self.control.authorize(executor)?;
+        let path = std::fs::canonicalize(&self.stage).map_err(publication_binding_error)?;
+        if path != self.stage
+            || open_file_identity(&stage).map_err(publication_binding_error)?
+                != filesystem_object_identity(&path).map_err(publication_binding_error)?
+            || std::fs::read_dir(&path)
+                .map_err(publication_binding_error)?
+                .next()
+                .is_some()
+        {
+            return Err(AppError::Validation(
+                "snapshot stage changed while awaiting executor authorization".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn generation_before(&self, provider: Provider, before: Option<String>) {
@@ -216,7 +269,13 @@ impl ExternalFullPull {
     }
 
     pub(super) fn publish(&self, ready: &FullPullReady<'_>) -> Result<(), AppError> {
-        self.control.publish(ready)
+        self.control.publish(ready)?;
+        if self.snapshot_only() {
+            return Err(AppError::Runtime(
+                "snapshot-only control acknowledged a publication".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn record_generation(

@@ -100,6 +100,24 @@ pub fn load_config_for_preview(
     )
 }
 
+pub(crate) fn load_config_for_snapshot_pull(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+    platform_from_sources: bool,
+    merge_baseline: bool,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::SnapshotPull {
+            platform_from_sources,
+            merge_baseline,
+        },
+    )
+}
+
 pub fn load_config_for_tools_download(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -353,6 +371,10 @@ enum ConfigValidationMode {
     },
     Full,
     Preview,
+    SnapshotPull {
+        platform_from_sources: bool,
+        merge_baseline: bool,
+    },
     Planned,
     InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
@@ -474,6 +496,20 @@ fn build_config(
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
+    if let ConfigValidationMode::SnapshotPull {
+        platform_from_sources,
+        merge_baseline,
+    } = validation_mode
+    {
+        crate::config::validate::admit_snapshot_pull(&config, merge_baseline)?;
+        if platform_from_sources {
+            config
+                .tools
+                .platform
+                .version
+                .get_or_insert(crate::platform::locator::PlatformVersionSetting::Sources);
+        }
+    }
     config.provider_origins = provider_origins
         .into_iter()
         .filter_map(|(key, file)| {
@@ -513,7 +549,9 @@ fn build_config(
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
-        ConfigValidationMode::Preview => validate_read_only(&config)?,
+        ConfigValidationMode::Preview | ConfigValidationMode::SnapshotPull { .. } => {
+            validate_read_only(&config)?
+        }
         ConfigValidationMode::Planned => validate_planned(&config)?,
         ConfigValidationMode::InfobaseExport(operation) => {
             validate_infobase_export(&config, operation)?
@@ -4023,6 +4061,44 @@ source-set:
                 .contains("platform version must use format"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn snapshot_platform_from_sources_is_in_memory_and_preserves_an_explicit_version() {
+        use crate::platform::locator::PlatformVersionSetting;
+
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let local = "infobases:\n  origin:\n    connection: File=build/ib\n";
+        let primary = "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n";
+        let config_path = write_minimal_project_config(&project, primary);
+        let local_path = project.join(LOCAL_CONFIG_FILE_NAME);
+        std::fs::write(&local_path, local).unwrap();
+        let load = |from_sources| {
+            super::load_config_for_snapshot_pull(
+                config_path.to_str(),
+                None,
+                &InfobaseSelector::Default,
+                from_sources,
+                false,
+            )
+            .expect("read-only snapshot configuration")
+            .config
+            .tools
+            .platform
+            .version
+        };
+
+        assert_eq!(load(false), None);
+        assert_eq!(load(true), Some(PlatformVersionSetting::Sources));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), primary);
+        assert_eq!(std::fs::read_to_string(&local_path).unwrap(), local);
+        assert!(!project.join("work").exists());
+
+        let pinned = format!("{primary}tools:\n  platform:\n    version: 8.3.27.1859\n");
+        std::fs::write(&config_path, &pinned).unwrap();
+        assert_eq!(load(true), PlatformVersionSetting::parse("8.3.27.1859"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), pinned);
     }
 
     #[test]

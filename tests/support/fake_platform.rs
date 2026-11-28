@@ -105,7 +105,20 @@ fn main() {
         .iter()
         .any(|argument| argument == "/GetConfigGenerationID");
     if ibcmd_generation || designer_generation {
-        let token = b"1111111111111111111111111111111111111111\n";
+        let mut token = std::env::var("V8_RUNNER_FAKE_PLATFORM_GENERATION")
+            .unwrap_or_else(|_| "1".repeat(40));
+        if let (Ok(after), Some(path)) = (
+            std::env::var("V8_RUNNER_FAKE_PLATFORM_GENERATION_AFTER_DUMP"),
+            std::env::var_os("V8_RUNNER_FAKE_PLATFORM_CALLS"),
+        ) {
+            if fs::read_to_string(path).is_ok_and(|calls| {
+                calls.contains("/DumpConfigToFiles") || calls.contains("\"export\"")
+            }) {
+                token = after;
+            }
+        }
+        let token = format!("{token}\n");
+        let token = token.as_bytes();
         if ibcmd_generation {
             std::io::stdout()
                 .write_all(token)
@@ -120,6 +133,10 @@ fn main() {
     }
 
     if let Some(directory) = directory_output {
+        if std::env::var_os("V8_RUNNER_FAKE_PLATFORM_FAIL_DUMP").is_some() {
+            eprintln!("controlled dump failure");
+            std::process::exit(1);
+        }
         let directory = Path::new(directory);
         write_artifact(
             directory.join("Configuration.xml").as_path(),
@@ -158,6 +175,12 @@ fn main() {
         return;
     }
 
+    if arguments.iter().any(|arg| arg == "/LoadConfigFromFiles") {
+        if let Some(log) = platform_log {
+            write_artifact(Path::new(log), b"platform log");
+        }
+        return;
+    }
     let Some(output) = output else {
         eprintln!("fake platform did not receive a supported export target");
         std::process::exit(2);

@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "BaselineState": {
+      "enum": [
+        "ready",
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/pull-merge-baseline.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "baseline": {
+      "$ref": "#/$defs/BaselineState"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "provider": {
+      "$ref": "#/$defs/Provider"
+    },
+    "source_set": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_set",
+    "generation",
+    "provider",
+    "baseline"
+  ],
+  "title": "MergeBaselineResult",
+  "type": "object"
+}

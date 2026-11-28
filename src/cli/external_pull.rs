@@ -183,6 +183,8 @@ enum Frame<'a, T: Serialize> {
         stage_path: &'a std::path::Path,
         snapshot: Snapshot,
         snapshot_warning: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        merge_baseline: Option<&'a crate::use_cases::merge_baseline::MergeBaselineReceipt>,
     },
     Terminal {
         #[schemars(range(min = 1, max = 1))]
@@ -201,12 +203,14 @@ enum Frame<'a, T: Serialize> {
 struct StdioControl {
     nonce: String,
     context: ExecutionContext,
+    snapshot_only: bool,
+    prepare_merge_baseline: bool,
     input: Mutex<mpsc::Receiver<Result<Vec<u8>, String>>>,
     state: Mutex<State>,
 }
 
 impl StdioControl {
-    fn new(context: ExecutionContext) -> Self {
+    fn new(context: ExecutionContext, snapshot_only: bool, prepare_merge_baseline: bool) -> Self {
         let (send, input) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut input = std::io::stdin().lock();
@@ -235,6 +239,8 @@ impl StdioControl {
         Self {
             nonce: uuid::Uuid::new_v4().to_string(),
             context,
+            snapshot_only,
+            prepare_merge_baseline,
             input: Mutex::new(input),
             state: Mutex::new(State {
                 publication: Publication::NotPublished,
@@ -283,7 +289,7 @@ impl StdioControl {
                     "while waiting for full-pull authorization",
                 ),
             ) {
-                return Err(if expected == Phase::Ready {
+                return Err(if expected == Phase::Ready && !self.snapshot_only {
                     AppError::Runtime("publication outcome is unknown after cancellation while awaiting the publisher".into())
                 } else {
                     cancellation.into_error()
@@ -325,6 +331,14 @@ impl StdioControl {
 }
 
 impl FullPullControl for StdioControl {
+    fn snapshot_only(&self) -> bool {
+        self.snapshot_only
+    }
+
+    fn prepare_merge_baseline(&self) -> bool {
+        self.prepare_merge_baseline
+    }
+
     fn authorize(&self, executor: &FullPullExecutor<'_>) -> Result<(), AppError> {
         let kind = match executor.kind {
             ExecutorKind::Local => WireExecutorKind::Local,
@@ -374,8 +388,12 @@ impl FullPullControl for StdioControl {
                 Snapshot::Unavailable
             },
             snapshot_warning: snapshot_warning.as_deref(),
+            merge_baseline: ready.merge_baseline,
         })?;
         match self.receive(Phase::Ready)? {
+            Decision::Published if self.snapshot_only => Err(AppError::Validation(
+                "published is not allowed with --snapshot-only".into(),
+            )),
             Decision::Published => {
                 self.state
                     .lock()
@@ -409,10 +427,15 @@ pub(crate) fn run(cli: &Cli, args: &DumpArgs, startup_refusal: Option<UseCaseErr
     let cancellation = CancellationToken::new();
     let _signals = super::signal::CliSignalGuard::install(cancellation.clone());
     let context = ExecutionContext::cli(CommandName::Dump).with_cancellation(cancellation);
-    let control = Arc::new(StdioControl::new(context.clone()));
+    let control = Arc::new(StdioControl::new(
+        context.clone(),
+        args.snapshot_only,
+        args.prepare_merge_baseline,
+    ));
     let outcome = execute(cli, args, startup_refusal, context, &control);
     let (terminal, exit_code) = match outcome {
-        Ok((result, code)) => (control.terminal(&result), code),
+        Ok((Some(result), code)) => (control.terminal(&result), code),
+        Ok((None, code)) => return code,
         Err(error) => (
             control.terminal(&super::output::pre_dispatch_error_envelope("pull", &error)),
             error.exit_code(),
@@ -433,7 +456,7 @@ fn execute(
     startup_refusal: Option<UseCaseError>,
     context: ExecutionContext,
     control: &Arc<StdioControl>,
-) -> Result<(Envelope<Value>, i32), UseCaseError> {
+) -> Result<(Option<Envelope<Value>>, i32), UseCaseError> {
     if let Some(error) = startup_refusal {
         return Err(error);
     }
@@ -449,14 +472,19 @@ fn execute(
     let config_path = crate::config::loader::resolve_primary_config_path(cli.config.as_deref())
         .map_err(|error| UseCaseError::from(AppError::from(error)))?;
     let command_line = crate::app::command_line_target(cli, Some(config_path), &config);
-    crate::support::logging::init_action_logging(
-        cli.log_level.as_deref().unwrap_or("info"),
-        "json",
-        false,
-        &config.work_path,
-        cli.dry_run,
-    )
-    .map_err(|error| UseCaseError::new(UseCaseErrorKind::Runtime, error.to_string()))?;
+    let init_logging = || {
+        crate::support::logging::init_action_logging(
+            cli.log_level.as_deref().unwrap_or("info"),
+            "json",
+            false,
+            &config.work_path,
+            cli.dry_run,
+        )
+        .map_err(|error| UseCaseError::new(UseCaseErrorKind::Runtime, error.to_string()))
+    };
+    if !args.snapshot_only {
+        init_logging()?;
+    }
     let request = super::execute::map_dump_request(args, cli.dry_run)?;
     if config.format != SourceFormat::Designer || request.source_set.is_none() {
         return Err(UseCaseError::new(
@@ -482,25 +510,51 @@ fn execute(
             format!("external publication stage must exist: {error}"),
         )
     })?;
+    let file_snapshot =
+        args.snapshot_only && config.target_kind() == crate::domain::capability::TargetKind::File;
+    if file_snapshot {
+        let base_dir = config
+            .v8_connection()
+            .file_infobase_dir(&config.base_path)
+            .ok_or_else(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "cannot resolve the selected file infobase directory for the snapshot",
+                )
+            })?;
+        let base_dir = crate::support::path::nearest_existing_canonical_path(&base_dir)
+            .map_err(|error| UseCaseError::new(UseCaseErrorKind::Validation, error.to_string()))?;
+        if stage.starts_with(&base_dir) || base_dir.starts_with(&stage) {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "snapshot stage must not overlap the infobase directory",
+            ));
+        }
+    }
     if !stage.is_dir() {
         return Err(UseCaseError::new(
             UseCaseErrorKind::Validation,
             "external publication stage must be a directory",
         ));
     }
-    let original = config
-        .source_sets
-        .iter()
-        .find(|set| Some(set.name.as_str()) == request.source_set.as_deref())
-        .ok_or_else(|| {
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "external full pull source set is not declared",
-            )
-        })?
-        .root_in(&config.base_path);
-    let original = crate::support::path::nearest_existing_canonical_path(&original)
-        .map_err(|error| UseCaseError::new(UseCaseErrorKind::Validation, error.to_string()))?;
+    let original = if args.snapshot_only {
+        crate::use_cases::dump_config::snapshot_source_path(&config, &request)
+            .map_err(UseCaseError::from)?
+    } else {
+        let original = config
+            .source_sets
+            .iter()
+            .find(|set| Some(set.name.as_str()) == request.source_set.as_deref())
+            .ok_or_else(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "external full pull source set is not declared",
+                )
+            })?
+            .root_in(&config.base_path);
+        crate::support::path::nearest_existing_canonical_path(&original)
+            .map_err(|error| UseCaseError::new(UseCaseErrorKind::Validation, error.to_string()))?
+    };
     if stage.starts_with(&original)
         || original.starts_with(&stage)
         || crate::change_detection::runner_dirs::overlaps_a_runner_dir(
@@ -524,41 +578,155 @@ fn execute(
             "external publication stage must be empty",
         ));
     }
+    if args.snapshot_only {
+        init_logging()?;
+    }
     let publication = Arc::new(ExternalFullPull::new(stage, control.clone()));
     let context = context
         .with_command_line(command_line)
         .with_external_full_pull(publication);
-    let mut warnings: Vec<Warning> = loaded.warnings.into_iter().map(Warning::Plain).collect();
-    let result = dispatch_with_workspace_boundary(
+    let warnings: Vec<Warning> = loaded.warnings.into_iter().map(Warning::Plain).collect();
+    let base_access = if file_snapshot {
+        BaseAccess::ReadsWithLock
+    } else if args.snapshot_only {
+        // The batch Designer owns the cluster configuration lock during export.
+        BaseAccess::Reads
+    } else {
+        BaseAccess::Writes
+    };
+    // Both callbacks run synchronously. Keep the boundary notes for the terminal frame.
+    let warnings = std::cell::RefCell::new(warnings);
+    dispatch_with_workspace_boundary(
         &config,
         CommandName::Dump,
-        BaseAccess::Writes,
+        base_access,
         cli.dry_run,
         |notes| {
-            warnings.extend(notes.iter().map(|note| note.warning.clone()));
+            warnings
+                .borrow_mut()
+                .extend(notes.iter().map(|note| note.warning.clone()));
             Ok(())
         },
-        || crate::use_cases::dump_config::execute(&context, &config, &request),
+        || {
+            let result = crate::use_cases::dump_config::execute(&context, &config, &request);
+            let (mut envelope, exit_code) = match result {
+                Ok(result) => (
+                    Envelope::ok(
+                        "pull",
+                        result.duration_ms,
+                        serde_json::to_value(result).map_err(serialization_error)?,
+                    ),
+                    0,
+                ),
+                Err(failure) => {
+                    let error = failure.error;
+                    let data =
+                        serde_json::to_value(failure.payload).map_err(serialization_error)?;
+                    (failure_envelope("pull", 0, data, &error), error.exit_code())
+                }
+            };
+            envelope.follow_with(warnings.borrow().iter());
+            if args.snapshot_only {
+                // The mandatory file infobase lock covers the dump and the terminal frame.
+                let code = match control.terminal(&envelope) {
+                    Ok(()) => exit_code,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        3
+                    }
+                };
+                Ok((None, code))
+            } else {
+                Ok((Some(envelope), exit_code))
+            }
+        },
     )
-    .map_err(|refusal| refusal.error)?;
-    let (envelope, exit_code) = match result {
-        Ok(result) => (
-            Envelope::ok(
-                "pull",
-                result.duration_ms,
-                serde_json::to_value(result).map_err(serialization_error)?,
-            ),
-            0,
-        ),
-        Err(failure) => {
-            let error = failure.error;
-            let data = serde_json::to_value(failure.payload).map_err(serialization_error)?;
-            (failure_envelope("pull", 0, data, &error), error.exit_code())
+    .map_err(|refusal| refusal.error)?
+}
+
+pub(crate) fn run_merge_baseline(
+    cli: &Cli,
+    args: &DumpArgs,
+    id: uuid::Uuid,
+    presenter: &crate::output::presenter::Presenter,
+) -> i32 {
+    let started = std::time::Instant::now();
+    let outcome = (|| {
+        if cli.dry_run || cli.clean_before_execution {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "working merge baseline checks and acceptance require a live generation read and cannot clean workPath",
+            ));
         }
-    };
-    let mut envelope = envelope;
-    envelope.follow_with(&warnings);
-    Ok((envelope, exit_code))
+        let cancellation = CancellationToken::new();
+        let _signals = super::signal::CliSignalGuard::install(cancellation.clone());
+        let loaded = crate::app::load_cli_config(cli)
+            .map_err(|error| UseCaseError::from(AppError::from(error)))?;
+        let config = loaded.config;
+        presenter.note_leading_warnings("pull", &loaded.warnings);
+        let request = super::execute::map_dump_request(args, false)?;
+        let config_path = crate::config::loader::resolve_primary_config_path(cli.config.as_deref())
+            .map_err(|error| UseCaseError::from(AppError::from(error)))?;
+        let command_line = crate::app::command_line_target(cli, Some(config_path), &config);
+        let context = ExecutionContext::cli(CommandName::Dump)
+            .with_cancellation(cancellation)
+            .with_command_line(command_line);
+        dispatch_with_workspace_boundary(
+            &config,
+            CommandName::Dump,
+            BaseAccess::ReadsWithMemory,
+            false,
+            |notes| {
+                for note in notes {
+                    presenter.note_leading_warning("pull", &note.warning);
+                }
+                Ok(())
+            },
+            || {
+                crate::use_cases::dump_config::snapshot_source_path(&config, &request)
+                    .map_err(UseCaseError::from)?;
+                let inventory =
+                    crate::use_cases::source_inventory::SourceSetInventory::new(&config);
+                let source = request
+                    .source_set
+                    .as_deref()
+                    .and_then(|name| inventory.designer_context(name))
+                    .ok_or_else(|| {
+                        UseCaseError::new(
+                            UseCaseErrorKind::Validation,
+                            "working merge requires one declared configuration source set",
+                        )
+                    })?;
+                crate::use_cases::merge_baseline::accept(
+                    &context,
+                    &config,
+                    source,
+                    id,
+                    args.check_merge_baseline.is_some(),
+                )
+                .map_err(UseCaseError::from)
+            },
+        )
+        .map_err(|refusal| refusal.error)?
+    })();
+    match outcome {
+        Ok(result) => {
+            presenter.print_bare(&format!(
+                "working merge baseline {} for '{}' at generation {}",
+                result.baseline, result.source_set, result.generation,
+            ));
+            presenter.print_envelope(&Envelope::ok(
+                "pull",
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                result,
+            ));
+            0
+        }
+        Err(error) => {
+            super::output::print_command_use_case_error(presenter, CommandName::Dump, &error);
+            error.exit_code()
+        }
+    }
 }
 
 fn serialization_error(error: serde_json::Error) -> UseCaseError {
@@ -658,6 +826,7 @@ mod tests {
             stage_path: std::path::Path::new("stage"),
             snapshot: Snapshot::Prepared,
             snapshot_warning: None,
+            merge_baseline: None,
         })
         .unwrap();
         assert!(validator.is_valid(&ready), "ready receipt: {ready}");

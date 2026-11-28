@@ -615,6 +615,16 @@
                 "null"
               ]
             },
+            "merge_baseline": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MergeBaselineReceipt"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mode": {
               "$ref": "#/$defs/ReportedDumpMode"
             },
@@ -961,6 +971,33 @@
         "not_saved"
       ],
       "type": "string"
+    },
+    "MergeBaselineReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "base_generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        }
+      },
+      "required": [
+        "id",
+        "generation",
+        "provider",
+        "base_generation"
+      ],
+      "type": "object"
     },
     "NextStep": {
       "additionalProperties": false,

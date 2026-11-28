@@ -2,6 +2,11 @@
 id: INV.USE-CASES.EXTERNAL-PUBLICATION-COMMITS-ONLY-THE-PREPARED-BASELINE
 check:
   - tests/cli_external_full_pull.rs::rejecting_the_selected_executor_starts_no_platform_and_preserves_baseline
+  - tests/cli_external_full_pull.rs::accepting_a_merge_baseline_preserves_outgoing_changes_and_refuses_a_moved_base
+  - tests/cli_external_full_pull.rs::a_named_cluster_snapshot_uses_designer_and_leaves_published_memory_alone
+  - tests/cli_external_full_pull.rs::a_cluster_merge_baseline_is_refused_before_source_resolution_or_platform
+  - tests/cli_external_full_pull.rs::a_pruned_accepted_merge_is_confirmed_without_rewriting_its_memory
+  - tests/cli_external_full_pull.rs::a_pruned_unaccepted_merge_requires_a_new_fetch_before_platform
   - tests/cli_external_full_pull.rs::rejecting_the_ready_tree_keeps_every_baseline_and_the_existing_sources
   - tests/cli_external_full_pull.rs::accepted_external_full_pull_remembers_the_original_source_for_the_next_push
   - tests/cli_external_full_pull.rs::eof_after_the_callers_publication_keeps_its_fact_and_does_not_fabricate_memory
@@ -26,3 +31,33 @@ check:
 публикацию. Оно использует подготовленные данные: последующие правки
 опубликованных файлов остаются изменениями. Ошибка подготовки или записи
 памяти сохраняет правдивый исход публикации и называет несохранённую память.
+
+
+Снимок для рабочего слияния предоставляет отдельный путь подтверждения.
+Подготовка хранит хеши исходного XML-снимка и опись в закрытом каталоге раннера.
+До принятия файлы исходников, метка владельца и активная память обмена
+сохраняются. Подготовка возможна для объявленной файловой ИБ в формате Designer.
+Исполнитель должен подтвердить одно поколение рабочей конфигурации до и после
+выгрузки. При отсутствии подтверждения вызывающий получает только дерево.
+
+Проверка и принятие сверяют привязку к выбранной базе, владельцу и набору
+исходников. Под замками раннер спрашивает поколение тем же исполнителем.
+При совпадении принятие записывает хеши выгруженного дерева, опись и
+поколение. В рабочем каталоге остаётся результат выборочного слияния.
+Незавершённая запись памяти блокирует следующую отправку. Успешное
+принятие сохраняет исходное поколение и привязку в текущей записи журнала.
+Проверка или повтор принятия подтверждает `accepted` после новой сверки тем
+же инструментом, пока эта запись актуальна, даже после уборки временной
+квитанции. Повтор сохраняет байты активной памяти. Просроченная или убранная
+квитанция, которую ещё не приняли, даёт `invalid_argument` до платформы
+и требует новый снимок.
+
+Для просмотра именованной кластерной ИБ с прямым `Srvr/Ref` раннер
+использует пакетный Конфигуратор и отдаёт дерево без квитанции слияния.
+Блокировка конфигурации принадлежит процессу платформы и действует во время
+выгрузки. Подтверждение baseline доступно на объявленной файловой ИБ.
+Раннер сохраняет сеансы уже подключённых агентов, исходники, настройки
+проекта и активную память обмена при выгрузке для просмотра.
+Первый `push` с изменениями использует частичную загрузку после положительной
+сверки поколения. Потеря ответа о поколении, расхождение и переход к полной
+загрузке отклоняются до загрузки.

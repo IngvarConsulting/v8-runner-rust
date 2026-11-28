@@ -652,6 +652,7 @@ mod tests {
             token: token.to_owned(),
             tool,
             after: GenerationAfter::Build,
+            merge_baseline: None,
             applied: true,
             recorded_at: "2026-10-06T00:00:00Z".to_owned(),
             identity: "pair".to_owned(),

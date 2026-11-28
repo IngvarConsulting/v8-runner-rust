@@ -9,7 +9,7 @@
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::GenerationRecordFate;
 use crate::support::error::AppError;
-use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, GenerationRecord};
+use crate::use_cases::agent_session::{GenerationLedger, GenerationRecord};
 
 /// Шаг, после которого переносится запись: оба кончаются равенством основной конфигурации
 /// и конфигурации базы данных и с каталогом не обмениваются.
@@ -79,17 +79,15 @@ pub(crate) fn carry_record(
             &format!("is not known after the {step}"),
         ));
     };
-    Ok(
-        match ledger.record_as(record.tool, &after, record.after, ApplyMark::Applied) {
-            Ok(()) => (GenerationRecordFate::Recorded, None),
-            Err(error) => erase(
-                step,
-                set,
-                &ledger,
-                &format!("was not recorded after the {step} ({error})"),
-            ),
-        },
-    )
+    Ok(match ledger.carry(record, &after) {
+        Ok(()) => (GenerationRecordFate::Recorded, None),
+        Err(error) => erase(
+            step,
+            set,
+            &ledger,
+            &format!("was not recorded after the {step} ({error})"),
+        ),
+    })
 }
 
 /// Стирает запись набора после шага `step`, у которого нет ответа инструмента записи.
