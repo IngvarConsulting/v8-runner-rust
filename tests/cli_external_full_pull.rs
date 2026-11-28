@@ -1400,6 +1400,105 @@ fn snapshot_only_preview_without_stage_returns_a_read_only_plan() {
 }
 
 #[test]
+fn a_project_root_snapshot_uses_a_sibling_stage_without_replacing_the_project() {
+    let mut project = Project::new("designer", false);
+    let recipe = fs::read_to_string(&project.config).unwrap();
+    let mut recipe: serde_yaml::Value = serde_yaml::from_str(&recipe).unwrap();
+    let overlay = project.config.with_file_name("v8project.local.yaml");
+    fs::rename(overlay, project.sources.join("v8project.local.yaml")).unwrap();
+    fs::remove_file(&project.config).unwrap();
+    project.config = project.sources.join("v8project.yaml");
+    project.work = project.sources.join("work");
+    recipe["source-set"][0]["path"] = serde_yaml::to_value(".").unwrap();
+    recipe["workPath"] = serde_yaml::to_value(&project.work).unwrap();
+    fs::write(&project.config, serde_yaml::to_string(&recipe).unwrap()).unwrap();
+
+    let plan = project.native(&["pull", "main", "--force", "--snapshot-only", "--dry-run"]);
+    assert_reported_path(&plan["data"]["target_path"], &project.sources);
+    assert!(project.calls().is_empty());
+    assert!(!project.local().exists());
+    assert!(!project.work.exists());
+
+    let inner_stage = project.sources.join("stage-inside-sources");
+    fs::create_dir(&inner_stage).unwrap();
+    let mut inside = project.command();
+    inside
+        .args([
+            "pull",
+            "main",
+            "--force",
+            "--snapshot-only",
+            "--publication-stdio",
+        ])
+        .arg(&inner_stage);
+    let (_, terminal) = Session::start(&mut inside).finish();
+    assert_eq!(
+        terminal["result"]["error"]["code"], "invalid_argument",
+        "{terminal}"
+    );
+    assert!(terminal["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("must not overlap"));
+    assert!(project.calls().is_empty());
+
+    let mut ordinary = project.command();
+    ordinary
+        .args([
+            "pull",
+            "main",
+            "--force",
+            "--dry-run",
+            "--publication-stdio",
+        ])
+        .arg(&project.stage);
+    let (_, ordinary) = Session::start(&mut ordinary).finish();
+    assert_eq!(
+        ordinary["result"]["error"]["code"], "invalid_argument",
+        "{ordinary}"
+    );
+    assert!(ordinary["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("must not contain workPath or localPath"));
+    assert!(project.calls().is_empty());
+
+    let configs = [
+        project.config.clone(),
+        project.config.with_file_name("v8project.local.yaml"),
+    ];
+    let recipes = configs.clone().map(|path| fs::read(path).unwrap());
+    let mut session = Session::start(project.snapshot_command().arg("--prepare-merge-baseline"));
+    let ready = project.snapshot_ready(&mut session);
+    let receipt = ready["merge_baseline"]["id"]
+        .as_str()
+        .expect("merge baseline receipt");
+    session.decide(&ready, "rejected");
+    let (status, terminal) = session.finish();
+    assert_eq!(status.code(), Some(2), "{terminal}");
+    assert_eq!(terminal["publication"], "not_published");
+    assert_eq!(terminal["memory"], "unchanged");
+    assert!(project.stage.join("Module.bsl").is_file());
+    assert!(!project.stage.join("ConfigDumpInfo.xml").exists());
+    assert_eq!(configs.map(|path| fs::read(path).unwrap()), recipes);
+    assert_eq!(
+        fs::read(project.sources.join("before.txt")).unwrap(),
+        b"original local sources"
+    );
+    assert_eq!(
+        project.native(&["pull", "main", "--check-merge-baseline", receipt])["data"]["baseline"],
+        "ready"
+    );
+    assert!(project.baseline().is_empty());
+    assert!(!project
+        .sources
+        .parent()
+        .unwrap()
+        .join(".ib.v8-runner.owners.json")
+        .exists());
+}
+
+#[test]
 fn a_named_cluster_snapshot_uses_designer_and_leaves_published_memory_alone() {
     let project = Project::new("designer", false);
     let local_recipe = project.config.with_file_name("v8project.local.yaml");

@@ -105,7 +105,15 @@ fn prepare_and_dump(
             .collect()
     });
 
-    let resolved = match resolve_target(config, args).and_then(|resolved| {
+    let snapshot = context
+        .external_full_pull()
+        .is_some_and(|external| external.snapshot_only());
+    let resolve = if snapshot {
+        resolve_snapshot_target
+    } else {
+        resolve_target
+    };
+    let resolved = match resolve(config, args).and_then(|resolved| {
         // Внешняя стадия Unica лежит у неё, а не в `workPath`: её том сверяет она.
         if context.external_full_pull().is_none() {
             super::helpers::refuse_a_work_path_on_another_volume(&resolved)?;
@@ -132,9 +140,6 @@ fn prepare_and_dump(
 
     let mut utilities = PlatformUtilities::from_config(config);
     use crate::use_cases::provider_selection;
-    let snapshot = context
-        .external_full_pull()
-        .is_some_and(|external| external.snapshot_only());
     let selection = if snapshot {
         // File snapshots use the measured read-only path. On a cluster, batch
         // Designer holds the platform configuration lock during the export.
@@ -437,12 +442,15 @@ fn run_dump_selected(
         }
     }
 
-    if let Err(error) = validate_publish_target(&resolved) {
-        return Err(refused(error));
-    }
-    if resolved.platform_target_path != resolved.target_path {
-        if let Err(error) = validate_platform_target(&resolved) {
-            return Err(refused(error));
+    let snapshot = context
+        .external_full_pull()
+        .filter(|external| external.snapshot_only());
+    if let Some(snapshot) = snapshot {
+        super::helpers::validate_snapshot_target(&resolved, snapshot.stage()).map_err(refused)?;
+    } else {
+        validate_publish_target(&resolved).map_err(refused)?;
+        if resolved.platform_target_path != resolved.target_path {
+            validate_platform_target(&resolved).map_err(refused)?;
         }
     }
 
@@ -467,7 +475,9 @@ fn run_dump_selected(
             // Каталог человека сторож спрашивает до первой рабочей команды платформе при любом
             // плане. Выгрузку по изменившемуся по годной копии описи — после поколения
             // (`generation_then_guard`): неизменившееся поколение дерево не трогает (#683).
-            if !super::by_version_file(context, &plan, partial_objects.as_deref()) {
+            if snapshot.is_none()
+                && !super::by_version_file(context, &plan, partial_objects.as_deref())
+            {
                 ask_the_guard(context, config, &resolved, &plan)?;
             }
             Ok(plan)

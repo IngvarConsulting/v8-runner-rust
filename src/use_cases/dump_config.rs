@@ -516,9 +516,19 @@ fn publish_full_dump(
 ) -> Result<DumpNotes, AppError> {
     use crate::change_detection::analyzer::commit_full_snapshot;
 
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    validate_full_dump_work_path(config, resolved)
-        .map_err(|error| publication.cleanup_failure(error))?;
+    let snapshot_only = context
+        .external_full_pull()
+        .is_some_and(|external| external.snapshot_only());
+    let validate_target = || {
+        if snapshot_only {
+            helpers::validate_snapshot_target(resolved, publication.staging_path())
+        } else {
+            validate_platform_target(resolved)
+                .and_then(|()| validate_full_dump_work_path(config, resolved))
+        }
+        .map_err(|error| publication.cleanup_failure(error))
+    };
+    validate_target()?;
     // Hashing a large staging tree takes seconds; honour a cancellation that came first.
     if let Some(error) = interruption_before_publish(context, "dump publication") {
         return Err(publication.cleanup_failure(error));
@@ -533,9 +543,6 @@ fn publish_full_dump(
         })
         .transpose()?;
 
-    let snapshot_only = context
-        .external_full_pull()
-        .is_some_and(|external| external.snapshot_only());
     let snapshot = if config.format == SourceFormat::Designer && !snapshot_only {
         SourceSetInventory::new(config)
             .designer_context(&resolved.source_set_name)
@@ -550,9 +557,7 @@ fn publish_full_dump(
         None
     };
     // Hashing may take seconds: re-check right before replacing, not only before hashing.
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    validate_full_dump_work_path(config, resolved)
-        .map_err(|error| publication.cleanup_failure(error))?;
+    validate_target()?;
 
     // Опись платформы в каталог набора не попадает (#646): она уходит из стадии до публикации
     // и становится копией раннера только после удачной публикации. `ConfigDumpInfo.xml`,
@@ -600,13 +605,17 @@ fn publish_full_dump(
         // Каталог заменяет вызывающий, но уничтожает замена то же, что и своя: сторож
         // спрашивает до кадра `ready`, пока каталог не тронут, и ответ называет
         // уничтоженное так же (`INV.USE-CASES.FORCE-NAMES-WHAT-IT-DESTROYED`).
-        let discarded = guard_replacement(
-            context,
-            &resolved.platform_target_path,
-            resolved.platform_consent(),
-            &[VERSION_FILE_NAME],
-            Destruction::Replace,
-        )?;
+        let discarded = if snapshot_only {
+            Losses::default()
+        } else {
+            guard_replacement(
+                context,
+                &resolved.platform_target_path,
+                resolved.platform_consent(),
+                &[VERSION_FILE_NAME],
+                Destruction::Replace,
+            )?
+        };
         let mut ready = super::full_pull_publication::FullPullReady {
             command: context.command(),
             requested_mode: DumpMode::Full,
@@ -1919,10 +1928,21 @@ fn resolve_snapshot_target(
             "--snapshot-only requires one explicit source set".into(),
         ));
     }
-    resolve_target(config, args)
+    resolve_dump_target(config, args)
 }
 
 fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTarget, AppError> {
+    let resolved = resolve_dump_target(config, args)?;
+    if matches!(args.mode, DumpModeRequest::Full) {
+        validate_full_dump_work_path(config, &resolved)?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_dump_target(
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<ResolvedDumpTarget, AppError> {
     let inventory = SourceSetInventory::new(config);
 
     let (source_set, extension) = match (args.source_set.as_deref(), args.extension.as_deref()) {
@@ -2025,7 +2045,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
     let lock_path = hashed_lock_path(&canonical_target_path, "dump")
         .map_err(|error| AppError::Runtime(format!("failed to resolve dump lock path: {error}")))?;
 
-    let resolved = ResolvedDumpTarget {
+    Ok(ResolvedDumpTarget {
         source_set_name: source_set.name.clone(),
         source_set_purpose: source_set.purpose,
         extension,
@@ -2056,11 +2076,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
                 },
             })
         },
-    };
-    if matches!(args.mode, DumpModeRequest::Full) {
-        validate_full_dump_work_path(config, &resolved)?;
-    }
-    Ok(resolved)
+    })
 }
 
 #[cfg(test)]
